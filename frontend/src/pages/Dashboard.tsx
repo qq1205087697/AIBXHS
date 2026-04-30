@@ -8,8 +8,8 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts'
-import axios from 'axios'
 import { useTheme } from '../contexts/ThemeContext'
+import { dashboardApi, inventoryApi, reviewsApi } from '../api'
 
 interface DashboardData {
   inventoryAlerts: {
@@ -64,9 +64,9 @@ const Dashboard: React.FC = () => {
     try {
       setLoading(true)
       const [dashboardRes, alertsRes, reviewsRes] = await Promise.all([
-        axios.get('/api/dashboard/stats'),
-        axios.get('/api/inventory/alerts'),
-        axios.get('/api/reviews/')
+        dashboardApi.getStats(),
+        inventoryApi.getAlerts(),
+        reviewsApi.getList()
       ])
 
       if (dashboardRes.data.success) {
