@@ -127,13 +127,33 @@ code {
   color: var(--theme-primary) !important;
 }
 
-/* 按钮组件 */
-.ant-btn:hover {
+/* 按钮组件 - 只针对默认和虚线按钮 */
+.ant-btn-default:hover,
+.ant-btn-dashed:hover,
+.ant-btn-link:hover {
   border-color: var(--theme-primary) !important;
   color: var(--theme-primary) !important;
 }
 
-.ant-btn:focus {
+.ant-btn-default:focus,
+.ant-btn-dashed:focus,
+.ant-btn-link:focus {
   border-color: var(--theme-primary) !important;
   color: var(--theme-primary) !important;
+}
+
+/* 主色按钮悬停添加阴影效果 */
+.ant-btn-primary:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  transform: translateY(-1px);
+  transition: all 0.2s ease;
+}
+
+.ant-btn-primary:active {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1) !important;
+  transform: translateY(0);
+}
+
+.ant-btn-primary {
+  transition: all 0.2s ease;
 }

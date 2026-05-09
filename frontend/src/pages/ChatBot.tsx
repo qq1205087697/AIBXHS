@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Input, Button, Typography, message, Spin, List, Avatar } from 'antd'
 import { Send, MessageSquare, Plus } from 'lucide-react'
-import axios from 'axios'
+import { chatApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 
 const { Title, Text } = Typography
@@ -48,7 +48,7 @@ const ChatBot: React.FC = () => {
   const loadSessions = async () => {
     try {
       setLoadingSessions(true)
-      const response = await axios.get('/api/chat/sessions')
+      const response = await chatApi.getSessions()
       setSessions(response.data)
     } catch (error) {
       console.error('加载会话失败:', error)
@@ -60,7 +60,7 @@ const ChatBot: React.FC = () => {
   const loadSessionMessages = async (sid: string) => {
     try {
       setLoading(true)
-      const response = await axios.get(`/api/chat/sessions/${sid}/messages`)
+      const response = await chatApi.getSessionMessages(sid)
       
       const loadedMessages: ChatMessage[] = response.data.map((msg: any) => ({
         id: msg.id.toString(),
@@ -109,10 +109,7 @@ const ChatBot: React.FC = () => {
     setLoading(true)
 
     try {
-      const response = await axios.post('/api/chat', {
-        message: input,
-        session_id: sessionId
-      })
+      const response = await chatApi.sendMessage(input, sessionId)
 
       const aiMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),

@@ -43,6 +43,7 @@ class Store(BaseModel):
     last_synced_at = Column(DateTime, nullable=True, comment="最后同步时间")
     config = Column(JSON, nullable=True, comment="店铺配置")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=True, index=True, comment="所属部门ID")
     
     # 关联关系
     tenant = relationship("Tenant", back_populates="stores")

@@ -11,7 +11,7 @@ import {
   Play,
   Send
 } from 'lucide-react'
-import axios from 'axios'
+import { inventoryApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 
 interface InventoryItem {
@@ -51,7 +51,7 @@ const InventoryBot: React.FC = () => {
   const fetchInventoryData = async () => {
     try {
       setLoading(true)
-      const response = await axios.get('/api/inventory/alerts')
+      const response = await inventoryApi.getAlerts()
       if (response.data.success) {
         setInventoryData(response.data.data)
       }
@@ -80,10 +80,7 @@ const InventoryBot: React.FC = () => {
       onOk: async () => {
         setIsExecuting(true)
         try {
-          await axios.post('/api/inventory/execute', {
-            asin: item.asin,
-            action: item.category === 'low_stock' ? 'restock' : 'promotion'
-          })
+          await inventoryApi.executeAction(item.asin, item.category === 'low_stock' ? 'restock' : 'promotion')
           Modal.success({ title: '操作成功', content: '已成功调用亚马逊API执行调价/促销操作！' })
         } catch (error) {
           Modal.error({ title: '操作失败', content: '调用API失败，请稍后重试。' })

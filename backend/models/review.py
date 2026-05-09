@@ -27,6 +27,12 @@ class HandlingAction(str, enum.Enum):
     OTHER = "other"
 
 
+class ImportanceLevel(str, enum.Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
 class Review(BaseModel):
     """评论模型"""
     __tablename__ = "reviews"
@@ -47,6 +53,7 @@ class Review(BaseModel):
     site = Column(String(50), nullable=True, comment="站点")
     return_rate = Column(Float, nullable=True, comment="退货率")
     status = Column(Enum(ReviewStatus), default=ReviewStatus.NEW, nullable=True, index=True, comment="处理状态")
+    importance_level = Column(Enum(ImportanceLevel), default=ImportanceLevel.MEDIUM, nullable=True, index=True, comment="重要等级")
 
     # 关联关系
     tenant = relationship("Tenant", back_populates="reviews")

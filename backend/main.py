@@ -1,10 +1,24 @@
 import sys
 import io
 import logging
+import platform
 
-# 设置输出编码为 UTF-8，避免 Windows 上的编码问题
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# 设置输出编码，避免 Windows 上的编码问题
+if platform.system() == 'Windows':
+    try:
+        # 尝试使用系统默认编码
+        import locale
+        system_encoding = locale.getpreferredencoding()
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=system_encoding, errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding=system_encoding, errors='replace')
+    except:
+        # 回退到 UTF-8
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+else:
+    # Linux/Mac 使用 UTF-8
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # 配置日志
 logging.basicConfig(
@@ -22,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth
+from routers import inventory, reviews, dashboard, chat, auth, departments, notifications, stores, products, tenants
 from config import get_settings
 
 settings = get_settings()
@@ -48,6 +62,11 @@ app.include_router(reviews.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(chat.router)
 app.include_router(auth.router)
+app.include_router(departments.router)
+app.include_router(notifications.router)
+app.include_router(stores.router)
+app.include_router(products.router)
+app.include_router(tenants.router)
 
 @app.get("/api/health")
 async def health_check():
@@ -56,6 +75,26 @@ async def health_check():
         "message": "宝鑫华盛AI助手服务运行正常",
         "version": "1.0.0"
     }
+
+@app.get("/api/test-push-notifications")
+async def test_push_notifications():
+    """手动触发差评通知推送测试"""
+    try:
+        from services.scheduler import push_daily_review_notifications_job
+        logger.info("手动触发差评通知推送测试...")
+        push_daily_review_notifications_job()
+        return {
+            "success": True,
+            "message": "测试推送已执行，请查看后端控制台日志"
+        }
+    except Exception as e:
+        logger.error(f"测试推送失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "success": False,
+            "message": f"测试推送失败: {str(e)}"
+        }
 
 @app.on_event("startup")
 async def startup_event():
@@ -101,10 +140,12 @@ if os.path.exists(static_dir):
 
 if __name__ == "__main__":
     import uvicorn
+    from config import get_settings
+    settings = get_settings()
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8002,
+        port=settings.PORT,
         reload=False,
-        log_level="debug"
+        log_level="info"
     )
