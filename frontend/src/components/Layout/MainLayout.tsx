@@ -214,7 +214,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     return pathMap[location.pathname] || '未知页面'
   }
 
-  const userMenuItems = [
+  const userMenuItems: any[] = [
     {
       key: 'changePassword',
       icon: <Key size={16} />,
