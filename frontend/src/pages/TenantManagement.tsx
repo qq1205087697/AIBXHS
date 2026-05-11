@@ -2,7 +2,6 @@ import React, { useState, useEffect } from "react"
 import { Card, Table, Button, Modal, Form, Input, Select, message } from "antd"
 import { EditOutlined } from "@ant-design/icons"
 import { tenantsApi } from "../api"
-import { useAuth } from "../contexts/AuthContext"
 
 interface Tenant {
   id: number
@@ -19,7 +18,6 @@ const TenantManagement: React.FC = () => {
   const [modalOpen, setModalOpen] = useState(false)
   const [editingTenant, setEditingTenant] = useState<Tenant | null>(null)
   const [form] = Form.useForm()
-  const { authData } = useAuth()
 
   const statusOptions = [
     { label: "活跃", value: "active" },

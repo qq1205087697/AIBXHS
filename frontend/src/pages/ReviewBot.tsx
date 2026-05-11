@@ -178,7 +178,7 @@ const ReviewBot: React.FC = () => {
       if (selectedReview && selectedIds.includes(selectedReview.id)) {
         setSelectedReview(prev => prev ? { ...prev, status: batchStatus } : null)
       }
-      message.success(`已批量标记为${batchStatus === 'new' ? '未读' : batchStatus === 'processing' ? '处理中' : '已处理'}`)
+      message.success(`已批量标记为${batchStatus === 'new' ? '未读' : batchStatus === 'read' ? '已读' : '已处理'}`)
       setSelectedIds([])
     } catch (error) {
       console.error('批量更新失败:', error)
@@ -205,11 +205,11 @@ const ReviewBot: React.FC = () => {
       },
     },
     {
-      key: 'processing',
-      label: '变更为处理中',
+      key: 'read',
+      label: '变更为已读',
       onClick: () => {
         setBatchAction('status')
-        setBatchStatus('processing')
+        setBatchStatus('read')
         setBatchModalVisible(true)
       },
     },
@@ -276,13 +276,13 @@ const ReviewBot: React.FC = () => {
     }
   }
 
-  const handleMarkAsProcessing = async () => {
+  const handleMarkAsRead = async () => {
     if (!selectedReview) return
     try {
-      await reviewsApi.updateStatus(selectedReview.id, 'processing')
-      setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, status: 'processing' } : r))
-      setSelectedReview(prev => prev ? { ...prev, status: 'processing' } : null)
-      message.success('已标记为处理中')
+      await reviewsApi.updateStatus(selectedReview.id, 'read')
+      setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, status: 'read' } : r))
+      setSelectedReview(prev => prev ? { ...prev, status: 'read' } : null)
+      message.success('已标记为已读')
     } catch (e) {
       message.error('标记失败')
     }
@@ -294,7 +294,7 @@ const ReviewBot: React.FC = () => {
       await reviewsApi.updateStatus(selectedReview.id, 'resolved')
       setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, status: 'resolved' } : r))
       setSelectedReview(prev => prev ? { ...prev, status: 'resolved' } : null)
-      message.success('已标记为已解决')
+      message.success('已标记为已处理')
     } catch (e) {
       message.error('标记失败')
     }
@@ -415,7 +415,6 @@ const ReviewBot: React.FC = () => {
                 options={[
                   { value: 'new', label: '未读' },
                   { value: 'read', label: '已读' },
-                  { value: 'processing', label: '处理中' },
                   { value: 'resolved', label: '已处理' },
                 ]}
               />
@@ -563,6 +562,16 @@ const ReviewBot: React.FC = () => {
                           <Tag key={idx} color={currentTheme.primary} style={{ flexShrink: 0 }}>{point}</Tag>
                         ))}
                       </div>
+                      {Array.isArray(item.suggestions) && item.suggestions.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: '12px', color: '#666', marginBottom: 4 }}>🤖 AI处理建议：</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {item.suggestions.map((suggestion, idx) => (
+                              <Tag key={`suggestion-${idx}`} color="blue" style={{ flexShrink: 0 }}>{suggestion}</Tag>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </Space>
                   }
                 />
@@ -596,12 +605,12 @@ const ReviewBot: React.FC = () => {
           onCancel={() => setSelectedReview(null)}
           footer={[
             <Button key="close" onClick={() => setSelectedReview(null)}>关闭</Button>,
-            selectedReview?.status !== 'processing' && selectedReview?.status !== 'resolved' && (
+            selectedReview?.status !== 'read' && selectedReview?.status !== 'resolved' && (
               <Button 
-                key="process" 
-                onClick={handleMarkAsProcessing}
+                key="read" 
+                onClick={handleMarkAsRead}
               >
-                标记为处理中
+                标记为已读
               </Button>
             ),
             selectedReview?.status !== 'resolved' && (
@@ -611,12 +620,12 @@ const ReviewBot: React.FC = () => {
                 onClick={handleMarkAsResolved}
                 style={{ backgroundColor: currentTheme.primary, borderColor: currentTheme.primary }}
               >
-                标记为已解决
+                标记为已处理
               </Button>
             ),
           ]}
           width={800}
-          bodyStyle={{ maxHeight: '60vh', overflowY: 'auto', padding: '16px 24px' }}
+          styles={{ body: { maxHeight: '60vh', overflowY: 'auto', padding: '16px 24px' } }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -753,7 +762,7 @@ const ReviewBot: React.FC = () => {
           </div>
         ) : (
           <div>
-            <p>您确定要将选中的 <strong>{selectedIds.length}</strong> 条差评标记为 <strong>{batchStatus === 'new' ? '未读' : batchStatus === 'processing' ? '处理中' : '已处理'}</strong> 吗？</p>
+            <p>您确定要将选中的 <strong>{selectedIds.length}</strong> 条差评标记为 <strong>{batchStatus === 'new' ? '未读' : batchStatus === 'read' ? '已读' : '已处理'}</strong> 吗？</p>
           </div>
         )}
       </Modal>

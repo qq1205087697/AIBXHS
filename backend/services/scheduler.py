@@ -48,8 +48,8 @@ def init_scheduler():
     scheduler.add_job(
         push_daily_review_notifications_job,
         trigger="cron",
-        hour=10,
-        minute=53,
+        hour=8,
+        minute=0,
         id="daily_review_notifications",
         name="每日推送未处理差评通知",
         replace_existing=True
@@ -206,6 +206,7 @@ def push_daily_review_notifications_job():
     """每天早上8点：推送未处理差评通知给对应部门所有人员"""
     from database.database import SessionLocal
     from sqlalchemy import text
+    from datetime import datetime, date
 
     logger.info("========== 开始推送每日差评通知 ==========")
     
@@ -213,6 +214,21 @@ def push_daily_review_notifications_job():
     try:
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
         logger.info("数据库连接成功")
+        
+        # 检查今天是否已经推送过通知
+        today = date.today().isoformat()
+        check_query = text("""
+            SELECT COUNT(*) FROM notifications 
+            WHERE type = 'warning' 
+              AND title LIKE '%未处理差评提醒%'
+              AND DATE(created_at) = :today
+        """)
+        result = db.execute(check_query, {"today": today}).scalar()
+        if result > 0:
+            logger.info(f"今天 ({today}) 已经推送过差评通知，跳过本次推送")
+            logger.info("========== 推送结束 ==========")
+            return
+        logger.info(f"今天 ({today}) 尚未推送通知，开始处理...")
 
         # 检查各表是否存在
         has_dept_table = False

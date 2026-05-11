@@ -96,6 +96,38 @@ async def test_push_notifications():
             "message": f"测试推送失败: {str(e)}"
         }
 
+@app.get("/api/clear-today-notifications")
+async def clear_today_notifications():
+    """清除今日所有差评通知（用于测试）"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    from datetime import date
+    
+    try:
+        today = date.today().isoformat()
+        db = SessionLocal()
+        result = db.execute(text("""
+            DELETE FROM notifications 
+            WHERE type = 'warning' 
+              AND title LIKE '%未处理差评提醒%'
+              AND DATE(created_at) = :today
+        """), {"today": today})
+        deleted_count = result.rowcount
+        db.commit()
+        db.close()
+        
+        logger.info(f"清除了今天 {deleted_count} 条差评通知")
+        return {
+            "success": True,
+            "message": f"已清除今天 {deleted_count} 条差评通知"
+        }
+    except Exception as e:
+        logger.error(f"清除通知失败: {e}")
+        return {
+            "success": False,
+            "message": f"清除通知失败: {str(e)}"
+        }
+
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
@@ -147,5 +179,8 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=settings.PORT,
         reload=False,
-        log_level="info"
+        log_level="info",
+        workers=4,  # 使用多个工作进程
+        limit_concurrency=1000,
+        timeout_keep_alive=5
     )

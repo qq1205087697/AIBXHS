@@ -23,3 +23,8 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyc

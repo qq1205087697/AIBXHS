@@ -5,7 +5,7 @@ const API_BASE = '/api'
 // 配置 axios 实例
 const apiClient = axios.create({
   baseURL: API_BASE,
-  timeout: 60000,
+  timeout: 180000,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -140,7 +140,7 @@ export const notificationsApi = {
 // ========== Chat API ==========
 export const chatApi = {
   sendMessage: (message: string, sessionId?: string) =>
-    apiClient.post('/chat', { message, session_id: sessionId }),
+    apiClient.post('/chat', { message, session_id: sessionId }, { timeout: 300000 }),
   getSessions: () => apiClient.get('/chat/sessions'),
   getSessionMessages: (sessionId: string) =>
     apiClient.get(`/chat/sessions/${sessionId}/messages`),

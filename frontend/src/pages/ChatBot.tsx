@@ -123,8 +123,16 @@ const ChatBot: React.FC = () => {
       loadSessions()
     } catch (error: any) {
       console.error('发送消息失败:', error)
-      const errorMsg = error.response?.data?.detail || error.message || '发送消息失败，请重试'
-      message.error(errorMsg)
+      
+      // 判断是否是超时错误
+      const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout')
+      
+      if (isTimeout) {
+        message.warning('请求处理中，请稍后刷新会话查看结果', 5)
+      } else {
+        const errorMsg = error.response?.data?.detail || error.message || '发送消息失败，请重试'
+        message.error(errorMsg)
+      }
     } finally {
       setLoading(false)
     }
@@ -358,7 +366,10 @@ const ChatBot: React.FC = () => {
                     border: '1px solid #f0f0f0'
                   }}
                 >
-                  <Spin size="small" tip="正在分析..." />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Spin size="small" />
+                    <span style={{ color: '#666', fontSize: '14px' }}>正在分析中，可能需要一点时间...</span>
+                  </div>
                 </div>
               </div>
             )}
