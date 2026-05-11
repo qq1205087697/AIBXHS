@@ -143,13 +143,17 @@ code {
   color: var(--theme-primary) !important;
 }
 
-/* 按钮组件 */
-.ant-btn:hover {
+/* 按钮组件 - 只针对默认和虚线按钮 */
+.ant-btn-default:hover,
+.ant-btn-dashed:hover,
+.ant-btn-link:hover {
   border-color: var(--theme-primary) !important;
   color: var(--theme-primary) !important;
 }
 
-.ant-btn:focus {
+.ant-btn-default:focus,
+.ant-btn-dashed:focus,
+.ant-btn-link:focus {
   border-color: var(--theme-primary) !important;
   color: var(--theme-primary) !important;
 }

@@ -3,6 +3,7 @@ import { Form, Input, Button, Card, Typography, Alert } from 'antd';
 import { Lock, User, MessageSquare } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate, Link } from 'react-router-dom';
+import { useTheme } from '../contexts/ThemeContext';
 
 const { Title, Text } = Typography;
 
@@ -10,6 +11,7 @@ const Login: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const { login } = useAuth();
+  const { currentTheme } = useTheme();
   const navigate = useNavigate();
 
   const onFinish = async (values: { username: string; password: string }) => {
@@ -32,7 +34,7 @@ const Login: React.FC = () => {
       display: 'flex', 
       alignItems: 'center', 
       justifyContent: 'center',
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+      background: `linear-gradient(135deg, ${currentTheme.primaryDark} 0%, ${currentTheme.primary} 100%)`
     }}>
       <Card 
         style={{ 
@@ -42,8 +44,8 @@ const Login: React.FC = () => {
         }}
       >
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
-          <MessageSquare size={48} color="#7e57c2" style={{ marginBottom: 16 }} />
-          <Title level={2} style={{ color: '#7e57c2', margin: 0 }}>
+          <MessageSquare size={48} color={currentTheme.primary} style={{ marginBottom: 16 }} />
+          <Title level={2} style={{ color: currentTheme.primary, margin: 0 }}>
             跨境电商差评分析助手
           </Title>
           <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
@@ -92,7 +94,7 @@ const Login: React.FC = () => {
               size="large" 
               block
               loading={loading}
-              style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}
+              style={{ background: `linear-gradient(135deg, ${currentTheme.primaryDark} 0%, ${currentTheme.primary} 100%)` }}
             >
               登录
             </Button>

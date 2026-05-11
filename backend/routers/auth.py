@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from database.database import get_db
-from services.auth_service import authenticate_user, create_user, create_access_token
+from services.auth_service import authenticate_user, create_user, create_access_token, get_password_hash, verify_password
 from dependencies import get_current_user
 from models.user import User
 
@@ -31,6 +31,17 @@ class UserResponse(BaseModel):
     username: str
     email: str
     nickname: str | None
+    role: str
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(..., description="旧密码")
+    new_password: str = Field(..., description="新密码", min_length=6)
+
+
+class ChangePasswordResponse(BaseModel):
+    success: bool
+    message: str
 
 
 @router.post("/register", response_model=TokenResponse)
@@ -90,5 +101,37 @@ async def get_me(current_user: User = Depends(get_current_user)):
         id=current_user.id,
         username=current_user.username,
         email=current_user.email,
-        nickname=current_user.nickname
+        nickname=current_user.nickname,
+        role=current_user.role or "operator"
+    )
+
+
+@router.post("/change-password", response_model=ChangePasswordResponse)
+async def change_password(
+    data: ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """修改当前用户密码"""
+    # 验证旧密码
+    if not verify_password(data.old_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="旧密码错误"
+        )
+    
+    # 验证新密码与旧密码不能相同
+    if verify_password(data.new_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="新密码不能与旧密码相同"
+        )
+    
+    # 更新密码
+    current_user.password_hash = get_password_hash(data.new_password)
+    db.commit()
+    
+    return ChangePasswordResponse(
+        success=True,
+        message="密码修改成功"
     )

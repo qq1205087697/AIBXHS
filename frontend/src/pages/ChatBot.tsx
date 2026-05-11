@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Input, Button, Typography, message, Spin, List, Avatar } from 'antd'
 import { Send, MessageSquare, Plus } from 'lucide-react'
-import axios from 'axios'
+import { chatApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 
 const { Title, Text } = Typography
@@ -48,7 +48,7 @@ const ChatBot: React.FC = () => {
   const loadSessions = async () => {
     try {
       setLoadingSessions(true)
-      const response = await axios.get('/api/chat/sessions')
+      const response = await chatApi.getSessions()
       setSessions(response.data)
     } catch (error) {
       console.error('加载会话失败:', error)
@@ -60,7 +60,7 @@ const ChatBot: React.FC = () => {
   const loadSessionMessages = async (sid: string) => {
     try {
       setLoading(true)
-      const response = await axios.get(`/api/chat/sessions/${sid}/messages`)
+      const response = await chatApi.getSessionMessages(sid)
       
       const loadedMessages: ChatMessage[] = response.data.map((msg: any) => ({
         id: msg.id.toString(),
@@ -109,10 +109,7 @@ const ChatBot: React.FC = () => {
     setLoading(true)
 
     try {
-      const response = await axios.post('/api/chat', {
-        message: input,
-        session_id: sessionId
-      })
+      const response = await chatApi.sendMessage(input, sessionId)
 
       const aiMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -126,8 +123,16 @@ const ChatBot: React.FC = () => {
       loadSessions()
     } catch (error: any) {
       console.error('发送消息失败:', error)
-      const errorMsg = error.response?.data?.detail || error.message || '发送消息失败，请重试'
-      message.error(errorMsg)
+      
+      // 判断是否是超时错误
+      const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout')
+      
+      if (isTimeout) {
+        message.warning('请求处理中，请稍后刷新会话查看结果', 5)
+      } else {
+        const errorMsg = error.response?.data?.detail || error.message || '发送消息失败，请重试'
+        message.error(errorMsg)
+      }
     } finally {
       setLoading(false)
     }
@@ -361,7 +366,10 @@ const ChatBot: React.FC = () => {
                     border: '1px solid #f0f0f0'
                   }}
                 >
-                  <Spin size="small" tip="正在分析..." />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Spin size="small" />
+                    <span style={{ color: '#666', fontSize: '14px' }}>正在分析中，可能需要一点时间...</span>
+                  </div>
                 </div>
               </div>
             )}

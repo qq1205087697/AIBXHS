@@ -218,6 +218,11 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
 【原文内容】: {content}
 【中文翻译】: {translated_content or '无'}
 
+重要性分级规则：
+1. high（最高级）：货不对板、颜色不对、产品不是同一种、规格不符
+2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
+3. low（第三级）：其他所有场景
+
 请严格按照以下JSON格式输出（不要输出其他内容）：
 {{
     "sentiment": "negative|neutral|positive",
@@ -225,14 +230,15 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
     "key_points": ["要点1", "要点2"],
     "topics": ["主题1", "主题2"],
     "suggestions": ["建议1", "建议2"],
-    "summary": "一句话总结"
+    "summary": "一句话总结",
+    "importance_level": "high|medium|low"
 }}
 """
 
         response = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "你是专业的跨境电商差评分析师。只输出JSON，不要输出其他内容。"},
+                {"role": "system", "content": "你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3
@@ -281,6 +287,27 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
             "summary": ai_result.get("summary", ""),
             "raw_response": response_content
         })
+        
+        # 更新重要性等级
+        importance_level = ai_result.get("importance_level", "low")
+        if importance_level not in ["high", "medium", "low"]:
+            importance_level = "low"
+        
+        # 先检查importance_level列是否存在
+        try:
+            col_check = db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
+            if col_check.fetchone():
+                result = db.execute(text("""
+                    UPDATE reviews SET importance_level = :level WHERE id = :rid
+                """), {"level": importance_level, "rid": review_id})
+                logger.info(f"[OK] 评论{review_id}重要性等级: {importance_level}, 影响行数: {result.rowcount}")
+                db.commit()  # 立即提交
+        except Exception as e:
+            logger.error(f"更新重要性等级失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        
+        # 再提交一次确保所有内容都保存
         db.commit()
 
         logger.info(f"[OK] 评论{review_id}({product_name})分析已保存到review_analyses表")
@@ -310,14 +337,19 @@ def analyze_review(db: Session, review: Review) -> dict:
 内容: {review.content}
 翻译: {review.translated_content or '无'}
 
+重要性分级规则：
+1. high（最高级）：货不对板、颜色不对、产品不是同一种、规格不符
+2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
+3. low（第三级）：其他所有场景
+
 输出JSON格式：
-{{"sentiment":"negative","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":""}}
+{{"sentiment":"negative","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low"}}
 """
 
         response = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "你是专业差评分析助手。只输出JSON。"},
+                {"role": "system", "content": "你是专业差评分析助手。所有分析结果必须使用中文输出。只输出JSON。"},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3
@@ -346,6 +378,27 @@ def analyze_review(db: Session, review: Review) -> dict:
             "kp": json.dumps(result.get("key_points", [])), "top": json.dumps(result.get("topics", [])),
             "sug": json.dumps(result.get("suggestions", [])), "sum": result.get("summary", ""), "raw": response_content
         })
+        
+        # 更新重要性等级
+        importance_level = result.get("importance_level", "low")
+        if importance_level not in ["high", "medium", "low"]:
+            importance_level = "low"
+        
+        # 先检查importance_level列是否存在
+        try:
+            col_check = db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
+            if col_check.fetchone():
+                update_result = db.execute(text("""
+                    UPDATE reviews SET importance_level = :level WHERE id = :rid
+                """), {"level": importance_level, "rid": review.id})
+                logger.info(f"评论{review.id}重要性等级: {importance_level}, 影响行数: {update_result.rowcount}")
+                db.commit()  # 立即提交
+        except Exception as e:
+            logger.error(f"更新重要性等级失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        
+        # 再提交一次确保所有内容都保存
         db.commit()
 
         return get_review_analysis(db, review.id)
@@ -358,9 +411,12 @@ def analyze_review(db: Session, review: Review) -> dict:
 def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, Any]]:
     """批量分析评论"""
     results = []
+    import time
 
-    for review_id in review_ids:
+    for idx, review_id in enumerate(review_ids):
         try:
+            logger.info(f"正在分析第 {idx+1}/{len(review_ids)} 条评论，ID: {review_id}")
+            
             check_query = text("SELECT id, tenant_id, title, content, translated_title, translated_content, rating FROM reviews WHERE id = :rid")
             check_result = db.execute(check_query, {"rid": review_id}).first()
             if not check_result:
@@ -389,11 +445,17 @@ def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, 
                         logger.error(f"翻译失败: {e}")
 
                 prompt = f"""分析差评：评分{check_result[6]}星，标题:{title or '无'}，内容:{content}，翻译:{translated_content or '无'}
-输出JSON:{{"sentiment":"","score":0,"points":[],"topics":[],"suggest":[],"sum":""}}"""
+
+重要性分级规则：
+1. high（最高级）：货不对板、颜色不对、产品不是同一种、规格不符
+2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
+3. low（第三级）：其他所有场景
+
+输出JSON:{{"sentiment":"","sentiment_score":0,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low"}}"""
 
                 if client:
                     try:
-                        resp = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"只输出JSON"},{"role":"user","content":prompt}], temperature=0.3)
+                        resp = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3, timeout=120)
                         rc = resp.choices[0].message.content.strip()
                         if rc.startswith("```"): rc = rc.split("\n",1)[-1]
                         if rc.endswith("```"): rc = rc[:-3]
@@ -401,12 +463,32 @@ def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, 
                         ar = json.loads(rc) if rc.startswith("{") else {}
                         
                         db.execute(text("""INSERT INTO review_analyses (tenant_id,review_id,model,sentiment,sentiment_score,key_points,topics,suggestions,summary,raw_response) VALUES (:tid,:rid,:m,:s,:sc,:kp,:t,:sg,:sm,:r)"""), {
-                            "tid": tenant_id, "rid": review_id, "m": settings.OPENAI_MODEL, "s": ar.get("sentiment","negative"), "sc": ar.get("sentiment_score",3), "kp": json.dumps(ar.get("points",[])), "t": json.dumps(ar.get("topics",[])), "sg": json.dumps(ar.get("suggest",[])), "sm": ar.get("sum",""), "r": rc
+                            "tid": tenant_id, "rid": review_id, "m": settings.OPENAI_MODEL, "s": ar.get("sentiment","negative"), "sc": ar.get("sentiment_score",3), "kp": json.dumps(ar.get("key_points",[])), "t": json.dumps(ar.get("topics",[])), "sg": json.dumps(ar.get("suggestions",[])), "sm": ar.get("summary",""), "r": rc
                         })
                         db.commit()
+                        
+                        # 更新重要性等级
+                        importance_level = ar.get("importance_level", "low")
+                        if importance_level not in ["high", "medium", "low"]:
+                            importance_level = "low"
+                        
+                        try:
+                            col_check = db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
+                            if col_check.fetchone():
+                                update_result = db.execute(text("""
+                                    UPDATE reviews SET importance_level = :level WHERE id = :rid
+                                """), {"level": importance_level, "rid": review_id})
+                                logger.info(f"评论{review_id}重要性等级: {importance_level}, 影响行数: {update_result.rowcount}")
+                                db.commit()  # 立即提交
+                        except Exception as e:
+                            logger.error(f"更新重要性等级失败: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                        
                         results.append({"review_id": review_id, "success": True, "data": get_review_analysis(db, review_id)})
                     except Exception as ex:
-                        results.append({"review_id": review_id, "success": True, "data": {"error": str(ex)}})
+                        logger.error(f"分析评论 {review_id} 时发生错误: {ex}")
+                        results.append({"review_id": review_id, "success": False, "data": {"error": str(ex)}})
                 else:
                     results.append({"review_id": review_id, "success": True, "data": {"error": "API未配置"}})
         except Exception as e:
@@ -457,7 +539,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str) 
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto")
+        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
 
         assistant_message = response.choices[0].message
 
@@ -486,7 +568,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str) 
                         messages.append({"role": "user", "content": clarify_prompt})
                         
                         # 重新调用AI
-                        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto")
+                        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
                         assistant_message = response.choices[0].message
                         
                         # 检查第二次调用是否有工具响应
@@ -560,7 +642,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str) 
                     final_messages.extend(history)
                     final_messages.append({"role": "user", "content": user_message})
 
-                    final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7)
+                    final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
                     final_reply = final_response.choices[0].message.content or "抱歉，无法处理"
                     
                     save_message(db, user_id, session_id, "assistant", final_reply)

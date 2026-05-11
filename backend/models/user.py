@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
 from models.base import BaseModel
 
@@ -15,7 +15,7 @@ class User(BaseModel):
     nickname = Column(String(100), nullable=True, comment="昵称")
     role = Column(String(20), default="operator", comment="角色")
     status = Column(String(20), default="active", index=True, comment="状态")
-    created_at = Column(DateTime, default=None, comment="创建时间")
 
     # 关联关系
     tenant = relationship("Tenant", back_populates="users")
+    departments = relationship("UserDepartment", back_populates="user", cascade="all, delete-orphan")

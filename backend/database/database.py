@@ -55,6 +55,7 @@ def init_db():
         from models import inventory
         from models import review
         from models import conversation
+        from models import department
         
         # 导入所有模型类
         from models.tenant import Tenant
@@ -64,6 +65,7 @@ def init_db():
         from models.inventory import InventoryRecord, InventoryAlert, InventoryAction
         from models.review import Review, ReviewAnalysis, ReviewHandling
         from models.conversation import ConversationHistory
+        from models.department import Department, UserDepartment
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)

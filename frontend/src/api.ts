@@ -5,7 +5,7 @@ const API_BASE = "/api";
 // 配置 axios 实例
 const apiClient = axios.create({
   baseURL: API_BASE,
-  timeout: 10000,
+  timeout: 180000,
   headers: {
     "Content-Type": "application/json",
   },
@@ -46,7 +46,7 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    // 如果是 401 未授权，清除 token
+    // 如果是 401 未授权，清除 token（只有当不是在登录页面时才跳转）
     if (error.response?.status === 401) {
       const url = error.config?.url || "";
 
