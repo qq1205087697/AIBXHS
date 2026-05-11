@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants
 from config import get_settings
 
 settings = get_settings()
@@ -46,6 +46,7 @@ app.add_middleware(
 app.include_router(inventory.router, prefix="/api")
 app.include_router(reviews.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
+app.include_router(restock.router, prefix="/api")
 app.include_router(chat.router)
 app.include_router(auth.router)
 
