@@ -51,6 +51,18 @@ const Home: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [notifLoading, setNotifLoading] = useState(false)
   
+  const isHighLevel = (level?: string | null) => {
+    return level === 'high' || level === '严重'
+  }
+  
+  const isMediumLevel = (level?: string | null) => {
+    return level === 'medium' || level === '中等'
+  }
+  
+  const isLowLevel = (level?: string | null) => {
+    return level === 'low' || level === '轻微'
+  }
+  
   // 标记通知为已读
   const markNotificationAsRead = async (id: number) => {
     try {
@@ -80,9 +92,9 @@ const Home: React.FC = () => {
   const todoList: TodoItem[] = []
   
   // 添加待处理差评到待办
-  const highReviews = reviews.filter(r => r.importanceLevel === 'high' && r.status !== 'resolved')
-  const mediumReviews = reviews.filter(r => r.importanceLevel === 'medium' && r.status !== 'resolved')
-  const lowReviews = reviews.filter(r => r.importanceLevel === 'low' && r.status !== 'resolved')
+  const highReviews = reviews.filter(r => isHighLevel(r.importanceLevel) && r.status !== 'resolved')
+  const mediumReviews = reviews.filter(r => isMediumLevel(r.importanceLevel) && r.status !== 'resolved')
+  const lowReviews = reviews.filter(r => isLowLevel(r.importanceLevel) && r.status !== 'resolved')
 
   if (highReviews.length > 0) {
     todoList.push({
@@ -139,7 +151,14 @@ const Home: React.FC = () => {
       ])
 
       if (reviewsRes.data.success) {
-        setReviews(reviewsRes.data.data)
+        const data = reviewsRes.data.data
+        
+        // 去重
+        const uniqueReviews = data.filter((item: ReviewItem, index: number, self: ReviewItem[]) => 
+          index === self.findIndex((t) => t.id === item.id)
+        )
+        
+        setReviews(uniqueReviews)
       }
     } catch (error) {
       console.error('获取数据失败:', error)
@@ -171,16 +190,16 @@ const Home: React.FC = () => {
 
   const reviewStats = {
     high: {
-      unhandled: reviews.filter(r => r.importanceLevel === 'high' && r.status !== 'resolved').length,
-      handled: reviews.filter(r => r.importanceLevel === 'high' && r.status === 'resolved').length
+      unhandled: reviews.filter(r => isHighLevel(r.importanceLevel) && r.status !== 'resolved').length,
+      handled: reviews.filter(r => isHighLevel(r.importanceLevel) && r.status === 'resolved').length
     },
     medium: {
-      unhandled: reviews.filter(r => r.importanceLevel === 'medium' && r.status !== 'resolved').length,
-      handled: reviews.filter(r => r.importanceLevel === 'medium' && r.status === 'resolved').length
+      unhandled: reviews.filter(r => isMediumLevel(r.importanceLevel) && r.status !== 'resolved').length,
+      handled: reviews.filter(r => isMediumLevel(r.importanceLevel) && r.status === 'resolved').length
     },
     low: {
-      unhandled: reviews.filter(r => r.importanceLevel === 'low' && r.status !== 'resolved').length,
-      handled: reviews.filter(r => r.importanceLevel === 'low' && r.status === 'resolved').length
+      unhandled: reviews.filter(r => isLowLevel(r.importanceLevel) && r.status !== 'resolved').length,
+      handled: reviews.filter(r => isLowLevel(r.importanceLevel) && r.status === 'resolved').length
     }
   }
 
@@ -259,7 +278,7 @@ const Home: React.FC = () => {
                   boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
                   transition: 'all 0.3s'
                 }}
-                bodyStyle={{ padding: 24 }}
+                styles={{ body: { padding: 24 } }}
               >
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>

@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import json
-import threading
 import logging
 from database.database import SessionLocal, get_db
 from config import get_settings
@@ -12,16 +11,19 @@ from services.translate_service import translate_review
 from services.chat_service import batch_analyze_reviews
 from dependencies import get_current_user
 from models.user import User
+import concurrent.futures
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-# 异步处理批量分析
+# 异步处理批量分析 - 使用独立的线程池
 def async_batch_analyze(review_ids: List[int]):
+    """后台分析任务，完全独立于主线程"""
     logger.info(f"开始异步分析 {len(review_ids)} 条评论")
     db = None
     try:
+        # 每次都创建全新的数据库会话
         db = SessionLocal()
         batch_analyze_reviews(db, review_ids)
         logger.info(f"完成分析 {len(review_ids)} 条评论")
@@ -680,7 +682,7 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
 
 
 @router.post("/analyze/batch")
-async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks: BackgroundTasks):
     """批量分析选中的差评（异步处理）"""
     try:
         if not review_ids or len(review_ids) == 0:
@@ -693,10 +695,11 @@ async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks
             except (ValueError, TypeError):
                 continue
         
-        # 后台异步处理
-        thread = threading.Thread(target=async_batch_analyze, args=(int_review_ids,))
-        thread.daemon = True
-        thread.start()
+        # 使用线程池在后台完全独立运行，不依赖主线程
+        import concurrent.futures
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        executor.submit(async_batch_analyze, int_review_ids)
+        executor.shutdown(wait=False)  # 不等待，让它在后台继续
 
         return {
             "success": True,
@@ -706,4 +709,5 @@ async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"批量分析接口异常: {e}")
         raise HTTPException(status_code=500, detail=f"批量分析失败: {str(e)}")

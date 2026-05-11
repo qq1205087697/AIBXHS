@@ -411,9 +411,12 @@ def analyze_review(db: Session, review: Review) -> dict:
 def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, Any]]:
     """批量分析评论"""
     results = []
+    import time
 
-    for review_id in review_ids:
+    for idx, review_id in enumerate(review_ids):
         try:
+            logger.info(f"正在分析第 {idx+1}/{len(review_ids)} 条评论，ID: {review_id}")
+            
             check_query = text("SELECT id, tenant_id, title, content, translated_title, translated_content, rating FROM reviews WHERE id = :rid")
             check_result = db.execute(check_query, {"rid": review_id}).first()
             if not check_result:
@@ -452,7 +455,7 @@ def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, 
 
                 if client:
                     try:
-                        resp = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3)
+                        resp = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3, timeout=120)
                         rc = resp.choices[0].message.content.strip()
                         if rc.startswith("```"): rc = rc.split("\n",1)[-1]
                         if rc.endswith("```"): rc = rc[:-3]
@@ -462,6 +465,7 @@ def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, 
                         db.execute(text("""INSERT INTO review_analyses (tenant_id,review_id,model,sentiment,sentiment_score,key_points,topics,suggestions,summary,raw_response) VALUES (:tid,:rid,:m,:s,:sc,:kp,:t,:sg,:sm,:r)"""), {
                             "tid": tenant_id, "rid": review_id, "m": settings.OPENAI_MODEL, "s": ar.get("sentiment","negative"), "sc": ar.get("sentiment_score",3), "kp": json.dumps(ar.get("key_points",[])), "t": json.dumps(ar.get("topics",[])), "sg": json.dumps(ar.get("suggestions",[])), "sm": ar.get("summary",""), "r": rc
                         })
+                        db.commit()
                         
                         # 更新重要性等级
                         importance_level = ar.get("importance_level", "low")
@@ -481,11 +485,10 @@ def batch_analyze_reviews(db: Session, review_ids: List[int]) -> List[Dict[str, 
                             import traceback
                             logger.error(traceback.format_exc())
                         
-                        # 再提交一次确保所有内容都保存
-                        db.commit()
                         results.append({"review_id": review_id, "success": True, "data": get_review_analysis(db, review_id)})
                     except Exception as ex:
-                        results.append({"review_id": review_id, "success": True, "data": {"error": str(ex)}})
+                        logger.error(f"分析评论 {review_id} 时发生错误: {ex}")
+                        results.append({"review_id": review_id, "success": False, "data": {"error": str(ex)}})
                 else:
                     results.append({"review_id": review_id, "success": True, "data": {"error": "API未配置"}})
         except Exception as e:
@@ -536,7 +539,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str) 
     messages.append({"role": "user", "content": user_message})
 
     try:
-        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto")
+        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
 
         assistant_message = response.choices[0].message
 
@@ -565,7 +568,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str) 
                         messages.append({"role": "user", "content": clarify_prompt})
                         
                         # 重新调用AI
-                        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto")
+                        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
                         assistant_message = response.choices[0].message
                         
                         # 检查第二次调用是否有工具响应
@@ -639,7 +642,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str) 
                     final_messages.extend(history)
                     final_messages.append({"role": "user", "content": user_message})
 
-                    final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7)
+                    final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
                     final_reply = final_response.choices[0].message.content or "抱歉，无法处理"
                     
                     save_message(db, user_id, session_id, "assistant", final_reply)
