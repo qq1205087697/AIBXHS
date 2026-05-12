@@ -63,8 +63,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
 
   const isAdmin = user?.role === 'admin'
 
+  // 从通知列表计算未读数量
+  const calculateUnreadCount = (notifList: Notification[]) => {
+    return notifList.filter(n => !n.is_read).length
+  }
+
   useEffect(() => {
     if (user) {
+      fetchNotifications()
       fetchUnreadCount()
       pollRef.current = setInterval(fetchUnreadCount, 60000)
     }
@@ -86,7 +92,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     setNotifLoading(true)
     try {
       const res = await notificationsApi.getList({ page: 1, page_size: 10 })
-      if (res.data.success) setNotifications(res.data.data)
+      if (res.data.success) {
+        const newNotifications = res.data.data
+        setNotifications(newNotifications)
+        setUnreadCount(calculateUnreadCount(newNotifications))
+      }
     } catch (e) {
       // ignore
     } finally {

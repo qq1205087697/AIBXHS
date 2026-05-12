@@ -1,24 +1,5 @@
 import sys
-import io
 import logging
-import platform
-
-# 设置输出编码，避免 Windows 上的编码问题
-if platform.system() == 'Windows':
-    try:
-        # 尝试使用系统默认编码
-        import locale
-        system_encoding = locale.getpreferredencoding()
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=system_encoding, errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding=system_encoding, errors='replace')
-    except:
-        # 回退到 UTF-8
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-else:
-    # Linux/Mac 使用 UTF-8
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # 配置日志
 logging.basicConfig(
