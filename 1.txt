@@ -1,0 +1,368 @@
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git pull origin master
+remote: Enumerating objects: 105, done.
+remote: Counting objects: 100% (105/105), done.
+remote: Compressing objects: 100% (31/31), done.
+remote: Total 66 (delta 34), reused 66 (delta 34), pack-reused 0 (from 0)
+Unpacking objects: 100% (66/66), 67.66 KiB | 67.00 KiB/s, done.
+From 
+ * branch            master     -> FETCH_HEAD
+   5bae317..f11f87f  master     -> origin/master
+Updating 5bae317..f11f87f
+error: Your local changes to the following files would be overwritten by merge:
+        backend/__pycache__/config.cpython-313.pyc
+        backend/database/__pycache__/__init__.cpython-313.pyc
+        backend/database/__pycache__/database.cpython-313.pyc
+        backend/database/database.py
+        backend/main.py
+        backend/routers/__pycache__/__init__.cpython-313.pyc        backend/routers/__pycache__/inventory.cpython-313.pyc
+        backend/routers/auth.py
+        frontend/package-lock.json
+        frontend/src/api.ts
+        frontend/src/pages/InventoryBot.tsx
+Please commit your changes or stash them before you merge.
+Aborting
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ ^Vgit stash^C
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ ^C
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ ^C
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash
+warning: in the working copy of 'backend/database/database.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/main.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/models/__init__.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/pages/InventoryBot.tsx', LF will be replaced by CRLF the next time Git touches it
+Saved working directory and index state WIP on wq: 5bae317 更新前端配置和认证上下文，新增API模块
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git pull origin master
+From 
+ * branch            master     -> FETCH_HEAD
+Updating 5bae317..f11f87f
+error: Your local changes to the following files would be overwritten by merge:
+        backend/__pycache__/config.cpython-313.pyc
+        backend/database/__pycache__/__init__.cpython-313.pyc
+        backend/database/__pycache__/database.cpython-313.pyc
+        backend/routers/__pycache__/__init__.cpython-313.pyc
+        backend/routers/__pycache__/inventory.cpython-313.pyc
+Please commit your changes or stash them before you merge.
+Aborting
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ find . -name "*.pyc" -delete
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ find . -name "__pycache__" -deletefind . -name "*.pyc" -delete
+find: unknown predicate `-deletefind'
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ find . -name "__pycache__" -delete^C
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash
+Saved working directory and index state WIP on wq: 5bae317 更新前端配置和认证上下文，新增API模块
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git pull origin master
+From 
+ * branch            master     -> FETCH_HEAD
+Updating 5bae317..f11f87f
+Fast-forward
+ backend/__pycache__/config.cpython-311.pyc         | Bin 2730 -> 0 bytes
+ backend/__pycache__/config.cpython-313.pyc         | Bin 2530 -> 0 bytes
+ backend/__pycache__/dependencies.cpython-311.pyc   | Bin 1895 -> 0 bytes
+ backend/__pycache__/main.cpython-311.pyc           | Bin 5655 -> 0 bytes
+ backend/__pycache__/main_debug.cpython-311.pyc     | Bin 2040 -> 0 bytes
+ backend/__pycache__/main_debug2.cpython-311.pyc    | Bin 2008 -> 0 bytes
+ backend/__pycache__/main_simple.cpython-311.pyc    | Bin 1341 -> 0 bytes
+ backend/check_db.py                                |  37 ++
+ .../database/__pycache__/__init__.cpython-311.pyc  | Bin 154 -> 0 bytes
+ .../database/__pycache__/__init__.cpython-313.pyc  | Bin 142 -> 0 bytes
+ .../database/__pycache__/database.cpython-311.pyc  | Bin 3533 -> 0 bytes
+ .../database/__pycache__/database.cpython-313.pyc  | Bin 2310 -> 0 bytes
+ backend/database/database.py                       |   2 +
+ backend/dependencies.py                            |  20 +
+ backend/main.py                                    |  53 ++-
+ .../models/__pycache__/__init__.cpython-311.pyc    | Bin 152 -> 0 bytes
+ backend/models/__pycache__/base.cpython-311.pyc    | Bin 1253 -> 0 bytes
+ .../__pycache__/conversation.cpython-311.pyc       | Bin 1513 -> 0 bytes
+ .../models/__pycache__/inventory.cpython-311.pyc   | Bin 9039 -> 0 bytes
+ backend/models/__pycache__/product.cpython-311.pyc | Bin 3495 -> 0 bytes
+ backend/models/__pycache__/review.cpython-311.pyc  | Bin 6774 -> 0 bytes
+ backend/models/__pycache__/store.cpython-311.pyc   | Bin 3760 -> 0 bytes
+ backend/models/__pycache__/tenant.cpython-311.pyc  | Bin 1625 -> 0 bytes
+ backend/models/__pycache__/user.cpython-311.pyc    | Bin 1831 -> 0 bytes
+ backend/models/department.py                       |  27 ++
+ backend/models/review.py                           |   7 +
+ backend/models/store.py                            |   1 +
+ backend/models/tenant.py                           |  14 +-
+ backend/models/user.py                             |   4 +-
+ .../routers/__pycache__/__init__.cpython-311.pyc   | Bin 153 -> 0 bytes
+ .../routers/__pycache__/__init__.cpython-313.pyc   | Bin 141 -> 0 bytes
+ backend/routers/__pycache__/auth.cpython-311.pyc   | Bin 4737 -> 0 bytes
+ backend/routers/__pycache__/chat.cpython-311.pyc   | Bin 6663 -> 0 bytes
+ .../routers/__pycache__/dashboard.cpython-311.pyc  | Bin 4246 -> 0 bytes
+ .../routers/__pycache__/inventory.cpython-311.pyc  | Bin 5368 -> 0 bytes
+ .../routers/__pycache__/inventory.cpython-313.pyc  | Bin 4982 -> 0 bytes
+ .../routers/__pycache__/reviews.cpython-311.pyc    | Bin 20840 -> 0 bytes
+ backend/routers/auth.py                            |  49 +-
+ backend/routers/dashboard.py                       |  48 +-
+ backend/routers/departments.py                     | 366 +++++++++++++++
+ backend/routers/notifications.py                   | 149 ++++++
+ backend/routers/products.py                        | 340 ++++++++++++++
+ backend/routers/reviews.py                         | 487 ++++++++++++++-----
+ backend/routers/stores.py                          | 247 ++++++++++
+ backend/routers/tenants.py                         | 113 +++++
+ .../services/__pycache__/__init__.cpython-311.pyc  | Bin 154 -> 0 bytes
+ .../__pycache__/auth_service.cpython-311.pyc       | Bin 4249 -> 0 bytes
+ .../__pycache__/chat_service.cpython-311.pyc       | Bin 31939 -> 0 bytes
+ .../__pycache__/feishu_service.cpython-311.pyc     | Bin 14767 -> 0 bytes
+ .../services/__pycache__/scheduler.cpython-311.pyc | Bin 2051 -> 0 bytes
+ .../__pycache__/translate_service.cpython-311.pyc  | Bin 2828 -> 0 bytes
+ backend/services/chat_service.py                   |  93 +++-
+ backend/services/scheduler.py                      | 366 ++++++++++++++-
+ database/migrations/check_db.py                    | 191 ++++++++
+ database/migrations/check_importance_data.py       | 123 +++++
+ database/migrations/create_test_data.py            | 111 +++++
+ database/migrations/create_test_user.py            | 126 +++++
+ database/migrations/fix_default_importance.py      | 115 +++++
+ database/migrations/migrate.py                     | 284 ++++++++++++
+ database/migrations/reset_admin_password.py        | 126 +++++
+ database/migrations/run_migration.py               |  84 ++++
+ database/migrations/simple_test.py                 |  76 +++
+ database/migrations/test_notification.py           |  99 ++++
+ .../v1_add_departments_notifications.sql           | 107 +++++
+ database/migrations/v1_simple.sql                  |  86 ++++
+ database/schema.sql                                |  59 +++
+ frontend/package-lock.json                         |  41 +-
+ frontend/package.json                              |  12 +-
+ frontend/src/App.tsx                               |  68 ++-
+ frontend/src/api.ts                                | 168 ++++++-
+ frontend/src/components/ChangePasswordModal.tsx    | 116 +++++
+ frontend/src/components/Layout/MainLayout.tsx      | 299 +++++++++++-
+ frontend/src/contexts/AuthContext.tsx              |   1 +
+ frontend/src/index.css                             |  26 +-
+ frontend/src/main.tsx                              |  25 +-
+ frontend/src/pages/ChatBot.tsx                     |  11 +-
+ frontend/src/pages/Home.tsx                        | 415 +++++++++++++++++
+ frontend/src/pages/InventoryBot.tsx                |   9 +-
+ frontend/src/pages/Login.tsx                       |  10 +-
+ frontend/src/pages/OrgManagement.tsx               | 443 ++++++++++++++++++
+ frontend/src/pages/ProductManagement.tsx           | 513 +++++++++++++++++++++
+ frontend/src/pages/Register.tsx                    |  10 +-
+ frontend/src/pages/ReviewBot.tsx                   | 462 +++++++++++++++----
+ frontend/src/pages/StoreManagement.tsx             | 350 ++++++++++++++
+ frontend/src/pages/TenantManagement.tsx            | 157 +++++++
+ 85 files changed, 6816 insertions(+), 330 deletions(-)
+ delete mode 100644 backend/__pycache__/config.cpython-311.pyc
+ delete mode 100644 backend/__pycache__/config.cpython-313.pyc
+ delete mode 100644 backend/__pycache__/dependencies.cpython-311.pyc
+ delete mode 100644 backend/__pycache__/main.cpython-311.pyc
+ delete mode 100644 backend/__pycache__/main_debug.cpython-311.pyc
+ delete mode 100644 backend/__pycache__/main_debug2.cpython-311.pyc
+ delete mode 100644 backend/__pycache__/main_simple.cpython-311.pyc
+ create mode 100644 backend/check_db.py
+ delete mode 100644 backend/database/__pycache__/__init__.cpython-311.pyc
+ delete mode 100644 backend/database/__pycache__/__init__.cpython-313.pyc
+ delete mode 100644 backend/database/__pycache__/database.cpython-311.pyc
+ delete mode 100644 backend/database/__pycache__/database.cpython-313.pyc
+ delete mode 100644 backend/models/__pycache__/__init__.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/base.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/conversation.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/inventory.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/product.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/review.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/store.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/tenant.cpython-311.pyc
+ delete mode 100644 backend/models/__pycache__/user.cpython-311.pyc
+ create mode 100644 backend/models/department.py
+ delete mode 100644 backend/routers/__pycache__/__init__.cpython-311.pyc
+ delete mode 100644 backend/routers/__pycache__/__init__.cpython-313.pyc
+ delete mode 100644 backend/routers/__pycache__/auth.cpython-311.pyc
+ delete mode 100644 backend/routers/__pycache__/chat.cpython-311.pyc
+ delete mode 100644 backend/routers/__pycache__/dashboard.cpython-311.pyc
+ delete mode 100644 backend/routers/__pycache__/inventory.cpython-311.pyc
+ delete mode 100644 backend/routers/__pycache__/inventory.cpython-313.pyc
+ delete mode 100644 backend/routers/__pycache__/reviews.cpython-311.pyc
+ create mode 100644 backend/routers/departments.py
+ create mode 100644 backend/routers/notifications.py
+ create mode 100644 backend/routers/products.py
+ create mode 100644 backend/routers/stores.py
+ create mode 100644 backend/routers/tenants.py
+ delete mode 100644 backend/services/__pycache__/__init__.cpython-311.pyc
+ delete mode 100644 backend/services/__pycache__/auth_service.cpython-311.pyc
+ delete mode 100644 backend/services/__pycache__/chat_service.cpython-311.pyc
+ delete mode 100644 backend/services/__pycache__/feishu_service.cpython-311.pyc
+ delete mode 100644 backend/services/__pycache__/scheduler.cpython-311.pyc
+ delete mode 100644 backend/services/__pycache__/translate_service.cpython-311.pyc
+ create mode 100644 database/migrations/check_db.py
+ create mode 100644 database/migrations/check_importance_data.py
+ create mode 100644 database/migrations/create_test_data.py
+ create mode 100644 database/migrations/create_test_user.py
+ create mode 100644 database/migrations/fix_default_importance.py
+ create mode 100644 database/migrations/migrate.py
+ create mode 100644 database/migrations/reset_admin_password.py
+ create mode 100644 database/migrations/run_migration.py
+ create mode 100644 database/migrations/simple_test.py
+ create mode 100644 database/migrations/test_notification.py
+ create mode 100644 database/migrations/v1_add_departments_notifications.sql
+ create mode 100644 database/migrations/v1_simple.sql
+ create mode 100644 frontend/src/components/ChangePasswordModal.tsx
+ create mode 100644 frontend/src/pages/Home.tsx
+ create mode 100644 frontend/src/pages/OrgManagement.tsx
+ create mode 100644 frontend/src/pages/ProductManagement.tsx
+ create mode 100644 frontend/src/pages/StoreManagement.tsx
+ create mode 100644 frontend/src/pages/TenantManagement.tsx
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash pop
+On branch wq
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        CODE_WIKI.md
+        backend/__pycache__/
+        backend/cleanup_inbound_data.py
+        backend/database/__pycache__/
+        backend/models/__pycache__/
+        backend/models/restock.py
+        backend/routers/__pycache__/
+        backend/routers/restock.py
+        backend/services/__pycache__/
+        backend/services/inventory_service.py
+        backend/test_db.py
+        database/drop_inventory_tables.sql
+        inventory.py
+        test_import.py
+
+nothing added to commit but untracked files present (use "git add" to track)
+Dropped refs/stash@{0} (94f1cf47529b2be50cf7165aa9552f06d404465f)
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash pop
+error: The following untracked working tree files would be overwritten by merge:
+        backend/__pycache__/config.cpython-313.pyc
+        backend/database/__pycache__/__init__.cpython-313.pyc
+        backend/database/__pycache__/database.cpython-313.pyc
+        backend/routers/__pycache__/__init__.cpython-313.pyc
+        backend/routers/__pycache__/inventory.cpython-313.pyc
+Please move or remove them before you merge.
+Aborting
+On branch wq
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        CODE_WIKI.md
+        backend/__pycache__/
+        backend/cleanup_inbound_data.py
+        backend/database/__pycache__/
+        backend/models/__pycache__/
+        backend/models/restock.py
+        backend/routers/__pycache__/
+        backend/routers/restock.py
+        backend/services/__pycache__/
+        backend/services/inventory_service.py
+        backend/test_db.py
+        database/drop_inventory_tables.sql
+        inventory.py
+        test_import.py
+
+nothing added to commit but untracked files present (use "git add" to track)
+The stash entry is kept in case you need it again.
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ ^C
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ ^C
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ rm -rf backend/**/__pycache__/
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ rm -rf backend/__pycache__/
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ rm -f backend/**/*.pyc
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash pop
+CONFLICT (modify/delete): backend/__pycache__/config.cpython-313.pyc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of backend/__pycache__/config.cpython-313.pyc left in tree.
+CONFLICT (modify/delete): backend/database/__pycache__/__init__.cpython-313.pyc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of backend/database/__pycache__/__init__.cpython-313.pyc left in tree.
+CONFLICT (modify/delete): backend/database/__pycache__/database.cpython-313.pyc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of backend/database/__pycache__/database.cpython-313.pyc left in tree.
+Auto-merging backend/database/database.py
+CONFLICT (content): Merge conflict in backend/database/database.py
+Auto-merging backend/main.py
+CONFLICT (content): Merge conflict in backend/main.py
+CONFLICT (modify/delete): backend/routers/__pycache__/__init__.cpython-313.pyc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of backend/routers/__pycache__/__init__.cpython-313.pyc left in tree.
+CONFLICT (modify/delete): backend/routers/__pycache__/inventory.cpython-313.pyc deleted in Updated upstream and modified in Stashed changes.  Version Stashed changes of backend/routers/__pycache__/inventory.cpython-313.pyc left in tree.
+Auto-merging backend/routers/auth.py
+Auto-merging frontend/package-lock.json
+Auto-merging frontend/src/api.ts
+CONFLICT (content): Merge conflict in frontend/src/api.ts
+Auto-merging frontend/src/pages/InventoryBot.tsx
+CONFLICT (content): Merge conflict in frontend/src/pages/InventoryBot.tsx
+On branch wq
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        modified:   backend/models/__init__.py
+        modified:   backend/requirements.txt
+        modified:   backend/routers/auth.py
+        modified:   backend/routers/chat.py
+        deleted:    backend/static/index.html
+        modified:   frontend/package-lock.json
+        modified:   package.json
+
+Unmerged paths:
+  (use "git restore --staged <file>..." to unstage)
+  (use "git add/rm <file>..." as appropriate to mark resolution)
+        deleted by us:   backend/__pycache__/config.cpython-313.pyc
+        deleted by us:   backend/database/__pycache__/__init__.cpython-313.pyc
+        deleted by us:   backend/database/__pycache__/database.cpython-313.pyc
+        both modified:   backend/database/database.py
+        both modified:   backend/main.py
+        deleted by us:   backend/routers/__pycache__/__init__.cpython-313.pyc
+        deleted by us:   backend/routers/__pycache__/inventory.cpython-313.pyc
+        both modified:   frontend/src/api.ts
+        both modified:   frontend/src/pages/InventoryBot.tsx
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        CODE_WIKI.md
+        backend/cleanup_inbound_data.py
+        backend/models/restock.py
+        backend/routers/restock.py
+        backend/services/inventory_service.py
+        backend/test_db.py
+        database/drop_inventory_tables.sql
+        inventory.py
+        test_import.py
+
+The stash entry is kept in case you need it again.
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash clear
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stash
+No local changes to save
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git stuas
+git: 'stuas' is not a git command. See 'git --help'.
+
+The most similar command is
+        stash
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXHS (wq)
+$ git staus
+git: 'staus' is not a git command. See 'git --help'.
+
+The most similar command is
+        status
+
+Administrator@PC-202503311138 MINGW64 ~/Desktop/Python/AI/AIBXHS/AIBXH

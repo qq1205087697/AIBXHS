@@ -1,29 +1,46 @@
-import axios from 'axios'
+import axios from "axios";
 
-const API_BASE = '/api'
+const API_BASE = "/api";
 
 // 配置 axios 实例
 const apiClient = axios.create({
   baseURL: API_BASE,
   timeout: 180000,
   headers: {
-    'Content-Type': 'application/json'
-  }
-})
+    "Content-Type": "application/json",
+  },
+  paramsSerializer: (params) => {
+    // 自定义参数序列化，处理数组参数
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        // 数组参数用同一个 key 多次传递
+        value.forEach((item) => {
+          if (item !== undefined && item !== null) {
+            searchParams.append(key, item);
+          }
+        });
+      } else if (value !== undefined && value !== null) {
+        searchParams.append(key, value);
+      }
+    });
+    return searchParams.toString();
+  },
+});
 
 // 请求拦截器 - 自动添加 token
 apiClient.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem("token");
     if (token) {
-      config.headers.Authorization = `Bearer ${token}`
+      config.headers.Authorization = `Bearer ${token}`;
     }
-    return config
+    return config;
   },
   (error) => {
-    return Promise.reject(error)
-  }
-)
+    return Promise.reject(error);
+  },
+);
 
 // 响应拦截器
 apiClient.interceptors.response.use(
@@ -31,194 +48,249 @@ apiClient.interceptors.response.use(
   (error) => {
     // 如果是 401 未授权，清除 token（只有当不是在登录页面时才跳转）
     if (error.response?.status === 401) {
-      const url = error.config?.url || ''
-      
+      const url = error.config?.url || "";
+
       // 只有当不是登录请求且不在登录页面时才跳转
-      if (!url.includes('/auth/login') && window.location.pathname !== '/login') {
-        console.warn('认证过期，跳转到登录页')
-        localStorage.removeItem('token')
-        window.location.href = '/login'
+      if (
+        !url.includes("/auth/login") &&
+        window.location.pathname !== "/login"
+      ) {
+        console.warn("认证过期，跳转到登录页");
+        localStorage.removeItem("token");
+        window.location.href = "/login";
       }
     }
-    return Promise.reject(error)
-  }
-)
+    return Promise.reject(error);
+  },
+);
 
 // ========== Auth API ==========
 export const authApi = {
   login: (username: string, password: string) =>
-    apiClient.post('/auth/login', { username, password }),
-  
-  register: (username: string, email: string, password: string, nickname?: string) =>
-    apiClient.post('/auth/register', { username, email, password, nickname }),
-  
-  getMe: () => apiClient.get('/auth/me'),
-  
+    apiClient.post("/auth/login", { username, password }),
+
+  register: (
+    username: string,
+    email: string,
+    password: string,
+    nickname?: string,
+  ) =>
+    apiClient.post("/auth/register", { username, email, password, nickname }),
+
+  getMe: () => apiClient.get("/auth/me"),
+
   changePassword: (oldPassword: string, newPassword: string) =>
-    apiClient.post('/auth/change-password', { old_password: oldPassword, new_password: newPassword }),
-}
+    apiClient.post("/auth/change-password", {
+      old_password: oldPassword,
+      new_password: newPassword,
+    }),
+};
 
 // ========== Dashboard API ==========
 export const dashboardApi = {
-  getStats: () => apiClient.get('/dashboard/stats'),
-}
+  getStats: () => apiClient.get("/dashboard/stats"),
+};
 
 // ========== Inventory API ==========
 export const inventoryApi = {
-  getAlerts: () =>
-    apiClient.get('/inventory/alerts'),
-  getList: () =>
-    apiClient.get('/inventory/'),
+  getAlerts: () => apiClient.get("/inventory/alerts"),
+  getList: () => apiClient.get("/inventory/"),
   updateStock: (id: string, data: any) =>
     apiClient.put(`/inventory/${id}`, data),
-  executeAction: (asin: string, action: string) =>
-    apiClient.post('/inventory/execute', { asin, action }),
-}
+
+  // ========== Restock (补货) API ==========
+  getOverview: () => apiClient.get("/restock/overview"),
+  calculate: () => apiClient.post("/restock/calculate"),
+  import: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post("/restock/import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  search: (params: any) => apiClient.get("/restock/search", { params }),
+  getStockoutTop10: () => apiClient.get("/restock/stockout-top10"),
+  getOverstockTop10: () => apiClient.get("/restock/overstock-top10"),
+  getInboundDetails: (asin: string, account?: string) =>
+    apiClient.get("/restock/inbound-details", { params: { asin, account } }),
+  getLatestDate: () => apiClient.get("/restock/latest-date"),
+};
 
 // ========== Reviews API ==========
 export const reviewsApi = {
   getList: (params?: {
-    page?: number,
-    page_size?: number,
-    asin_search?: string,
-    product_name_search?: string,
-    sku_search?: string,
-    sort_by?: string,
-    sort_order?: string,
-    start_date?: string,
-    end_date?: string,
-    status?: string,
-    importance_level?: string,
+    page?: number;
+    page_size?: number;
+    asin_search?: string;
+    product_name_search?: string;
+    sku_search?: string;
+    sort_by?: string;
+    sort_order?: string;
+    start_date?: string;
+    end_date?: string;
+    status?: string;
+    importance_level?: string;
   }) => {
     // 过滤掉undefined、null和空字符串的参数
-    const filteredParams: any = {}
+    const filteredParams: any = {};
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== '') {
-          filteredParams[key] = value
+        if (value !== undefined && value !== null && value !== "") {
+          filteredParams[key] = value;
         }
-      })
+      });
     }
-    return apiClient.get('/reviews/', { params: filteredParams })
+    return apiClient.get("/reviews/", { params: filteredParams });
   },
-  getById: (id: string) =>
-    apiClient.get(`/reviews/${id}`),
+  getById: (id: string) => apiClient.get(`/reviews/${id}`),
   updateStatus: (id: string, status: string) =>
     apiClient.put(`/reviews/${id}/status`, { status }),
   updateImportance: (id: string, importance_level: string | undefined) =>
     apiClient.put(`/reviews/${id}/importance`, { importance_level }),
   batchAnalyze: (ids: string[]) =>
-    apiClient.post('/reviews/analyze/batch', ids),
-  getNewCount: () =>
-    apiClient.get('/reviews/new/count'),
-}
+    apiClient.post("/reviews/analyze/batch", ids),
+  getNewCount: () => apiClient.get("/reviews/new/count"),
+};
 
 // ========== Departments API ==========
 export const departmentsApi = {
-  getList: () => apiClient.get('/departments/'),
-  create: (data: { name: string; description?: string }) => apiClient.post('/departments/', data),
-  update: (id: number, data: { name?: string; description?: string }) => apiClient.put(`/departments/${id}`, data),
+  getList: () => apiClient.get("/departments/"),
+  create: (data: { name: string; description?: string }) =>
+    apiClient.post("/departments/", data),
+  update: (id: number, data: { name?: string; description?: string }) =>
+    apiClient.put(`/departments/${id}`, data),
   delete: (id: number) => apiClient.delete(`/departments/${id}`),
   getMembers: (id: number) => apiClient.get(`/departments/${id}/members`),
-  addMember: (deptId: number, userId: number) => apiClient.post(`/departments/${deptId}/members`, { user_id: userId }),
-  removeMember: (deptId: number, userId: number) => apiClient.delete(`/departments/${deptId}/members/${userId}`),
-  getAllUsers: () => apiClient.get('/departments/users/all'),
-  updateUserDepartments: (userId: number, departmentIds: number[]) => apiClient.put(`/departments/users/${userId}/departments`, departmentIds),
-  createUser: (data: { username: string; email: string; role?: string }) => apiClient.post('/departments/users', data),
-  batchAssignDepartments: (data: { user_ids: number[]; department_ids: number[] }) => apiClient.post('/departments/users/batch-assign', data),
-}
+  addMember: (deptId: number, userId: number) =>
+    apiClient.post(`/departments/${deptId}/members`, { user_id: userId }),
+  removeMember: (deptId: number, userId: number) =>
+    apiClient.delete(`/departments/${deptId}/members/${userId}`),
+  getAllUsers: () => apiClient.get("/departments/users/all"),
+  updateUserDepartments: (userId: number, departmentIds: number[]) =>
+    apiClient.put(`/departments/users/${userId}/departments`, departmentIds),
+  createUser: (data: { username: string; email: string; role?: string }) =>
+    apiClient.post("/departments/users", data),
+  batchAssignDepartments: (data: {
+    user_ids: number[];
+    department_ids: number[];
+  }) => apiClient.post("/departments/users/batch-assign", data),
+};
 
 // ========== Notifications API ==========
 export const notificationsApi = {
-  getList: (params?: { page?: number; page_size?: number; unread_only?: boolean }) =>
-    apiClient.get('/notifications/', { params }),
-  getUnreadCount: () => apiClient.get('/notifications/unread-count'),
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    unread_only?: boolean;
+  }) => apiClient.get("/notifications/", { params }),
+  getUnreadCount: () => apiClient.get("/notifications/unread-count"),
   markAsRead: (id: number) => apiClient.put(`/notifications/${id}/read`),
-  markAllAsRead: () => apiClient.put('/notifications/read-all'),
-}
+  markAllAsRead: () => apiClient.put("/notifications/read-all"),
+};
 
 // ========== Chat API ==========
 export const chatApi = {
   sendMessage: (message: string, sessionId?: string) =>
-    apiClient.post('/chat', { message, session_id: sessionId }, { timeout: 300000 }),
-  getSessions: () => apiClient.get('/chat/sessions'),
+    apiClient.post(
+      "/chat",
+      { message, session_id: sessionId },
+      { timeout: 300000 },
+    ),
+  getSessions: () => apiClient.get("/chat/sessions"),
   getSessionMessages: (sessionId: string) =>
     apiClient.get(`/chat/sessions/${sessionId}/messages`),
-}
+};
 
 // ========== Stores API ==========
 export const storesApi = {
-  getList: (params?: { page?: number; page_size?: number; name_search?: string; site_search?: string }) => apiClient.get('/stores/', { params }),
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    name_search?: string;
+    site_search?: string;
+  }) => apiClient.get("/stores/", { params }),
   create: (data: {
-    name: string
-    platform?: string
-    site?: string
-    platform_store_id?: string
-    department_id?: number
-  }) => apiClient.post('/stores/', data),
-  update: (id: number, data: {
-    name?: string
-    platform?: string
-    site?: string
-    platform_store_id?: string
-    department_id?: number
-    status?: string
-  }) => apiClient.put(`/stores/${id}`, data),
+    name: string;
+    platform?: string;
+    site?: string;
+    platform_store_id?: string;
+    department_id?: number;
+  }) => apiClient.post("/stores/", data),
+  update: (
+    id: number,
+    data: {
+      name?: string;
+      platform?: string;
+      site?: string;
+      platform_store_id?: string;
+      department_id?: number;
+      status?: string;
+    },
+  ) => apiClient.put(`/stores/${id}`, data),
   delete: (id: number) => apiClient.delete(`/stores/${id}`),
-  batchUpdateDepartment: (data: { store_ids: number[]; department_id?: number }) => apiClient.post('/stores/batch-update-department', data),
-}
+  batchUpdateDepartment: (data: {
+    store_ids: number[];
+    department_id?: number;
+  }) => apiClient.post("/stores/batch-update-department", data),
+};
 
 // ========== Products API ==========
 export const productsApi = {
   getList: (params?: {
-    page?: number
-    page_size?: number
-    store_id?: number
-    asin_search?: string
-    sku_search?: string
-    name_search?: string
-  }) => apiClient.get('/products/', { params }),
+    page?: number;
+    page_size?: number;
+    store_id?: number;
+    asin_search?: string;
+    sku_search?: string;
+    name_search?: string;
+  }) => apiClient.get("/products/", { params }),
   getById: (id: number) => apiClient.get(`/products/${id}`),
   create: (data: {
-    store_id: number
-    asin: string
-    name: string
-    sku?: string
-    name_en?: string
-    image_url?: string
-    category?: string
-    brand?: string
-    price?: number
-    cost_price?: number
-    status?: string
-    is_robot_monitored?: boolean
-  }) => apiClient.post('/products/', data),
-  update: (id: number, data: {
-    store_id?: number
-    asin?: string
-    name?: string
-    sku?: string
-    name_en?: string
-    image_url?: string
-    category?: string
-    brand?: string
-    price?: number
-    cost_price?: number
-    status?: string
-    is_robot_monitored?: boolean
-  }) => apiClient.put(`/products/${id}`, data),
+    store_id: number;
+    asin: string;
+    name: string;
+    sku?: string;
+    name_en?: string;
+    image_url?: string;
+    category?: string;
+    brand?: string;
+    price?: number;
+    cost_price?: number;
+    status?: string;
+    is_robot_monitored?: boolean;
+  }) => apiClient.post("/products/", data),
+  update: (
+    id: number,
+    data: {
+      store_id?: number;
+      asin?: string;
+      name?: string;
+      sku?: string;
+      name_en?: string;
+      image_url?: string;
+      category?: string;
+      brand?: string;
+      price?: number;
+      cost_price?: number;
+      status?: string;
+      is_robot_monitored?: boolean;
+    },
+  ) => apiClient.put(`/products/${id}`, data),
   delete: (id: number) => apiClient.delete(`/products/${id}`),
-}
+};
 
 // ========== Tenants API ==========
 export const tenantsApi = {
   getList: () => apiClient.get("/tenants/"),
   getById: (id: number) => apiClient.get(`/tenants/${id}`),
-  update: (id: number, data: {
-    name?: string
-    code?: string
-    status?: string
-  }) => apiClient.put(`/tenants/${id}`, data),
-}
+  update: (
+    id: number,
+    data: {
+      name?: string;
+      code?: string;
+      status?: string;
+    },
+  ) => apiClient.put(`/tenants/${id}`, data),
+};
 
-export default apiClient
+export default apiClient;
