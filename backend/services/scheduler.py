@@ -350,6 +350,7 @@ def push_daily_review_notifications_job():
 
         # 为每个部门的成员推送通知
         notification_count = 0
+        notification_rows = []
         for dept_id, stats in dept_stats.items():
             logger.info(f"处理部门 {stats['name']} (ID={dept_id})...")
             
@@ -371,19 +372,22 @@ def push_daily_review_notifications_job():
             for member in members:
                 user_id = member[0]
                 logger.info(f"  准备推送给用户 ID={user_id}")
-                try:
-                    db.execute(text("""
-                        INSERT INTO notifications (tenant_id, user_id, type, title, content, link)
-                        VALUES (1, :uid, 'warning', :title, :content, '/review')
-                    """), {
-                        "uid": user_id,
-                        "title": title,
-                        "content": content
-                    })
-                    notification_count += 1
-                    logger.info(f"  ✅ 成功推送给用户 ID={user_id}")
-                except Exception as e:
-                    logger.error(f"  ❌ 推送给用户 {user_id} 失败: {e}")
+                notification_rows.append({
+                    "uid": user_id,
+                    "title": title,
+                    "content": content
+                })
+
+        if notification_rows:
+            try:
+                db.execute(text("""
+                    INSERT INTO notifications (tenant_id, user_id, type, title, content, link)
+                    VALUES (1, :uid, 'warning', :title, :content, '/review')
+                """), notification_rows)
+                notification_count = len(notification_rows)
+                logger.info(f"✅ 批量写入 {notification_count} 条通知")
+            except Exception as e:
+                logger.error(f"批量写入通知失败: {e}")
 
         db.commit()
         logger.info(f"========== 推送完成！共推送 {notification_count} 条通知，覆盖 {len(dept_stats)} 个部门 ==========")
