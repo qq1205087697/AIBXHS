@@ -11,6 +11,7 @@ import OrgManagement from './pages/OrgManagement'
 import StoreManagement from './pages/StoreManagement'
 import ProductManagement from './pages/ProductManagement'
 import TenantManagement from './pages/TenantManagement'
+import ProductSelection from './pages/ProductSelection'
 import Login from './pages/Login'
 import Register from './pages/Register'
 
@@ -105,6 +106,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <TenantManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/product-selection"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ProductSelection />
             </MainLayout>
           </ProtectedRoute>
         }

@@ -37,13 +37,17 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def get_user(db: Session, username: str) -> Optional[User]:
-    """根据用户名获取用户"""
-    return db.query(User).filter(User.username == username).first()
+    """根据用户名或邮箱获取用户"""
+    user = db.query(User).filter(User.username == username).first()
+    if user:
+        return user
+    # 如果没有找到用户，尝试通过邮箱查找
+    return db.query(User).filter(User.email == username).first()
 
 
-def authenticate_user(db: Session, username: str, password: str) -> Optional[User]:
-    """认证用户"""
-    user = get_user(db, username)
+def authenticate_user(db: Session, username_or_email: str, password: str) -> Optional[User]:
+    """认证用户（支持用户名或邮箱）"""
+    user = get_user(db, username_or_email)
     if not user:
         return None
     if not verify_password(password, user.password_hash):

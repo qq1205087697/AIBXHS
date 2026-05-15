@@ -54,8 +54,8 @@ async def get_reviews(
 ):
     """获取差评列表（支持分页、搜索、排序、部门过滤、日期筛选、状态筛选）"""
     try:
-        where_conditions = ["r.rating <= 3"]
-        params = {"limit": page_size, "offset": (page - 1) * page_size}
+        where_conditions = ["r.rating <= 3", "r.tenant_id = :tenant_id"]
+        params = {"limit": page_size, "offset": (page - 1) * page_size, "tenant_id": current_user.tenant_id}
         
         # 检查 importance_level 列是否存在
         has_importance_level = False
@@ -318,7 +318,7 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
     try:
         # 非管理员用户按部门过滤
         dept_filter = ""
-        params = {"review_id": review_id}
+        params = {"review_id": review_id, "tenant_id": current_user.tenant_id}
         if current_user.role != "admin":
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
@@ -350,7 +350,7 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             FROM reviews r
             LEFT JOIN products p ON r.asin = p.asin
             LEFT JOIN stores s ON r.store_id = s.id
-            WHERE r.id = :review_id
+            WHERE r.id = :review_id AND r.tenant_id = :tenant_id
             {dept_filter}
         """)
 
@@ -527,8 +527,8 @@ async def update_review_status(review_id: str, status_data: Dict[str, str], db: 
             raise HTTPException(status_code=400, detail="无效的状态值")
 
         # 非管理员用户按部门过滤
-        check_params = {"review_id": review_id}
-        check_where = "r.id = :review_id"
+        check_params = {"review_id": review_id, "tenant_id": current_user.tenant_id}
+        check_where = "r.id = :review_id AND r.tenant_id = :tenant_id"
         if current_user.role != "admin":
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
@@ -556,9 +556,9 @@ async def update_review_status(review_id: str, status_data: Dict[str, str], db: 
         update_query = text("""
             UPDATE reviews
             SET status = :new_status, updated_at = NOW()
-            WHERE id = :review_id
+            WHERE id = :review_id AND tenant_id = :tenant_id
         """)
-        db.execute(update_query, {"new_status": new_status, "review_id": review_id})
+        db.execute(update_query, {"new_status": new_status, "review_id": review_id, "tenant_id": current_user.tenant_id})
         db.commit()
 
         return {
@@ -585,7 +585,7 @@ async def get_new_reviews_count(db: Session = Depends(get_db), current_user: Use
         
         store_join = ""
         dept_filter = ""
-        params = {"three_days_ago": three_days_ago}
+        params = {"three_days_ago": three_days_ago, "tenant_id": current_user.tenant_id}
         if current_user.role != "admin":
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
@@ -609,6 +609,7 @@ async def get_new_reviews_count(db: Session = Depends(get_db), current_user: Use
             WHERE rating <= 3
               AND status = 'new'
               AND review_date >= :three_days_ago
+              AND tenant_id = :tenant_id
               {dept_filter}
         """)
         
@@ -631,8 +632,8 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
             raise HTTPException(status_code=400, detail="无效的重要性等级")
 
         # 非管理员用户按部门过滤
-        check_params = {"review_id": review_id}
-        check_where = "r.id = :review_id"
+        check_params = {"review_id": review_id, "tenant_id": current_user.tenant_id}
+        check_where = "r.id = :review_id AND r.tenant_id = :tenant_id"
         if current_user.role != "admin":
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
@@ -668,8 +669,8 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
         
         if has_importance_level:
             db.execute(text("""
-                UPDATE reviews SET importance_level = :level WHERE id = :rid
-            """), {"level": level or None, "rid": review_id})
+                UPDATE reviews SET importance_level = :level WHERE id = :rid AND tenant_id = :tenant_id
+            """), {"level": level or None, "rid": review_id, "tenant_id": current_user.tenant_id})
             db.commit()
         
         return {"success": True, "message": "重要性等级更新成功"}

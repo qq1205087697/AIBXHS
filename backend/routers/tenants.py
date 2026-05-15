@@ -25,9 +25,10 @@ async def get_tenants(
         query = text("""
             SELECT id, name, code, status, created_at, updated_at
             FROM tenants
+            WHERE id = :tenant_id
             ORDER BY created_at DESC
         """)
-        result = db.execute(query)
+        result = db.execute(query, {"tenant_id": current_user.tenant_id})
         tenants = []
         for row in result:
             tenants.append({
@@ -50,6 +51,10 @@ async def get_tenant(
     current_user: User = Depends(get_current_admin_user)
 ):
     try:
+        # 只能查看自己的租户
+        if tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="无权访问该租户")
+        
         query = text("""
             SELECT id, name, code, status, created_at, updated_at
             FROM tenants
@@ -83,6 +88,10 @@ async def update_tenant(
     current_user: User = Depends(get_current_admin_user)
 ):
     try:
+        # 只能修改自己的租户
+        if tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="无权修改该租户")
+        
         check = text("SELECT id FROM tenants WHERE id = :id")
         row = db.execute(check, {"id": tenant_id}).fetchone()
         if not row:

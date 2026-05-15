@@ -2,10 +2,97 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
+
+def acquire_distributed_lock(db, lock_key: str, timeout_minutes: int = 30) -> bool:
+    """获取分布式锁，防止多进程同时执行
+    返回 True 表示成功获取锁，可以执行任务
+    """
+    from sqlalchemy import text
+    lock_expires_at = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+    
+    try:
+        # 先检查锁表是否存在，不存在直接返回 True（允许执行）
+        check_table_sql = text("SHOW TABLES LIKE 'scheduler_locks'")
+        table_exists = db.execute(check_table_sql).fetchone() is not None
+        if not table_exists:
+            logger.warning(f"scheduler_locks 表不存在，不使用锁: {lock_key}")
+            return True
+        
+        # 尝试获取锁：插入记录
+        insert_sql = text("""
+            INSERT INTO scheduler_locks (lock_key, acquired_at, expires_at, is_active)
+            VALUES (:key, NOW(), :expires, TRUE)
+            ON DUPLICATE KEY UPDATE
+                acquired_at = IF(is_active = FALSE OR expires_at < NOW(), NOW(), acquired_at),
+                expires_at = IF(is_active = FALSE OR expires_at < NOW(), :expires, expires_at),
+                is_active = IF(is_active = FALSE OR expires_at < NOW(), TRUE, is_active)
+        """)
+        result = db.execute(insert_sql, {"key": lock_key, "expires": lock_expires_at})
+        
+        # 检查是否真的获取到了锁（影响行数 > 0 说明是第一个）
+        if result.rowcount > 0:
+            db.commit()
+            logger.info(f"✅ 成功获取分布式锁: {lock_key}")
+            return True
+        
+        # 如果没有插入行，检查是否是锁已过期被我们自动续期了
+        check_sql = text("""
+            SELECT 1 FROM scheduler_locks
+            WHERE lock_key = :key
+              AND is_active = TRUE
+              AND expires_at > NOW()
+        """)
+        check_result = db.execute(check_sql, {"key": lock_key}).fetchone()
+        if not check_result:
+            # 锁已过期，我们更新锁
+            update_sql = text("""
+                UPDATE scheduler_locks
+                SET is_active = TRUE,
+                    acquired_at = NOW(),
+                    expires_at = :expires
+                WHERE lock_key = :key
+            """)
+            db.execute(update_sql, {"key": lock_key, "expires": lock_expires_at})
+            db.commit()
+            logger.info(f"🔄 锁已过期，重新获取: {lock_key}")
+            return True
+        
+        db.commit()
+        logger.info(f"🔒 其他进程正在执行该任务，跳过: {lock_key}")
+        return False
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"获取分布式锁失败: {e}")
+        # 出错时允许执行任务（不阻塞）
+        return True
+
+
+def release_distributed_lock(db, lock_key: str):
+    """释放分布式锁"""
+    from sqlalchemy import text
+    try:
+        # 检查锁表是否存在
+        check_table_sql = text("SHOW TABLES LIKE 'scheduler_locks'")
+        table_exists = db.execute(check_table_sql).fetchone() is not None
+        if not table_exists:
+            return
+        
+        update_sql = text("""
+            UPDATE scheduler_locks
+            SET is_active = FALSE
+            WHERE lock_key = :key
+        """)
+        db.execute(update_sql, {"key": lock_key})
+        db.commit()
+        logger.info(f"🔓 释放分布式锁: {lock_key}")
+    except Exception as e:
+        logger.error(f"释放分布式锁失败: {e}")
 
 
 def init_scheduler():
@@ -60,15 +147,45 @@ def init_scheduler():
 
 
 def check_inventory_job():
-    logger.info("执行库存检查任务...")
+    from database.database import SessionLocal
+    LOCK_KEY = "inventory_check"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("执行库存检查任务...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def check_reviews_job():
-    logger.info("执行差评监控任务...")
+    from database.database import SessionLocal
+    LOCK_KEY = "reviews_check"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("执行差评监控任务...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def send_daily_report_job():
-    logger.info("发送每日运营报告...")
+    from database.database import SessionLocal
+    LOCK_KEY = "daily_report"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("发送每日运营报告...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def analyze_unanalyzed_reviews_job():
@@ -77,8 +194,13 @@ def analyze_unanalyzed_reviews_job():
     from sqlalchemy import text
     import json
 
+    LOCK_KEY = "daily_review_analysis"
     db = SessionLocal()
     try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
 
         # 查询所有未分析的差评（review_analyses中不存在的差评）
@@ -199,6 +321,7 @@ def analyze_unanalyzed_reviews_job():
     except Exception as e:
         logger.error(f"每日AI分析任务失败: {e}")
     finally:
+        release_distributed_lock(db, LOCK_KEY)
         db.close()
 
 
@@ -208,10 +331,16 @@ def push_daily_review_notifications_job():
     from sqlalchemy import text
     from datetime import datetime, date
 
-    logger.info("========== 开始推送每日差评通知 ==========")
+    LOCK_KEY = "daily_review_notifications"
     
     db = SessionLocal()
     try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        
+        logger.info("========== 开始推送每日差评通知 ==========")
+        
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
         logger.info("数据库连接成功")
         
@@ -398,4 +527,5 @@ def push_daily_review_notifications_job():
         logger.error(traceback.format_exc())
         db.rollback()
     finally:
+        release_distributed_lock(db, LOCK_KEY)
         db.close()

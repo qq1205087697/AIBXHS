@@ -293,4 +293,67 @@ export const tenantsApi = {
   ) => apiClient.put(`/tenants/${id}`, data),
 };
 
+// ========== Product Selection API ==========
+export const productSelectionApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    asin_search?: string;
+    keyword_search?: string;
+    title_search?: string;
+    product_type?: string;
+    sort_by?: string;
+    sort_order?: string;
+  }) => apiClient.get("/product-selection/", { params }),
+  getById: (id: number) => apiClient.get(`/product-selection/${id}`),
+  create: (data: {
+    product_title: string;
+    url?: string;
+    asin?: string;
+    image_url?: string;
+    rating?: number;
+    review_count?: number;
+    keywords?: string;
+    price?: number;
+    commission?: number;
+    first_leg_cost?: number;
+    last_mile_cost?: number;
+    weight_kg?: number;
+    cost_at_15_profit?: number;
+    product_type?: string;
+    monthly_sales?: number;
+    traffic_trend?: string;
+  }) => apiClient.post("/product-selection/", data),
+  update: (
+    id: number,
+    data: {
+      product_title?: string;
+      url?: string;
+      asin?: string;
+      image_url?: string;
+      rating?: number;
+      review_count?: number;
+      keywords?: string;
+      price?: number;
+      commission?: number;
+      first_leg_cost?: number;
+      last_mile_cost?: number;
+      weight_kg?: number;
+      cost_at_15_profit?: number;
+      product_type?: string;
+      monthly_sales?: number;
+      traffic_trend?: string;
+    },
+  ) => apiClient.put(`/product-selection/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/product-selection/${id}`),
+  analyze: (id: number) =>
+    apiClient.post(`/product-selection/${id}/analyze`, {}, { timeout: 180000 }),
+  batchAnalyze: (ids: number[]) =>
+    apiClient.post(
+      "/product-selection/batch-analyze",
+      ids,
+      { timeout: 300000 },
+    ),
+};
+
 export default apiClient;

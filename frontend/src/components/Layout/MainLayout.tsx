@@ -17,6 +17,7 @@ import {
   ShoppingBag,
   Users,
   Building2,
+  Target,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -183,6 +184,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <MessageSquare size={20} />,
       label: '差评机器人',
     },
+    {
+      key: '/product-selection',
+      icon: <Target size={20} />,
+      label: '选品机器人',
+    },
     ...(isAdmin
       ? [
           {
@@ -216,6 +222,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/dashboard': '数据看板',
       '/inventory': '库存机器人',
       '/review': '差评机器人',
+      '/product-selection': '选品机器人',
       '/org': '角色管理',
       '/stores': '店铺管理',
       '/products': '产品管理',

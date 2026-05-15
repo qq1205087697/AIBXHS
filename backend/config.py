@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
     
+    # Coze AI配置
+    COZE_API_KEY: str = ""
+    COZE_API_BASE: str = "https://api.coze.cn"
+    COZE_BOT_ID: str = ""
+    COZE_WORKFLOW_ID: str = ""
+
     # JWT配置
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"
