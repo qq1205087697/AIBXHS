@@ -27,7 +27,16 @@ async def get_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         product_query = db.query(func.count(Product.id))
         store_query = db.query(func.count(Store.id))
         
-        if current_user.role != "admin":
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}

@@ -47,6 +47,7 @@ import {
 import { UploadOutlined, DownloadOutlined } from "@ant-design/icons";
 import { inventoryApi, localInventoryApi } from "../api";
 import { useTheme } from "../contexts/ThemeContext";
+import { useAuth } from "../contexts/AuthContext";
 
 // ==================== TypeScript Interfaces ====================
 
@@ -168,6 +169,7 @@ const truncateText = (text: string, maxLen: number): string => {
 
 const InventoryBot: React.FC = () => {
   const { currentTheme } = useTheme();
+  const { hasPermission } = useAuth();
   const [messageApi, contextHolder] = message.useMessage();
 
   // --- Loading states ---
@@ -1671,12 +1673,6 @@ const InventoryBot: React.FC = () => {
           gap: 12,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Package color={currentTheme.primary} size={32} />
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>
-            库存机器人
-          </h1>
-        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           {snapshotDate && (
             <span style={{ color: "#888", fontSize: 13 }}>
@@ -1973,7 +1969,7 @@ const InventoryBot: React.FC = () => {
             size="small"
             bordered={false}
             style={{ borderRadius: 8, overflow: "hidden" }}
-            bodyStyle={{ padding: 0 }}
+            styles={{ body: { padding: 0 } }}
           >
             {/* Header - Always visible */}
             <div
@@ -2186,7 +2182,7 @@ const InventoryBot: React.FC = () => {
             size="small"
             bordered={false}
             style={{ borderRadius: 8, overflow: "hidden" }}
-            bodyStyle={{ padding: 0 }}
+            styles={{ body: { padding: 0 } }}
           >
             {/* Header - Always visible */}
             <div

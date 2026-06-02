@@ -13,9 +13,11 @@ class User(BaseModel):
     email = Column(String(255), nullable=True, comment="邮箱")
     password_hash = Column(String(255), nullable=False, comment="密码哈希")
     nickname = Column(String(100), nullable=True, comment="昵称")
-    role = Column(String(20), default="operator", comment="角色")
+    role = Column(String(20), default="operator", comment="角色编码（兼容旧版）")
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True, comment="角色ID（新版）")
     status = Column(String(20), default="active", index=True, comment="状态")
 
     # 关联关系
     tenant = relationship("Tenant", back_populates="users")
     departments = relationship("UserDepartment", back_populates="user", cascade="all, delete-orphan")
+    role_ref = relationship("Role", back_populates="users", foreign_keys=[role_id])

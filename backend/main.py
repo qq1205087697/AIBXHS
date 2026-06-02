@@ -51,8 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, local_inventory, business_settings, store_mapping, emails
-
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails
 from config import get_settings
 
 settings = get_settings()
@@ -82,12 +81,21 @@ app.include_router(auth.router)
 app.include_router(departments.router)
 app.include_router(notifications.router)
 app.include_router(stores.router)
+app.include_router(store_groups.router)
 app.include_router(products.router)
 app.include_router(tenants.router)
 app.include_router(emails.router, prefix="/api")
 app.include_router(local_inventory.router, prefix="/api")
 app.include_router(business_settings.router)
 app.include_router(store_mapping.router, prefix="/api")
+app.include_router(inbound.router)
+app.include_router(outbound.router)
+app.include_router(purchase.router)
+app.include_router(inventory_batch.router)
+app.include_router(operation_logs.router)
+app.include_router(permissions.router)
+app.include_router(stock_transfer.router)
+app.include_router(warehouses.router)
 
 @app.get("/api/health")
 async def health_check():

@@ -74,8 +74,13 @@ export const authApi = {
     email: string,
     password: string,
     nickname?: string,
+    company_name?: string,
+    company_code?: string,
   ) =>
-    apiClient.post("/auth/register", { username, email, password, nickname }),
+    apiClient.post("/auth/register", {
+      username, email, password, nickname,
+      company_name, company_code,
+    }),
 
   getMe: () => apiClient.get("/auth/me"),
 
@@ -199,6 +204,7 @@ export const reviewsApi = {
   batchAnalyze: (ids: string[]) =>
     apiClient.post("/reviews/analyze/batch", ids),
   getNewCount: () => apiClient.get("/reviews/new/count"),
+  getStats: () => apiClient.get("/reviews/stats"),
 };
 
 // ========== Departments API ==========
@@ -217,12 +223,28 @@ export const departmentsApi = {
   getAllUsers: () => apiClient.get("/departments/users/all"),
   updateUserDepartments: (userId: number, departmentIds: number[]) =>
     apiClient.put(`/departments/users/${userId}/departments`, departmentIds),
-  createUser: (data: { username: string; email: string; role?: string }) =>
+  createUser: (data: { username: string; email: string; role?: string; role_id?: number }) =>
     apiClient.post("/departments/users", data),
+  updateUser: (userId: number, data: { username?: string; email?: string; nickname?: string; role?: string; role_id?: number }) =>
+    apiClient.put(`/departments/users/${userId}`, data),
+  deleteUser: (userId: number) =>
+    apiClient.delete(`/departments/users/${userId}`),
+  toggleUserStatus: (userId: number) =>
+    apiClient.put(`/departments/users/${userId}/toggle-status`),
+  changeUserPassword: (userId: number, newPassword: string) =>
+    apiClient.put(`/departments/users/${userId}/change-password`, { new_password: newPassword }),
   batchAssignDepartments: (data: {
     user_ids: number[];
     department_ids: number[];
   }) => apiClient.post("/departments/users/batch-assign", data),
+  batchEnableUsers: (userIds: number[]) =>
+    apiClient.post("/departments/users/batch-enable", { user_ids: userIds }),
+  batchDisableUsers: (userIds: number[]) =>
+    apiClient.post("/departments/users/batch-disable", { user_ids: userIds }),
+  batchChangePassword: (userIds: number[], newPassword: string) =>
+    apiClient.post("/departments/users/batch-password", { user_ids: userIds, new_password: newPassword }),
+  batchDeleteUsers: (userIds: number[]) =>
+    apiClient.post("/departments/users/batch-delete", { user_ids: userIds }),
 };
 
 // ========== Notifications API ==========
@@ -286,6 +308,7 @@ export const storesApi = {
     name_search?: string;
     site_search?: string;
   }) => apiClient.get("/stores/", { params }),
+  getAll: () => apiClient.get("/stores/all"),
   create: (data: {
     name: string;
     platform?: string;
@@ -316,50 +339,136 @@ export const productsApi = {
   getList: (params?: {
     page?: number;
     page_size?: number;
-    store_id?: number;
-    asin_search?: string;
-    sku_search?: string;
-    name_search?: string;
+    search?: string;
+    product_type?: string;
+    status?: string;
   }) => apiClient.get("/products/", { params }),
   getById: (id: number) => apiClient.get(`/products/${id}`),
   create: (data: {
-    store_id: number;
-    asin: string;
+    product_code?: string;
     name: string;
-    sku?: string;
     name_en?: string;
-    image_url?: string;
+    product_type?: string;
+    product_attribute?: string;
     category?: string;
     brand?: string;
-    price?: number;
-    cost_price?: number;
+    purchase_price?: number;
+    sale_price?: number;
+    main_image?: string;
+    weight?: number;
+    length?: number;
+    width?: number;
+    height?: number;
     status?: string;
     is_robot_monitored?: boolean;
+    local_quantity?: number;
+    local_warehouse?: string;
+    local_inbound_date?: string;
+    local_stock_age?: number;
   }) => apiClient.post("/products/", data),
   update: (
     id: number,
     data: {
-      store_id?: number;
-      asin?: string;
+      product_code?: string;
       name?: string;
-      sku?: string;
       name_en?: string;
-      image_url?: string;
+      product_type?: string;
+      product_attribute?: string;
       category?: string;
       brand?: string;
-      price?: number;
-      cost_price?: number;
+      purchase_price?: number;
+      sale_price?: number;
+      main_image?: string;
+      weight?: number;
+      length?: number;
+      width?: number;
+      height?: number;
       status?: string;
       is_robot_monitored?: boolean;
+      local_quantity?: number;
+      local_warehouse?: string;
+      local_inbound_date?: string;
+      local_stock_age?: number;
     },
   ) => apiClient.put(`/products/${id}`, data),
   delete: (id: number) => apiClient.delete(`/products/${id}`),
+  getPlatformProducts: (productId: number) =>
+    apiClient.get(`/products/${productId}/platform-products`),
+  createPlatformProduct: (
+    productId: number,
+    data: {
+      platform: string;
+      store_ids: number[];
+      platform_product_id?: string;
+      asin?: string;
+      spu?: string;
+      sku?: string;
+      title?: string;
+      title_en?: string;
+      image_url?: string;
+      currency?: string;
+      price?: number;
+      cost_price?: number;
+      status?: string;
+    },
+  ) => apiClient.post(`/products/${productId}/platform-products`, data),
+  updatePlatformProduct: (
+    productId: number,
+    ppId: number,
+    data: {
+      platform_product_id?: string;
+      asin?: string;
+      spu?: string;
+      sku?: string;
+      title?: string;
+      title_en?: string;
+      image_url?: string;
+      currency?: string;
+      price?: number;
+      cost_price?: number;
+      status?: string;
+      store_ids?: number[];
+    },
+  ) => apiClient.put(`/products/${productId}/platform-products/${ppId}`, data),
+  deletePlatformProduct: (productId: number, ppId: number) =>
+    apiClient.delete(`/products/${productId}/platform-products/${ppId}`),
+  downloadTemplate: () => apiClient.get('/products/template/download', {
+    responseType: 'blob',
+  }),
+  uploadPreview: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.post('/products/upload/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  batchImport: (items: any[]) =>
+    apiClient.post('/products/batch-import', { items }),
+  batchUpdateMissing: (items: any[]) =>
+    apiClient.post('/products/batch-update-missing', { items }),
+};
+
+// ========== Store Groups API ==========
+export const storeGroupsApi = {
+  getList: () => apiClient.get("/store-groups/"),
+  getGroupStores: (groupId: number) => apiClient.get(`/store-groups/${groupId}/stores`),
+  create: (data: { name: string; description?: string }) =>
+    apiClient.post("/store-groups/", data),
+  update: (id: number, data: { name?: string; description?: string }) =>
+    apiClient.put(`/store-groups/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/store-groups/${id}`),
+  batchAddStores: (groupId: number, storeIds: number[]) =>
+    apiClient.post(`/store-groups/${groupId}/stores`, { store_ids: storeIds }),
+  removeStore: (groupId: number, storeId: number) =>
+    apiClient.delete(`/store-groups/${groupId}/stores/${storeId}`),
 };
 
 // ========== Tenants API ==========
 export const tenantsApi = {
   getList: () => apiClient.get("/tenants/"),
   getById: (id: number) => apiClient.get(`/tenants/${id}`),
+  create: (data: { name: string; code: string; status?: string }) =>
+    apiClient.post("/tenants/", data),
   update: (
     id: number,
     data: {
@@ -368,6 +477,279 @@ export const tenantsApi = {
       status?: string;
     },
   ) => apiClient.put(`/tenants/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/tenants/${id}`),
+  generateBindingCode: (id: number) =>
+    apiClient.put(`/tenants/${id}/generate-binding-code`),
+  bind: (binding_code: string) =>
+    apiClient.post("/tenants/bind", { binding_code }),
+};
+
+// ========== Inbound Orders API ==========
+export const inboundOrdersApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    inbound_type?: string;
+    search?: string;
+  }) => apiClient.get("/inbound-orders/", { params }),
+  create: (data: {
+    order_number: string;
+    inbound_type: string;
+    purchase_order_id?: number;
+    warehouse?: string;
+    handler?: string;
+    inbound_date?: string;
+    notes?: string;
+    items: {
+      product_id: number;
+      quantity: number;
+      unit_price?: number;
+      batch_number?: string;
+      production_date?: string;
+      expiry_date?: string;
+      warehouse?: string;
+      notes?: string;
+    }[];
+  }) => apiClient.post("/inbound-orders/", data),
+  update: (id: number, data: {
+    order_number?: string;
+    inbound_type?: string;
+    purchase_order_id?: number;
+    warehouse?: string;
+    handler?: string;
+    inbound_date?: string;
+    notes?: string;
+  }) => apiClient.put(`/inbound-orders/${id}`, data),
+  confirm: (id: number) => apiClient.put(`/inbound-orders/${id}/confirm`),
+  delete: (id: number) => apiClient.delete(`/inbound-orders/${id}`),
+  downloadTemplate: () => apiClient.get(`/inbound-orders/template/download`, {
+    responseType: 'blob',
+  }),
+  uploadPreview: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.post('/inbound-orders/upload/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
+// ========== Outbound Orders API ==========
+export const outboundOrdersApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    outbound_type?: string;
+    search?: string;
+  }) => apiClient.get("/outbound-orders/", { params }),
+  create: (data: {
+    order_number: string;
+    outbound_type: string;
+    warehouse?: string;
+    handler?: string;
+    outbound_date?: string;
+    notes?: string;
+    items: {
+      product_id: number;
+      quantity: number;
+      unit_price?: number;
+      notes?: string;
+    }[];
+  }) => apiClient.post("/outbound-orders/", data),
+  update: (id: number, data: {
+    order_number?: string;
+    outbound_type?: string;
+    warehouse?: string;
+    handler?: string;
+    outbound_date?: string;
+    notes?: string;
+  }) => apiClient.put(`/outbound-orders/${id}`, data),
+  confirm: (id: number) => apiClient.put(`/outbound-orders/${id}/confirm`),
+  delete: (id: number) => apiClient.delete(`/outbound-orders/${id}`),
+  downloadTemplate: () => apiClient.get(`/outbound-orders/template/download`, {
+    responseType: 'blob',
+  }),
+  uploadPreview: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.post('/outbound-orders/upload/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
+// ========== Purchase Orders API ==========
+export const purchaseOrdersApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    supplier?: string;
+    search?: string;
+  }) => apiClient.get("/purchase-orders/", { params }),
+  create: (data: {
+    order_number: string;
+    supplier?: string;
+    contact_person?: string;
+    contact_phone?: string;
+    warehouse?: string;
+    expected_date?: string;
+    notes?: string;
+    items: {
+      product_id: number;
+      quantity: number;
+      unit_price?: number;
+      notes?: string;
+    }[];
+  }) => apiClient.post("/purchase-orders/", data),
+  update: (id: number, data: {
+    order_number?: string;
+    supplier?: string;
+    contact_person?: string;
+    contact_phone?: string;
+    warehouse?: string;
+    expected_date?: string;
+    notes?: string;
+    status?: string;
+  }) => apiClient.put(`/purchase-orders/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/purchase-orders/${id}`),
+  downloadTemplate: () => apiClient.get(`/purchase-orders/template/download`, {
+    responseType: 'blob',
+  }),
+  uploadPreview: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.post('/purchase-orders/upload/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
+// ========== Inventory Batches API ==========
+export const inventoryBatchesApi = {
+  getProductBatches: (productId: number) => apiClient.get(`/inventory-batches/product/${productId}`),
+  getProductHistory: (productId: number) => apiClient.get(`/inventory-batches/product/${productId}/history`),
+  getReport: (params?: { page?: number; page_size?: number }) => apiClient.get("/inventory-batches/report", { params }),
+  updateShelfNumber: (batchId: number, shelfNumber: string) =>
+    apiClient.put(`/inventory-batches/${batchId}/shelf-number`, { shelf_number: shelfNumber }),
+};
+
+// ========== Operation Logs API ==========
+export const operationLogsApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    module?: string;
+    action?: string;
+    user_id?: number;
+    start_date?: string;
+    end_date?: string;
+    search?: string;
+  }) => apiClient.get("/operation-logs/", { params }),
+  getModules: () => apiClient.get("/operation-logs/modules"),
+  getActions: () => apiClient.get("/operation-logs/actions"),
+};
+
+// ========== Permissions API ==========
+export const permissionsApi = {
+  // 角色管理
+  getRoles: () => apiClient.get("/permissions/roles"),
+  createRole: (data: { name: string; code: string; description?: string; sort_order?: number }) =>
+    apiClient.post("/permissions/roles", data),
+  updateRole: (id: number, data: { name?: string; description?: string; sort_order?: number }) =>
+    apiClient.put(`/permissions/roles/${id}`, data),
+  deleteRole: (id: number) => apiClient.delete(`/permissions/roles/${id}`),
+
+  // 权限管理
+  getPermissions: (type?: string) => apiClient.get("/permissions/permissions", { params: { type } }),
+
+  // 角色权限
+  getRolePermissions: (roleId: number) => apiClient.get(`/permissions/roles/${roleId}/permissions`),
+  updateRolePermissions: (roleId: number, permissionIds: number[]) =>
+    apiClient.put(`/permissions/roles/${roleId}/permissions`, { permission_ids: permissionIds }),
+
+  // 角色用户
+  getRoleUsers: (roleId: number) => apiClient.get(`/permissions/roles/${roleId}/users`),
+  updateRoleUsers: (roleId: number, userIds: number[]) =>
+    apiClient.put(`/permissions/roles/${roleId}/users`, { user_ids: userIds }),
+
+  // 用户管理
+  getAllUsers: () => apiClient.get("/permissions/users"),
+
+  // 当前用户权限
+  getMyPermissions: () => apiClient.get("/permissions/my-permissions"),
+
+  // 初始化默认权限
+  initDefaultPermissions: () => apiClient.post("/permissions/init-default-permissions"),
+  
+  // 补充缺失权限
+  addMissingPermissions: () => apiClient.post("/permissions/add-missing-permissions"),
+};
+
+// ========== Stock Transfer API ==========
+export const stockTransfersApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    source_warehouse?: string;
+    search?: string;
+    start_date?: string;
+    end_date?: string;
+  }) => apiClient.get("/stock-transfers/", { params }),
+  getDetail: (id: number) => apiClient.get(`/stock-transfers/${id}`),
+  create: (data: {
+    order_number: string;
+    source_warehouse: string;
+    target_warehouse: string;
+    notes?: string;
+    items: {
+      product_id: number;
+      batch_id?: number;
+      batch_number?: string;
+      shelf_number?: string;
+      target_shelf_number?: string;
+      quantity: number;
+      unit_price?: number;
+      notes?: string;
+    }[];
+  }) => apiClient.post("/stock-transfers/", data),
+  update: (id: number, data: {
+    order_number?: string;
+    source_warehouse?: string;
+    target_warehouse?: string;
+    notes?: string;
+  }) => apiClient.put(`/stock-transfers/${id}`, data),
+  confirm: (id: number) => apiClient.put(`/stock-transfers/${id}/confirm`),
+  delete: (id: number) => apiClient.delete(`/stock-transfers/${id}`),
+  getWarehouses: () => apiClient.get("/stock-transfers/warehouses/list"),
+  getProductsByWarehouse: (warehouse: string) =>
+    apiClient.get("/stock-transfers/products/by-warehouse", { params: { warehouse } }),
+};
+
+export const warehousesApi = {
+  getList: (params?: { search?: string; status?: string; page?: number; page_size?: number }) =>
+    apiClient.get("/warehouses/", { params }),
+  create: (data: {
+    name: string;
+    code?: string;
+    address?: string;
+    contact_person?: string;
+    contact_phone?: string;
+    notes?: string;
+  }) => apiClient.post("/warehouses/", data),
+  update: (id: number, data: {
+    name?: string;
+    code?: string;
+    address?: string;
+    contact_person?: string;
+    contact_phone?: string;
+    status?: string;
+    notes?: string;
+  }) => apiClient.put(`/warehouses/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/warehouses/${id}`),
 };
 
 // ========== Emails API ==========

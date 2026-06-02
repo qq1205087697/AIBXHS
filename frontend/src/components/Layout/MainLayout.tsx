@@ -5,12 +5,10 @@ import {
   Home,
   Package,
   MessageSquare,
-  Database,
   Bot,
   LogOut,
   User,
   Bell,
-  Settings,
   Key,
   BarChart3,
   ClipboardList,
@@ -18,6 +16,14 @@ import {
   ShoppingBag,
   Users,
   Building2,
+  ArrowDownCircle,
+  ArrowUpCircle,
+  Truck,
+  ArrowLeftRight,
+  Shield,
+  Warehouse,
+  Boxes,
+  Settings,
   Mail,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
@@ -49,7 +55,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [changePasswordOpen, setChangePasswordOpen] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
-  const { user, logout } = useAuth()
+  const { user, logout, hasPermission } = useAuth()
   const { currentTheme } = useTheme()
   const {
     token: { colorBgContainer, borderRadiusLG },
@@ -61,7 +67,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [notifOpen, setNotifOpen] = useState(false)
   const [selectedNotification, setSelectedNotification] = useState<Notification | null>(null)
   const [detailModalOpen, setDetailModalOpen] = useState(false)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isAdmin = user?.role === 'admin'
 
@@ -97,7 +103,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       if (res.data.success) {
         const newNotifications = res.data.data
         setNotifications(newNotifications)
-        setUnreadCount(calculateUnreadCount(newNotifications))
+        // 获取完整的未读总数
+        const countRes = await notificationsApi.getUnreadCount()
+        if (countRes.data.success) setUnreadCount(countRes.data.data.count)
       }
     } catch (e) {
       // ignore
@@ -141,23 +149,39 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     }
   }
   
-  const handleDetailModalOk = () => {
-    if (selectedNotification) {
-      // 检查是否是差评通知
-      const isReviewNotification = selectedNotification.title?.includes('未处理差评') || selectedNotification.type === 'warning'
-      if (selectedNotification.link) {
-        navigate(selectedNotification.link)
-      } else if (isReviewNotification) {
-        navigate('/review')
-      }
+  const handleGoToReview = () => {
+    if (selectedNotification?.link) {
+      navigate(selectedNotification.link)
+    } else {
+      navigate('/review')
     }
     setDetailModalOpen(false)
   }
-  
-  const handleGoToReview = () => {
-    navigate('/review')
-    setDetailModalOpen(false)
-  }
+
+  const inventoryPaths = ['/purchase', '/inbound', '/outbound', '/stock-transfer', '/warehouses']
+  const systemPaths = ['/org', '/permissions', '/operation-logs', '/tenants', '/stores']
+
+  const [openKeys, setOpenKeys] = useState<string[]>(() => {
+    const currentPath = location.pathname
+    const keys: string[] = []
+    if (inventoryPaths.includes(currentPath)) keys.push('inventory-group')
+    if (systemPaths.includes(currentPath)) keys.push('system-group')
+    return keys
+  })
+
+  useEffect(() => {
+    const currentPath = location.pathname
+    setOpenKeys(prev => {
+      const next = [...prev]
+      if (inventoryPaths.includes(currentPath) && !next.includes('inventory-group')) {
+        next.push('inventory-group')
+      }
+      if (systemPaths.includes(currentPath) && !next.includes('system-group')) {
+        next.push('system-group')
+      }
+      return next
+    })
+  }, [location.pathname])
 
   const menuItems = [
     {
@@ -168,72 +192,137 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     {
       key: '/todo',
       icon: <ClipboardList size={20} />,
-      label: '待办事项',
+      label: 'KPI',
     },
-    {
-      key: '/chat',
-      icon: <Bot size={20} />,
-      label: 'AI聊天助手',
-    },
-    {
-      key: '/inventory',
-      icon: <Package size={20} />,
-      label: '库存机器人',
-    },
-    {
-      key: '/review',
-      icon: <MessageSquare size={20} />,
-      label: '差评机器人',
-    },
+    ...(hasPermission('chat:use')
+      ? [{
+          key: '/chat',
+          icon: <Bot size={20} />,
+          label: 'AI聊天助手',
+        }] : []),
+    ...(hasPermission('robot:inventory:view')
+      ? [{
+          key: '/inventory',
+          icon: <Package size={20} />,
+          label: '库存机器人',
+        }] : []),
+    ...(hasPermission('robot:review:view')
+      ? [{
+          key: '/review',
+          icon: <MessageSquare size={20} />,
+          label: '差评机器人',
+        }] : []),
     {
       key: '/email',
       icon: <Mail size={20} />,
       label: '邮件机器人',
     },
-    ...(isAdmin
-      ? [
-          {
-            key: '/org',
-            icon: <Users size={20} />,
-            label: '角色管理',
-          },
-          {
-            key: '/stores',
-            icon: <Store size={20} />,
-            label: '店铺管理',
-          },
-          {
-            key: '/products',
-            icon: <ShoppingBag size={20} />,
-            label: '产品管理',
-          },
-          {
-            key: '/tenants',
-            icon: <Building2 size={20} />,
-            label: '租户管理',
-          },
+    ...(hasPermission('product:view')
+      ? [{
+          key: '/products',
+          icon: <ShoppingBag size={20} />,
+          label: '产品管理',
+        }] : []),
+    {
+      key: 'inventory-group',
+      icon: <Boxes size={20} />,
+      label: '进销存',
+      children: [
+        ...(hasPermission('purchase:view')
+          ? [{
+              key: '/purchase',
+              icon: <Truck size={18} />,
+              label: '采购管理',
+            }] : []),
+        ...(hasPermission('inbound:view')
+          ? [{
+              key: '/inbound',
+              icon: <ArrowDownCircle size={18} />,
+              label: '入库管理',
+            }] : []),
+        ...(hasPermission('outbound:view')
+          ? [{
+              key: '/outbound',
+              icon: <ArrowUpCircle size={18} />,
+              label: '出库管理',
+            }] : []),
+        ...(hasPermission('stock_transfer:view')
+          ? [{
+              key: '/stock-transfer',
+              icon: <ArrowLeftRight size={18} />,
+              label: '挪货管理',
+            }] : []),
+        ...(hasPermission('warehouse:view')
+          ? [{
+              key: '/warehouses',
+              icon: <Warehouse size={18} />,
+              label: '仓库管理',
+            }] : []),
+      ] as any[],
+    },
+    {
+      key: 'system-group',
+      icon: <Settings size={20} />,
+      label: '系统设置',
+      children: [
+        ...(hasPermission('org:view')
+          ? [{
+              key: '/org',
+              icon: <Users size={18} />,
+              label: '组织管理',
+            }] : []),
+        ...(hasPermission('permission:view')
+          ? [{
+              key: '/permissions',
+              icon: <Shield size={18} />,
+              label: '权限管理',
+            }] : []),
+        ...(hasPermission('log:view')
+          ? [{
+              key: '/operation-logs',
+              icon: <ClipboardList size={18} />,
+              label: '操作日志',
+            }] : []),
+        {
+              key: '/tenants',
+              icon: <Building2 size={18} />,
+              label: '公司设置',
+            },
           {
             key: '/business-settings',
             icon: <Settings size={20} />,
             label: '业务设置',
           },
-        ]
-      : []),
-  ]
+        ...(hasPermission('store:view')
+          ? [{
+              key: '/stores',
+              icon: <Store size={18} />,
+              label: '店铺管理',
+            }] : []),
+      ] as any[],
+    },
+  ].filter(item => !item.children || item.children.length > 0)
 
   const getPageTitle = () => {
     const pathMap: Record<string, string> = {
       '/': '首页',
-      '/todo': '待办事项',
+      '/todo': 'KPI',
       '/chat': 'AI聊天助手',
       '/inventory': '库存机器人',
       '/business-settings': '业务设置',
       '/review': '差评机器人',
       '/email': '邮件机器人',
-      '/org': '角色管理',
+      '/org': '组织管理',
+      '/permissions': '权限管理',
       '/stores': '店铺管理',
       '/products': '产品管理',
-      '/tenants': '租户管理',
+      '/inbound': '入库管理',
+      '/outbound': '出库管理',
+      '/purchase': '采购管理',
+      '/stock-transfer': '挪货管理',
+      '/warehouses': '仓库管理',
+      '/operation-logs': '操作日志',
+      '/tenants': '公司设置',
     }
     return pathMap[location.pathname] || '未知页面'
   }
@@ -335,6 +424,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         <Menu
           mode="inline"
           selectedKeys={[location.pathname]}
+          openKeys={openKeys}
+          onOpenChange={(keys) => setOpenKeys(keys)}
           items={menuItems}
           onClick={({ key }) => navigate(key)}
           style={{

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Form, Input, Button, Card, Typography, Alert } from 'antd';
-import { Lock, User, Mail, Globe, Package, MessageSquare } from 'lucide-react';
+import { Form, Input, Button, Card, Typography, Alert, Divider } from 'antd';
+import { Lock, User, Mail, Globe, Package, MessageSquare, Building2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate, Link } from 'react-router-dom';
 import { useTheme } from '../contexts/ThemeContext';
@@ -14,12 +14,14 @@ const Register: React.FC = () => {
   const { currentTheme } = useTheme();
   const navigate = useNavigate();
 
-  const onFinish = async (values: { 
-    username: string; 
-    email: string; 
-    password: string; 
+  const onFinish = async (values: {
+    username: string;
+    email: string;
+    password: string;
     confirmPassword: string;
     nickname?: string;
+    company_name?: string;
+    company_code?: string;
   }) => {
     if (values.password !== values.confirmPassword) {
       setError('两次输入的密码不一致');
@@ -28,9 +30,16 @@ const Register: React.FC = () => {
 
     setLoading(true);
     setError('');
-    
+
     try {
-      await register(values.username, values.email, values.password, values.nickname);
+      await register(
+        values.username,
+        values.email,
+        values.password,
+        values.nickname,
+        values.company_name,
+        values.company_code,
+      );
       navigate('/');
     } catch (error: any) {
       setError(error.response?.data?.detail || '注册失败，请重试');
@@ -41,11 +50,10 @@ const Register: React.FC = () => {
 
   return (
     <div style={{ 
-      minHeight: '100vh', 
+      height: '100vh', 
       display: 'flex', 
       margin: 0,
-      padding: 0,
-      overflow: 'hidden'
+      padding: 0
     }}>
       {/* 左侧图片区域 */}
       <div style={{
@@ -155,10 +163,11 @@ const Register: React.FC = () => {
         flex: 1,
         display: 'flex',
         justifyContent: 'center',
-        alignItems: 'center',
+        alignItems: 'flex-start',
         background: '#f8fafc',
         padding: '40px',
-        overflowY: 'auto'
+        overflowY: 'auto',
+        height: '100vh'
       }}>
         <Card 
           style={{ 
@@ -267,6 +276,33 @@ const Register: React.FC = () => {
               <Input.Password
                 prefix={<Lock size={18} style={{ color: '#94a3b8' }} />}
                 placeholder="请再次输入密码"
+                size="large"
+                style={{ borderRadius: '10px', height: '48px' }}
+              />
+            </Form.Item>
+
+            <Divider orientation="left" plain style={{ fontSize: 13, color: '#999' }}>
+              <Building2 size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+              公司信息（选填，后续可绑定）
+            </Divider>
+
+            <Form.Item
+              name="company_name"
+              label="公司名称"
+            >
+              <Input
+                placeholder="请输入公司名称（选填）"
+                size="large"
+                style={{ borderRadius: '10px', height: '48px' }}
+              />
+            </Form.Item>
+
+            <Form.Item
+              name="company_code"
+              label="公司编号"
+            >
+              <Input
+                placeholder="输入编号加入已有公司，或输入新编号创建（选填）"
                 size="large"
                 style={{ borderRadius: '10px', height: '48px' }}
               />

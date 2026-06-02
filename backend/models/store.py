@@ -6,6 +6,9 @@ import enum
 
 class Platform(str, enum.Enum):
     AMAZON = "amazon"
+    EBAY = "ebay"
+    WALMART = "walmart"
+    SHOPIFY = "shopify"
     SHOPEE = "shopee"
     LAZADA = "lazada"
     TIKTOK = "tiktok"

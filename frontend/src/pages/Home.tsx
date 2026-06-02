@@ -51,7 +51,7 @@ const Home: React.FC = () => {
   const fetchData = async () => {
     try {
       setLoading(true)
-      const [reviewsRes, inventoryRes, emailCountRes] = await Promise.all([
+      const [reviewsRes, emailCountRes, inventoryRes] = await Promise.all([
         reviewsApi.getList({ page_size: 100 }),
         emailsApi.getUnfollowedCount(),
         inventoryApi.getOverview()
@@ -119,7 +119,9 @@ const Home: React.FC = () => {
       // stats: null,
       // hasPending: false,
       // priority: 3,
-      stats: inventoryStats
+      stats: inventoryStats,
+      hasPending: inventoryStats ? inventoryStats.red + inventoryStats.yellow + inventoryStats.green > 0 : false,
+      priority: inventoryStats && inventoryStats.red > 0 ? 0 : inventoryStats && inventoryStats.yellow > 0 ? 1 : 2,
     },
     {
       id: 'chat',

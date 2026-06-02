@@ -25,12 +25,8 @@ class StoreUpdate(BaseModel):
     status: Optional[str] = None
 
 
-@router.get("/")
-async def get_stores(
-    page: int = 1,
-    page_size: int = 20,
-    name_search: Optional[str] = None,
-    site_search: Optional[str] = None,
+@router.get("/all")
+async def get_all_stores(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -38,7 +34,87 @@ async def get_stores(
         where_conditions = ["s.tenant_id = :tenant_id"]
         params = {"tenant_id": current_user.tenant_id}
 
-        if current_user.role != "admin":
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
+            dept_ids = db.execute(
+                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
+                {"uid": current_user.id}
+            ).fetchall()
+            dept_id_list = [d[0] for d in dept_ids]
+            if dept_id_list:
+                dept_placeholders = ",".join([f":dept_{i}" for i in range(len(dept_id_list))])
+                for i, did in enumerate(dept_id_list):
+                    params[f"dept_{i}"] = did
+                where_conditions.append(f"s.department_id IN ({dept_placeholders})")
+            else:
+                where_conditions.append("1=0")
+
+        where_clause = " AND ".join(where_conditions)
+        
+        query = text(f"""
+            SELECT s.id, s.name, s.platform, s.site, s.status, 
+                   s.department_id, d.name as department_name, s.created_at,
+                   s.group_id, sg.name as group_name
+            FROM stores s
+            LEFT JOIN departments d ON s.department_id = d.id
+            LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
+            WHERE {where_clause}
+            ORDER BY 
+                CASE WHEN s.department_id IS NOT NULL THEN 0 ELSE 1 END,
+                s.name ASC,
+                s.site ASC
+        """)
+        result = db.execute(query, params)
+        stores = []
+        for row in result:
+            stores.append({
+                "id": row[0],
+                "name": row[1],
+                "platform": row[2],
+                "site": row[3] or "",
+                "status": row[4],
+                "department_id": row[5],
+                "department_name": row[6] or "未分配",
+                "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                "group_id": row[8],
+                "group_name": row[9] or "",
+            })
+        return {"success": True, "data": stores}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取店铺列表失败: {str(e)}")
+
+
+@router.get("/")
+async def get_stores(
+    page: int = 1,
+    page_size: int = 20,
+    name_search: Optional[str] = None,
+    site_search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        where_conditions = ["s.tenant_id = :tenant_id"]
+        params = {"tenant_id": current_user.tenant_id}
+
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}
@@ -81,6 +157,7 @@ async def get_stores(
                    s.department_id, d.name as department_name, s.inventory_name, s.created_at
             FROM stores s
             LEFT JOIN departments d ON s.department_id = d.id
+            LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
             WHERE {where_clause}
             ORDER BY 
                 CASE WHEN s.department_id IS NOT NULL THEN 0 ELSE 1 END,
@@ -101,6 +178,9 @@ async def get_stores(
                 "department_name": row[6] or "未分配",
                 "inventory_name": row[7] or "",
                 "created_at": row[8].strftime("%Y-%m-%d %H:%M:%S") if row[8] else "",
+                # "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                # "group_id": row[8],
+                # "group_name": row[9] or "",
             })
         return {"success": True, "data": stores, "total": total}
     except Exception as e:

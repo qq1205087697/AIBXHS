@@ -51,20 +51,48 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
     return user
 
 
-def create_user(db: Session, username: str, email: str, password: str, nickname: Optional[str] = None) -> User:
-    """创建用户"""
+def create_user(
+    db: Session,
+    username: str,
+    email: str,
+    password: str,
+    nickname: Optional[str] = None,
+    company_name: Optional[str] = None,
+    company_code: Optional[str] = None
+) -> User:
+    """创建用户（支持公司选择）"""
     from models.tenant import Tenant
-    import uuid
-    
-    # 首先创建一个默认租户
-    tenant = Tenant(
-        name=f"{username}'s Tenant",
-        code=f"tenant-{uuid.uuid4().hex[:8]}"
-    )
-    db.add(tenant)
-    db.commit()
-    db.refresh(tenant)
-    
+    import uuid, random, string
+
+    if company_code:
+        company_code = company_code.strip()
+        # 查找已有公司
+        tenant = db.query(Tenant).filter(Tenant.code == company_code, Tenant.deleted_at.is_(None)).first()
+        if tenant:
+            # 公司已存在，加入该公司
+            pass
+        else:
+            # 公司不存在，自动创建
+            company_name = (company_name or company_code).strip()
+            tenant = Tenant(
+                name=company_name,
+                code=company_code,
+                is_personal=0
+            )
+            db.add(tenant)
+            db.commit()
+            db.refresh(tenant)
+    else:
+        # 未填公司编号，自动创建个人公司
+        tenant = Tenant(
+            name=f"{username}的个人公司",
+            code=f"personal-{uuid.uuid4().hex[:8]}",
+            is_personal=1
+        )
+        db.add(tenant)
+        db.commit()
+        db.refresh(tenant)
+
     hashed_password = get_password_hash(password)
     user = User(
         tenant_id=tenant.id,

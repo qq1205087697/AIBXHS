@@ -15,6 +15,7 @@ import {
 import { reviewsApi } from '../api'
 import dayjs, { Dayjs } from 'dayjs'
 import { useTheme } from '../contexts/ThemeContext'
+import { useAuth } from '../contexts/AuthContext'
 const { RangePicker } = DatePicker
 
 interface ReviewItem {
@@ -38,6 +39,7 @@ interface ReviewItem {
 
 const ReviewBot: React.FC = () => {
   const { currentTheme } = useTheme()
+  const { hasPermission } = useAuth()
   const [selectedReview, setSelectedReview] = useState<ReviewItem | null>(null)
   const [reviews, setReviews] = useState<ReviewItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -60,9 +62,30 @@ const ReviewBot: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined)
   const [importanceLevelFilter, setImportanceLevelFilter] = useState<string | undefined>(undefined)
 
+  const [importanceStats, setImportanceStats] = useState({
+    high: { unviewed: 0, viewed: 0 },
+    medium: { unviewed: 0, viewed: 0 },
+    low: { unviewed: 0, viewed: 0 },
+  })
+
   useEffect(() => {
     fetchReviewData()
   }, [currentPage, pageSize, asinSearch, productNameSearch, skuSearch, sortBy, sortOrder, dateRange, statusFilter, importanceLevelFilter])
+
+  useEffect(() => {
+    fetchStats()
+  }, [])
+
+  const fetchStats = async () => {
+    try {
+      const response = await reviewsApi.getStats()
+      if (response.data.success) {
+        setImportanceStats(response.data.data)
+      }
+    } catch (error) {
+      console.error('获取统计数据失败:', error)
+    }
+  }
 
   const fetchReviewData = async () => {
     try {
@@ -148,6 +171,7 @@ const ReviewBot: React.FC = () => {
       if (response.data.success) {
         message.success(response.data.message)
         setSelectedIds([])
+        fetchStats()
       } else {
         message.error('批量分析失败')
       }
@@ -180,6 +204,7 @@ const ReviewBot: React.FC = () => {
       }
       message.success(`已批量标记为${batchStatus === 'new' ? '未读' : batchStatus === 'read' ? '已读' : '已处理'}`)
       setSelectedIds([])
+      fetchStats()
     } catch (error) {
       console.error('批量更新失败:', error)
       message.error('批量更新失败，请重试')
@@ -271,6 +296,7 @@ const ReviewBot: React.FC = () => {
         setSelectedReview(prev => prev ? { ...prev, importanceLevel: level || null } : null)
       }
       message.success('重要性等级已更新')
+      fetchStats()
     } catch (e) {
       message.error('更新失败')
     }
@@ -283,6 +309,7 @@ const ReviewBot: React.FC = () => {
       setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, status: 'read' } : r))
       setSelectedReview(prev => prev ? { ...prev, status: 'read' } : null)
       message.success('已标记为已读')
+      fetchStats()
     } catch (e) {
       message.error('标记失败')
     }
@@ -295,6 +322,7 @@ const ReviewBot: React.FC = () => {
       setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, status: 'resolved' } : r))
       setSelectedReview(prev => prev ? { ...prev, status: 'resolved' } : null)
       message.success('已标记为已处理')
+      fetchStats()
     } catch (e) {
       message.error('标记失败')
     }
@@ -312,22 +340,6 @@ const ReviewBot: React.FC = () => {
   }
 
   const hasSelected = selectedIds.length > 0
-
-  // 计算统计数据 - 按重要性等级分组
-  const importanceStats = {
-    high: {
-      unviewed: reviews.filter(r => r.importanceLevel === 'high' && r.status !== 'resolved').length,
-      viewed: reviews.filter(r => r.importanceLevel === 'high' && r.status === 'resolved').length
-    },
-    medium: {
-      unviewed: reviews.filter(r => r.importanceLevel === 'medium' && r.status !== 'resolved').length,
-      viewed: reviews.filter(r => r.importanceLevel === 'medium' && r.status === 'resolved').length
-    },
-    low: {
-      unviewed: reviews.filter(r => r.importanceLevel === 'low' && r.status !== 'resolved').length,
-      viewed: reviews.filter(r => r.importanceLevel === 'low' && r.status === 'resolved').length
-    }
-  }
 
   const renderImportanceCard = (level: 'high' | 'medium' | 'low', title: string, color: string) => {
     const stats = importanceStats[level]
@@ -480,21 +492,25 @@ const ReviewBot: React.FC = () => {
           loading={loading}
           extra={
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <Button
-                disabled={!hasSelected}
-                onClick={() => {
-                  setBatchAction('analyze')
-                  setBatchModalVisible(true)
-                }}
-                style={{ borderColor: currentTheme.primary, color: currentTheme.primary }}
-              >
-                AI分析选中
-              </Button>
-              <Dropdown menu={{ items: statusMenuItems }} disabled={!hasSelected}>
-                <Button>
-                  变更状态 <ChevronDown size={16} style={{ marginLeft: 4 }} />
+              {hasPermission('robot:review:analyze') && (
+                <Button
+                  disabled={!hasSelected}
+                  onClick={() => {
+                    setBatchAction('analyze')
+                    setBatchModalVisible(true)
+                  }}
+                  style={{ borderColor: currentTheme.primary, color: currentTheme.primary }}
+                >
+                  AI分析选中
                 </Button>
-              </Dropdown>
+              )}
+              {hasPermission('robot:review:manage') && (
+                <Dropdown menu={{ items: statusMenuItems }} disabled={!hasSelected}>
+                  <Button>
+                    变更状态 <ChevronDown size={16} style={{ marginLeft: 4 }} />
+                  </Button>
+                </Dropdown>
+              )}
             </div>
           }
         >
@@ -605,15 +621,7 @@ const ReviewBot: React.FC = () => {
           onCancel={() => setSelectedReview(null)}
           footer={[
             <Button key="close" onClick={() => setSelectedReview(null)}>关闭</Button>,
-            selectedReview?.status !== 'read' && selectedReview?.status !== 'resolved' && (
-              <Button 
-                key="read" 
-                onClick={handleMarkAsRead}
-              >
-                标记为已读
-              </Button>
-            ),
-            selectedReview?.status !== 'resolved' && (
+            hasPermission('robot:review:manage') && selectedReview?.status !== 'resolved' && (
               <Button 
                 key="resolve" 
                 type="primary" 
@@ -656,18 +664,22 @@ const ReviewBot: React.FC = () => {
                 <Space>{getRatingStars(selectedReview.rating)}</Space>
                 <div style={{ marginTop: 12 }}>
                   <span style={{ fontSize: 13, color: '#666', marginRight: 8 }}>重要性：</span>
-                  <Select
-                    size="small"
-                    value={selectedReview.importanceLevel || undefined}
-                    onChange={(v) => handleUpdateImportance(selectedReview.id, v)}
-                    style={{ width: 110 }}
-                    options={[
-                      { value: undefined, label: '⏳ 待分析' },
-                      { value: 'high', label: '🔴 严重' },
-                      { value: 'medium', label: '🟠 中等' },
-                      { value: 'low', label: '🔵 轻微' },
-                    ]}
-                  />
+                  {hasPermission('robot:review:manage') ? (
+                    <Select
+                      size="small"
+                      value={selectedReview.importanceLevel || undefined}
+                      onChange={(v) => handleUpdateImportance(selectedReview.id, v)}
+                      style={{ width: 110 }}
+                      options={[
+                        { value: undefined, label: '⏳ 待分析' },
+                        { value: 'high', label: '🔴 严重' },
+                        { value: 'medium', label: '🟠 中等' },
+                        { value: 'low', label: '🔵 轻微' },
+                      ]}
+                    />
+                  ) : (
+                    <span>{getImportanceBadge(selectedReview.importanceLevel)}</span>
+                  )}
                 </div>
               </div>
             </div>
