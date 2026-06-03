@@ -165,7 +165,8 @@ async def get_products(
                    p.main_image, p.weight, p.length, p.width, p.height,
                    p.status, p.is_robot_monitored, p.created_at,
                    (SELECT COUNT(*) FROM platform_products pp WHERE pp.product_id = p.id AND pp.deleted_at IS NULL) as platform_count,
-                   p.local_quantity, p.local_warehouse, p.local_inbound_date, p.local_stock_age
+                   COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.status = 'active'), 0) as local_quantity,
+                   p.local_warehouse, p.local_inbound_date, p.local_stock_age
             FROM products p
             WHERE {where_clause}
             ORDER BY p.created_at DESC
@@ -235,7 +236,8 @@ async def get_product(
                    p.category, p.brand, p.purchase_price, p.sale_price,
                    p.main_image, p.weight, p.length, p.width, p.height,
                    p.status, p.is_robot_monitored, p.created_at, p.config,
-                   p.local_quantity, p.local_warehouse, p.local_inbound_date, p.local_stock_age
+                   COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.status = 'active'), 0) as local_quantity,
+                   p.local_warehouse, p.local_inbound_date, p.local_stock_age
             FROM products p
             WHERE p.id = :product_id AND p.tenant_id = :tenant_id AND p.deleted_at IS NULL
         """)
