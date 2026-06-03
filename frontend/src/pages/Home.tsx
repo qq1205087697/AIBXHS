@@ -296,9 +296,8 @@ const Home: React.FC = () => {
                   <ChevronRight size={20} color="#999" />
                 </div>
 
-                {module.stats && module.stats !== 'email' && renderReviewStats(module.stats)}
-                {module.stats === 'email' && renderEmailStats()}
                 {module.id === 'review' && module.stats && renderReviewStats(module.stats)}
+                {module.id === 'email' && renderEmailStats()}
                 {module.id === 'inventory' && module.stats && renderInventoryStats(module.stats)}
               </Card>
             </Col>

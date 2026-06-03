@@ -82,6 +82,7 @@ interface OverstockItem {
   age_12_plus: number;
   age_9_12: number;
   age_6_9: number;
+  age_3_6?: number;
 }
 
 interface InventoryItem {
