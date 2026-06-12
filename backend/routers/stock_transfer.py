@@ -260,6 +260,7 @@ async def create_stock_transfer(
                          {"source_warehouse": data.source_warehouse,
                           "target_warehouse": data.target_warehouse,
                           "items_count": len(data.items)})
+        db.commit()
 
         return {"success": True, "id": order_id, "order_number": data.order_number}
     except Exception as e:
@@ -351,6 +352,7 @@ async def update_stock_transfer(
                          current_user.nickname or current_user.username,
                          "stock_transfer", order_id, order_number,
                          before_data, after_data)
+        db.commit()
 
         return {"success": True}
     except HTTPException:
@@ -455,6 +457,7 @@ async def delete_stock_transfer(
         log_order_delete(db, current_user.tenant_id, current_user.id,
                          current_user.nickname or current_user.username,
                          "stock_transfer", order_id, order[1], before_data)
+        db.commit()
         return {"success": True}
     except HTTPException:
         raise
@@ -580,6 +583,7 @@ async def confirm_stock_transfer(
                           {"status": "draft"},
                           {"status": "confirmed", "target_warehouse": target_warehouse,
                            "items_count": len(items)})
+        db.commit()
 
         return {"success": True}
     except HTTPException:

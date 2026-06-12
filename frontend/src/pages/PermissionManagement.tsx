@@ -22,26 +22,27 @@ import {
   Pagination,
 } from "antd";
 import {
-  PlusOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  UserOutlined,
-  KeyOutlined,
-  SaveOutlined,
-  MoreOutlined,
-  UserAddOutlined,
-  ShoppingOutlined,
-  ArrowDownOutlined,
-  ArrowUpOutlined,
-  TruckOutlined,
-  DatabaseOutlined,
-  ShopOutlined,
-  TeamOutlined,
-  SafetyOutlined,
-  FileTextOutlined,
-  RobotOutlined,
-  SwapOutlined,
-  HomeOutlined,
+    PlusOutlined,
+    DeleteOutlined,
+    EditOutlined,
+    UserOutlined,
+    KeyOutlined,
+    SaveOutlined,
+    MoreOutlined,
+    UserAddOutlined,
+    ShoppingOutlined,
+    ArrowDownOutlined,
+    ArrowUpOutlined,
+    TruckOutlined,
+    DatabaseOutlined,
+    ShopOutlined,
+    TeamOutlined,
+    SafetyOutlined,
+    FileTextOutlined,
+    RobotOutlined,
+    SwapOutlined,
+    HomeOutlined,
+    MailOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
 
@@ -339,22 +340,23 @@ const PermissionManagement: React.FC = () => {
   };
 
   // 模块配置 - 定义每个模块的图标和颜色
-  const moduleConfig: Record<string, { icon: React.ReactNode; color: string }> = {
-    '产品管理': { icon: <ShoppingOutlined />, color: '#722ed1' },
-    '入库管理': { icon: <ArrowDownOutlined />, color: '#52c41a' },
-    '出库管理': { icon: <ArrowUpOutlined />, color: '#fa541c' },
-    '采购管理': { icon: <TruckOutlined />, color: '#fa8c16' },
-    '挪货管理': { icon: <SwapOutlined />, color: '#eb2f96' },
-    '仓库管理': { icon: <HomeOutlined />, color: '#fa8c16' },
-    '库存管理': { icon: <DatabaseOutlined />, color: '#13c2c2' },
-    '店铺管理': { icon: <ShopOutlined />, color: '#2f54eb' },
-    '组织管理': { icon: <TeamOutlined />, color: '#eb2f96' },
-    '权限管理': { icon: <SafetyOutlined />, color: '#f5222d' },
-    '系统管理': { icon: <FileTextOutlined />, color: '#595959' },
-    'AI聊天助手': { icon: <RobotOutlined />, color: '#1677ff' },
-    '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
-    '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
-  };
+    const moduleConfig: Record<string, { icon: React.ReactNode; color: string }> = {
+        '产品管理': { icon: <ShoppingOutlined />, color: '#722ed1' },
+        '入库管理': { icon: <ArrowDownOutlined />, color: '#52c41a' },
+        '出库管理': { icon: <ArrowUpOutlined />, color: '#fa541c' },
+        '采购管理': { icon: <TruckOutlined />, color: '#fa8c16' },
+        '挪货管理': { icon: <SwapOutlined />, color: '#eb2f96' },
+        '仓库管理': { icon: <HomeOutlined />, color: '#fa8c16' },
+        '库存管理': { icon: <DatabaseOutlined />, color: '#13c2c2' },
+        '店铺管理': { icon: <ShopOutlined />, color: '#2f54eb' },
+        '组织管理': { icon: <TeamOutlined />, color: '#eb2f96' },
+        '权限管理': { icon: <SafetyOutlined />, color: '#f5222d' },
+        '系统管理': { icon: <FileTextOutlined />, color: '#595959' },
+        'AI聊天助手': { icon: <RobotOutlined />, color: '#1677ff' },
+        '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
+        '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
+        '邮件机器人': { icon: <MailOutlined />, color: '#1890ff' },
+    };
 
   // 计算权限总数
   const totalPermissionsCount = Object.values(permissions).reduce(

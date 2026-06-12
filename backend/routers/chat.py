@@ -14,6 +14,9 @@ from schemas.chat_schemas import (
     ChatSessionResponse, ChatMessageResponse
 )
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -28,6 +31,7 @@ async def chat_endpoint(
     current_user: User = Depends(get_current_user)
 ):
     """标准聊天接口（非流式）"""
+    logger.info(f"[CHAT] 收到聊天请求: user_id={current_user.id}, message={request.message}, chat_type={request.chat_type}")
     try:
         session_id = request.session_id or create_session_id()
         reply = process_chat(
@@ -36,11 +40,13 @@ async def chat_endpoint(
             chat_type=request.chat_type
         )
 
+        logger.info(f"[CHAT] 处理完成: session_id={session_id}")
         return ChatResponse(
             reply=reply,
             session_id=session_id
         )
     except Exception as e:
+        logger.error(f"[CHAT] 错误: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

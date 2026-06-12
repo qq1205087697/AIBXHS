@@ -584,6 +584,10 @@ async def init_default_permissions(
         {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 45},
         {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 46},
         {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 47},
+        # 邮件机器人
+        {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
+        {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
+        {"name": "管理邮件状态", "code": "robot:email:manage", "type": "function", "module": "邮件机器人", "sort_order": 59},
         # 挪货管理
         {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 48},
         {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 49},
@@ -640,6 +644,10 @@ async def add_missing_permissions(
         {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 45},
         {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 46},
         {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 47},
+        # 邮件机器人
+        {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
+        {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
+        {"name": "管理邮件状态", "code": "robot:email:manage", "type": "function", "module": "邮件机器人", "sort_order": 59},
         # 挪货管理
         {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 48},
         {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 49},

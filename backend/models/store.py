@@ -27,7 +27,7 @@ class Store(BaseModel):
 
     id = Column(Integer, primary_key=True, index=True, comment="店铺ID")
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
-    name = Column(String(100), nullable=False, comment="店铺名称")
+    name = Column(String(100), nullable=False, comment="紫鸟账号")
     platform = Column(String(20), nullable=False, index=True, comment="平台")
     site = Column(String(50), nullable=True, comment="站点")
     status = Column(String(20), default="active", index=True, comment="状态")

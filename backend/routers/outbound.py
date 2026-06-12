@@ -10,7 +10,7 @@ from urllib.parse import quote
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
-from services.operation_log import log_order_create, log_order_confirm, log_order_cancel, log_order_delete
+from services.operation_log import log_order_create, log_order_confirm, log_order_cancel, log_order_delete, log_order_update
 from services.inventory_batch import deduce_inventory_fifo, deduce_inventory_from_specific_batch, apply_deduction, rollback_deduction, recalculate_product_local_stock
 from services.excel_helper import create_outbound_excel_template, parse_outbound_excel
 import json
@@ -255,6 +255,7 @@ async def create_outbound_order(
         log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "outbound", order_id, data.order_number,
                          {"order_number": data.order_number, "items_count": len(data.items), "total_quantity": total_qty})
+        db.commit()
 
         return {"success": True, "message": "出库订单创建成功", "data": {"id": order_id}}
     except HTTPException:
@@ -273,12 +274,14 @@ async def update_outbound_order(
 ):
     try:
         row = db.execute(text(
-            "SELECT id, status FROM outbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            "SELECT id, order_number, status FROM outbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
         ), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="出库订单不存在")
-        if row[1] != "draft":
+        if row[2] != "draft":
             raise HTTPException(status_code=400, detail="只能修改草稿状态的订单")
+
+        before_data = {"order_number": row[1], "status": row[2]}
 
         updates = []
         params = {"id": order_id}
@@ -291,6 +294,11 @@ async def update_outbound_order(
         if updates:
             db.execute(text(f"UPDATE outbound_orders SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"), params)
             db.commit()
+
+        log_order_update(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                         "outbound", order_id, row[1], before_data,
+                         {"order_number": row[1], "status": "draft"})
+        db.commit()
 
         return {"success": True, "message": "出库订单更新成功"}
     except HTTPException:
@@ -330,29 +338,44 @@ async def confirm_outbound_order(
                 if not item[5]:  # item[5] is batch_id
                     raise HTTPException(status_code=400, detail="报废类型的出库单必须为每个商品选择指定批次")
 
-        deduction_results = []
-        deduction_details_all = []
+        # 合并同产品的数量，避免重复扣减库存
+        product_quantity_map = {}
+        product_items_map = {}  # 记录每个产品对应的行项目
         for item in items:
             item_id, product_id, quantity, product_name, product_code, selected_batch_id = item
-            if selected_batch_id:
-                # 用户选择了指定批次，从该批次扣减
+            if product_id not in product_quantity_map:
+                product_quantity_map[product_id] = 0
+                product_items_map[product_id] = []
+            product_quantity_map[product_id] += int(quantity)
+            product_items_map[product_id].append(item)
+
+        deduction_results = []
+        deduction_details_all = []
+        
+        # 按产品合并扣减库存
+        for product_id, total_quantity in product_quantity_map.items():
+            # 检查该产品是否有指定批次（如果有多个行，只要有指定批次就按指定批次处理）
+            selected_batch_ids = [item[5] for item in product_items_map[product_id] if item[5]]
+            
+            if selected_batch_ids:
+                # 有指定批次，从指定批次扣减（取第一个指定批次）
                 details, actual_qty, fulfilled = deduce_inventory_from_specific_batch(
-                    db, current_user.tenant_id, product_id, int(quantity), selected_batch_id
+                    db, current_user.tenant_id, product_id, total_quantity, selected_batch_ids[0]
                 )
                 if not fulfilled:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"产品#{product_id}选择的批次库存不足: 需要{quantity}件，当前可用{actual_qty}件"
+                        detail=f"产品#{product_id}选择的批次库存不足: 需要{total_quantity}件，当前可用{actual_qty}件"
                     )
             else:
                 # 未选择批次，按 FIFO 自动分配
                 details, actual_qty, fulfilled = deduce_inventory_fifo(
-                    db, current_user.tenant_id, product_id, int(quantity)
+                    db, current_user.tenant_id, product_id, total_quantity
                 )
                 if not fulfilled:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"产品#{product_id}库存不足: 需要{quantity}件，当前可用{actual_qty}件"
+                        detail=f"产品#{product_id}库存不足: 需要{total_quantity}件，当前可用{actual_qty}件"
                     )
             deduction_details_all.extend(details)
 
@@ -365,19 +388,22 @@ async def confirm_outbound_order(
             # 取第一个批次作为主批次
             first_batch_id = details[0]["batch_id"] if len(details) > 0 else None
             first_batch_number = details[0]["batch_number"] if len(details) > 0 else None
-            db.execute(text("""
-                UPDATE outbound_order_items SET
-                    batch_id = :bid, batch_number = :bn, batch_details = :bd, updated_at = :now
-                WHERE id = :iid
-            """), {
-                "bid": first_batch_id, "bn": first_batch_number,
-                "bd": batch_details_json, "now": datetime.now(), "iid": item[0]
-            })
+            
+            # 更新该产品的所有行项目
+            for item in product_items_map[product_id]:
+                db.execute(text("""
+                    UPDATE outbound_order_items SET
+                        batch_id = :bid, batch_number = :bn, batch_details = :bd, updated_at = :now
+                    WHERE id = :iid
+                """), {
+                    "bid": first_batch_id, "bn": first_batch_number,
+                    "bd": batch_details_json, "now": datetime.now(), "iid": item[0]
+                })
 
             deduction_results.append({
-                "product_id": item[1],
-                "product_name": item[3] or f"产品#{item[1]}",
-                "product_code": item[4] or "",
+                "product_id": product_id,
+                "product_name": product_items_map[product_id][0][3] or f"产品#{product_id}",
+                "product_code": product_items_map[product_id][0][4] or "",
                 "details": details,
                 "batch_info": batch_info,
             })
@@ -396,6 +422,7 @@ async def confirm_outbound_order(
                           "outbound", order_id, order[1],
                           {"status": before_status},
                           {"status": "confirmed", "deduction_by_batch": "FIFO逻辑: 优先出库最早批次"})
+        db.commit()
 
         return {"success": True, "message": "出库订单已确认，按FIFO规则自动扣减库存", "data": {"deduction_results": deduction_results}}
     except HTTPException:
@@ -475,6 +502,7 @@ async def delete_outbound_order(
 
         log_order_delete(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                         "outbound", order_id, row[1], before_data)
+        db.commit()
 
         return {"success": True, "message": "出库订单已删除"}
     except HTTPException:

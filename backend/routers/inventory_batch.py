@@ -37,7 +37,7 @@ async def get_product_stock_history(
         # 先尝试查询包含类型字段的数据
         try:
             inbound_rows = db.execute(text("""
-                SELECT io.order_number, io.inbound_date, ioi.quantity, ioi.warehouse, ioi.batch_number, io.created_at, 'inbound' as type, io.inbound_type
+                SELECT io.id as order_id, ioi.id as item_id, io.order_number, io.inbound_date, ioi.quantity, ioi.warehouse, ioi.batch_number, io.created_at, 'inbound' as type, io.inbound_type
                 FROM inbound_order_items ioi
                 JOIN inbound_orders io ON io.id = ioi.inbound_order_id AND io.deleted_at IS NULL
                 WHERE ioi.product_id = :pid AND io.tenant_id = :tid AND ioi.deleted_at IS NULL AND io.status = 'confirmed'
@@ -48,7 +48,7 @@ async def get_product_stock_history(
             print(f"查询包含inbound_type失败: {e}")
             # 回退到不包含类型字段的查询
             inbound_rows = db.execute(text("""
-                SELECT io.order_number, io.inbound_date, ioi.quantity, ioi.warehouse, ioi.batch_number, io.created_at, 'inbound' as type
+                SELECT io.id as order_id, ioi.id as item_id, io.order_number, io.inbound_date, ioi.quantity, ioi.warehouse, ioi.batch_number, io.created_at, 'inbound' as type
                 FROM inbound_order_items ioi
                 JOIN inbound_orders io ON io.id = ioi.inbound_order_id AND io.deleted_at IS NULL
                 WHERE ioi.product_id = :pid AND io.tenant_id = :tid AND ioi.deleted_at IS NULL AND io.status = 'confirmed'
@@ -58,7 +58,7 @@ async def get_product_stock_history(
 
         try:
             outbound_rows = db.execute(text("""
-                SELECT oo.order_number, oo.outbound_date, ooi.quantity, oo.warehouse, ooi.batch_number, oo.created_at, 'outbound' as type, oo.outbound_type, ooi.batch_details
+                SELECT oo.id as order_id, ooi.id as item_id, oo.order_number, oo.outbound_date, ooi.quantity, oo.warehouse, ooi.batch_number, oo.created_at, 'outbound' as type, oo.outbound_type, ooi.batch_details
                 FROM outbound_order_items ooi
                 JOIN outbound_orders oo ON oo.id = ooi.outbound_order_id AND oo.deleted_at IS NULL
                 WHERE ooi.product_id = :pid AND oo.tenant_id = :tid AND ooi.deleted_at IS NULL AND oo.status = 'confirmed'
@@ -70,7 +70,7 @@ async def get_product_stock_history(
             # 回退到不包含类型字段的查询
             try:
                 outbound_rows = db.execute(text("""
-                    SELECT oo.order_number, oo.outbound_date, ooi.quantity, oo.warehouse, ooi.batch_number, oo.created_at, 'outbound' as type, ooi.batch_details
+                    SELECT oo.id as order_id, ooi.id as item_id, oo.order_number, oo.outbound_date, ooi.quantity, oo.warehouse, ooi.batch_number, oo.created_at, 'outbound' as type, ooi.batch_details
                     FROM outbound_order_items ooi
                     JOIN outbound_orders oo ON oo.id = ooi.outbound_order_id AND oo.deleted_at IS NULL
                     WHERE ooi.product_id = :pid AND oo.tenant_id = :tid AND ooi.deleted_at IS NULL AND oo.status = 'confirmed'
@@ -80,7 +80,7 @@ async def get_product_stock_history(
             except Exception as e2:
                 print(f"查询包含batch_details失败: {e2}")
                 outbound_rows = db.execute(text("""
-                    SELECT oo.order_number, oo.outbound_date, ooi.quantity, oo.warehouse, ooi.batch_number, oo.created_at, 'outbound' as type
+                    SELECT oo.id as order_id, ooi.id as item_id, oo.order_number, oo.outbound_date, ooi.quantity, oo.warehouse, ooi.batch_number, oo.created_at, 'outbound' as type
                     FROM outbound_order_items ooi
                     JOIN outbound_orders oo ON oo.id = ooi.outbound_order_id AND oo.deleted_at IS NULL
                     WHERE ooi.product_id = :pid AND oo.tenant_id = :tid AND ooi.deleted_at IS NULL AND oo.status = 'confirmed'
@@ -107,41 +107,68 @@ async def get_product_stock_history(
 
         records = []
         for row in inbound_rows:
-            inbound_type = row[7] if len(row) > 7 else None
+            has_inbound_type = len(row) > 9
+            inbound_type = row[9] if has_inbound_type else None
             sub_type = inbound_type_map.get(inbound_type, inbound_type or "入库")
+            order_id = row[0]
+            item_id = row[1]
+            batch_number = row[6]
+            if not batch_number:
+                # 如果入库明细没有批次号，从 inventory_batches 表中查找
+                batch_info = db.execute(text("""
+                    SELECT batch_number FROM inventory_batches
+                    WHERE inbound_order_id = :oid AND inbound_item_id = :iid AND deleted_at IS NULL
+                """), {"oid": order_id, "iid": item_id}).fetchone()
+                if batch_info and batch_info[0]:
+                    batch_number = batch_info[0]
+                else:
+                    # 还没有的话，尝试根据订单号+产品ID查找
+                    product_id = db.execute(text("""
+                        SELECT product_id FROM inbound_order_items
+                        WHERE id = :iid
+                    """), {"iid": item_id}).scalar()
+                    if product_id:
+                        batch = db.execute(text("""
+                            SELECT batch_number FROM inventory_batches
+                            WHERE inbound_order_id = :oid AND product_id = :pid AND deleted_at IS NULL
+                            ORDER BY created_at ASC LIMIT 1
+                        """), {"oid": order_id, "pid": product_id}).fetchone()
+                        if batch and batch[0]:
+                            batch_number = batch[0]
             records.append({
-                "order_number": row[0],
-                "date": row[1].strftime("%Y-%m-%d") if row[1] else "",
-                "quantity": int(row[2]),
-                "warehouse": row[3] or "",
-                "batch_number": row[4] or "",
-                "created_at": row[5].strftime("%Y-%m-%d %H:%M:%S") if row[5] else "",
-                "type": row[6],
+                "order_number": row[2],
+                "date": row[3].strftime("%Y-%m-%d") if row[3] else "",
+                "quantity": int(row[4]),
+                "warehouse": row[5] or "",
+                "batch_number": batch_number or "",
+                "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                "type": row[8],
                 "sub_type": sub_type,
             })
         for row in outbound_rows:
-            outbound_type = row[7] if len(row) > 7 else None
+            has_outbound_type = len(row) > 9
+            outbound_type = row[9] if has_outbound_type else None
             sub_type = outbound_type_map.get(outbound_type, outbound_type or "出库")
             # 解析 batch_details
             batch_details = None
-            if len(row) > 8 and row[8]:
+            if len(row) > 10 and row[10]:
                 try:
-                    if isinstance(row[8], str):
+                    if isinstance(row[10], str):
                         import json
-                        batch_details = json.loads(row[8])
+                        batch_details = json.loads(row[10])
                     else:
-                        batch_details = row[8]
+                        batch_details = row[10]
                 except (json.JSONDecodeError, TypeError):
                     pass
             
             records.append({
-                "order_number": row[0],
-                "date": row[1].strftime("%Y-%m-%d") if row[1] else "",
-                "quantity": -int(row[2]),
-                "warehouse": row[3] or "",
-                "batch_number": row[4] or "",
-                "created_at": row[5].strftime("%Y-%m-%d %H:%M:%S") if row[5] else "",
-                "type": row[6],
+                "order_number": row[2],
+                "date": row[3].strftime("%Y-%m-%d") if row[3] else "",
+                "quantity": -int(row[4]),
+                "warehouse": row[5] or "",
+                "batch_number": row[6] or "",
+                "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                "type": row[8],
                 "sub_type": sub_type,
                 "batch_details": batch_details,
             })

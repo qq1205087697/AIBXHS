@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined } from '@ant-design/icons'
+import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker } from 'antd'
+import dayjs, { Dayjs } from 'dayjs'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
-import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi } from '../api'
+import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -57,6 +58,7 @@ interface PlatformProduct {
 interface Store {
   id: number
   name: string
+  inventory_name?: string
   platform?: string
   site?: string
   group_id?: number | null
@@ -81,6 +83,7 @@ interface ColumnState {
 
 // 平台商品列表的列状态
 const defaultPpColumns: ColumnState[] = [
+  { key: 'image_url', title: '图片', visible: true, width: 70, minWidth: 70 },
   { key: 'platform', title: '平台', visible: true, width: 90 },
   { key: 'store_names', title: '店铺', visible: true, width: 220 },
   { key: 'asin', title: 'ASIN', visible: true, width: 130 },
@@ -92,7 +95,7 @@ const defaultPpColumns: ColumnState[] = [
 
 const defaultColumns: ColumnState[] = [
   { key: 'main_image', title: '图片', visible: true, width: 70, minWidth: 70 },
-  { key: 'product_code', title: '产品编码', visible: true, width: 130, minWidth: 110 },
+  { key: 'product_code', title: '产品编码', visible: true, width: 180, minWidth: 150 },
   { key: 'name', title: '产品名称', visible: true, width: 200, minWidth: 150 },
   { key: 'name_en', title: '英文名称', visible: false, width: 200, minWidth: 150 },
   { key: 'product_type', title: '产品类型', visible: true, width: 120, minWidth: 100 },
@@ -183,6 +186,22 @@ const ProductManagement: React.FC = () => {
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [displayColumns, setDisplayColumns] = useState<ColumnState[] | null>(null)
   const searchTimeoutRef = useRef<number | null>(null)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+  const [batchBindOpen, setBatchBindOpen] = useState(false)
+  const [batchBindLoading, setBatchBindLoading] = useState(false)
+  const [selectedFinishedProduct, setSelectedFinishedProduct] = useState<number | null>(null)
+  const [selectedAccessoryIds, setSelectedAccessoryIds] = useState<number[]>([])
+  const [importRecordModalOpen, setImportRecordModalOpen] = useState(false)
+  const [importRecordLoading, setImportRecordLoading] = useState(false)
+  const [importRecords, setImportRecords] = useState<any[]>([])
+  const [importRecordTotal, setImportRecordTotal] = useState(0)
+  const [importRecordPage, setImportRecordPage] = useState(1)
+  const [importRecordPageSize, setImportRecordPageSize] = useState(20)
+  const [importRecordStatus, setImportRecordStatus] = useState<string | undefined>()
+  const [importRecordCreator, setImportRecordCreator] = useState<string | undefined>()
+  const [importRecordDateRange, setImportRecordDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null)
+  const [importRecordDetail, setImportRecordDetail] = useState<any>(null)
 
   const [ppModalOpen, setPpModalOpen] = useState(false)
   const [ppEditingItem, setPpEditingItem] = useState<PlatformProduct | null>(null)
@@ -209,8 +228,10 @@ const ProductManagement: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [importPreviewOpen, setImportPreviewOpen] = useState(false)
-  const [importPreviewData, setImportPreviewData] = useState<{ products: any[]; platform_products: any[] }>({ products: [], platform_products: [] })
+  const [importPreviewData, setImportPreviewData] = useState<{ products: any[]; platform_products: any[]; file_name?: string }>({ products: [], platform_products: [] })
+  const [importPreviewRecordId, setImportPreviewRecordId] = useState<number | null>(null)
   const [importing, setImporting] = useState(false)
+  const [importErrors, setImportErrors] = useState<string[]>([])
   
   const [dataFixOpen, setDataFixOpen] = useState(false)
   const [dataFixProducts, setDataFixProducts] = useState<Product[]>([])
@@ -223,6 +244,22 @@ const ProductManagement: React.FC = () => {
   
   // 平台商品列表的列状态
   const [ppColumnStates, setPpColumnStates] = useState<ColumnState[]>(defaultPpColumns)
+
+  // 仓库盘存
+  const [countModalOpen, setCountModalOpen] = useState(false)
+  const [countUploading, setCountUploading] = useState(false)
+  const [countResult, setCountResult] = useState<any>(null)
+  const [countConfirming, setCountConfirming] = useState(false)
+  const countFileRef = useRef<HTMLInputElement>(null)
+
+  // 成品配件绑定管理
+  const [bindingDrawerOpen, setBindingDrawerOpen] = useState(false)
+  const [bindingProduct, setBindingProduct] = useState<Product | null>(null)
+  const [bindingList, setBindingList] = useState<any[]>([])
+  const [bindingLoading, setBindingLoading] = useState(false)
+  const [bindingModalOpen, setBindingModalOpen] = useState(false)
+  const [bindingEditingItem, setBindingEditingItem] = useState<any>(null)
+  const [bindingForm] = Form.useForm()
 
   const statusOptions = [
   { label: '启用', value: 'active' },
@@ -376,6 +413,127 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  const handleBatchDelete = async () => {
+    try {
+      const ids = selectedRowKeys.map(k => Number(k))
+      const res = await productsApi.batchDelete(ids)
+      if (res.data.success) {
+        message.success(res.data.message)
+        setBatchDeleteOpen(false)
+        setSelectedRowKeys([])
+        fetchData()
+      } else {
+        message.error(res.data.message || '批量删除失败')
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || e.message || '批量删除失败')
+    }
+  }
+
+  const handleBatchBind = async () => {
+    if (!selectedAccessoryIds || selectedAccessoryIds.length === 0) {
+      message.warning('请选择至少一个配件')
+      return
+    }
+    setBatchBindLoading(true)
+    try {
+      const finishedProductIds = selectedRowKeys.map(k => Number(k))
+      const res = await productsApi.batchBindAccessory({
+        finished_product_ids: finishedProductIds,
+        accessory_ids: selectedAccessoryIds,
+        quantity: 1,
+      })
+      if (res.data.success) {
+        message.success(res.data.message)
+        setBatchBindOpen(false)
+        setSelectedAccessoryIds([])
+        setSelectedRowKeys([])
+        fetchData()
+      } else {
+        message.error(res.data.message || '批量绑定失败')
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || e.message || '批量绑定失败')
+    } finally {
+      setBatchBindLoading(false)
+    }
+  }
+
+  const fetchImportRecords = async () => {
+    setImportRecordLoading(true)
+    try {
+      const params: any = {
+        page: importRecordPage,
+        page_size: importRecordPageSize,
+      }
+      if (importRecordStatus) params.status = importRecordStatus
+      if (importRecordCreator) params.created_by = importRecordCreator
+      if (importRecordDateRange?.[0]) params.start_date = importRecordDateRange[0].format('YYYY-MM-DD')
+      if (importRecordDateRange?.[1]) params.end_date = importRecordDateRange[1].format('YYYY-MM-DD')
+      const res = await productsApi.getImportRecords(params)
+      if (res.data.success) {
+        setImportRecords(res.data.data.list)
+        setImportRecordTotal(res.data.data.total)
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '获取导入记录失败')
+    } finally {
+      setImportRecordLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (importRecordModalOpen) {
+      fetchImportRecords()
+    }
+  }, [importRecordModalOpen, importRecordPage, importRecordPageSize])
+
+  const openImportRecordDetail = async (id: number) => {
+    try {
+      const res = await productsApi.getImportRecordDetail(id)
+      if (res.data.success) {
+        setImportRecordDetail(res.data.data)
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '获取详情失败')
+    }
+  }
+
+  const openImportPreviewFromRecord = async (recordId: number, fromDetail: boolean = false) => {
+    try {
+      message.loading({ content: '正在加载预览数据，数据量较大请等待...', key: 'load-preview', duration: 0 })
+      const res = await productsApi.getImportRecordPreviewData(recordId)
+      if (res.data.success) {
+        const d = res.data.data
+        const products = d.products || []
+        const platform_products = d.platform_products || []
+        if (!products.length && !platform_products.length) {
+          message.destroy('load-preview')
+          message.warning('预览数据为空')
+          return
+        }
+        setImportPreviewRecordId(recordId)
+        setImportPreviewData({
+          products,
+          platform_products,
+          file_name: d.preview_file_name || `产品导入_${new Date().toISOString().slice(0, 10)}.xlsx`,
+        })
+        setImportPreviewOpen(true)
+        if (fromDetail) {
+          setImportRecordDetail(null)
+        }
+        setImportRecordModalOpen(false)
+        setTimeout(() => message.destroy('load-preview'), 300)
+      } else {
+        message.destroy('load-preview')
+        message.error(res.data.message || '获取预览数据失败')
+      }
+    } catch (e: any) {
+      message.destroy('load-preview')
+      message.error(e.response?.data?.detail || '获取预览数据失败')
+    }
+  }
+
   const openPpDrawer = async (product: Product) => {
     setPpCurrentProductId(product.id)
     setPpCurrentProductName(product.name)
@@ -505,6 +663,34 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }, [])
 
+  const handleExport = useCallback(async () => {
+    try {
+      message.loading({ content: '正在导出，请稍候...', key: 'export-loading', duration: 0 })
+      const params: any = {}
+      if (filters.search) params.search = filters.search
+      if (filters.product_type && filters.product_type.length > 0) params.product_type = filters.product_type
+      if (filters.product_attribute) params.product_attribute = filters.product_attribute
+      if (filters.status) params.status = filters.status
+
+      const res = await productsApi.exportProducts(params)
+      message.destroy('export-loading')
+      const url = window.URL.createObjectURL(new Blob([res.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      }))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', '产品列表_' + new Date().toISOString().split('T')[0] + '.xlsx')
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      message.success('导出成功')
+    } catch (e: any) {
+      message.destroy('export-loading')
+      message.error('导出失败: ' + (e.message || '未知错误'))
+    }
+  }, [filters])
+
   const handleImportClick = () => {
     fileInputRef.current?.click()
   }
@@ -517,10 +703,15 @@ const productAttributeLabelMap: Record<string, string> = {
     try {
       const res = await productsApi.uploadPreview(file)
       if (res.data.success) {
-        setImportPreviewData(res.data.data || { products: [], platform_products: [] })
-        setImportPreviewOpen(true)
+        const recordId = res.data.data?.record_id
+        message.info('文件已上传成功，正在后台解析预览数据...', 5)
+
+        // 后台轮询等待预览就绪，就绪后弹出提示（用户可点击打开导入记录）
+        if (recordId) {
+          _pollPreviewReady(recordId)
+        }
       } else {
-        message.error(res.data.message || '文件解析失败')
+        message.error(res.data.message || '文件上传失败')
       }
     } catch (e: any) {
       const errorMsg = e.response?.data?.detail || e.message || '文件上传失败'
@@ -531,27 +722,183 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  // 轮询预览状态，就绪后弹出可点击的提示
+  const _pollPreviewReady = (recordId: number) => {
+    let pollCount = 0
+    const MAX_POLL = 180 // 最多轮询 3 分钟（每2秒一次）
+    const timer = setInterval(async () => {
+      pollCount++
+      if (pollCount > MAX_POLL) {
+        clearInterval(timer)
+        return
+      }
+      try {
+        const statusRes = await productsApi.getImportRecordStatus(recordId)
+        if (statusRes.data.success && statusRes.data.data.preview_status === 'success') {
+          clearInterval(timer)
+          message.success({
+            content: (
+              <span>
+                预览数据已解析完成！{' '}
+                <a onClick={() => { message.destroy(`preview-ready-${recordId}`); setImportRecordModalOpen(true); fetchImportRecords() }} style={{ fontWeight: 600 }}>
+                  点击查看导入记录 →
+                </a>
+              </span>
+            ),
+            key: `preview-ready-${recordId}`,
+            duration: 10,
+          })
+        }
+      } catch { /* 静默 */ }
+    }, 2000)
+  }
+
+  // 轮询检测导入处理完成，完成后弹出提示
+  const _pollImportComplete = (recordId: number) => {
+    let pollCount = 0
+    const MAX_POLL = 600 // 最多轮询10分钟（每1秒一次）
+    const timer = setInterval(async () => {
+      pollCount++
+      if (pollCount > MAX_POLL) {
+        clearInterval(timer)
+        return
+      }
+      try {
+        const statusRes = await productsApi.getImportRecordStatus(recordId)
+        if (statusRes.data.success) {
+          const d = statusRes.data.data
+          if (d.status === 'success' || d.status === 'partial_success' || d.status === 'failed') {
+            clearInterval(timer)
+            const isOk = d.status !== 'failed'
+            const pOk = d.product_success ?? 0
+            const pTotal = d.product_total ?? 0
+            const ppOk = d.platform_success ?? 0
+            const ppTotal = d.platform_total ?? 0
+            message[isOk ? 'success' : 'error']({
+              content: (
+                <span>
+                  导入{d.status === 'success' ? '完成' : d.status === 'partial_success' ? '部分完成' : '失败'}！{' '}
+                  产品 {pOk}/{pTotal}，平台商品 {ppOk}/{ppTotal}。{' '}
+                  <a onClick={() => { message.destroy(`import-done-${recordId}`); setImportRecordModalOpen(true); fetchImportRecords() }} style={{ fontWeight: 600 }}>
+                    查看详情 →
+                  </a>
+                </span>
+              ),
+              key: `import-done-${recordId}`,
+              duration: isOk ? 10 : 15,
+            })
+          }
+        }
+      } catch { /* 静默 */ }
+    }, 1000)
+  }
+
   const handleConfirmImport = async () => {
-    if (importPreviewData.products.length === 0 && importPreviewData.platform_products.length === 0) {
-      message.warning('没有可导入的数据')
+    if (!importPreviewRecordId) {
+      message.warning('缺少导入记录ID')
       return
     }
     setImporting(true)
     try {
-      const res = await productsApi.batchImport(importPreviewData)
-      if (res.data.success) {
-        message.success(res.data.message)
-        setImportPreviewOpen(false)
-        setImportPreviewData({ products: [], platform_products: [] })
-        fetchData()
-      } else {
-        message.error(res.data.message || '导入失败')
+      const total = importPreviewData.products.length + importPreviewData.platform_products.length
+      // 传 record_id 让后端从 DB 读完整数据执行导入（前端数据可能被分页截断）
+      const submitRes = await productsApi.batchImport({
+        products: [],
+        platform_products: [],
+        file_name: importPreviewData.file_name || `产品导入_${new Date().toISOString().slice(0, 10)}.xlsx`,
+        record_id: importPreviewRecordId,
+      })
+      if (!submitRes.data.success) {
+        message.error(submitRes.data.message || '提交导入任务失败')
+        return
       }
+      message.success(`已提交 ${total} 条数据到后台导入，可在"导入记录"中查看进度`)
+      setImportPreviewOpen(false)
+      setImportPreviewData({ products: [], platform_products: [] })
+      setImportPreviewRecordId(null)
+      setImportErrors([])
+      fetchData()
+      // 轮询检测处理完成
+      _pollImportComplete(importPreviewRecordId!)
     } catch (e: any) {
       const errorMsg = e.response?.data?.detail || e.message || '导入失败'
       message.error(errorMsg)
     } finally {
       setImporting(false)
+    }
+  }
+
+  const downloadCountTemplate = async () => {
+    try {
+      const res = await inventoryCountApi.downloadTemplate()
+      const url = window.URL.createObjectURL(new Blob([res.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      }))
+      const link = document.createElement('a')
+      link.href = url
+      link.setAttribute('download', '仓库盘存模板_' + new Date().toISOString().split('T')[0] + '.xlsx')
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      message.success('盘存模板下载成功')
+    } catch (e: any) {
+      message.error('模板下载失败: ' + (e.message || '未知错误'))
+    }
+  }
+
+  const handleCountClick = () => {
+    setCountResult(null)
+    setCountModalOpen(true)
+  }
+
+  const handleCountFileUpload = () => {
+    countFileRef.current?.click()
+  }
+
+  const handleCountFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    setCountUploading(true)
+    try {
+      const res = await inventoryCountApi.upload(file)
+      if (res.data.success) {
+        setCountResult(res.data.data)
+        message.success(res.data.message)
+      } else {
+        message.error(res.data.message || '盘存文件解析失败')
+      }
+    } catch (e: any) {
+      const errorMsg = e.response?.data?.detail || e.message || '盘存文件解析失败'
+      message.error(errorMsg)
+    } finally {
+      setCountUploading(false)
+      e.target.value = ''
+    }
+  }
+
+  const handleCountConfirm = async () => {
+    if (!countResult || !countResult.items) {
+      message.warning('没有可确认的盘存数据')
+      return
+    }
+    setCountConfirming(true)
+    try {
+      const res = await inventoryCountApi.confirm({ items: countResult.items })
+      if (res.data.success) {
+        message.success(res.data.message)
+        setCountModalOpen(false)
+        setCountResult(null)
+        fetchData()
+      } else {
+        message.error(res.data.message || '确认失败')
+      }
+    } catch (e: any) {
+      const errorMsg = e.response?.data?.detail || e.message || '确认盘存失败'
+      message.error(errorMsg)
+    } finally {
+      setCountConfirming(false)
     }
   }
 
@@ -611,6 +958,80 @@ const productAttributeLabelMap: Record<string, string> = {
       local_stock_age: product.local_stock_age,
     })
     setModalOpen(true)
+  }
+
+  // 成品配件绑定管理
+  const openBindingDrawer = async (product: Product) => {
+    setBindingProduct(product)
+    setBindingDrawerOpen(true)
+    await fetchBindings(product.id)
+  }
+
+  const fetchBindings = async (productId: number) => {
+    setBindingLoading(true)
+    try {
+      const res = await productBindingsApi.getByFinished(productId)
+      if (res.data.success) {
+        setBindingList(res.data.data || [])
+      }
+    } catch (e) {
+      message.error('获取配件绑定失败')
+    } finally {
+      setBindingLoading(false)
+    }
+  }
+
+  const handleBindingCreate = () => {
+    setBindingEditingItem(null)
+    bindingForm.resetFields()
+    setBindingModalOpen(true)
+  }
+
+  const handleBindingEdit = (binding: any) => {
+    setBindingEditingItem(binding)
+    bindingForm.setFieldsValue({
+      accessory_product_id: binding.accessory_product_id,
+      quantity: binding.quantity,
+    })
+    setBindingModalOpen(true)
+  }
+
+  const handleBindingSubmit = async () => {
+    if (!bindingProduct) return
+    try {
+      const values = await bindingForm.validateFields()
+      if (bindingEditingItem) {
+        await productBindingsApi.update(bindingEditingItem.id, {
+          finished_product_id: bindingProduct.id,
+          accessory_product_id: values.accessory_product_id,
+          quantity: values.quantity,
+        })
+        message.success('绑定更新成功')
+      } else {
+        await productBindingsApi.create({
+          finished_product_id: bindingProduct.id,
+          accessory_product_id: values.accessory_product_id,
+          quantity: values.quantity,
+        })
+        message.success('绑定创建成功')
+      }
+      setBindingModalOpen(false)
+      fetchBindings(bindingProduct.id)
+    } catch (e: any) {
+      if (e.errorFields) return
+      const errorMsg = e.response?.data?.detail || e.message || '操作失败'
+      message.error(errorMsg)
+    }
+  }
+
+  const handleBindingDelete = async (bindingId: number) => {
+    try {
+      await productBindingsApi.delete(bindingId)
+      message.success('绑定已删除')
+      if (bindingProduct) fetchBindings(bindingProduct.id)
+    } catch (e) {
+      message.error('删除失败')
+    }
   }
 
   const handleShelfEditStart = (batchId: number, currentValue: string) => {
@@ -888,6 +1309,15 @@ const productAttributeLabelMap: Record<string, string> = {
             icon: <EditOutlined />,
             onClick: () => handleEdit(record),
           })
+          
+          if (record.product_type?.includes('finished')) {
+            dropdownItems.push({
+              key: 'binding',
+              label: '绑定配件',
+              icon: <SettingOutlined />,
+              onClick: () => openBindingDrawer(record),
+            })
+          }
         }
         
         if (hasPermission('product:delete')) {
@@ -947,77 +1377,124 @@ const productAttributeLabelMap: Record<string, string> = {
       <Card
         loading={loading}
         title={
-          <Space wrap style={{ width: "100%" }} size="middle">
-            <Input
-              placeholder="搜索产品编码、名称、分类、品牌、平台SKU、ASIN..."
-              prefix={<SearchOutlined />}
-              allowClear
-              style={{ width: 450 }}
-              value={searchText}
-              onChange={(e) => handleSearch(e.target.value)}
-            />
-            <Select
-              placeholder="产品类型"
-              allowClear
-              mode="multiple"
-              style={{ width: 200 }}
-              value={productTypeFilter}
-              onChange={handleProductTypeFilter}
-              options={productTypeOptions}
-              showSearch
-              filterOption={(input, option) =>
-                (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-              }
-            />
-            <Select
-              placeholder="产品属性"
-              allowClear
-              style={{ width: 120 }}
-              value={productAttributeFilter}
-              onChange={handleProductAttributeFilter}
-              options={productAttributeOptions}
-              showSearch
-              filterOption={(input, option) =>
-                (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-              }
-            />
-          </Space>
-        }
-        extra={
-          <Space>
-            <Button icon={<SettingOutlined />} onClick={() => {
-              setColumnSettingTarget('main')
-              setColumnSettingOpen(true)
-            }}>列设置</Button>
-            <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>模板</Button>
-            <Button icon={<UploadOutlined />} onClick={handleImportClick} loading={uploading}>导入</Button>
-            <Button onClick={openDataFix}>数据补齐</Button>
-            {hasPermission('product:create') && <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新增商品</Button>}
-          </Space>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%', padding: '12px 8px' }}>
+            <Space wrap style={{ width: '100%' }} size="middle">
+              <Input
+                placeholder="搜索产品编码、名称、分类、品牌、平台SKU、ASIN..."
+                prefix={<SearchOutlined />}
+                allowClear
+                style={{ width: 450 }}
+                value={searchText}
+                onChange={(e) => handleSearch(e.target.value)}
+              />
+              <Select
+                placeholder="产品类型"
+                allowClear
+                mode="multiple"
+                style={{ width: 200 }}
+                value={productTypeFilter}
+                onChange={handleProductTypeFilter}
+                options={productTypeOptions}
+                showSearch
+                filterOption={(input, option) =>
+                  (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                }
+              />
+              <Select
+                placeholder="产品属性"
+                allowClear
+                style={{ width: 120 }}
+                value={productAttributeFilter}
+                onChange={handleProductAttributeFilter}
+                options={productAttributeOptions}
+                showSearch
+                filterOption={(input, option) =>
+                  (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                }
+              />
+            </Space>
+            <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: 794 }}>
+                <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新增商品</Button>
+                <Dropdown
+                  menu={{
+                    items: [
+                      hasPermission('product:delete') ? {
+                        key: 'delete',
+                        label: '批量删除',
+                        onClick: () => {
+                          if (selectedRowKeys.length === 0) {
+                            message.warning('请先选择要操作的商品')
+                            return
+                          }
+                          setBatchDeleteOpen(true)
+                        },
+                      } : null,
+                      hasPermission('product:edit') ? {
+                        key: 'bind',
+                        label: '批量绑定配件',
+                        onClick: () => {
+                          if (selectedRowKeys.length === 0) {
+                            message.warning('请先选择要操作的商品')
+                            return
+                          }
+                          setSelectedAccessoryIds([])
+                          setBatchBindOpen(true)
+                        },
+                      } : null,
+                    ].filter(Boolean) as any,
+                  }}
+                >
+                  <Button>批量 <DownOutlined /></Button>
+                </Dropdown>
+                <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>模板</Button>
+                <Button icon={<UploadOutlined />} onClick={handleImportClick} loading={uploading}>导入</Button>
+                <Button icon={<ExportOutlined />} onClick={handleExport}>导出</Button>
+                <Button icon={<CheckCircleOutlined />} onClick={handleCountClick}>仓库盘存</Button>
+                <Button onClick={openDataFix}>数据补齐</Button>
+              </div>
+              <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+                <Button onClick={() => setImportRecordModalOpen(true)}>导入记录</Button>
+                <Button type="text" icon={<SettingOutlined />} onClick={() => {
+                  setColumnSettingTarget('main')
+                  setColumnSettingOpen(true)
+                }} title="列设置" />
+              </div>
+            </div>
+          </div>
         }
         style={{ flex: 1, display: 'flex', flexDirection: 'column' }}
-        styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
+        styles={{ body: { padding: 16 } }}
       >
         <Table
           dataSource={products}
           columns={getColumns()}
           rowKey="id"
           components={components}
-          scroll={{ x: 2000, y: 'calc(100vh - 320px)' }}
-          pagination={{
-            current: pagination.current,
-            pageSize: pagination.pageSize,
-            total: pagination.total,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total) => `共 ${total} 条`,
-            onChange: (page, pageSize) =>
-              setPagination((prev) => ({ ...prev, current: page, pageSize: pageSize || 20 })),
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
           }}
+          scroll={{ x: 2000, y: 'calc(100vh - 380px)' }}
+          pagination={false}
           tableLayout="fixed"
           sticky={{ offsetHeader: 0 }}
         />
       </Card>
+
+      <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', paddingRight: 8 }}>
+        <Pagination
+          current={pagination.current}
+          pageSize={pagination.pageSize}
+          total={pagination.total}
+          showSizeChanger
+          showQuickJumper
+          showTotal={(total) => `共 ${total} 条`}
+          onChange={(page, pageSize) =>
+            setPagination((prev) => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+          }
+        />
+      </div>
 
       <input
         ref={fileInputRef}
@@ -1026,6 +1503,365 @@ const productAttributeLabelMap: Record<string, string> = {
         style={{ display: 'none' }}
         onChange={handleFileChange}
       />
+
+      <Modal
+        title={`确认删除 ${selectedRowKeys.length} 个商品`}
+        open={batchDeleteOpen}
+        onOk={handleBatchDelete}
+        onCancel={() => setBatchDeleteOpen(false)}
+        okText="删除"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+      >
+        <p>确定要删除选中的 {selectedRowKeys.length} 个商品吗？</p>
+        <p style={{ color: '#ff4d4f' }}>该操作不可撤销，相关的绑定关系也将被移除。</p>
+      </Modal>
+
+      <Modal
+        title={`批量绑定配件 (已选 ${selectedRowKeys.length} 个成品)`}
+        open={batchBindOpen}
+        onOk={handleBatchBind}
+        onCancel={() => {
+          setBatchBindOpen(false)
+          setSelectedAccessoryIds([])
+        }}
+        confirmLoading={batchBindLoading}
+        okText="绑定"
+        cancelText="取消"
+        width={600}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <p>选择要绑定的配件，将把它们添加到选中的 {selectedRowKeys.length} 个成品：</p>
+        </div>
+        <Form layout="vertical">
+          <Form.Item label="选择配件" required>
+            <Select
+              mode="multiple"
+              placeholder="请选择配件"
+              showSearch
+              filterOption={(input, option) =>
+                (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+              }
+              style={{ width: '100%' }}
+              value={selectedAccessoryIds.length > 0 ? selectedAccessoryIds : undefined}
+              onChange={(value) => setSelectedAccessoryIds(value)}
+              options={products
+                .filter((p) => {
+                  const types = p.product_type
+                  if (!types) return false
+                  if (Array.isArray(types)) {
+                    return types.some((t) => t && t.toLowerCase().includes('accessory'))
+                  }
+                  return typeof types === 'string' && types.toLowerCase().includes('accessory')
+                })
+                .map((p) => ({
+                  value: p.id,
+                  label: `${p.name || ''} (${p.product_code || p.id})`,
+                }))}
+            />
+          </Form.Item>
+          {(() => {
+            const accessoryCount = products.filter((p) => {
+              const types = p.product_type
+              if (!types) return false
+              if (Array.isArray(types)) {
+                return types.some((t) => t && t.toLowerCase().includes('accessory'))
+              }
+              return typeof types === 'string' && types.toLowerCase().includes('accessory')
+            }).length
+            return accessoryCount === 0 ? (
+              <div style={{ color: '#faad14', fontSize: 12, padding: 8, background: '#fffbe6', borderRadius: 4 }}>
+                当前列表中没有配件。请先创建类型为"配件"的商品。
+              </div>
+            ) : null
+          })()}
+        </Form>
+      </Modal>
+
+      <Modal
+        title="导入记录"
+        open={importRecordModalOpen}
+        onCancel={() => {
+          if (importRecordDetail?.status === 'success' || importRecordDetail?.status === 'partial_success') {
+            fetchData()
+          }
+          setImportRecordModalOpen(false)
+          setImportRecordDetail(null)
+        }}
+        footer={[
+          <Button key="close" onClick={() => {
+            if (importRecordDetail?.status === 'success' || importRecordDetail?.status === 'partial_success') {
+              fetchData()
+            }
+            setImportRecordModalOpen(false)
+            setImportRecordDetail(null)
+          }}>
+            关闭
+          </Button>
+        ]}
+        width={1200}
+        style={{ top: 20 }}
+        styles={{
+          body: {
+            padding: 16,
+          },
+        }}
+      >
+        {!importRecordDetail ? (
+          <>
+            <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <Select
+                placeholder="处理状态"
+                allowClear
+                style={{ width: 120 }}
+                value={importRecordStatus}
+                onChange={(v) => setImportRecordStatus(v)}
+                options={[
+                  { value: 'success', label: '成功' },
+                  { value: 'partial_success', label: '部分成功' },
+                  { value: 'failed', label: '失败' },
+                ]}
+              />
+              <Input
+                placeholder="创建人"
+                allowClear
+                style={{ width: 120 }}
+                value={importRecordCreator}
+                onChange={(e) => setImportRecordCreator(e.target.value)}
+              />
+              <DatePicker.RangePicker
+                style={{ width: 260 }}
+                format="YYYY-MM-DD"
+                value={importRecordDateRange as any}
+                onChange={(range) => setImportRecordDateRange(range as any)}
+              />
+              <Button type="primary" onClick={fetchImportRecords}>查询</Button>
+              <Button onClick={() => {
+                setImportRecordStatus(undefined)
+                setImportRecordCreator(undefined)
+                setImportRecordDateRange(null)
+                setImportRecordPage(1)
+                setTimeout(() => fetchImportRecords(), 50)
+              }}>重置</Button>
+            </div>
+            <Table
+              dataSource={importRecords}
+              rowKey="id"
+              loading={importRecordLoading}
+              size="small"
+              scroll={{ y: 360 }}
+              columns={[
+                { title: '上传文件', dataIndex: 'file_name', width: 220, ellipsis: true },
+                {
+                  title: '预览状态',
+                  dataIndex: 'preview_status',
+                  width: 90,
+                  render: (status: string) => {
+                    const statusMap: Record<string, { text: string; color: string }> = {
+                      'previewing': { text: '解析中', color: 'blue' },
+                      'success': { text: '已就绪', color: 'green' },
+                      'failed': { text: '解析失败', color: 'red' },
+                    }
+                    const info = statusMap[status] || { text: status || '-', color: 'default' }
+                    return <Tag color={info.color}>{info.text}</Tag>
+                  }
+                },
+                {
+                  title: '处理状态',
+                  dataIndex: 'status',
+                  width: 90,
+                  render: (status: string) => {
+                    const statusMap: Record<string, { text: string; color: string }> = {
+                      'pending': { text: '待处理', color: 'default' },
+                      'processing': { text: '处理中', color: 'blue' },
+                      'success': { text: '成功', color: 'green' },
+                      'partial_success': { text: '部分成功', color: 'orange' },
+                      'failed': { text: '失败', color: 'red' },
+                    }
+                    const info = statusMap[status] || { text: status, color: 'default' }
+                    return <Tag color={info.color}>{info.text}</Tag>
+                  }
+                },
+                {
+                  title: '产品',
+                  width: 90,
+                  dataIndex: 'product_total',
+                  render: (_: number, record: any) => (
+                    <span>
+                      <span style={{ color: '#52c41a' }}>{record.product_success ?? '-'}</span>
+                      <span style={{ color: '#999', margin: '0 2px' }}>/</span>
+                      <span>{record.product_total ?? '-'}</span>
+                    </span>
+                  )
+                },
+                {
+                  title: '平台商品',
+                  width: 100,
+                  dataIndex: 'platform_total',
+                  render: (_: number, record: any) => (
+                    <span>
+                      <span style={{ color: '#52c41a' }}>{record.platform_success ?? '-'}</span>
+                      <span style={{ color: '#999', margin: '0 2px' }}>/</span>
+                      <span>{record.platform_total ?? '-'}</span>
+                    </span>
+                  )
+                },
+                { title: '创建人', dataIndex: 'created_by', width: 80 },
+                { title: '创建时间', dataIndex: 'created_at', width: 150 },
+                {
+                  title: '操作',
+                  width: 150,
+                  render: (_: any, record: any) => (
+                    <Space size="small">
+                      {record.preview_status === 'success' && record.status !== 'success' && record.status !== 'partial_success' && (
+                        <Button
+                          type="link"
+                          size="small"
+                          onClick={() => openImportPreviewFromRecord(record.id)}
+                        >
+                          查看预览
+                        </Button>
+                      )}
+                      <Button type="link" size="small" onClick={() => openImportRecordDetail(record.id)}>
+                        详情
+                      </Button>
+                    </Space>
+                  )
+                },
+              ]}
+              pagination={{
+                current: importRecordPage,
+                pageSize: importRecordPageSize,
+                total: importRecordTotal,
+                showSizeChanger: true,
+                showQuickJumper: true,
+                showTotal: (total) => `共 ${total} 条`,
+                onChange: (page, pageSize) => {
+                  setImportRecordPage(page)
+                  setImportRecordPageSize(pageSize)
+                },
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <Button style={{ marginBottom: 16 }} onClick={() => setImportRecordDetail(null)}>
+              ← 返回列表
+            </Button>
+            <Descriptions bordered column={2} size="small">
+              <Descriptions.Item label="上传文件">{importRecordDetail.file_name}</Descriptions.Item>
+              <Descriptions.Item label="预览状态">
+                <Tag color={
+                  importRecordDetail.preview_status === 'success' ? 'green' :
+                  importRecordDetail.preview_status === 'previewing' ? 'blue' :
+                  importRecordDetail.preview_status === 'failed' ? 'red' : 'default'
+                }>
+                  {importRecordDetail.preview_status === 'success' ? '已就绪' :
+                   importRecordDetail.preview_status === 'previewing' ? '解析中' :
+                   importRecordDetail.preview_status === 'failed' ? '解析失败' : '-'}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="处理状态">
+                <Tag color={importRecordDetail.status === 'success' ? 'green' : importRecordDetail.status === 'partial_success' ? 'orange' : importRecordDetail.status === 'failed' ? 'red' : importRecordDetail.status === 'processing' ? 'blue' : 'default'}>
+                  {importRecordDetail.status === 'success' ? '成功' :
+                   importRecordDetail.status === 'partial_success' ? '部分成功' :
+                   importRecordDetail.status === 'failed' ? '失败' :
+                   importRecordDetail.status === 'processing' ? '处理中...' :
+                   importRecordDetail.status === 'pending' ? '待处理' : importRecordDetail.status}
+                </Tag>
+              </Descriptions.Item>
+
+              {/* 产品统计 */}
+              <Descriptions.Item label={<span><strong>产品</strong>（共{importRecordDetail.product_total ?? 0}条）</span>}>
+                {importRecordDetail.status === 'processing' || importRecordDetail.status === 'pending' ? (
+                  <span style={{ color: '#1890ff' }}><LoadingOutlined style={{ marginRight: 6 }} />导入中...</span>
+                ) : (
+                  <>
+                    <span style={{ color: '#52c41a', fontWeight: 600 }}>成功 {importRecordDetail.product_success ?? 0}</span>
+                    {importRecordDetail.product_total != null && importRecordDetail.product_success != null && importRecordDetail.product_success < importRecordDetail.product_total && (
+                      <span style={{ color: '#ff4d4f', marginLeft: 12 }}>失败 {importRecordDetail.product_total - importRecordDetail.product_success}</span>
+                    )}
+                  </>
+                )}
+              </Descriptions.Item>
+
+              {/* 平台商品统计 */}
+              <Descriptions.Item label={<span><strong>平台商品</strong>（共{importRecordDetail.platform_total ?? 0}条）</span>}>
+                {importRecordDetail.status === 'processing' || importRecordDetail.status === 'pending' ? (
+                  <span style={{ color: '#1890ff' }}><LoadingOutlined style={{ marginRight: 6 }} />导入中...</span>
+                ) : (
+                  <>
+                    <span style={{ color: '#52c41a', fontWeight: 600 }}>成功 {importRecordDetail.platform_success ?? 0}</span>
+                    {importRecordDetail.platform_total != null && importRecordDetail.platform_success != null && importRecordDetail.platform_success < importRecordDetail.platform_total && (
+                      <span style={{ color: '#ff4d4f', marginLeft: 12 }}>失败 {importRecordDetail.platform_total - importRecordDetail.platform_success}</span>
+                    )}
+                  </>
+                )}
+              </Descriptions.Item>
+
+              <Descriptions.Item label="创建人">{importRecordDetail.created_by}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">
+                {importRecordDetail.created_at}
+              </Descriptions.Item>
+            </Descriptions>
+            {importRecordDetail.preview_status === 'success' &&
+             importRecordDetail.status !== 'success' &&
+             importRecordDetail.status !== 'partial_success' && (
+              <div style={{ marginTop: 16 }}>
+                <Button type="primary" onClick={() => openImportPreviewFromRecord(importRecordDetail.id, true)}>
+                  查看预览并确认导入
+                </Button>
+              </div>
+            )}
+
+            {/* 产品错误（优先用新格式 product_errors，兼容旧格式 error_details 数组） */}
+            {(() => {
+              const pErrs = (importRecordDetail.product_errors && importRecordDetail.product_errors.length > 0)
+                ? importRecordDetail.product_errors
+                : (Array.isArray(importRecordDetail.error_details) ? importRecordDetail.error_details : [])
+              if (pErrs.length === 0) return null
+              return (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ marginBottom: 8, fontWeight: 500, color: '#ff4d4f' }}>
+                    产品错误（{pErrs.length}条）：
+                  </div>
+                  <div style={{
+                    maxHeight: 200, overflowY: 'auto',
+                    background: '#fff1f0', padding: 12,
+                    border: '1px solid #ffccc7', borderRadius: 4
+                  }}>
+                    {pErrs.map((err: string, idx: number) => (
+                      <div key={idx} style={{ marginBottom: 4, color: '#cf1322', fontSize: 13 }}>
+                        {idx + 1}. {err}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* 平台商品/绑定错误 */}
+            {(importRecordDetail.platform_errors && importRecordDetail.platform_errors.length > 0) && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ marginBottom: 8, fontWeight: 500, color: '#fa8c16' }}>
+                  平台商品/绑定错误（{importRecordDetail.platform_errors.length}条）：
+                </div>
+                <div style={{
+                  maxHeight: 200, overflowY: 'auto',
+                  background: '#fff7e6', padding: 12,
+                  border: '1px solid #ffd591', borderRadius: 4
+                }}>
+                  {importRecordDetail.platform_errors.map((err: string, idx: number) => (
+                    <div key={idx} style={{ marginBottom: 4, color: '#ad6800', fontSize: 13 }}>
+                      {idx + 1}. {err}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Modal>
 
       <Modal
         title={editingProduct ? '编辑商品' : '新增商品'}
@@ -1108,7 +1944,7 @@ const productAttributeLabelMap: Record<string, string> = {
         }
         styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
       >
-        <div style={{ flex: 1, padding: 16, overflow: 'auto' }}>
+        <div style={{ flex: 1, padding: 16, display: 'flex', flexDirection: 'column' }}>
           <Table
             dataSource={ppList}
             rowKey="id"
@@ -1117,6 +1953,7 @@ const productAttributeLabelMap: Record<string, string> = {
             pagination={false}
             components={components}
             tableLayout="fixed"
+            scroll={{ x: 'max-content', y: 'calc(100vh - 300px)' }}
             columns={ppColumnStates
               .filter(col => col.visible)
               .map((col, index) => {
@@ -1131,7 +1968,28 @@ const productAttributeLabelMap: Record<string, string> = {
                   }),
                 }
                 
-                if (col.key === 'platform') {
+                if (col.key === 'image_url') {
+                  column.render = (url: string) =>
+                    url ? (
+                      <Image 
+                        src={url} 
+                        width={40} 
+                        height={40} 
+                        style={{ objectFit: 'cover', borderRadius: 4 }} 
+                        preview={{ mask: false }}
+                        loading="lazy"
+                        placeholder={
+                          <div style={{ width: 40, height: 40, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <AppstoreOutlined style={{ color: '#ccc' }} />
+                          </div>
+                        }
+                      />
+                    ) : (
+                      <div style={{ width: 40, height: 40, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <AppstoreOutlined style={{ color: '#ccc' }} />
+                      </div>
+                    )
+                } else if (col.key === 'platform') {
                   column.render = (p: string) => <Tag color={platformColorMap[p] || 'default'}>{p?.toUpperCase()}</Tag>
                 } else if (col.key === 'store_names') {
                   column.render = (names: string[]) => names?.length > 0
@@ -1167,6 +2025,18 @@ const productAttributeLabelMap: Record<string, string> = {
                   key: 'actions',
                   width: 120,
                   fixed: 'right' as const,
+                  onCell: () => ({
+                    style: {
+                      borderLeft: '1px solid #f0f0f0',
+                      backgroundColor: '#fff'
+                    }
+                  }),
+                  onHeaderCell: () => ({
+                    style: {
+                      borderLeft: '1px solid #f0f0f0',
+                      backgroundColor: '#fafafa'
+                    }
+                  }),
                   render: (_: any, record: PlatformProduct) => (
                     <Space>
                       {hasPermission('platform:edit') && (
@@ -1305,7 +2175,7 @@ const productAttributeLabelMap: Record<string, string> = {
               .filter(s => !ppTransferFilterGroupId || s.group_id === ppTransferFilterGroupId)
               .map(s => ({
                 key: String(s.id),
-                title: `${s.name}${s.site ? ` - ${s.site}` : ''}`,
+                title: s.inventory_name || s.name,
                 description: s.platform,
               }))
           })()}
@@ -1427,7 +2297,8 @@ const productAttributeLabelMap: Record<string, string> = {
               pagination={false}
               scroll={{ x: 'max-content' }}
               columns={[
-                { title: '批次号', dataIndex: 'batch_number', key: 'batch_number', width: 150 },
+                { title: '批次号', dataIndex: 'batch_number', key: 'batch_number', width: 150,
+                  render: (v: string) => v || <Tag color="orange">自动生成中</Tag> },
                 { title: '来源', dataIndex: 'source_type', key: 'source_type', width: 100,
                   render: (t: string) => 
                     t === 'stock_transfer' 
@@ -1589,10 +2460,16 @@ const productAttributeLabelMap: Record<string, string> = {
       <Modal
         title="导入预览"
         open={importPreviewOpen}
-        onCancel={() => setImportPreviewOpen(false)}
+        onCancel={() => {
+          setImportPreviewOpen(false)
+          setImportPreviewRecordId(null)
+        }}
         width={importPreviewData.platform_products.length > 0 ? 1200 : 900}
         footer={[
-          <Button key="cancel" onClick={() => setImportPreviewOpen(false)}>取消</Button>,
+          <Button key="cancel" onClick={() => {
+            setImportPreviewOpen(false)
+            setImportPreviewRecordId(null)
+          }}>取消</Button>,
           <Button key="confirm" type="primary" loading={importing} onClick={handleConfirmImport}>
             确认导入
           </Button>,
@@ -1605,8 +2482,8 @@ const productAttributeLabelMap: Record<string, string> = {
               dataSource={importPreviewData.products}
               rowKey={(_, idx) => `product-${idx}`}
               size="small"
-              pagination={false}
               scroll={{ y: 300 }}
+              pagination={{ pageSize: 50, showSizeChanger: false, showQuickJumper: true, showTotal: (t) => `共 ${t} 条`, size: 'small' }}
               columns={[
                 { title: '产品编码', dataIndex: 'product_code', width: 120 },
                 { title: '产品名称', dataIndex: 'name', width: 200 },
@@ -1625,12 +2502,12 @@ const productAttributeLabelMap: Record<string, string> = {
               dataSource={importPreviewData.platform_products}
               rowKey={(_, idx) => `platform-${idx}`}
               size="small"
-              pagination={false}
               scroll={{ y: 300 }}
+              pagination={{ pageSize: 50, showSizeChanger: false, showQuickJumper: true, showTotal: (t) => `共 ${t} 条`, size: 'small' }}
               columns={[
                 { title: '产品编码', dataIndex: 'product_code', width: 120 },
                 { title: '平台', dataIndex: 'platform', width: 100 },
-                { title: '店铺名称', dataIndex: 'store_name', width: 150 },
+                { title: '店铺', dataIndex: 'store_with_site_raw', width: 180, render: (v: string) => v || '-' },
                 { title: 'SKU', dataIndex: 'sku', width: 120, render: (v: string) => v || '-' },
                 { title: '标题', dataIndex: 'title', width: 200, render: (v: string) => v || '-' },
                 { title: '售价', dataIndex: 'price', width: 100, render: (v: number, record: any) => v != null ? `${record.currency || ''} ${v.toFixed(2)}` : '-' },
@@ -1640,6 +2517,27 @@ const productAttributeLabelMap: Record<string, string> = {
                 }},
               ]}
             />
+          </>
+        )}
+        {importErrors.length > 0 && (
+          <>
+            <Divider orientation="left" plain style={{ marginTop: 24, color: '#ff4d4f' }}>
+              错误详情 ({importErrors.length} 条)
+            </Divider>
+            <div style={{
+              maxHeight: 200,
+              overflowY: 'auto',
+              backgroundColor: '#fff1f0',
+              padding: 12,
+              border: '1px solid #ffccc7',
+              borderRadius: 4,
+            }}>
+              {importErrors.map((err, idx) => (
+                <div key={idx} style={{ color: '#cf1322', fontSize: 13, marginBottom: 4 }}>
+                  • {err}
+                </div>
+              ))}
+            </div>
           </>
         )}
       </Modal>
@@ -1688,6 +2586,197 @@ const productAttributeLabelMap: Record<string, string> = {
           ]}
         />
       </Drawer>
+
+      <input
+        ref={countFileRef}
+        type="file"
+        accept=".xlsx,.xls"
+        style={{ display: 'none' }}
+        onChange={handleCountFileChange}
+      />
+
+      <Modal
+        title="仓库盘存"
+        open={countModalOpen}
+        onCancel={() => { setCountModalOpen(false); setCountResult(null) }}
+        width={900}
+        footer={
+          countResult ? (
+            <Space>
+              <Button onClick={() => { setCountResult(null) }}>重新上传</Button>
+              <Button onClick={() => { setCountModalOpen(false); setCountResult(null) }}>取消</Button>
+              <Button
+                type="primary"
+                icon={<CheckCircleOutlined />}
+                onClick={handleCountConfirm}
+                loading={countConfirming}
+                danger={countResult.has_diff}
+              >
+                {countResult.has_diff ? '确认并更新库存差异' : '确认'}
+              </Button>
+            </Space>
+          ) : null
+        }
+      >
+        {!countResult ? (
+          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            <div style={{ marginBottom: 24 }}>
+              <Button size="large" icon={<DownloadOutlined />} onClick={downloadCountTemplate} style={{ marginRight: 16 }}>
+                下载盘存模板
+              </Button>
+              <Button
+                size="large"
+                type="primary"
+                icon={<UploadOutlined />}
+                loading={countUploading}
+                onClick={handleCountFileUpload}
+              >
+                上传盘存文件
+              </Button>
+            </div>
+            <div style={{ color: '#999', fontSize: 13 }}>
+              请先下载模板，按模板格式填写盘点数据后上传，系统将自动对比库存差异
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ marginBottom: 16, display: 'flex', gap: 24, alignItems: 'center' }}>
+              <div>
+                <span style={{ color: '#666' }}>盘点总数：</span>
+                <strong>{countResult.total}</strong>
+              </div>
+              <div>
+                <span style={{ color: '#666' }}>差异数量：</span>
+                <strong style={{ color: countResult.has_diff ? '#ff4d4f' : '#52c41a' }}>
+                  {countResult.diff_count}
+                </strong>
+              </div>
+              {countResult.has_diff && (
+                <Tag color="error" icon={<WarningOutlined />}>存在库存差异，请确认后更新</Tag>
+              )}
+              {!countResult.has_diff && (
+                <Tag color="success" icon={<CheckCircleOutlined />}>库存一致</Tag>
+              )}
+            </div>
+            <Table
+              dataSource={countResult.items}
+              rowKey={(record: any, index: number) => `${record.product_code}-${index}`}
+              size="small"
+              scroll={{ y: 400 }}
+              pagination={false}
+              columns={[
+                { title: '产品编码', dataIndex: 'product_code', width: 120 },
+                { title: '产品名称', dataIndex: 'product_name', width: 150 },
+                { title: '仓库', dataIndex: 'warehouse', width: 100 },
+                { title: '系统库存', dataIndex: 'system_quantity', width: 90, align: 'center' as const },
+                { title: '盘点数量', dataIndex: 'count_quantity', width: 90, align: 'center' as const },
+                {
+                  title: '差异',
+                  dataIndex: 'difference',
+                  width: 90,
+                  align: 'center' as const,
+                  render: (val: number) => {
+                    if (val === 0) return <Tag color="default">0</Tag>
+                    return (
+                      <Tag color={val > 0 ? 'green' : 'red'}>
+                        {val > 0 ? '+' : ''}{val}
+                      </Tag>
+                    )
+                  },
+                },
+                { title: '备注', dataIndex: 'notes', width: 120, ellipsis: true },
+              ]}
+              rowClassName={(record: any) => record.has_difference ? 'inventory-count-diff-row' : ''}
+            />
+            <style>{`
+              .inventory-count-diff-row { background-color: #fff2f0 !important; }
+              .inventory-count-diff-row:hover { background-color: #ffe7e5 !important; }
+            `}</style>
+          </div>
+        )}
+      </Modal>
+
+      {/* 成品配件绑定管理 */}
+      <Drawer
+        title={`配件绑定 - ${bindingProduct?.name || ''}`}
+        open={bindingDrawerOpen}
+        onClose={() => setBindingDrawerOpen(false)}
+        width={700}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleBindingCreate}>
+            新增绑定
+          </Button>
+        }
+      >
+        <Table
+          dataSource={bindingList}
+          rowKey="id"
+          loading={bindingLoading}
+          size="small"
+          pagination={false}
+          columns={[
+            { title: '配件ID', dataIndex: 'accessory_product_id', width: 80 },
+            { title: '配件名称', dataIndex: 'accessory_name', width: 200 },
+            { title: '配件编码', dataIndex: 'accessory_code', width: 130 },
+            { title: '数量', dataIndex: 'quantity', width: 80,
+              render: (qty: number) => <Tag color="blue">{qty}</Tag>
+            },
+            {
+              title: '操作',
+              key: 'actions',
+              width: 150,
+              render: (_: any, record: any) => (
+                <Space>
+                  <Button size="small" icon={<EditOutlined />} onClick={() => handleBindingEdit(record)} />
+                  <Popconfirm title="确定删除?" onConfirm={() => handleBindingDelete(record.id)}>
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                </Space>
+              ),
+            },
+          ]}
+          locale={{ emptyText: '暂无配件绑定，点击右上角"新增绑定"添加' }}
+        />
+      </Drawer>
+
+      <Modal
+        title={bindingEditingItem ? '编辑绑定' : '新增绑定'}
+        open={bindingModalOpen}
+        onOk={handleBindingSubmit}
+        onCancel={() => { bindingForm.resetFields(); setBindingEditingItem(null); setBindingModalOpen(false) }}
+        width={500}
+      >
+        <Form form={bindingForm} layout="vertical">
+          <Form.Item
+            name="accessory_product_id"
+            label="配件产品"
+            rules={[{ required: true, message: '请选择配件产品' }]}
+          >
+            <Select
+              placeholder="请选择配件产品"
+              showSearch
+              disabled={!!bindingEditingItem}
+              filterOption={(input, option) =>
+                (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+              }
+              options={products
+                .filter(p => p.product_type?.includes('accessory') && p.id !== bindingProduct?.id)
+                .map(p => ({
+                  label: `[${p.product_code}] ${p.name}`,
+                  value: p.id,
+                }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="quantity"
+            label="配件数量"
+            rules={[{ required: true, message: '请输入配件数量' }]}
+            initialValue={1}
+          >
+            <InputNumber min={1} style={{ width: '100%' }} placeholder="请输入出库时自动扣除的配件数量" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   )
 }

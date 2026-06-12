@@ -62,6 +62,7 @@ def init_db():
         from models.user import User
         from models.store import Store
         from models.product import Product
+        from models.product_binding import ProductBinding
         from models.inventory import InventoryRecord, InventoryAlert, InventoryAction
         from models.review import Review, ReviewAnalysis, ReviewHandling
         from models.conversation import ConversationHistory

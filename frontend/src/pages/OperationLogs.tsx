@@ -39,6 +39,8 @@ const actionLabels: Record<string, string> = {
   delete: '删除',
   confirm: '审批',
   cancel: '取消',
+  batch_import: '批量导入',
+  export: '导出',
 }
 
 const moduleColorMap: Record<string, string> = {
@@ -55,6 +57,139 @@ const actionColorMap: Record<string, string> = {
   delete: 'red',
   confirm: 'cyan',
   cancel: 'default',
+  batch_import: 'purple',
+  export: 'geekblue',
+}
+
+const fieldLabels: Record<string, Record<string, string>> = {
+  product: {
+    product_code: '产品编码',
+    name: '产品名称',
+    name_en: '英文名称',
+    product_type: '产品类型',
+    product_attribute: '产品属性',
+    category: '分类',
+    brand: '品牌',
+    purchase_price: '采购价',
+    sale_price: '销售价',
+    main_image: '主图',
+    weight: '重量',
+    length: '长度',
+    width: '宽度',
+    height: '高度',
+    status: '状态',
+    is_robot_monitored: '机器人监控',
+    local_quantity: '本地库存',
+    local_warehouse: '本地仓库',
+    local_inbound_date: '本地入库日期',
+    local_stock_age: '本地库存龄',
+  },
+  platform_product: {
+    platform: '平台',
+    sku: 'SKU',
+    asin: 'ASIN',
+    spu: 'SPU',
+    title: '标题',
+    title_en: '英文标题',
+    image_url: '图片地址',
+    currency: '货币',
+    price: '价格',
+    cost_price: '成本价',
+    status: '状态',
+    product_id: '产品ID',
+    platform_product_id: '平台产品ID',
+    store_id: '店铺ID',
+  },
+  order: {
+    order_number: '订单号',
+    type: '类型',
+    status: '状态',
+    total_amount: '总金额',
+    total_quantity: '总数量',
+    supplier: '供应商',
+    warehouse: '仓库',
+    remark: '备注',
+    items: '商品项',
+  },
+  inbound: {
+    order_number: '入库单号',
+    warehouse: '仓库',
+    supplier: '供应商',
+    total_quantity: '总数量',
+    total_amount: '总金额',
+    status: '状态',
+    remark: '备注',
+    items_count: '商品项数',
+  },
+  outbound: {
+    order_number: '出库单号',
+    warehouse: '仓库',
+    customer: '客户',
+    total_quantity: '总数量',
+    total_amount: '总金额',
+    status: '状态',
+    remark: '备注',
+    items_count: '商品项数',
+  },
+  purchase: {
+    order_number: '采购单号',
+    supplier: '供应商',
+    warehouse: '仓库',
+    total_quantity: '总数量',
+    total_amount: '总金额',
+    status: '状态',
+    remark: '备注',
+    items_count: '商品项数',
+    expected_date: '期望日期',
+  },
+  stock_transfer: {
+    order_number: '挪货单号',
+    source_warehouse: '源仓库',
+    target_warehouse: '目标仓库',
+    total_quantity: '总数量',
+    status: '状态',
+    remark: '备注',
+    items_count: '商品项数',
+  },
+  inventory: {
+    warehouse: '仓库',
+    product_id: '产品ID',
+    product_code: '产品编码',
+    product_name: '产品名称',
+    quantity: '库存数量',
+    available_quantity: '可用数量',
+    locked_quantity: '锁定数量',
+    safety_stock: '安全库存',
+    unit_cost: '单位成本',
+  },
+  default: {
+    id: 'ID',
+    name: '名称',
+    code: '编码',
+    status: '状态',
+    quantity: '数量',
+    price: '价格',
+    amount: '金额',
+    cost: '成本',
+    total: '总计',
+    date: '日期',
+    time: '时间',
+    created_at: '创建时间',
+    updated_at: '更新时间',
+    type: '类型',
+    remark: '备注',
+    warehouse: '仓库',
+    supplier: '供应商',
+    customer: '客户',
+    count: '数量',
+    source: '来源',
+    target: '目标',
+    product_id: '产品ID',
+    product_name: '产品名称',
+    product_code: '产品编码',
+    sku: 'SKU',
+    asin: 'ASIN',
+  },
 }
 
 const moduleOptions = [
@@ -199,46 +334,78 @@ const OperationLogs: React.FC = () => {
     setDetailOpen(true)
   }
 
-  const renderJson = (data: any) => {
+  const getFieldLabel = (key: string, targetType: string | null, module: string | null) => {
+    // 优先使用 target_type 的标签
+    if (targetType && fieldLabels[targetType]?.[key]) {
+      return fieldLabels[targetType][key]
+    }
+    // 其次使用 module 的标签
+    if (module && fieldLabels[module]?.[key]) {
+      return fieldLabels[module][key]
+    }
+    // 最后使用默认标签
+    return fieldLabels.default[key] || key
+  }
+
+  const renderData = (data: any, title: string) => {
     if (data === null || data === undefined) {
-      return <Text type="secondary">无数据</Text>
+      return (
+        <div style={{ background: currentTheme.primaryBg, padding: 12, borderRadius: 6 }}>
+          <Text type="secondary">无数据</Text>
+        </div>
+      )
     }
+
+    let parsedData = data
     try {
-      const formatted = typeof data === 'string' ? JSON.stringify(JSON.parse(data), null, 2) : JSON.stringify(data, null, 2)
-      return (
-        <pre
-          style={{
-            background: currentTheme.primaryBg,
-            padding: '12px 16px',
-            borderRadius: 6,
-            maxHeight: 300,
-            overflow: 'auto',
-            fontSize: 13,
-            margin: 0,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-all',
-          }}
-        >
-          {formatted}
-        </pre>
-      )
+      if (typeof data === 'string') {
+        parsedData = JSON.parse(data)
+      }
     } catch {
+      // 不是 JSON 字符串，保持原样
+    }
+
+    if (!parsedData || typeof parsedData !== 'object') {
       return (
-        <pre
-          style={{
-            background: currentTheme.primaryBg,
-            padding: '12px 16px',
-            borderRadius: 6,
-            maxHeight: 300,
-            overflow: 'auto',
-            fontSize: 13,
-            margin: 0,
-          }}
-        >
-          {String(data)}
-        </pre>
+        <div style={{ background: currentTheme.primaryBg, padding: 12, borderRadius: 6 }}>
+          <Text>{String(parsedData)}</Text>
+        </div>
       )
     }
+
+    const entries = Object.entries(parsedData)
+    if (entries.length === 0) {
+      return (
+        <div style={{ background: currentTheme.primaryBg, padding: 12, borderRadius: 6 }}>
+          <Text type="secondary">无数据</Text>
+        </div>
+      )
+    }
+
+    return (
+      <div style={{ background: currentTheme.primaryBg, borderRadius: 6, overflow: 'hidden' }}>
+        <Descriptions column={1} size="small" bordered>
+          {entries.map(([key, value]) => (
+            <Descriptions.Item
+              key={key}
+              label={
+                <span style={{ fontWeight: 500 }}>
+                  {getFieldLabel(key, selectedLog?.target_type, selectedLog?.module)}
+                </span>
+              }
+            >
+              {value === null || value === undefined ? (
+                <Text type="secondary">-</Text>
+              ) : typeof value === 'boolean' ? (
+                <Tag color={value ? 'green' : 'default'}>{value ? '是' : '否'}</Tag>
+              ) : (
+                <Text>{String(value)}</Text>
+              )}
+            </Descriptions.Item>
+          ))}
+        </Descriptions>
+      </div>
+    )
   }
 
   const columns: ColumnsType<OperationLog> = [
@@ -323,7 +490,7 @@ const OperationLogs: React.FC = () => {
   ]
 
   return (
-    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <Card
         loading={loading}
         title={
@@ -363,14 +530,14 @@ const OperationLogs: React.FC = () => {
         extra={
           <Button onClick={handleReset}>重置</Button>
         }
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
-        styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16, minHeight: 0 }}
+        styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 } }}
       >
         <Table
           dataSource={logs}
           columns={columns}
           rowKey="id"
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1200, y: 'calc(100vh - 380px)' }}
           pagination={false}
           tableLayout="fixed"
           sticky={{ offsetHeader: 0 }}
@@ -380,7 +547,7 @@ const OperationLogs: React.FC = () => {
           })}
         />
       </Card>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8, flexShrink: 0 }}>
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -435,11 +602,11 @@ const OperationLogs: React.FC = () => {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <div>
               <Text strong style={{ display: 'block', marginBottom: 8 }}>变更前数据</Text>
-              {renderJson(selectedLog.before_data)}
+              {renderData(selectedLog.before_data, '变更前')}
             </div>
             <div>
               <Text strong style={{ display: 'block', marginBottom: 8 }}>变更后数据</Text>
-              {renderJson(selectedLog.after_data)}
+              {renderData(selectedLog.after_data, '变更后')}
             </div>
           </div>
         )}

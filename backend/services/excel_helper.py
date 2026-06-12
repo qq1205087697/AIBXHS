@@ -295,47 +295,52 @@ def create_product_excel_template() -> io.BytesIO:
     """创建产品导入Excel模板（含产品和平台商品两个页签）"""
     # 产品数据页签
     product_data = {
-        "产品编码": ["P001", "P002"],
-        "产品名称": ["示例产品A", "示例产品B"],
-        "英文名称": ["Product A", "Product B"],
-        "产品类型": ["成品", "配件"],
-        "产品属性": ["通货", "定制品"],
-        "分类": ["电子产品", "配件类"],
-        "品牌": ["品牌A", "品牌B"],
-        "采购价": [50.00, 25.50],
-        "建议售价": [99.00, 49.00],
-        "主图URL": ["https://", "https://"],
-        "重量(kg)": [0.5, 0.2],
-        "长(cm)": [20.0, 15.0],
-        "宽(cm)": [10.0, 8.0],
-        "高(cm)": [5.0, 3.0],
-        "状态": ["启用", "启用"],
+        "产品编码": ["P001", "P002", "P003"],
+        "产品名称": ["示例成品A", "示例配件B", "示例成品C"],
+        "英文名称": ["Product A", "Accessory B", "Product C"],
+        "产品类型": ["成品", "配件", "成品"],
+        "产品属性": ["通货", "定制品", "通货"],
+        "分类": ["电子产品", "配件类", "通用类"],
+        "品牌": ["品牌A", "品牌B", "品牌A"],
+        "采购价": [50.00, 25.50, 35.00],
+        "建议售价": [99.00, 49.00, 68.00],
+        "主图URL": ["https://", "https://", "https://"],
+        "重量(kg)": [0.5, 0.2, 0.3],
+        "长(cm)": [20.0, 15.0, 18.0],
+        "宽(cm)": [10.0, 8.0, 9.0],
+        "高(cm)": [5.0, 3.0, 4.0],
+        "绑定成品1": ["", "P001", ""],
+        "数量1": ["", 2, ""],
+        "绑定成品2": ["", "P003", ""],
+        "数量2": ["", 1, ""],
+        "绑定成品3": ["", "", ""],
+        "数量3": ["", "", ""],
+        "状态": ["启用", "启用", "启用"],
     }
     df_products = pd.DataFrame(product_data)
     
     # 平台商品页签
     platform_data = {
-        "产品编码": ["P001", "P001", "P001"],
-        "平台": ["Amazon", "Shopify", "Amazon"],
-        "店铺名称": ["美国店铺", "独立站", "美国店铺 | 独立站"],
-        "站点": ["US", "主站", "US | 主站"],
-        "平台商品ID": ["", "", ""],
-        "ASIN": ["B001234567", "", ""],
-        "SPU": ["", "SPU-001", ""],
-        "SKU": ["SKU-P001-AMZ", "SKU-P001-SPF", "SKU-AMZ-SPF"],
-        "标题": ["示例标题A - Amazon", "示例标题A - Shopify", "多店铺示例"],
-        "英文标题": ["Example Title A - Amazon", "Example Title A - Shopify", "Multi-store Example"],
-        "图片URL": ["https://", "https://", "https://"],
-        "币种": ["USD", "USD", "USD"],
-        "售价": [19.99, 29.99, 19.99],
-        "成本价": [12.00, 15.00, 12.00],
-        "状态": ["启用", "启用", "启用"],
+        "产品编码": ["P001", "P001", "P001", "P002", "P002", "P003"],
+        "平台": ["Amazon", "Shopify", "Amazon", "Amazon", "Shopify", "Amazon"],
+        "店铺": ["德国店铺", "独立站", "美国店铺, 日本店铺", "北美店铺分组", "欧洲店铺分组", "美国店铺"],
+        "平台商品ID": ["", "", "", "", "", ""],
+        "ASIN": ["B001234567", "", "", "B009876543", "", ""],
+        "SPU": ["", "SPU-001", "", "", "SPU-002", ""],
+        "SKU": ["SKU-P001-AMZ", "SKU-P001-SPF", "SKU-P001-AMZ-JP", "SKU-P002-AMZ", "SKU-P002-SPF", "SKU-P003-AMZ"],
+        "标题": ["示例标题A - Amazon", "示例标题A - Shopify", "多店铺示例标题", "示例标题B - Amazon", "示例标题B - Shopify", "示例标题C - Amazon"],
+        "英文标题": ["Example Title A - Amazon", "Example Title A - Shopify", "Multi-store Example", "Example Title B - Amazon", "Example Title B - Shopify", "Example Title C - Amazon"],
+        "图片URL": ["https://", "https://", "https://", "https://", "https://", "https://"],
+        "币种": ["USD", "USD", "USD", "EUR", "USD", "USD"],
+        "售价": [19.99, 29.99, 19.99, 25.99, 39.99, 22.99],
+        "成本价": [12.00, 15.00, 12.00, 18.00, 22.00, 16.00],
+        "状态": ["启用", "启用", "启用", "启用", "启用", "启用"],
     }
     df_platform = pd.DataFrame(platform_data)
     
     # 标记必填列
     product_required_cols = ["产品编码", "产品名称"]
-    platform_required_cols = ["产品编码", "平台", "店铺名称"]
+    platform_required_cols = ["产品编码", "平台", "店铺"]
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -371,10 +376,24 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
     products = []
     platform_products = []
     
-    # 解析产品页签
-    if "产品" in excel_file.sheet_names or "产品导入模板" in excel_file.sheet_names:
-        sheet_name = "产品" if "产品" in excel_file.sheet_names else "产品导入模板"
-        df = pd.read_excel(excel_file, sheet_name=sheet_name)
+    # 尝试解析产品页签（支持多种可能的名字）
+    product_sheet_names = ["产品", "产品导入模板", "Products", "产品表"]
+    product_sheet_name = None
+    for name in product_sheet_names:
+        if name in excel_file.sheet_names:
+            product_sheet_name = name
+            break
+    # 如果没找到，检查第一个 sheet 是否包含产品相关的列
+    if not product_sheet_name and len(excel_file.sheet_names) > 0:
+        first_sheet = excel_file.sheet_names[0]
+        df_first = pd.read_excel(excel_file, sheet_name=first_sheet, nrows=1)
+        cols = df_first.columns.str.strip().tolist()
+        has_product_cols = any(c in cols for c in ["产品编码", "产品名称", "name", "product_code"])
+        if has_product_cols:
+            product_sheet_name = first_sheet
+    
+    if product_sheet_name:
+        df = pd.read_excel(excel_file, sheet_name=product_sheet_name)
         df.columns = df.columns.str.strip()
         
         # 映射列名（支持新旧三种格式）
@@ -385,6 +404,8 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             "产品名称": "name",
             "产品名称（必填）": "name",
             "*产品名称": "name",
+            "name": "name",
+            "product_code": "product_code",
             "英文名称": "name_en",
             "英文名称（选填）": "name_en",
             "产品类型": "product_type",
@@ -411,11 +432,14 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             "高(cm)（选填）": "height",
             "状态": "status",
             "状态（选填）": "status",
+            # 绑定成品多列（支持1~N组，每组: 绑定成品N + 数量N）
+            "绑定配件": "bind_accessories",
+            "绑定配件（选填）": "bind_accessories",
         }
         df = df.rename(columns={k: v for k, v in col_mapping.items() if k in df.columns})
         
         if "product_code" not in df.columns or "name" not in df.columns:
-            raise ValueError("缺少必需列: 产品编码、产品名称")
+            raise ValueError(f"页签 '{product_sheet_name}' 缺少必需列: 产品编码、产品名称")
         
         status_map = {"启用": "active", "停用": "inactive", "归档": "archived"}
         type_map = {"成品": "finished", "配件": "accessory"}
@@ -438,6 +462,51 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             for field in ["name_en", "category", "brand", "main_image"]:
                 val = row.get(field)
                 row_data[field] = str(val).strip() if pd.notna(val) and str(val).strip() != "nan" else None
+            
+            # 解析绑定成品: 多列格式（绑定成品1/数量1, 绑定成品2/数量2, ...）
+            # 同时兼容旧的单列"绑定配件"格式（编码×数量, 编码×数量）
+            bind_list = []
+
+            # 优先尝试新多列格式
+            has_new_format = False
+            for i in range(1, 50):  # 支持到49组，足够用
+                col_code = f"绑定成品{i}"
+                col_qty = f"数量{i}"
+                if col_code in df.columns or col_qty in df.columns:
+                    has_new_format = True
+                    code_val = row.get(col_code)
+                    qty_val = row.get(col_qty)
+                    code_str = str(code_val).strip() if pd.notna(code_val) else ""
+                    qty_str = str(qty_val).strip() if pd.notna(qty_val) else ""
+                    if code_str and code_str not in ("", "nan"):
+                        try:
+                            qty = int(float(qty_str)) if qty_str and qty_str != "nan" else 1
+                        except (ValueError, TypeError):
+                            qty = 1
+                        if qty > 0:
+                            bind_list.append({"finished_code": code_str, "quantity": qty})
+                elif has_new_format:
+                    break  # 遇到第一组缺失就停止（连续的）
+
+            # 回退到旧单列格式: "P002×2, P003×1"
+            if not bind_list:
+                bind_raw = row.get("bind_accessories")
+                if pd.notna(bind_raw) and str(bind_raw).strip() not in ("", "nan"):
+                    bind_str = str(bind_raw).strip()
+                    import re
+                    parts = re.split(r'[,，]', bind_str)
+                    for part in parts:
+                        part = part.strip()
+                        if not part:
+                            continue
+                        m = re.match(r'^([^×*xX]+)\s*[×*xX]\s*(\d+)$', part)
+                        if m:
+                            acc_code = m.group(1).strip()
+                            acc_qty = int(m.group(2))
+                            if acc_code and acc_qty > 0:
+                                bind_list.append({"finished_code": acc_code, "quantity": acc_qty})
+
+            row_data["bind_accessories"] = bind_list if bind_list else None
             
             product_type_str = row.get("product_type")
             if pd.notna(product_type_str) and str(product_type_str).strip() != "nan":
@@ -468,8 +537,15 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             products.append(row_data)
     
     # 解析平台商品页签
-    if "平台商品" in excel_file.sheet_names:
-        df = pd.read_excel(excel_file, sheet_name="平台商品")
+    platform_sheet_names = ["平台商品", "Platform Products", "平台"]
+    platform_sheet_name = None
+    for name in platform_sheet_names:
+        if name in excel_file.sheet_names:
+            platform_sheet_name = name
+            break
+    
+    if platform_sheet_name:
+        df = pd.read_excel(excel_file, sheet_name=platform_sheet_name)
         df.columns = df.columns.str.strip()
         
         # 映射列名
@@ -480,6 +556,9 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             "平台": "platform",
             "平台（必填）": "platform",
             "*平台": "platform",
+            "店铺": "store_with_site",
+            "店铺（必填）": "store_with_site",
+            "*店铺": "store_with_site",
             "店铺名称": "store_name",
             "店铺名称（必填）": "store_name",
             "*店铺名称": "store_name",
@@ -501,7 +580,9 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
         df = df.rename(columns={k: v for k, v in col_mapping.items() if k in df.columns})
         
         # 检查必需列
-        required_cols = ["product_code", "platform", "store_name"]
+        required_cols = ["product_code", "platform"]
+        if "store_with_site" not in df.columns and "store_name" not in df.columns:
+            raise ValueError(f"平台商品页签缺少必需列: 店铺")
         for col in required_cols:
             if col not in df.columns:
                 raise ValueError(f"平台商品页签缺少必需列: {col}")
@@ -509,7 +590,6 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
         status_map = {"启用": "active", "停用": "inactive", "归档": "archived"}
         valid_platforms = {"amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "other"}
         platform_aliases = {
-            "amazon": "amazon",
             "amazon": "amazon",
             "ebay": "ebay",
             "walmart": "walmart",
@@ -524,8 +604,6 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
         for idx, row in df.iterrows():
             product_code = str(row["product_code"]).strip() if pd.notna(row["product_code"]) else ""
             platform = str(row["platform"]).strip().lower() if pd.notna(row["platform"]) else ""
-            store_name = str(row["store_name"]).strip() if pd.notna(row["store_name"]) else ""
-            store_site = str(row["store_site"]).strip() if pd.notna(row.get("store_site")) and str(row.get("store_site")) != "nan" else None
             
             if not product_code or product_code == "nan":
                 raise ValueError(f"平台商品页签第 {idx + 2} 行: 产品编码不能为空")
@@ -538,15 +616,48 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
                 raise ValueError(f"平台商品页签第 {idx + 2} 行: 平台 '{platform}' 无效，有效平台: {', '.join(valid_platforms)}")
             platform = normalized_platform
             
-            if not store_name or store_name == "nan":
-                raise ValueError(f"平台商品页签第 {idx + 2} 行: 店铺名称不能为空")
-            
-            store_names = [s.strip() for s in store_name.split("|") if s.strip()]
-            store_sites = [s.strip() for s in (store_site or "").split("|") if s.strip()] if store_site else []
-            if not store_sites:
-                store_sites = [None] * len(store_names)
-            if len(store_names) != len(store_sites):
-                raise ValueError(f"平台商品页签第 {idx + 2} 行: 店铺名称和站点的数量不一致 ({len(store_names)} vs {len(store_sites)})")
+            store_names = []
+            store_sites = []
+            store_name = ""
+            store_site = None
+            store_with_site_raw = ""
+
+            # 读取店铺列（只支持店铺名，不再按 - 拆分站点）
+            if "store_with_site" in df.columns:
+                store_with_site = str(row["store_with_site"]).strip() if pd.notna(row.get("store_with_site")) else ""
+                store_with_site_raw = store_with_site
+                if not store_with_site or store_with_site == "nan":
+                    raise ValueError(f"平台商品页签第 {idx + 2} 行: 店铺不能为空")
+
+                # 分割多个店铺（支持中英文逗号、分号、竖线）
+                import re
+                store_items = re.split(r'[,，;；|]', store_with_site)
+                for item in store_items:
+                    item = item.strip()
+                    if not item:
+                        continue
+                    # 整体作为店铺名，不拆分
+                    store_names.append(item)
+                    store_sites.append(None)
+            # 兼容旧格式
+            elif "store_name" in df.columns:
+                store_name = str(row["store_name"]).strip() if pd.notna(row["store_name"]) else ""
+                store_site = str(row["store_site"]).strip() if pd.notna(row.get("store_site")) and str(row.get("store_site")) != "nan" else None
+                store_with_site_raw = store_name
+                if store_site:
+                    store_with_site_raw = f"{store_name}-{store_site}"
+
+                if not store_name or store_name == "nan":
+                    raise ValueError(f"平台商品页签第 {idx + 2} 行: 店铺名称不能为空")
+
+                store_names = [s.strip() for s in store_name.split("|") if s.strip()]
+                store_sites = [s.strip() for s in (store_site or "").split("|") if s.strip()] if store_site else []
+                if not store_sites:
+                    store_sites = [None] * len(store_names)
+                if len(store_names) != len(store_sites):
+                    raise ValueError(f"平台商品页签第 {idx + 2} 行: 店铺名称和站点的数量不一致 ({len(store_names)} vs {len(store_sites)})")
+            else:
+                raise ValueError(f"平台商品页签第 {idx + 2} 行: 缺少店铺信息")
             
             row_data = {
                 "product_code": product_code,
@@ -555,6 +666,7 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
                 "store_site": store_site,
                 "store_names": store_names,
                 "store_sites": store_sites,
+                "store_with_site_raw": store_with_site_raw,
             }
             
             for field in ["platform_product_id", "asin", "spu", "sku", "title", "title_en", "image_url", "currency"]:
@@ -575,6 +687,11 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
                 row_data["status"] = "active"
             
             platform_products.append(row_data)
+    
+    # 如果没有解析到任何数据，给出更详细的提示
+    if not products and not platform_products:
+        sheet_names_str = ", ".join(f"'{s}'" for s in excel_file.sheet_names)
+        raise ValueError(f"无法解析数据，Excel文件包含 {len(excel_file.sheet_names)} 个页签: {sheet_names_str}\n请确保页签名称为 '产品' 或 '平台商品'，或下载正确的模板！")
     
     return {
         "products": products,
@@ -687,4 +804,134 @@ def parse_outbound_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List
             "unit_price": float(purchase_price) if purchase_price else 0,
             "notes": str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
         })
+    return items
+
+
+def create_inventory_count_template(db: Session, tenant_id: int) -> io.BytesIO:
+    """创建仓库盘存Excel模板"""
+    products = db.execute(text("""
+        SELECT product_code, name, local_warehouse, local_quantity
+        FROM products 
+        WHERE tenant_id = :tid AND deleted_at IS NULL
+        ORDER BY product_code
+    """), {"tid": tenant_id}).fetchall()
+    
+    data = {
+        "产品编码": [],
+        "产品名称": [],
+        "仓库": [],
+        "系统库存": [],
+        "盘点数量": [],
+        "备注": [],
+    }
+    
+    if products:
+        for p in products[:5]:
+            data["产品编码"].append(p[0])
+            data["产品名称"].append(p[1])
+            data["仓库"].append(p[2] or "")
+            data["系统库存"].append(p[3] or 0)
+            data["盘点数量"].append(p[3] or 0)
+            data["备注"].append("")
+    else:
+        data["产品编码"].append("")
+        data["产品名称"].append("")
+        data["仓库"].append("")
+        data["系统库存"].append(0)
+        data["盘点数量"].append(0)
+        data["备注"].append("")
+    
+    df = pd.DataFrame(data)
+    
+    required_cols = ["产品编码", "盘点数量"]
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='仓库盘存')
+        worksheet = writer.sheets['仓库盘存']
+        
+        for cell in worksheet[1]:
+            if cell.value in required_cols:
+                cell.value = f"*{cell.value}"
+        
+        set_auto_column_width(worksheet)
+        set_required_header_style(worksheet)
+    
+    output.seek(0)
+    return output
+
+
+def parse_inventory_count_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List[Dict[str, Any]]:
+    """解析仓库盘存Excel，对比系统库存并返回差异"""
+    df = pd.read_excel(io.BytesIO(file_bytes))
+    df.columns = df.columns.str.strip()
+    
+    col_mapping = {
+        "产品编码": "product_code",
+        "产品编码（必填）": "product_code",
+        "*产品编码": "product_code",
+        "产品名称": "product_name",
+        "仓库": "warehouse",
+        "系统库存": "system_quantity",
+        "盘点数量": "count_quantity",
+        "盘点数量（必填）": "count_quantity",
+        "*盘点数量": "count_quantity",
+        "备注": "notes",
+    }
+    df = df.rename(columns={k: v for k, v in col_mapping.items() if k in df.columns})
+    
+    required_cols = ["product_code", "count_quantity"]
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"缺少必需列: {col}")
+    
+    all_products = db.execute(text("""
+        SELECT product_code, name, id, local_quantity, local_warehouse
+        FROM products 
+        WHERE tenant_id = :tid AND deleted_at IS NULL
+        ORDER BY product_code
+    """), {"tid": tenant_id}).fetchall()
+    
+    product_code_map = {p[0]: (p[1], p[2], p[3] or 0, p[4] or "") for p in all_products}
+    
+    product_list_str = ""
+    if all_products:
+        product_list_str = "\n\n系统中存在的产品编码：\n" + "\n".join([
+            f"  {code} - {name}"
+            for code, name, _, _, _ in all_products
+        ])
+    
+    items = []
+    for idx, row in df.iterrows():
+        product_code = str(row["product_code"]).strip() if pd.notna(row["product_code"]) else ""
+        count_quantity = int(row["count_quantity"]) if pd.notna(row["count_quantity"]) else 0
+        warehouse = str(row.get("warehouse", "")).strip() if pd.notna(row.get("warehouse")) else ""
+        notes = str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
+        
+        if not product_code or product_code == "nan":
+            raise ValueError(f"第 {idx + 2} 行: 产品编码不能为空")
+        
+        if count_quantity < 0:
+            raise ValueError(f"第 {idx + 2} 行: 盘点数量不能为负数")
+        
+        if product_code not in product_code_map:
+            raise ValueError(f"第 {idx + 2} 行: 产品编码 '{product_code}' 不存在{product_list_str}")
+        
+        product_name, product_id, sys_qty, sys_warehouse = product_code_map[product_code]
+        actual_warehouse = warehouse if warehouse and warehouse != "nan" else sys_warehouse
+        
+        difference = count_quantity - sys_qty
+        
+        items.append({
+            "product_code": product_code,
+            "product_name": product_name,
+            "product_id": product_id,
+            "warehouse": actual_warehouse,
+            "system_quantity": sys_qty,
+            "count_quantity": count_quantity,
+            "difference": difference,
+            "has_difference": difference != 0,
+            "notes": notes,
+        })
+    
     return items

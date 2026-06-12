@@ -2,6 +2,7 @@ from models.user import User
 from models.tenant import Tenant
 from models.store import Store
 from models.product import Product
+from models.product_binding import ProductBinding
 from models.review import Review
 from models.department import Department, UserDepartment
 from models.permission import Role, Permission, RolePermission
@@ -14,6 +15,7 @@ __all__ = [
     "Tenant",
     "Store",
     "Product",
+    "ProductBinding",
     "Review",
     "Department",
     "UserDepartment",
