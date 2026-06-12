@@ -49,6 +49,7 @@ const EmailBot: React.FC = () => {
   const [aiReplyGenerating, setAiReplyGenerating] = useState(false)
   const [aiReplyResult, setAiReplyResult] = useState<{ reply_text: string; reply_text_chinese: string } | null>(null)
   const [aiReplyForm] = Form.useForm()
+  const [reRunLoading, setReRunLoading] = useState(false)
 
   const fetchStoreNames = useCallback(async () => {
     try {
@@ -252,6 +253,27 @@ const EmailBot: React.FC = () => {
       setAiReplyModalVisible(false)
       setAiReplyResult(null)
       message.success('已采纳AI回复')
+    }
+  }
+
+  const handleReRunRobot = async () => {
+    if (!selectedEmail) return
+    setReRunLoading(true)
+    try {
+      const response = await emailsApi.reRunRobot(selectedEmail.id)
+      if (response.data.success) {
+        message.success('重新运行成功')
+        // 刷新数据
+        const detailResponse = await emailsApi.getById(selectedEmail.id)
+        if (detailResponse.data.success) {
+          setSelectedEmail(detailResponse.data.data)
+        }
+      }
+    } catch (error) {
+      console.error('重新运行失败:', error)
+      message.error('重新运行失败，请重试')
+    } finally {
+      setReRunLoading(false)
     }
   }
 
@@ -555,22 +577,34 @@ const EmailBot: React.FC = () => {
           onCancel={() => setSelectedEmail(null)}
           footer={[
             <Space key="actions">
-              {hasPermission('robot:email:manage') && (
+            {hasPermission('robot:email:manage') && (
+              <Button
+                type="primary"
+                onClick={() => handleConfirmFollowUp(selectedEmail)}
+                disabled={selectedEmail.follow_up_status === 1}
+              >
+                确认跟进
+              </Button>
+            )}
+            {hasPermission('robot:email:manage') && (
+              <Button
+                type="default"
+                onClick={handleOpenNeedReply}
+                disabled={selectedEmail.need_reply === 1 || selectedEmail.follow_up_status === 1}
+              >
+                需要回复
+              </Button>
+            )}
+              {selectedEmail.need_reply === 1 &&
+                selectedEmail.follow_up_status === 0 &&
+                selectedEmail.reply_text_time &&
+                dayjs().diff(dayjs(selectedEmail.reply_text_time), 'hour') > 24 && (
                 <Button
-                  type="primary"
-                  onClick={() => handleConfirmFollowUp(selectedEmail)}
-                  disabled={selectedEmail.follow_up_status === 1}
+                  type="dashed"
+                  loading={reRunLoading}
+                  onClick={handleReRunRobot}
                 >
-                  确认跟进
-                </Button>
-              )}
-              {hasPermission('robot:email:manage') && (
-                <Button
-                  type="default"
-                  onClick={handleOpenNeedReply}
-                  disabled={selectedEmail.need_reply === 1 || selectedEmail.follow_up_status === 1}
-                >
-                  需要回复
+                  重新运行机器人
                 </Button>
               )}
               <Button key="close" onClick={() => setSelectedEmail(null)}>
