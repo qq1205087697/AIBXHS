@@ -277,6 +277,7 @@ const InboundManagement: React.FC = () => {
   const handleCreate = () => {
     setEditingOrder(null)
     setViewingOrder(null)
+    form.resetFields()
     const orderNumber = `IN${dayjs().format('YYYYMMDDHHmmss')}`
     const handler = user?.nickname || user?.username || ''
     form.setFieldsValue({

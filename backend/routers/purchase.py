@@ -10,7 +10,7 @@ from urllib.parse import quote
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
-from services.operation_log import log_order_create, log_order_cancel, log_order_delete
+from services.operation_log import log_order_create, log_order_update, log_order_confirm, log_order_cancel, log_order_delete
 from services.excel_helper import create_purchase_excel_template, parse_purchase_excel
 
 router = APIRouter(prefix="/api/purchase-orders", tags=["purchase_orders"])
@@ -223,6 +223,7 @@ async def create_purchase_order(
         log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "purchase", order_id, data.order_number,
                          {"order_number": data.order_number, "supplier": data.supplier, "items_count": len(data.items)})
+        db.commit()
 
         return {"success": True, "message": "采购订单创建成功", "data": {"id": order_id}}
     except HTTPException:
@@ -273,20 +274,21 @@ async def update_purchase_order(
 ):
     try:
         row = db.execute(text(
-            "SELECT id FROM purchase_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            "SELECT id, order_number, status FROM purchase_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
         ), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="采购订单不存在")
+
+        before_status = row[2]
+        before_data = {"order_number": row[1], "status": before_status}
 
         # 检查是否是审批操作
         is_approve = data.status == "approved"
         
         # 权限检查
         if is_approve:
-            # 审批操作需要 purchase:confirm 权限
             await check_permission("purchase:confirm", current_user, db)
         else:
-            # 普通编辑需要 purchase:edit 权限
             await check_permission("purchase:edit", current_user, db)
 
         updates = []
@@ -305,6 +307,18 @@ async def update_purchase_order(
 
         if updates:
             db.execute(text(f"UPDATE purchase_orders SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"), params)
+            db.commit()
+
+        after_data = {"order_number": row[1], "status": data.status or before_status}
+        
+        if is_approve:
+            log_order_confirm(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                             "purchase", order_id, row[1],
+                             {"status": before_status}, {"status": "approved"})
+            db.commit()
+        else:
+            log_order_update(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                             "purchase", order_id, row[1], before_data, after_data)
             db.commit()
 
         return {"success": True, "message": "采购订单更新成功"}
@@ -335,6 +349,7 @@ async def delete_purchase_order(
 
         log_order_delete(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "purchase", order_id, row[1], before_data)
+        db.commit()
 
         return {"success": True, "message": "采购订单已删除"}
     except HTTPException:

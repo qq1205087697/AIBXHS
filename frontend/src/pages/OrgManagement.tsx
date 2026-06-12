@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Table, Button, Modal, Input, Form, Select, message, Space, Tag, Tabs, Typography, Dropdown, MenuProps, Popconfirm } from 'antd'
+import { Card, Table, Button, Modal, Input, Form, Select, message, Space, Tag, Tabs, Typography, Dropdown, MenuProps, Popconfirm, Pagination } from 'antd'
 import { PlusOutlined, DeleteOutlined, EditOutlined, TeamOutlined, UserOutlined, LockOutlined, MoreOutlined, DownOutlined } from '@ant-design/icons'
 import { departmentsApi, permissionsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
@@ -46,6 +46,8 @@ const OrgManagement: React.FC = () => {
   const [users, setUsers] = useState<UserItem[]>([])
   const [roles, setRoles] = useState<Role[]>([])
   const [loading, setLoading] = useState(false)
+  const [userPagination, setUserPagination] = useState({ current: 1, pageSize: 20, total: 0 })
+  const [deptPagination, setDeptPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [deptModalOpen, setDeptModalOpen] = useState(false)
   const [editingDept, setEditingDept] = useState<Department | null>(null)
   const [deptForm] = Form.useForm()
@@ -80,8 +82,14 @@ const OrgManagement: React.FC = () => {
         departmentsApi.getAllUsers(),
         permissionsApi.getRoles()
       ])
-      if (deptRes.data.success) setDepartments(deptRes.data.data)
-      if (usersRes.data.success) setUsers(usersRes.data.data)
+      if (deptRes.data.success) {
+        setDepartments(deptRes.data.data)
+        setDeptPagination(prev => ({ ...prev, total: deptRes.data.data.length }))
+      }
+      if (usersRes.data.success) {
+        setUsers(usersRes.data.data)
+        setUserPagination(prev => ({ ...prev, total: usersRes.data.data.length }))
+      }
       if (rolesRes.data.success) setRoles(rolesRes.data.data)
     } catch (e) {
       console.error('获取数据失败:', e)
@@ -490,13 +498,24 @@ const OrgManagement: React.FC = () => {
     }
   ]
 
+  const getCurrentPageUsers = () => {
+    const start = (userPagination.current - 1) * userPagination.pageSize
+    const end = start + userPagination.pageSize
+    return users.slice(start, end)
+  }
+
+  const getCurrentPageDepts = () => {
+    const start = (deptPagination.current - 1) * deptPagination.pageSize
+    const end = start + deptPagination.pageSize
+    return departments.slice(start, end)
+  }
+
   return (
     <div style={{ 
-      padding: 24, 
-      height: '100%', 
-      display: 'flex', 
-      flexDirection: 'column',
-      overflow: 'hidden'
+      padding: 24,
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
     }}>
       <Tabs
         defaultActiveKey="users"
@@ -506,7 +525,7 @@ const OrgManagement: React.FC = () => {
             key: 'users',
             label: '用户管理',
             children: (
-              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
                 <Card 
                   title="用户列表" 
                   loading={loading}
@@ -523,20 +542,34 @@ const OrgManagement: React.FC = () => {
                     </Space>
                   }
                   style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-                  styles={{ body: { flex: 1, padding: 0, overflow: 'hidden' } }}
+                  styles={{ body: { flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' } }}
                 >
                   <Table 
                     rowSelection={hasPermission('org:edit') ? {
                       ...rowSelection,
                       columnWidth: 60
                     } : undefined}
-                    dataSource={users} 
+                    dataSource={getCurrentPageUsers()} 
                     columns={userColumns} 
                     rowKey="id" 
                     pagination={false}
-                    scroll={{ x: 'max-content' }}
+                    scroll={{ x: 'max-content', y: 'calc(100vh - 380px)' }}
                   />
                 </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16, flexShrink: 0 }}>
+                  <Pagination
+                    current={userPagination.current}
+                    pageSize={userPagination.pageSize}
+                    total={userPagination.total}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setUserPagination(prev => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
               </div>
             )
           },
@@ -544,22 +577,36 @@ const OrgManagement: React.FC = () => {
             key: 'departments',
             label: '部门管理',
             children: (
-              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
                 <Card
                   title="部门列表"
                   loading={loading}
                   extra={<>{hasPermission('org:edit') && <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateDept}>新建部门</Button>}</>}
                   style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-                  styles={{ body: { flex: 1, padding: 0, overflow: 'hidden' } }}
+                  styles={{ body: { flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' } }}
                 >
                   <Table 
-                    dataSource={departments} 
+                    dataSource={getCurrentPageDepts()} 
                     columns={deptColumns} 
                     rowKey="id" 
                     pagination={false}
-                    scroll={{ x: 'max-content' }}
+                    scroll={{ x: 'max-content', y: 'calc(100vh - 380px)' }}
                   />
                 </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16, flexShrink: 0 }}>
+                  <Pagination
+                    current={deptPagination.current}
+                    pageSize={deptPagination.pageSize}
+                    total={deptPagination.total}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setDeptPagination(prev => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
               </div>
             )
           }

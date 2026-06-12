@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, Select, message,
   Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination,
@@ -48,9 +48,10 @@ const StoreManagement: React.FC = () => {
   const [modalOpen, setModalOpen] = useState(false)
   const [editingStore, setEditingStore] = useState<Store | null>(null)
   const [form] = Form.useForm()
-  const [searchForm] = Form.useForm()
-  const [filters, setFilters] = useState({ name_search: '', site_search: '' })
+  const [searchText, setSearchText] = useState('')
+  const [filters, setFilters] = useState<Record<string, any>>({ search: '' })
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
+  const searchTimeoutRef = useRef<number | null>(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchForm] = Form.useForm()
@@ -152,17 +153,26 @@ const StoreManagement: React.FC = () => {
     }
   }
 
-  const handleSearch = async () => {
-    const values = await searchForm.validateFields()
-    setFilters(values)
-    setPagination((prev) => ({ ...prev, current: 1 }))
+  const handleSearch = (value: string) => {
+    setSearchText(value)
+    
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+    
+    searchTimeoutRef.current = setTimeout(() => {
+      setFilters(prev => ({ ...prev, search: value }))
+      setPagination((prev) => ({ ...prev, current: 1 }))
+    }, 300)
   }
 
-  const handleReset = () => {
-    searchForm.resetFields()
-    setFilters({ name_search: '', site_search: '' })
-    setPagination((prev) => ({ ...prev, current: 1 }))
-  }
+  useEffect(() => {
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const rowSelection = {
     selectedRowKeys,
@@ -205,8 +215,10 @@ const StoreManagement: React.FC = () => {
     setEditingStore(store)
     form.setFieldsValue({
       name: store.name,
+      inventory_name: store.inventory_name,
       platform: store.platform,
       site: store.site,
+      shop_abbr: (store as any).shop_abbr,
       platform_store_id: store.platform_store_id,
       department_id: store.department_id,
       status: store.status,
@@ -326,14 +338,14 @@ const StoreManagement: React.FC = () => {
   }
 
   const storeColumns = [
-    { title: '店铺名称', dataIndex: 'name', key: 'name' },
-    { title: '店铺', dataIndex: 'inventory_name', key: 'inventory_name' },
+    { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
     {
       title: '平台',
       dataIndex: 'platform',
       key: 'platform',
       render: (v: string) => <Tag color="blue">{v}</Tag>,
     },
+    { title: '紫鸟账号', dataIndex: 'name', key: 'name' },
     { title: '站点', dataIndex: 'site', key: 'site' },
     { title: '店铺ID', dataIndex: 'platform_store_id', key: 'platform_store_id' },
     {
@@ -401,7 +413,7 @@ const StoreManagement: React.FC = () => {
 
   const transferDataSource = allStores.map((s) => ({
     key: String(s.id),
-    title: `${s.name}${s.site ? ` - ${s.site}` : ''}`,
+    title: `${s.inventory_name || s.name}${s.site ? ` - ${s.site}` : ''}`,
     description: s.platform,
   }))
 
@@ -420,20 +432,14 @@ const StoreManagement: React.FC = () => {
                 <Card
                   loading={loading}
                   title={
-                    <Form form={searchForm} layout="inline" style={{ margin: 0 }}>
-                      <Form.Item name="name_search" label="店铺名">
-                        <Input placeholder="请输入店铺名" style={{ width: 150 }} />
-                      </Form.Item>
-                      <Form.Item name="site_search" label="站点">
-                        <Input placeholder="请输入站点" style={{ width: 150 }} />
-                      </Form.Item>
-                      <Form.Item>
-                        <Space>
-                          <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch}>搜索</Button>
-                          <Button onClick={handleReset}>重置</Button>
-                        </Space>
-                      </Form.Item>
-                    </Form>
+                    <Input
+                      placeholder="搜索紫鸟账号、店铺名、站点..."
+                      prefix={<SearchOutlined />}
+                      allowClear
+                      style={{ width: 400 }}
+                      value={searchText}
+                      onChange={(e) => handleSearch(e.target.value)}
+                    />
                   }
                   extra={
                     <Space>
@@ -504,14 +510,20 @@ const StoreManagement: React.FC = () => {
         width={600}
       >
         <Form form={form} layout="vertical">
-          <Form.Item name="name" label="店铺名称" rules={[{ required: true, message: '请输入店铺名称' }]}>
-            <Input placeholder="请输入店铺名称" />
+          <Form.Item name="inventory_name" label="店铺名" rules={[{ required: true, message: '请输入店铺名' }]}>
+            <Input placeholder="请输入店铺名" />
+          </Form.Item>
+          <Form.Item name="name" label="紫鸟账号">
+            <Input placeholder="请输入紫鸟账号" />
           </Form.Item>
           <Form.Item name="platform" label="平台" rules={[{ required: true, message: '请选择平台' }]} initialValue="amazon">
             <Select placeholder="请选择平台" options={platformOptions} />
           </Form.Item>
           <Form.Item name="site" label="站点">
             <Input placeholder="请输入站点，如US、UK等" />
+          </Form.Item>
+          <Form.Item name="shop_abbr" label="店铺简称" rules={[{ required: true, message: '请输入店铺简称' }]}>
+            <Input placeholder="请输入店铺简称" />
           </Form.Item>
           <Form.Item name="platform_store_id" label="平台店铺ID">
             <Input placeholder="请输入平台店铺ID" />
@@ -584,13 +596,14 @@ const StoreManagement: React.FC = () => {
           size="small"
           pagination={false}
           columns={[
-            { title: '店铺名称', dataIndex: 'name', key: 'name' },
+            { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
             {
               title: '平台',
               dataIndex: 'platform',
               key: 'platform',
               render: (v: string) => <Tag color="blue">{v}</Tag>,
             },
+            { title: '紫鸟账号', dataIndex: 'name', key: 'name' },
             { title: '站点', dataIndex: 'site', key: 'site' },
             {
               title: '操作',

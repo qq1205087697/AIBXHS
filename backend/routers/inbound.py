@@ -11,7 +11,7 @@ from urllib.parse import quote
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
-from services.operation_log import log_order_create, log_order_confirm, log_order_cancel, log_order_delete
+from services.operation_log import log_order_create, log_order_confirm, log_order_cancel, log_order_delete, log_order_update
 from services.inventory_batch import create_inventory_batch, recalculate_product_local_stock
 from services.excel_helper import create_inbound_excel_template, parse_inbound_excel
 
@@ -263,6 +263,7 @@ async def create_inbound_order(
         log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "inbound", order_id, data.order_number,
                          {"order_number": data.order_number, "items_count": len(data.items), "total_quantity": total_qty})
+        db.commit()
 
         return {"success": True, "message": "入库订单创建成功", "data": {"id": order_id}}
     except HTTPException:
@@ -281,12 +282,18 @@ async def update_inbound_order(
 ):
     try:
         row = db.execute(text(
-            "SELECT id, status FROM inbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            "SELECT id, order_number, status, warehouse, notes FROM inbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
         ), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="入库订单不存在")
-        if row[1] != "draft":
+        if row[2] != "draft":
             raise HTTPException(status_code=400, detail="只能修改草稿状态的订单")
+        
+        before_data = {"order_number": row[1], "status": row[2], "warehouse": row[3], "notes": row[4]}
+        if data.items:
+            before_data["items_count"] = db.execute(text(
+                "SELECT COUNT(*) FROM inbound_order_items WHERE inbound_order_id = :oid AND deleted_at IS NULL"
+            ), {"oid": order_id}).scalar()
 
         updates = []
         params = {"id": order_id}
@@ -340,6 +347,13 @@ async def update_inbound_order(
             db.execute(text(f"UPDATE inbound_orders SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"), params)
             db.commit()
 
+        after_data = {"order_number": row[1]}
+        if data.items:
+            after_data["items_count"] = len(data.items)
+        log_order_update(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                         "inbound", order_id, row[1], before_data, after_data)
+        db.commit()
+
         return {"success": True, "message": "入库订单更新成功"}
     except HTTPException:
         raise
@@ -381,11 +395,15 @@ async def confirm_inbound_order(
         inbound_date_str = created_at.strftime("%Y-%m-%d %H:%M:%S")
 
         for item in items:
-            create_inventory_batch(
+            batch_id, batch_number = create_inventory_batch(
                 db, current_user.tenant_id, item[1], order_id, item[0],
                 int(item[2]), item[3] or 0, item[4] or order[3],
                 item[8], inbound_date_str, item[6], item[7]
             )
+            # 把批次号回写到入库明细中
+            db.execute(text("""
+                UPDATE inbound_order_items SET batch_number = :bn WHERE id = :iid
+            """), {"bn": batch_number, "iid": item[0]})
             recalculate_product_local_stock(db, current_user.tenant_id, item[1])
 
         db.execute(text("""
@@ -396,6 +414,7 @@ async def confirm_inbound_order(
         log_order_confirm(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                           "inbound", order_id, order[1],
                           {"status": before_status}, {"status": "confirmed", "items_count": len(items)})
+        db.commit()
 
         return {"success": True, "message": "入库订单已确认，库存已自动更新"}
     except HTTPException:
@@ -506,6 +525,7 @@ async def delete_inbound_order(
 
         log_order_delete(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                         "inbound", order_id, row[1], before_data)
+        db.commit()
 
         return {"success": True, "message": "入库订单已删除"}
     except HTTPException:

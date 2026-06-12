@@ -32,9 +32,9 @@ class ChatRequest(BaseModel):
         max_length=64,
         description="会话ID"
     )
-    chat_type: Literal["review", "inventory"] = Field(
-        "review",
-        description="对话类型: review=差评分析, inventory=库存分析"
+    chat_type: Literal["review", "inventory", "unified"] = Field(
+        "unified",
+        description="对话类型: review=差评分析, inventory=库存分析, unified=统一分析"
     )
     stream: bool = Field(
         False,
@@ -184,7 +184,7 @@ class ChatSearchRequest(BaseModel):
         max_length=100,
         description="搜索关键词"
     )
-    chat_type: Optional[Literal["review", "inventory"]] = Field(
+    chat_type: Optional[Literal["review", "inventory", "unified"]] = Field(
         None,
         description="对话类型过滤"
     )

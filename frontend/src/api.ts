@@ -313,6 +313,7 @@ export const storesApi = {
     name: string;
     platform?: string;
     site?: string;
+    inventory_name?: string;
     platform_store_id?: string;
     department_id?: number;
   }) => apiClient.post("/stores/", data),
@@ -322,6 +323,7 @@ export const storesApi = {
       name?: string;
       platform?: string;
       site?: string;
+      inventory_name?: string;
       platform_store_id?: string;
       department_id?: number;
       status?: string;
@@ -442,10 +444,63 @@ export const productsApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
-  batchImport: (items: any[]) =>
-    apiClient.post('/products/batch-import', { items }),
+  batchImport: (data: any) =>
+    apiClient.post('/products/batch-import', data),
+  getImportRecordStatus: (recordId: number) =>
+    apiClient.get(`/products/import-records/${recordId}/status`),
   batchUpdateMissing: (items: any[]) =>
     apiClient.post('/products/batch-update-missing', { items }),
+  exportProducts: (params?: {
+    search?: string;
+    product_type?: string[];
+    product_attribute?: string;
+    status?: string;
+  }) => apiClient.get('/products/export', {
+    params,
+    paramsSerializer: (params) => {
+      const items: string[] = []
+      Object.entries(params).forEach(([key, value]) => {
+        if (Array.isArray(value)) {
+          value.forEach((v) => items.push(`${key}=${encodeURIComponent(v)}`))
+        } else if (value !== undefined && value !== null) {
+          items.push(`${key}=${encodeURIComponent(String(value))}`)
+        }
+      })
+      return items.join('&')
+    },
+    responseType: 'blob',
+  }),
+  batchDelete: (ids: number[]) =>
+    apiClient.post('/products/batch-delete', { ids }),
+  batchBindAccessory: (data: { finished_product_ids: number[]; accessory_ids: number[]; quantity?: number }) =>
+    apiClient.post('/products/batch-bind-accessory', data),
+  getImportRecords: (params?: {
+    status?: string;
+    created_by?: string;
+    start_date?: string;
+    end_date?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get('/products/import-records', { params }),
+  getImportRecordPreviewData: (id: number) =>
+    apiClient.get(`/products/import-records/${id}/preview-data`),
+  getImportRecordDetail: (id: number) =>
+    apiClient.get(`/products/import-records/${id}`),
+};
+
+// ========== Inventory Count API ==========
+export const inventoryCountApi = {
+  downloadTemplate: () =>
+    apiClient.get('/inventory-count/template', { responseType: 'blob' }),
+  upload: (file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return apiClient.post('/inventory-count/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  confirm: (data: { items: any[] }) =>
+    apiClient.post('/inventory-count/confirm', data),
 };
 
 // ========== Store Groups API ==========
@@ -819,6 +874,26 @@ export const businessSettingsApi = {
 
   resetSetting: (settingType: string) =>
     apiClient.post<BusinessSetting>(`/business-settings/reset/${settingType}`),
+};
+
+// ========== Product Bindings API ==========
+export const productBindingsApi = {
+  getByFinished: (productId: number) =>
+    apiClient.get(`/product-bindings/by-finished/${productId}`),
+  getByAccessory: (productId: number) =>
+    apiClient.get(`/product-bindings/by-accessory/${productId}`),
+  create: (data: {
+    finished_product_id: number;
+    accessory_product_id: number;
+    quantity: number;
+  }) => apiClient.post("/product-bindings/", data),
+  update: (bindingId: number, data: {
+    finished_product_id: number;
+    accessory_product_id: number;
+    quantity: number;
+  }) => apiClient.put(`/product-bindings/${bindingId}`, data),
+  delete: (bindingId: number) =>
+    apiClient.delete(`/product-bindings/${bindingId}`),
 };
 
 export default apiClient;

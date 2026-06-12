@@ -36,7 +36,7 @@ def create_inventory_batch(
     production_date: date | str | None = None,
     expiry_date: date | str | None = None,
     notes: str | None = None,
-) -> int:
+) -> tuple[int, str]:
     batch_number = generate_batch_number(product_id, str(inbound_date) if inbound_date else None)
 
     if isinstance(unit_price, (int, float)):
@@ -69,7 +69,7 @@ def create_inventory_batch(
     })
     result = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
     db.commit()
-    return result
+    return result, batch_number
 
 
 def deduce_inventory_fifo(
@@ -210,9 +210,19 @@ def get_product_stock_summary(db: Session, tenant_id: int, product_id: int) -> d
         if row[11]:
             source_type = "stock_transfer"
         
+        batch_number = row[1]
+        if not batch_number:
+            # 如果没有批次号，生成一个
+            batch_number = generate_batch_number(product_id, row[6])
+            # 更新数据库
+            db.execute(text("""
+                UPDATE inventory_batches SET batch_number = :bn WHERE id = :id
+            """), {"bn": batch_number, "id": row[0]})
+            db.commit()
+        
         batches.append({
             "id": int(row[0]),
-            "batch_number": row[1],
+            "batch_number": batch_number,
             "current_quantity": qty,
             "unit_price": float(row[3]) if row[3] else 0,
             "warehouse": row[4] or "",
