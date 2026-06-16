@@ -630,6 +630,67 @@ async def update_follow_up(
         raise HTTPException(status_code=500, detail=f"更新跟进状态失败: {str(e)}")
 
 
+async def send_feishu_webhook(
+    email_id: str,
+    reply_text: str,
+    db: Session,
+    current_user: User
+):
+    """发送飞书webhook（复用逻辑）"""
+    if current_user.role != "admin":
+        webhook_access_filter = """ AND s.id IN (
+            SELECT s2.id FROM stores s2
+            WHERE s2.department_id IN (
+                SELECT ud.department_id FROM user_departments ud
+                WHERE ud.user_id = :user_id
+            )
+        )"""
+    else:
+        webhook_access_filter = ""
+
+    query = text(f"""
+        SELECT
+            e.id, e.mail_subject, e.mail_content,
+            e.mail_content_chinese, e.buyer_mail_number,
+            e.ai_reply_content, e.site, e.language,
+            s.name AS store_name
+        FROM email_messages e
+        LEFT JOIN stores s ON e.store_id = s.id
+        WHERE e.id = :email_id{webhook_access_filter}
+    """)
+    params = {"email_id": email_id}
+    if current_user.role != "admin":
+        params["user_id"] = current_user.id
+    result = db.execute(query, params)
+    row = result.fetchone()
+    
+    if row:
+        webhook_data = {
+            "紫鸟账号": (row[-1] or ""),
+            "站点": get_site_name(row[-3] or ""),
+            "语言": get_language_name(row[-2] or ""),
+            "邮件主题": row[1] or "",
+            "邮件内容": row[2] or "",
+            "邮件内容-中文": row[3] or "",
+            "买家邮件": row[4] or "",
+            "AI回复内容": row[5] or "",
+            "自定义回复": reply_text or "",
+            "数据库ID": str(row[0]),
+        }
+        
+        logger.info(f"发送飞书webhook: 邮件ID={email_id}")
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(FEISHU_WEBHOOK_URL, json=webhook_data)
+                if resp.status_code == 200:
+                    logger.info(f"飞书webhook发送成功: 邮件ID={email_id}")
+                else:
+                    logger.warning(f"飞书webhook发送异常: 状态码={resp.status_code}, 响应={resp.text}")
+        except Exception as hook_error:
+            logger.error(f"飞书webhook发送失败: {hook_error}", exc_info=True)
+
+
 @router.put("/{email_id}/need-reply")
 async def update_need_reply(
     email_id: str,
@@ -683,58 +744,7 @@ async def update_need_reply(
         logger.info(f"用户 {current_user.username} 更新了邮件 {email_id} 的需要回复状态")
         
         if request.need_reply == 1:
-            if current_user.role != "admin":
-                webhook_access_filter = """ AND s.id IN (
-                    SELECT s2.id FROM stores s2
-                    WHERE s2.department_id IN (
-                        SELECT ud.department_id FROM user_departments ud
-                        WHERE ud.user_id = :user_id
-                    )
-                )"""
-            else:
-                webhook_access_filter = ""
-
-            query = text(f"""
-                SELECT
-                    e.id, e.mail_subject, e.mail_content,
-                    e.mail_content_chinese, e.buyer_mail_number,
-                    e.ai_reply_content, e.site, e.language,
-                    s.name AS store_name
-                FROM email_messages e
-                LEFT JOIN stores s ON e.store_id = s.id
-                WHERE e.id = :email_id{webhook_access_filter}
-            """)
-            params = {"email_id": email_id}
-            if current_user.role != "admin":
-                params["user_id"] = current_user.id
-            result = db.execute(query, params)
-            row = result.fetchone()
-            
-            if row:
-                webhook_data = {
-                    "紫鸟账号": (row[-1] or ""),
-                    "站点": get_site_name(row[-3] or ""),
-                    "语言": get_language_name(row[-2] or ""),
-                    "邮件主题": row[1] or "",
-                    "邮件内容": row[2] or "",
-                    "邮件内容-中文": row[3] or "",
-                    "买家邮件": row[4] or "",
-                    "AI回复内容": row[5] or "",
-                    "自定义回复": request.reply_text or "",
-                    "数据库ID": str(row[0]),
-                }
-                
-                logger.info(f"发送飞书webhook: 邮件ID={email_id}")
-                
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        resp = await client.post(FEISHU_WEBHOOK_URL, json=webhook_data)
-                        if resp.status_code == 200:
-                            logger.info(f"飞书webhook发送成功: 邮件ID={email_id}")
-                        else:
-                            logger.warning(f"飞书webhook发送异常: 状态码={resp.status_code}, 响应={resp.text}")
-                except Exception as hook_error:
-                    logger.error(f"飞书webhook发送失败: {hook_error}", exc_info=True)
+            await send_feishu_webhook(email_id, request.reply_text or "", db, current_user)
         
         return {"success": True, "message": "更新成功"}
         
@@ -744,3 +754,71 @@ async def update_need_reply(
         db.rollback()
         logger.error(f"更新需要回复状态失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"更新需要回复状态失败: {str(e)}")
+
+
+@router.post("/{email_id}/re-run")
+async def re_run_robot(
+    email_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """重新运行机器人（重新发送飞书Webhook）"""
+    try:
+        # 获取邮件信息
+        if current_user.role != "admin":
+            access_filter = """ AND e.store_id IN (
+                SELECT s2.id FROM stores s2
+                WHERE s2.department_id IN (
+                    SELECT ud.department_id FROM user_departments ud
+                    WHERE ud.user_id = :user_id
+                )
+            )"""
+        else:
+            access_filter = ""
+        
+        query = text(f"""
+            SELECT e.need_reply, e.reply_text
+            FROM email_messages e
+            WHERE e.id = :email_id{access_filter}
+        """)
+        params = {"email_id": email_id}
+        if current_user.role != "admin":
+            params["user_id"] = current_user.id
+        
+        result = db.execute(query, params)
+        row = result.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail=f"邮件 {email_id} 不存在")
+        
+        need_reply = row[0] or 0
+        reply_text = row[1] or ""
+        
+        if need_reply != 1:
+            raise HTTPException(status_code=400, detail="该邮件未设置需要回复")
+        
+        if not reply_text:
+            raise HTTPException(status_code=400, detail="该邮件无回复内容")
+        
+        # 更新时间
+        update_time_query = text(f"""
+            UPDATE email_messages 
+            SET reply_text_time = NOW()
+            WHERE id = :email_id{access_filter}
+        """)
+        db.execute(update_time_query, params)
+        db.commit()
+        
+        # 重新发送飞书
+        await send_feishu_webhook(email_id, reply_text, db, current_user)
+        
+        logger.info(f"用户 {current_user.username} 重新运行了邮件 {email_id} 的机器人")
+        
+        return {"success": True, "message": "重新运行成功"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"重新运行失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"重新运行失败: {str(e)}")
