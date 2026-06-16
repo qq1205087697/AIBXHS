@@ -63,11 +63,15 @@ def init_db():
         from models.user import User
         from models.store import Store
         from models.product import Product
+        from models.product_binding import ProductBinding
         from models.inventory import InventoryRecord, InventoryAlert, InventoryAction
         from models.review import Review, ReviewAnalysis, ReviewHandling
         from models.conversation import ConversationHistory
         from models.department import Department, UserDepartment
         from models.product_selection import ProductSelection
+        from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
+        from models.local_inventory import LocalInventory
+        from models.inventory_management import PurchaseOrder, PurchaseOrderItem, InboundOrder, InboundOrderItem, OutboundOrder, OutboundOrderItem, InventoryBatch, OperationLog, StockTransferOrder, StockTransferOrderItem, Warehouse
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)

@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Table, Button, Modal, Input, Form, Select, message, Popconfirm, Space, Tag, Tabs, Alert, Typography } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, TeamOutlined, CopyOutlined } from '@ant-design/icons'
-import { departmentsApi } from '../api'
+import { Card, Table, Button, Modal, Input, Form, Select, message, Space, Tag, Tabs, Typography, Dropdown, MenuProps, Popconfirm, Pagination } from 'antd'
+import { PlusOutlined, DeleteOutlined, EditOutlined, TeamOutlined, UserOutlined, LockOutlined, MoreOutlined, DownOutlined } from '@ant-design/icons'
+import { departmentsApi, permissionsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
+import { useAuth } from '../contexts/AuthContext'
 import type { TableProps } from 'antd'
+
+const { Title } = Typography
 
 interface Department {
   id: number
@@ -19,15 +22,32 @@ interface UserItem {
   nickname: string
   email: string
   role: string
+  status: string
+  role_id?: number
   department_names: string
   department_ids: string
 }
 
+interface Role {
+  id: number
+  name: string
+  code: string
+  description: string
+  is_system: boolean
+  sort_order: number
+  created_at: string
+  user_count: number
+}
+
 const OrgManagement: React.FC = () => {
   const { currentTheme } = useTheme()
+  const { hasPermission } = useAuth()
   const [departments, setDepartments] = useState<Department[]>([])
   const [users, setUsers] = useState<UserItem[]>([])
+  const [roles, setRoles] = useState<Role[]>([])
   const [loading, setLoading] = useState(false)
+  const [userPagination, setUserPagination] = useState({ current: 1, pageSize: 20, total: 0 })
+  const [deptPagination, setDeptPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [deptModalOpen, setDeptModalOpen] = useState(false)
   const [editingDept, setEditingDept] = useState<Department | null>(null)
   const [deptForm] = Form.useForm()
@@ -39,11 +59,16 @@ const OrgManagement: React.FC = () => {
   const [selectedDeptIds, setSelectedDeptIds] = useState<number[]>([])
   const [userModalOpen, setUserModalOpen] = useState(false)
   const [userForm] = Form.useForm()
+  const [editingUser, setEditingUser] = useState<UserItem | null>(null)
   const [createdUserInfo, setCreatedUserInfo] = useState<any>(null)
   const [successModalOpen, setSuccessModalOpen] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [batchAssignModalOpen, setBatchAssignModalOpen] = useState(false)
   const [batchSelectedDeptIds, setBatchSelectedDeptIds] = useState<number[]>([])
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false)
+  const [passwordForm] = Form.useForm()
+  const [batchPasswordModalOpen, setBatchPasswordModalOpen] = useState(false)
+  const [batchPasswordForm] = Form.useForm()
 
   useEffect(() => {
     fetchData()
@@ -52,12 +77,20 @@ const OrgManagement: React.FC = () => {
   const fetchData = async () => {
     setLoading(true)
     try {
-      const [deptRes, usersRes] = await Promise.all([
+      const [deptRes, usersRes, rolesRes] = await Promise.all([
         departmentsApi.getList(),
-        departmentsApi.getAllUsers()
+        departmentsApi.getAllUsers(),
+        permissionsApi.getRoles()
       ])
-      if (deptRes.data.success) setDepartments(deptRes.data.data)
-      if (usersRes.data.success) setUsers(usersRes.data.data)
+      if (deptRes.data.success) {
+        setDepartments(deptRes.data.data)
+        setDeptPagination(prev => ({ ...prev, total: deptRes.data.data.length }))
+      }
+      if (usersRes.data.success) {
+        setUsers(usersRes.data.data)
+        setUserPagination(prev => ({ ...prev, total: usersRes.data.data.length }))
+      }
+      if (rolesRes.data.success) setRoles(rolesRes.data.data)
     } catch (e) {
       console.error('获取数据失败:', e)
     } finally {
@@ -138,34 +171,85 @@ const OrgManagement: React.FC = () => {
   }
 
   const handleCreateUser = () => {
+    setEditingUser(null)
     userForm.resetFields()
+    setUserModalOpen(true)
+  }
+
+  const handleEditUser = (user: UserItem) => {
+    setEditingUser(user)
+    userForm.setFieldsValue({
+      username: user.username,
+      email: user.email,
+      nickname: user.nickname,
+      role_id: user.role_id
+    })
     setUserModalOpen(true)
   }
 
   const handleUserSubmit = async () => {
     try {
       const values = await userForm.validateFields()
-      const res = await departmentsApi.createUser(values)
-      if (res.data.success) {
-        setCreatedUserInfo(res.data.data)
-        setUserModalOpen(false)
-        setSuccessModalOpen(true)
-        fetchData()
+      if (editingUser) {
+        await departmentsApi.updateUser(editingUser.id, values)
+        message.success('用户更新成功')
+      } else {
+        const res = await departmentsApi.createUser(values)
+        if (res.data.success) {
+          setCreatedUserInfo(res.data.data)
+          setSuccessModalOpen(true)
+        }
       }
+      setUserModalOpen(false)
+      fetchData()
     } catch (e: any) {
       if (e.errorFields) return
-      message.error(e.response?.data?.detail || '创建用户失败')
+      message.error(e.response?.data?.detail || '操作失败')
     }
   }
 
-  const handleCopyUserInfo = () => {
-    if (!createdUserInfo) return
-    const info = `用户名：${createdUserInfo.username}\n密码：${createdUserInfo.password}\n邮箱：${createdUserInfo.email}\n角色：${createdUserInfo.role === 'admin' ? '管理员' : '普通用户'}`
-    navigator.clipboard.writeText(info).then(() => {
-      message.success('用户信息已复制到剪贴板')
-    }).catch(() => {
-      message.error('复制失败，请手动复制')
+  const handleToggleUserStatus = async (user: UserItem) => {
+    try {
+      await departmentsApi.toggleUserStatus(user.id)
+      message.success('用户状态已切换')
+      fetchData()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '切换状态失败')
+    }
+  }
+
+  const handleDeleteUser = (user: UserItem) => {
+    Modal.confirm({
+      title: '删除用户',
+      content: `确定要删除用户"${user.nickname || user.username}"吗？`,
+      onOk: async () => {
+        try {
+          await departmentsApi.deleteUser(user.id)
+          message.success('用户删除成功')
+          fetchData()
+        } catch (e: any) {
+          message.error(e.response?.data?.detail || '删除失败')
+        }
+      }
     })
+  }
+
+  const handleOpenPasswordModal = (user: UserItem) => {
+    setSelectedUser(user)
+    passwordForm.resetFields()
+    setPasswordModalOpen(true)
+  }
+
+  const handleChangePassword = async () => {
+    if (!selectedUser) return
+    try {
+      const values = await passwordForm.validateFields()
+      await departmentsApi.changeUserPassword(selectedUser.id, values.new_password)
+      message.success('密码修改成功')
+      setPasswordModalOpen(false)
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '修改密码失败')
+    }
   }
 
   const handleBatchAssign = () => {
@@ -192,6 +276,151 @@ const OrgManagement: React.FC = () => {
     }
   }
 
+  const handleBatchEnable = async () => {
+    try {
+      await departmentsApi.batchEnableUsers(selectedRowKeys.map(Number))
+      message.success('批量启用成功')
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e) {
+      message.error('批量启用失败')
+    }
+  }
+
+  const handleBatchDisable = async () => {
+    try {
+      await departmentsApi.batchDisableUsers(selectedRowKeys.map(Number))
+      message.success('批量禁用成功')
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e) {
+      message.error('批量禁用失败')
+    }
+  }
+
+  const handleBatchPasswordSubmit = async () => {
+    try {
+      const values = await batchPasswordForm.validateFields()
+      await departmentsApi.batchChangePassword(selectedRowKeys.map(Number), values.new_password)
+      message.success('批量修改密码成功')
+      setBatchPasswordModalOpen(false)
+      setSelectedRowKeys([])
+      batchPasswordForm.resetFields()
+      fetchData()
+    } catch (e) {
+      message.error('批量修改密码失败')
+    }
+  }
+
+  const handleBatchDelete = async () => {
+    try {
+      await departmentsApi.batchDeleteUsers(selectedRowKeys.map(Number))
+      message.success('批量删除成功')
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e) {
+      message.error('批量删除失败')
+    }
+  }
+
+  const getRoleName = (roleCode: string, roleId?: number) => {
+    if (roleId) {
+      const role = roles.find(r => r.id === roleId)
+      if (role) return role.name
+    }
+    const role = roles.find(r => r.code === roleCode)
+    if (role) return role.name
+    return roleCode === 'admin' ? '管理员' : roleCode
+  }
+
+  const getUserActionsMenu = (user: UserItem): MenuProps['items'] => [
+    {
+      key: 'assign',
+      label: '分配部门',
+      icon: <TeamOutlined />,
+      onClick: () => handleAssignDepts(user)
+    },
+    {
+      key: 'toggle',
+      label: user.status === 'active' ? '禁用' : '启用',
+      icon: <UserOutlined />,
+      onClick: () => handleToggleUserStatus(user)
+    },
+    {
+      key: 'password',
+      label: '更改密码',
+      icon: <LockOutlined />,
+      onClick: () => handleOpenPasswordModal(user)
+    },
+    {
+      type: 'divider'
+    },
+    {
+      key: 'delete',
+      label: '删除',
+      style: { color: '#ff4d4f' },
+      icon: <DeleteOutlined />,
+      onClick: () => handleDeleteUser(user)
+    }
+  ]
+
+  const batchActionsMenu: MenuProps['items'] = [
+    {
+      key: 'assign',
+      label: '批量分配部门',
+      icon: <TeamOutlined />,
+      onClick: () => handleBatchAssign()
+    },
+    {
+      key: 'enable',
+      label: '批量启用',
+      icon: <UserOutlined />,
+      onClick: () => {
+        Modal.confirm({
+          title: '批量启用用户',
+          content: `确定要启用选中的 ${selectedRowKeys.length} 个用户吗？`,
+          onOk: handleBatchEnable
+        })
+      }
+    },
+    {
+      key: 'disable',
+      label: '批量禁用',
+      icon: <UserOutlined />,
+      onClick: () => {
+        Modal.confirm({
+          title: '批量禁用用户',
+          content: `确定要禁用选中的 ${selectedRowKeys.length} 个用户吗？`,
+          onOk: handleBatchDisable
+        })
+      }
+    },
+    {
+      key: 'password',
+      label: '批量修改密码',
+      icon: <LockOutlined />,
+      onClick: () => {
+        setBatchPasswordModalOpen(true)
+      }
+    },
+    {
+      type: 'divider'
+    },
+    {
+      key: 'delete',
+      label: '批量删除',
+      style: { color: '#ff4d4f' },
+      icon: <DeleteOutlined />,
+      onClick: () => {
+        Modal.confirm({
+          title: '批量删除用户',
+          content: `确定要删除选中的 ${selectedRowKeys.length} 个用户吗？此操作不可恢复！`,
+          onOk: handleBatchDelete
+        })
+      }
+    }
+  ]
+
   const deptColumns = [
     { title: '部门名称', dataIndex: 'name', key: 'name' },
     { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
@@ -205,10 +434,12 @@ const OrgManagement: React.FC = () => {
       render: (_: any, record: Department) => (
         <Space>
           <Button size="small" icon={<TeamOutlined />} onClick={() => handleManageMembers(record)}>成员</Button>
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleEditDept(record)}>编辑</Button>
-          <Popconfirm title="确定删除?" onConfirm={() => handleDeleteDept(record.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
+          {hasPermission('org:edit') && (
+            <>
+              <Button size="small" icon={<EditOutlined />} onClick={() => handleEditDept(record)}>编辑</Button>
+              <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteDept(record.id)}>删除</Button>
+            </>
+          )}
         </Space>
       )
     }
@@ -225,11 +456,21 @@ const OrgManagement: React.FC = () => {
 
   const userColumns = [
     { title: '用户名', dataIndex: 'username', key: 'username' },
-    { title: '昵称', dataIndex: 'nickname', key: 'nickname' },
+    { title: '姓名', dataIndex: 'nickname', key: 'nickname' },
     { title: '邮箱', dataIndex: 'email', key: 'email', ellipsis: true },
     {
       title: '角色', dataIndex: 'role', key: 'role',
-      render: (v: string) => <Tag color={v === 'admin' ? 'red' : 'blue'}>{v === 'admin' ? '管理员' : '普通用户'}</Tag>
+      render: (v: string, record: UserItem) => (
+        <Tag color={v === 'admin' ? 'red' : 'blue'}>{getRoleName(v, record.role_id)}</Tag>
+      )
+    },
+    {
+      title: '状态', dataIndex: 'status', key: 'status',
+      render: (v: string) => (
+        <Tag color={v === 'active' ? 'green' : 'default'}>
+          {v === 'active' ? '启用' : '禁用'}
+        </Tag>
+      )
     },
     {
       title: '所属部门', dataIndex: 'department_names', key: 'department_names',
@@ -238,55 +479,135 @@ const OrgManagement: React.FC = () => {
     {
       title: '操作', key: 'actions',
       render: (_: any, record: UserItem) => (
-        <Button size="small" type="primary" onClick={() => handleAssignDepts(record)}>分配部门</Button>
+        <Space>
+          {hasPermission('org:edit') && (
+            <>
+              <Button size="small" type="primary" icon={<EditOutlined />} onClick={() => handleEditUser(record)}>
+                编辑
+              </Button>
+              <Dropdown
+                menu={{ items: getUserActionsMenu(record) }}
+                trigger={['click']}
+              >
+                <Button size="small" icon={<MoreOutlined />}>操作</Button>
+              </Dropdown>
+            </>
+          )}
+        </Space>
       )
     }
   ]
 
+  const getCurrentPageUsers = () => {
+    const start = (userPagination.current - 1) * userPagination.pageSize
+    const end = start + userPagination.pageSize
+    return users.slice(start, end)
+  }
+
+  const getCurrentPageDepts = () => {
+    const start = (deptPagination.current - 1) * deptPagination.pageSize
+    const end = start + deptPagination.pageSize
+    return departments.slice(start, end)
+  }
+
   return (
-    <div style={{ padding: 24, overflow: 'auto', height: '100%' }}>
+    <div style={{ 
+      padding: 24,
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }}>
       <Tabs
-        defaultActiveKey="departments"
+        defaultActiveKey="users"
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
         items={[
+          {
+            key: 'users',
+            label: '用户管理',
+            children: (
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+                <Card 
+                  title="用户列表" 
+                  loading={loading}
+                  extra={
+                    <Space>
+                      {hasPermission('org:edit') && selectedRowKeys.length > 0 && (
+                        <Dropdown menu={{ items: batchActionsMenu }} trigger={['click']}>
+                          <Button type="primary">
+                            批量操作 ({selectedRowKeys.length}) <DownOutlined />
+                          </Button>
+                        </Dropdown>
+                      )}
+                      {hasPermission('org:edit') && <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateUser}>新建用户</Button>}
+                    </Space>
+                  }
+                  style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+                  styles={{ body: { flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' } }}
+                >
+                  <Table 
+                    rowSelection={hasPermission('org:edit') ? {
+                      ...rowSelection,
+                      columnWidth: 60
+                    } : undefined}
+                    dataSource={getCurrentPageUsers()} 
+                    columns={userColumns} 
+                    rowKey="id" 
+                    pagination={false}
+                    scroll={{ x: 'max-content', y: 'calc(100vh - 380px)' }}
+                  />
+                </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16, flexShrink: 0 }}>
+                  <Pagination
+                    current={userPagination.current}
+                    pageSize={userPagination.pageSize}
+                    total={userPagination.total}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setUserPagination(prev => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
+              </div>
+            )
+          },
           {
             key: 'departments',
             label: '部门管理',
             children: (
-              <Card
-                title="部门列表"
-                loading={loading}
-                extra={<Button type="primary" icon={<PlusOutlined />} onClick={handleCreateDept}>新建部门</Button>}
-              >
-                <Table dataSource={departments} columns={deptColumns} rowKey="id" pagination={false} />
-              </Card>
-            )
-          },
-          {
-            key: 'users',
-            label: '用户部门分配',
-            children: (
-              <Card 
-                title="用户列表" 
-                loading={loading}
-                extra={
-                  <Space>
-                    {selectedRowKeys.length > 0 && (
-                      <Button type="primary" onClick={handleBatchAssign}>
-                        批量分配部门 ({selectedRowKeys.length})
-                      </Button>
-                    )}
-                    <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateUser}>新建用户</Button>
-                  </Space>
-                }
-              >
-                <Table 
-                  rowSelection={rowSelection}
-                  dataSource={users} 
-                  columns={userColumns} 
-                  rowKey="id" 
-                  pagination={false} 
-                />
-              </Card>
+              <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+                <Card
+                  title="部门列表"
+                  loading={loading}
+                  extra={<>{hasPermission('org:edit') && <Button type="primary" icon={<PlusOutlined />} onClick={handleCreateDept}>新建部门</Button>}</>}
+                  style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+                  styles={{ body: { flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' } }}
+                >
+                  <Table 
+                    dataSource={getCurrentPageDepts()} 
+                    columns={deptColumns} 
+                    rowKey="id" 
+                    pagination={false}
+                    scroll={{ x: 'max-content', y: 'calc(100vh - 380px)' }}
+                  />
+                </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16, flexShrink: 0 }}>
+                  <Pagination
+                    current={deptPagination.current}
+                    pageSize={deptPagination.pageSize}
+                    total={deptPagination.total}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setDeptPagination(prev => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
+              </div>
             )
           }
         ]}
@@ -345,10 +666,11 @@ const OrgManagement: React.FC = () => {
       </Modal>
 
       <Modal
-        title="新建用户"
+        title={editingUser ? '编辑用户' : '新建用户'}
         open={userModalOpen}
         onOk={handleUserSubmit}
         onCancel={() => setUserModalOpen(false)}
+        width={500}
       >
         <Form form={userForm} layout="vertical">
           <Form.Item
@@ -356,7 +678,7 @@ const OrgManagement: React.FC = () => {
             label="用户名"
             rules={[{ required: true, message: '请输入用户名' }]}
           >
-            <Input placeholder="请输入用户名" />
+            <Input placeholder="请输入用户名" disabled={!!editingUser} />
           </Form.Item>
           <Form.Item
             name="email"
@@ -369,13 +691,19 @@ const OrgManagement: React.FC = () => {
             <Input placeholder="请输入邮箱" />
           </Form.Item>
           <Form.Item
-            name="role"
-            label="角色"
-            initialValue="operator"
+            name="nickname"
+            label="姓名"
           >
-            <Select placeholder="请选择角色">
-              <Select.Option value="operator">普通用户</Select.Option>
-              <Select.Option value="admin">管理员</Select.Option>
+            <Input placeholder="请输入姓名（可选）" />
+          </Form.Item>
+          <Form.Item
+            name="role_id"
+            label="角色"
+          >
+            <Select placeholder="请选择角色" style={{ width: '100%' }}>
+              {roles.map(role => (
+                <Select.Option key={role.id} value={role.id}>{role.name}</Select.Option>
+              ))}
             </Select>
           </Form.Item>
         </Form>
@@ -387,36 +715,39 @@ const OrgManagement: React.FC = () => {
         onOk={() => setSuccessModalOpen(false)}
         onCancel={() => setSuccessModalOpen(false)}
         footer={[
-          <Button key="copy" type="primary" icon={<CopyOutlined />} onClick={handleCopyUserInfo}>
-            复制信息
-          </Button>,
           <Button key="close" onClick={() => setSuccessModalOpen(false)}>
             关闭
           </Button>
         ]}
       >
-        <Alert
-          message="请保存以下用户信息"
-          description="此信息只会显示一次，请务必保存或复制后发送给用户"
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-        />
-        {createdUserInfo && (
-          <div style={{ 
-            backgroundColor: '#f5f5f5', 
-            padding: 16, 
-            borderRadius: 8,
-            fontFamily: 'monospace'
-          }}>
-            <Typography.Paragraph copyable={{ text: `用户名：${createdUserInfo.username}\n密码：${createdUserInfo.password}\n邮箱：${createdUserInfo.email}\n角色：${createdUserInfo.role === 'admin' ? '管理员' : '普通用户'}` }}>
-              <p>用户名：{createdUserInfo.username}</p>
-              <p>密码：{createdUserInfo.password}</p>
-              <p>邮箱：{createdUserInfo.email}</p>
-              <p>角色：{createdUserInfo.role === 'admin' ? '管理员' : '普通用户'}</p>
-            </Typography.Paragraph>
-          </div>
-        )}
+        <div style={{ 
+          backgroundColor: '#f5f5f5', 
+          padding: 16, 
+          borderRadius: 8,
+          fontFamily: 'monospace'
+        }}>
+          <p><strong>用户名：</strong>{createdUserInfo?.username}</p>
+          <p><strong>密码：</strong>{createdUserInfo?.password}</p>
+          <p><strong>邮箱：</strong>{createdUserInfo?.email}</p>
+          <p><strong>角色：</strong>{getRoleName(createdUserInfo?.role, createdUserInfo?.role_id)}</p>
+        </div>
+      </Modal>
+
+      <Modal
+        title="更改密码"
+        open={passwordModalOpen}
+        onOk={handleChangePassword}
+        onCancel={() => setPasswordModalOpen(false)}
+      >
+        <Form form={passwordForm} layout="vertical">
+          <Form.Item
+            name="new_password"
+            label="新密码"
+            rules={[{ required: true, message: '请输入新密码' }, { min: 6, message: '密码至少6位' }]}
+          >
+            <Input.Password placeholder="请输入新密码" />
+          </Form.Item>
+        </Form>
       </Modal>
 
       <Modal
@@ -435,6 +766,27 @@ const OrgManagement: React.FC = () => {
           options={departments.map(d => ({ label: d.name, value: d.id }))}
           placeholder="请选择部门"
         />
+      </Modal>
+
+      <Modal
+        title={`批量修改密码 (已选 ${selectedRowKeys.length} 个用户)`}
+        open={batchPasswordModalOpen}
+        onOk={handleBatchPasswordSubmit}
+        onCancel={() => setBatchPasswordModalOpen(false)}
+        width={500}
+      >
+        <Form form={batchPasswordForm} layout="vertical">
+          <Form.Item
+            name="new_password"
+            label="新密码"
+            rules={[
+              { required: true, message: '请输入新密码' },
+              { min: 6, message: '密码至少6位' }
+            ]}
+          >
+            <Input.Password placeholder="请输入所有选中用户的新密码" />
+          </Form.Item>
+        </Form>
       </Modal>
     </div>
   )

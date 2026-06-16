@@ -1,14 +1,48 @@
 import sys
+import os
+import io
 import logging
+import platform
 
-# 配置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+# ========== Windows 控制台 UTF-8 编码修复 ==========
+if "pytest" not in sys.modules:
+    if platform.system() == 'Windows':
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        # 设置控制台代码页为 UTF-8
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+        # 重建 stdout/stderr 为 UTF-8
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        if hasattr(sys.stderr, 'buffer'):
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    else:
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        if hasattr(sys.stderr, 'buffer'):
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+# 配置日志 - 使用 UTF-8 编码的文件 handler 避免控制台乱码
+log_formatter = logging.Formatter(
+    fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# 控制台 handler
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(log_formatter)
+console_handler.setLevel(logging.INFO)
+
+# 根日志配置
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI
@@ -17,7 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, product_selection
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, product_selection
 from config import get_settings
 
 settings = get_settings()
@@ -47,9 +81,26 @@ app.include_router(auth.router)
 app.include_router(departments.router)
 app.include_router(notifications.router)
 app.include_router(stores.router)
+app.include_router(store_groups.router)
 app.include_router(products.router)
 app.include_router(tenants.router)
 app.include_router(product_selection.router)
+app.include_router(emails.router, prefix="/api")
+app.include_router(local_inventory.router, prefix="/api")
+app.include_router(business_settings.router)
+app.include_router(store_mapping.router, prefix="/api")
+app.include_router(inbound.router)
+app.include_router(outbound.router)
+app.include_router(purchase.router)
+app.include_router(inventory_batch.router)
+app.include_router(operation_logs.router)
+app.include_router(permissions.router)
+app.include_router(stock_transfer.router)
+app.include_router(warehouses.router)
+
+app.include_router(inventory_count.router)
+
+app.include_router(product_bindings.router)
 
 @app.get("/api/health")
 async def health_check():
@@ -157,13 +208,17 @@ if __name__ == "__main__":
     import uvicorn
     from config import get_settings
     settings = get_settings()
+    
+    # Windows 不支持多 worker 的 multiprocessing spawn 模式，强制使用 1
+    workers = 1 if platform.system() == 'Windows' else 4
+    
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=settings.PORT,
         reload=False,
         log_level="info",
-        workers=4,  # 使用多个工作进程
+        workers=workers,
         limit_concurrency=1000,
         timeout_keep_alive=5
     )

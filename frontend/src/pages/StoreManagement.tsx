@@ -1,8 +1,15 @@
-import React, { useState, useEffect } from 'react'
-import { Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons'
-import { storesApi, departmentsApi } from '../api'
+import React, { useState, useEffect, useRef } from 'react'
+import {
+  Card, Table, Button, Modal, Form, Input, Select, message,
+  Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination,
+} from 'antd'
+import {
+  PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
+  AppstoreOutlined, ShopOutlined,
+} from '@ant-design/icons'
+import { storesApi, departmentsApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
+import { CSSProperties } from 'react'
 
 interface Store {
   id: number
@@ -13,6 +20,9 @@ interface Store {
   status: string
   department_id: number | null
   department_name: string
+  inventory_name: string | null
+  group_id: number | null
+  group_name: string
   created_at: string
 }
 
@@ -21,23 +31,48 @@ interface Department {
   name: string
 }
 
+interface StoreGroup {
+  id: number
+  name: string
+  description: string
+  store_count: number
+  created_at: string
+}
+
 const StoreManagement: React.FC = () => {
   const { currentTheme } = useTheme()
+
   const [stores, setStores] = useState<Store[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingStore, setEditingStore] = useState<Store | null>(null)
   const [form] = Form.useForm()
-  const [searchForm] = Form.useForm()
-  const [filters, setFilters] = useState({ name_search: '', site_search: '' })
+  const [searchText, setSearchText] = useState('')
+  const [filters, setFilters] = useState<Record<string, any>>({ search: '' })
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
+  const searchTimeoutRef = useRef<number | null>(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchForm] = Form.useForm()
 
+  const [groups, setGroups] = useState<StoreGroup[]>([])
+  const [groupLoading, setGroupLoading] = useState(false)
+  const [groupModalOpen, setGroupModalOpen] = useState(false)
+  const [editingGroup, setEditingGroup] = useState<StoreGroup | null>(null)
+  const [groupForm] = Form.useForm()
+  const [groupDrawerOpen, setGroupDrawerOpen] = useState(false)
+  const [currentGroup, setCurrentGroup] = useState<StoreGroup | null>(null)
+  const [groupStores, setGroupStores] = useState<Store[]>([])
+  const [addStoreModalOpen, setAddStoreModalOpen] = useState(false)
+  const [transferTargetKeys, setTransferTargetKeys] = useState<string[]>([])
+  const [allStores, setAllStores] = useState<Store[]>([])
+
   const platformOptions = [
     { label: 'Amazon', value: 'amazon' },
+    { label: 'eBay', value: 'ebay' },
+    { label: 'Walmart', value: 'walmart' },
+    { label: 'Shopify', value: 'shopify' },
     { label: 'Shopee', value: 'shopee' },
     { label: 'Lazada', value: 'lazada' },
     { label: 'TikTok', value: 'tiktok' },
@@ -51,49 +86,97 @@ const StoreManagement: React.FC = () => {
   ]
 
   useEffect(() => {
-    fetchData()
+    fetchStores()
   }, [pagination.current, pagination.pageSize, filters])
 
-  const fetchData = async () => {
+  useEffect(() => {
+    fetchGroups()
+    fetchAllStores()
+    fetchDepartments()
+  }, [])
+
+  const fetchStores = async () => {
     setLoading(true)
     try {
-      const [storesRes, deptsRes] = await Promise.all([
-        storesApi.getList({
-          page: pagination.current,
-          page_size: pagination.pageSize,
-          ...filters,
-        }),
-        departmentsApi.getList(),
-      ])
-      if (storesRes.data.success) {
-        setStores(storesRes.data.data)
-        setPagination((prev) => ({ ...prev, total: storesRes.data.total }))
+      const res = await storesApi.getList({
+        page: pagination.current,
+        page_size: pagination.pageSize,
+        ...filters,
+      })
+      if (res.data.success) {
+        setStores(res.data.data)
+        setPagination((prev) => ({ ...prev, total: res.data.total }))
       }
-      if (deptsRes.data.success) setDepartments(deptsRes.data.data)
     } catch (e) {
-      console.error('获取数据失败:', e)
+      console.error(e)
     } finally {
       setLoading(false)
     }
   }
 
-  const handleSearch = async () => {
-    const values = await searchForm.validateFields()
-    setFilters(values)
-    setPagination((prev) => ({ ...prev, current: 1 }))
+  const fetchDepartments = async () => {
+    try {
+      const res = await departmentsApi.getList()
+      if (res.data.success) setDepartments(res.data.data)
+    } catch (e) {
+      console.error(e)
+    }
   }
 
-  const handleReset = () => {
-    searchForm.resetFields()
-    setFilters({ name_search: '', site_search: '' })
-    setPagination((prev) => ({ ...prev, current: 1 }))
+  const fetchAllStores = async () => {
+    try {
+      const res = await storesApi.getList({ page: 1, page_size: 1000 })
+      if (res.data.success) setAllStores(res.data.data)
+    } catch (e) {
+      console.error(e)
+    }
   }
+
+  const fetchGroups = async () => {
+    setGroupLoading(true)
+    try {
+      const res = await storeGroupsApi.getList()
+      if (res.data.success) setGroups(res.data.data)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setGroupLoading(false)
+    }
+  }
+
+  const fetchGroupStores = async (groupId: number) => {
+    try {
+      const res = await storeGroupsApi.getGroupStores(groupId)
+      if (res.data.success) setGroupStores(res.data.data)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const handleSearch = (value: string) => {
+    setSearchText(value)
+    
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+    
+    searchTimeoutRef.current = setTimeout(() => {
+      setFilters(prev => ({ ...prev, search: value }))
+      setPagination((prev) => ({ ...prev, current: 1 }))
+    }, 300)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const rowSelection = {
     selectedRowKeys,
-    onChange: (newSelectedRowKeys: React.Key[]) => {
-      setSelectedRowKeys(newSelectedRowKeys)
-    },
+    onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
   }
 
   const handleBatchAssign = () => {
@@ -115,7 +198,7 @@ const StoreManagement: React.FC = () => {
       message.success('批量分配部门成功')
       setBatchModalOpen(false)
       setSelectedRowKeys([])
-      fetchData()
+      fetchStores()
     } catch (e: any) {
       if (e.errorFields) return
       message.error('批量分配失败')
@@ -132,8 +215,10 @@ const StoreManagement: React.FC = () => {
     setEditingStore(store)
     form.setFieldsValue({
       name: store.name,
+      inventory_name: store.inventory_name,
       platform: store.platform,
       site: store.site,
+      shop_abbr: (store as any).shop_abbr,
       platform_store_id: store.platform_store_id,
       department_id: store.department_id,
       status: store.status,
@@ -152,7 +237,8 @@ const StoreManagement: React.FC = () => {
         message.success('店铺创建成功')
       }
       setModalOpen(false)
-      fetchData()
+      fetchStores()
+      fetchAllStores()
     } catch (e: any) {
       if (e.errorFields) return
       message.error('操作失败')
@@ -163,42 +249,123 @@ const StoreManagement: React.FC = () => {
     try {
       await storesApi.delete(id)
       message.success('店铺删除成功')
-      fetchData()
+      fetchStores()
+      fetchAllStores()
     } catch (e) {
       message.error('删除失败')
     }
   }
 
-  const columns = [
-    { title: '店铺名称', dataIndex: 'name', key: 'name' },
+  const handleGroupCreate = () => {
+    setEditingGroup(null)
+    groupForm.resetFields()
+    setGroupModalOpen(true)
+  }
+
+  const handleGroupEdit = (group: StoreGroup) => {
+    setEditingGroup(group)
+    groupForm.setFieldsValue({ name: group.name, description: group.description })
+    setGroupModalOpen(true)
+  }
+
+  const handleGroupSubmit = async () => {
+    try {
+      const values = await groupForm.validateFields()
+      if (editingGroup) {
+        await storeGroupsApi.update(editingGroup.id, values)
+        message.success('分组更新成功')
+      } else {
+        await storeGroupsApi.create(values)
+        message.success('分组创建成功')
+      }
+      setGroupModalOpen(false)
+      fetchGroups()
+    } catch (e: any) {
+      if (e.errorFields) return
+      message.error('操作失败')
+    }
+  }
+
+  const handleGroupDelete = async (id: number) => {
+    try {
+      await storeGroupsApi.delete(id)
+      message.success('分组删除成功')
+      fetchGroups()
+      fetchAllStores()
+    } catch (e) {
+      message.error('删除失败')
+    }
+  }
+
+  const handleOpenGroupDrawer = async (group: StoreGroup) => {
+    setCurrentGroup(group)
+    setGroupDrawerOpen(true)
+    await fetchGroupStores(group.id)
+  }
+
+  const handleOpenAddStoreModal = () => {
+    const currentIds = groupStores.map((s) => String(s.id))
+    setTransferTargetKeys(currentIds)
+    setAddStoreModalOpen(true)
+  }
+
+  const handleAddStoreSubmit = async () => {
+    if (!currentGroup) return
+    try {
+      const newIds = transferTargetKeys.map(Number)
+      await storeGroupsApi.batchAddStores(currentGroup.id, newIds)
+      message.success('分组店铺更新成功')
+      setAddStoreModalOpen(false)
+      await fetchGroupStores(currentGroup.id)
+      fetchGroups()
+      fetchAllStores()
+    } catch (e) {
+      message.error('操作失败')
+    }
+  }
+
+  const handleRemoveStoreFromGroup = async (storeId: number) => {
+    if (!currentGroup) return
+    try {
+      await storeGroupsApi.removeStore(currentGroup.id, storeId)
+      message.success('已从分组移除')
+      await fetchGroupStores(currentGroup.id)
+      fetchGroups()
+      fetchAllStores()
+    } catch (e) {
+      message.error('移除失败')
+    }
+  }
+
+  const storeColumns = [
+    { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
     {
       title: '平台',
       dataIndex: 'platform',
       key: 'platform',
-      render: (platform: string) => (
-        <Tag color="blue">{platform}</Tag>
-      ),
+      render: (v: string) => <Tag color="blue">{v}</Tag>,
     },
+    { title: '紫鸟账号', dataIndex: 'name', key: 'name' },
     { title: '站点', dataIndex: 'site', key: 'site' },
     { title: '店铺ID', dataIndex: 'platform_store_id', key: 'platform_store_id' },
     {
       title: '所属部门',
       dataIndex: 'department_name',
       key: 'department_name',
-      render: (name: string) => (
-        <Tag color="green">{name}</Tag>
-      ),
+      render: (v: string) => <Tag color="green">{v}</Tag>,
+    },
+    {
+      title: '所属分组',
+      dataIndex: 'group_name',
+      key: 'group_name',
+      render: (v: string) => v ? <Tag color="purple">{v}</Tag> : <span style={{ color: '#ccc' }}>-</span>,
     },
     {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
       render: (status: string) => {
-        const colorMap: Record<string, string> = {
-          active: 'success',
-          inactive: 'default',
-          error: 'error',
-        }
+        const colorMap: Record<string, string> = { active: 'success', inactive: 'default', error: 'error' }
         return <Tag color={colorMap[status] || 'default'}>{status}</Tag>
       },
     },
@@ -208,72 +375,132 @@ const StoreManagement: React.FC = () => {
       key: 'actions',
       render: (_: any, record: Store) => (
         <Space>
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
-            编辑
-          </Button>
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>编辑</Button>
           <Popconfirm title="确定删除?" onConfirm={() => handleDelete(record.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />}>
-              删除
-            </Button>
+            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
           </Popconfirm>
         </Space>
       ),
     },
   ]
 
+  const groupColumns = [
+    { title: '分组名称', dataIndex: 'name', key: 'name' },
+    { title: '描述', dataIndex: 'description', key: 'description' },
+    {
+      title: '店铺数量',
+      dataIndex: 'store_count',
+      key: 'store_count',
+      render: (v: number) => <Tag color="blue">{v} 个店铺</Tag>,
+    },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at' },
+    {
+      title: '操作',
+      key: 'actions',
+      render: (_: any, record: StoreGroup) => (
+        <Space>
+          <Button size="small" icon={<ShopOutlined />} onClick={() => handleOpenGroupDrawer(record)}>
+            管理店铺
+          </Button>
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleGroupEdit(record)}>编辑</Button>
+          <Popconfirm title="删除分组后，分组内店铺将取消分组，确定删除?" onConfirm={() => handleGroupDelete(record.id)}>
+            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ]
+
+  const transferDataSource = allStores.map((s) => ({
+    key: String(s.id),
+    title: `${s.inventory_name || s.name}${s.site ? ` - ${s.site}` : ''}`,
+    description: s.platform,
+  }))
+
   return (
-    <div style={{ padding: 24, overflow: 'auto', height: '100%' }}>
-      <Card
-        loading={loading}
-        title={
-          <Form form={searchForm} layout="inline" style={{ margin: 0, width: '100%' }}>
-            <Form.Item name="name_search" label="店铺名">
-              <Input placeholder="请输入店铺名" style={{ width: 150 }} />
-            </Form.Item>
-            <Form.Item name="site_search" label="站点">
-              <Input placeholder="请输入站点" style={{ width: 150 }} />
-            </Form.Item>
-            <Form.Item>
-              <Space>
-                <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch}>
-                  搜索
-                </Button>
-                <Button onClick={handleReset}>重置</Button>
-              </Space>
-            </Form.Item>
-          </Form>
-        }
-        extra={
-          <Space>
-            {selectedRowKeys.length > 0 && (
-              <Button type="default" onClick={handleBatchAssign}>
-                批量分配部门 ({selectedRowKeys.length})
-              </Button>
-            )}
-            <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
-              新增店铺
-            </Button>
-          </Space>
-        }
-      >
-        <Table
-          dataSource={stores}
-          columns={columns}
-          rowKey="id"
-          rowSelection={rowSelection}
-          pagination={{
-            current: pagination.current,
-            pageSize: pagination.pageSize,
-            total: pagination.total,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total) => `共 ${total} 条`,
-            pageSizeOptions: ['10', '20', '50', '100'],
-            onChange: (page, pageSize) =>
-              setPagination((prev) => ({ ...prev, current: page, pageSize: pageSize || 20 })),
-          }}
-        />
-      </Card>
+    <div style={{ padding: 24, height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <Tabs
+        defaultActiveKey="stores"
+        style={{ flex: 1, display: 'flex', flexDirection: 'column' }}
+        destroyInactiveTabPane
+        items={[
+          {
+            key: 'stores',
+            label: <span><ShopOutlined /> 店铺列表</span>,
+            children: (
+              <>
+                <Card
+                  loading={loading}
+                  title={
+                    <Input
+                      placeholder="搜索紫鸟账号、店铺名、站点..."
+                      prefix={<SearchOutlined />}
+                      allowClear
+                      style={{ width: 400 }}
+                      value={searchText}
+                      onChange={(e) => handleSearch(e.target.value)}
+                    />
+                  }
+                  extra={
+                    <Space>
+                      {selectedRowKeys.length > 0 && (
+                        <Button type="default" onClick={handleBatchAssign}>
+                          批量分配部门 ({selectedRowKeys.length})
+                        </Button>
+                      )}
+                      <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新增店铺</Button>
+                    </Space>
+                  }
+                >
+                  <Table
+                    dataSource={stores}
+                    columns={storeColumns}
+                    rowKey="id"
+                    rowSelection={rowSelection}
+                    scroll={{ x: 1200, y: 500 }}
+                    pagination={false}
+                  />
+                </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16 }}>
+                  <Pagination
+                    current={pagination.current}
+                    pageSize={pagination.pageSize}
+                    total={pagination.total}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setPagination((prev) => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
+              </>
+            ),
+          },
+          {
+            key: 'groups',
+            label: <span><AppstoreOutlined /> 店铺分组</span>,
+            children: (
+              <Card
+                loading={groupLoading}
+                extra={
+                  <Button type="primary" icon={<PlusOutlined />} onClick={handleGroupCreate}>
+                    新建分组
+                  </Button>
+                }
+              >
+                <Table
+                  dataSource={groups}
+                  columns={groupColumns}
+                  rowKey="id"
+                  pagination={false}
+                />
+              </Card>
+            ),
+          },
+        ]}
+      />
 
       <Modal
         title={editingStore ? '编辑店铺' : '新增店铺'}
@@ -283,23 +510,20 @@ const StoreManagement: React.FC = () => {
         width={600}
       >
         <Form form={form} layout="vertical">
-          <Form.Item
-            name="name"
-            label="店铺名称"
-            rules={[{ required: true, message: '请输入店铺名称' }]}
-          >
-            <Input placeholder="请输入店铺名称" />
+          <Form.Item name="inventory_name" label="店铺名" rules={[{ required: true, message: '请输入店铺名' }]}>
+            <Input placeholder="请输入店铺名" />
           </Form.Item>
-          <Form.Item
-            name="platform"
-            label="平台"
-            rules={[{ required: true, message: '请选择平台' }]}
-            initialValue="amazon"
-          >
+          <Form.Item name="name" label="紫鸟账号">
+            <Input placeholder="请输入紫鸟账号" />
+          </Form.Item>
+          <Form.Item name="platform" label="平台" rules={[{ required: true, message: '请选择平台' }]} initialValue="amazon">
             <Select placeholder="请选择平台" options={platformOptions} />
           </Form.Item>
           <Form.Item name="site" label="站点">
             <Input placeholder="请输入站点，如US、UK等" />
+          </Form.Item>
+          <Form.Item name="shop_abbr" label="店铺简称" rules={[{ required: true, message: '请输入店铺简称' }]}>
+            <Input placeholder="请输入店铺简称" />
           </Form.Item>
           <Form.Item name="platform_store_id" label="平台店铺ID">
             <Input placeholder="请输入平台店铺ID" />
@@ -326,15 +550,10 @@ const StoreManagement: React.FC = () => {
         onCancel={() => setBatchModalOpen(false)}
       >
         <Form form={batchForm} layout="vertical">
-          <Form.Item
-            name="department_id"
-            label="选择部门"
-          >
+          <Form.Item name="department_id" label="选择部门">
             <Select placeholder="请选择部门（不选择则取消分配）" allowClear>
               {departments.map((dept) => (
-                <Select.Option key={dept.id} value={dept.id}>
-                  {dept.name}
-                </Select.Option>
+                <Select.Option key={dept.id} value={dept.id}>{dept.name}</Select.Option>
               ))}
             </Select>
           </Form.Item>
@@ -342,6 +561,82 @@ const StoreManagement: React.FC = () => {
             已选择 {selectedRowKeys.length} 个店铺进行批量分配
           </div>
         </Form>
+      </Modal>
+
+      <Modal
+        title={editingGroup ? '编辑分组' : '新建分组'}
+        open={groupModalOpen}
+        onOk={handleGroupSubmit}
+        onCancel={() => setGroupModalOpen(false)}
+      >
+        <Form form={groupForm} layout="vertical">
+          <Form.Item name="name" label="分组名称" rules={[{ required: true, message: '请输入分组名称' }]}>
+            <Input placeholder="如：B账号欧洲" />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea placeholder="分组描述（可选）" rows={3} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Drawer
+        title={currentGroup ? `分组：${currentGroup.name}` : '分组店铺管理'}
+        open={groupDrawerOpen}
+        onClose={() => setGroupDrawerOpen(false)}
+        width={600}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleOpenAddStoreModal}>
+            批量添加店铺
+          </Button>
+        }
+      >
+        <Table
+          dataSource={groupStores}
+          rowKey="id"
+          size="small"
+          pagination={false}
+          columns={[
+            { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
+            {
+              title: '平台',
+              dataIndex: 'platform',
+              key: 'platform',
+              render: (v: string) => <Tag color="blue">{v}</Tag>,
+            },
+            { title: '紫鸟账号', dataIndex: 'name', key: 'name' },
+            { title: '站点', dataIndex: 'site', key: 'site' },
+            {
+              title: '操作',
+              key: 'actions',
+              render: (_: any, record: any) => (
+                <Popconfirm title="确定从分组移除?" onConfirm={() => handleRemoveStoreFromGroup(record.id)}>
+                  <Button size="small" danger>移除</Button>
+                </Popconfirm>
+              ),
+            },
+          ]}
+        />
+      </Drawer>
+
+      <Modal
+        title="批量添加店铺到分组"
+        open={addStoreModalOpen}
+        onOk={handleAddStoreSubmit}
+        onCancel={() => setAddStoreModalOpen(false)}
+        width={700}
+      >
+        <Transfer
+          dataSource={transferDataSource}
+          titles={['所有店铺', '分组内店铺']}
+          targetKeys={transferTargetKeys}
+          onChange={(nextTargetKeys) => setTransferTargetKeys(nextTargetKeys as string[])}
+          render={(item) => item.title}
+          showSearch
+          filterOption={(inputValue, item) =>
+            item.title.toLowerCase().includes(inputValue.toLowerCase())
+          }
+          listStyle={{ width: 280, height: 400 }}
+        />
       </Modal>
     </div>
   )

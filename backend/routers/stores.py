@@ -11,9 +11,11 @@ router = APIRouter(prefix="/api/stores", tags=["stores"])
 
 
 class StoreCreate(BaseModel):
-    name: str
+    inventory_name: str
+    name: Optional[str] = None
     platform: str = "amazon"
     site: Optional[str] = None
+    shop_abbr: str
     department_id: Optional[int] = None
 
 
@@ -21,24 +23,31 @@ class StoreUpdate(BaseModel):
     name: Optional[str] = None
     platform: Optional[str] = None
     site: Optional[str] = None
+    inventory_name: Optional[str] = None
+    shop_abbr: Optional[str] = None
     department_id: Optional[int] = None
     status: Optional[str] = None
 
 
-@router.get("/")
-async def get_stores(
-    page: int = 1,
-    page_size: int = 20,
-    name_search: Optional[str] = None,
-    site_search: Optional[str] = None,
+@router.get("/all")
+async def get_all_stores(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     try:
-        where_conditions = ["s.tenant_id = :tenant_id"]
+        where_conditions = ["s.tenant_id = :tenant_id", "s.deleted_at IS NULL"]
         params = {"tenant_id": current_user.tenant_id}
 
-        if current_user.role != "admin":
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}
@@ -52,13 +61,79 @@ async def get_stores(
             else:
                 where_conditions.append("1=0")
 
-        if name_search:
-            where_conditions.append("s.name LIKE :name_search")
-            params["name_search"] = f"%{name_search}%"
+        where_clause = " AND ".join(where_conditions)
         
-        if site_search:
-            where_conditions.append("s.site LIKE :site_search")
-            params["site_search"] = f"%{site_search}%"
+        query = text(f"""
+            SELECT s.id, s.name, s.platform, s.site, s.status,
+                   s.department_id, d.name as department_name, s.created_at,
+                   s.group_id, sg.name as group_name,
+                   s.inventory_name, s.shop_abbr
+            FROM stores s
+            LEFT JOIN departments d ON s.department_id = d.id
+            LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
+            WHERE {where_clause}
+            ORDER BY s.created_at DESC, s.inventory_name ASC
+        """)
+        result = db.execute(query, params)
+        stores = []
+        for row in result:
+            stores.append({
+                "id": row[0],
+                "name": row[1],
+                "platform": row[2],
+                "site": row[3] or "",
+                "status": row[4],
+                "department_id": row[5],
+                "department_name": row[6] or "未分配",
+                "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                "group_id": row[8],
+                "group_name": row[9] or "",
+                "inventory_name": row[10] or "",
+                "shop_abbr": row[11] or "",
+            })
+        return {"success": True, "data": stores}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取店铺列表失败: {str(e)}")
+
+
+@router.get("/")
+async def get_stores(
+    page: int = 1,
+    page_size: int = 20,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        where_conditions = ["s.tenant_id = :tenant_id", "s.deleted_at IS NULL"]
+        params = {"tenant_id": current_user.tenant_id}
+
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
+            dept_ids = db.execute(
+                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
+                {"uid": current_user.id}
+            ).fetchall()
+            dept_id_list = [d[0] for d in dept_ids]
+            if dept_id_list:
+                dept_placeholders = ",".join([f":dept_{i}" for i in range(len(dept_id_list))])
+                for i, did in enumerate(dept_id_list):
+                    params[f"dept_{i}"] = did
+                where_conditions.append(f"s.department_id IN ({dept_placeholders})")
+            else:
+                where_conditions.append("1=0")
+
+        if search:
+            where_conditions.append("(s.name LIKE :search OR s.inventory_name LIKE :search OR s.site LIKE :search)")
+            params["search"] = f"%{search}%"
 
         where_clause = " AND ".join(where_conditions)
         
@@ -77,15 +152,13 @@ async def get_stores(
         params["page_size"] = page_size
         
         query = text(f"""
-            SELECT s.id, s.name, s.platform, s.site, s.status, 
-                   s.department_id, d.name as department_name, s.created_at
+            SELECT s.id, s.name, s.platform, s.site, s.status,
+                   s.department_id, d.name as department_name, s.inventory_name, s.shop_abbr, s.created_at
             FROM stores s
             LEFT JOIN departments d ON s.department_id = d.id
+            LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
             WHERE {where_clause}
-            ORDER BY 
-                CASE WHEN s.department_id IS NOT NULL THEN 0 ELSE 1 END,
-                s.name ASC,
-                s.site ASC
+            ORDER BY s.created_at DESC, s.inventory_name ASC
             LIMIT :page_size OFFSET :offset
         """)
         result = db.execute(query, params)
@@ -99,7 +172,12 @@ async def get_stores(
                 "status": row[4],
                 "department_id": row[5],
                 "department_name": row[6] or "未分配",
-                "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                "inventory_name": row[7] or "",
+                "shop_abbr": row[8] or "",
+                "created_at": row[9].strftime("%Y-%m-%d %H:%M:%S") if row[9] else "",
+                # "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                # "group_id": row[8],
+                # "group_name": row[9] or "",
             })
         return {"success": True, "data": stores, "total": total}
     except Exception as e:
@@ -114,14 +192,16 @@ async def create_store(
 ):
     try:
         insert_sql = text("""
-            INSERT INTO stores (tenant_id, name, platform, site, department_id)
-            VALUES (:tenant_id, :name, :platform, :site, :department_id)
+            INSERT INTO stores (tenant_id, name, platform, site, inventory_name, shop_abbr, department_id)
+            VALUES (:tenant_id, :name, :platform, :site, :inventory_name, :shop_abbr, :department_id)
         """)
         result = db.execute(insert_sql, {
             "tenant_id": current_user.tenant_id,
-            "name": store_data.name,
+            "name": store_data.name or store_data.inventory_name,
             "platform": store_data.platform,
             "site": store_data.site,
+            "inventory_name": store_data.inventory_name,
+            "shop_abbr": store_data.shop_abbr,
             "department_id": store_data.department_id,
         })
         db.commit()
@@ -153,12 +233,18 @@ async def update_store(
         if store_data.name is not None:
             updates.append("name = :name")
             params["name"] = store_data.name
+        if store_data.inventory_name is not None:
+            updates.append("inventory_name = :inventory_name")
+            params["inventory_name"] = store_data.inventory_name
         if store_data.platform is not None:
             updates.append("platform = :platform")
             params["platform"] = store_data.platform
         if store_data.site is not None:
             updates.append("site = :site")
             params["site"] = store_data.site
+        if store_data.shop_abbr is not None:
+            updates.append("shop_abbr = :shop_abbr")
+            params["shop_abbr"] = store_data.shop_abbr
         if store_data.department_id is not None:
             updates.append("department_id = :department_id")
             params["department_id"] = store_data.department_id
