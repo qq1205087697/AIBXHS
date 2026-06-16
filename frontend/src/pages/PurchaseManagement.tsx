@@ -613,8 +613,13 @@ const PurchaseManagement: React.FC = () => {
     }))
   }
 
-  // 计算某行总价（含配件）
+  // 计算某行成品自身的总价（不含配件）
   const calcRowTotal = (item: any) => {
+    return (item.quantity || 0) * (item.unit_price || 0)
+  }
+
+  // 计算某行总价（含配件），用于底部合计
+  const calcRowTotalWithBindings = (item: any) => {
     let total = (item.quantity || 0) * (item.unit_price || 0)
     for (const b of (item.bindings || [])) {
       total += (b.editableQty || 0) * (b.unit_price || 0)
@@ -1189,7 +1194,7 @@ const PurchaseManagement: React.FC = () => {
             },
             { title: '单价', dataIndex: 'unit_price', key: 'unit_price', width: 90, render: (v: number) => v != null ? `¥${v.toFixed(2)}` : '-' },
             {
-              title: '合计（含配件）',
+              title: '合计',
               key: 'total',
               width: 120,
               render: (_: any, record: any) => {
@@ -1199,7 +1204,7 @@ const PurchaseManagement: React.FC = () => {
             },
           ]}
           summary={() => {
-            const grandTotal = previewItems.reduce((sum, item) => sum + calcRowTotal(item), 0)
+            const grandTotal = previewItems.reduce((sum, item) => sum + calcRowTotalWithBindings(item), 0)
             return (
               <Table.Summary fixed>
                 <Table.Summary.Row>
