@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker, message, Popconfirm, Space, Tag, Divider, Dropdown, Menu, Pagination } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, CheckOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined } from '@ant-design/icons'
+import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker, message, Popconfirm, Space, Tag, Divider, Dropdown, Menu, Pagination, Row, Col } from 'antd'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, CheckOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, MinusCircleOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { purchaseOrdersApi, productsApi, warehousesApi } from '../api'
 import { useAuth } from '../contexts/AuthContext'
@@ -127,6 +127,7 @@ const PurchaseManagement: React.FC = () => {
   const [productsLoading, setProductsLoading] = useState(false)
   const [previewModalOpen, setPreviewModalOpen] = useState(false)
   const [previewItems, setPreviewItems] = useState<any[]>([])
+  const [previewOrderInfo, setPreviewOrderInfo] = useState<Record<string, any>>({})
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
@@ -158,7 +159,7 @@ const PurchaseManagement: React.FC = () => {
   const fetchProducts = async () => {
     setProductsLoading(true)
     try {
-      const res = await productsApi.getList({ page: 1, page_size: 100 })
+      const res = await productsApi.getList({ page: 1, page_size: 500 })
       if (res.data.success) {
         setProductList(res.data.data || [])
       }
@@ -240,6 +241,12 @@ const PurchaseManagement: React.FC = () => {
     const orderNumber = `PO${dayjs().format('YYYYMMDDHHmmss')}`
     form.setFieldsValue({
       order_number: orderNumber,
+      supplier: '',
+      contact_person: '',
+      contact_phone: '',
+      expected_date: null,
+      warehouse: undefined,
+      notes: '',
     })
     setFormItems([createEmptyFormItem()])
     fetchProducts()
@@ -247,19 +254,67 @@ const PurchaseManagement: React.FC = () => {
     setModalOpen(true)
   }
 
-  const handleView = (order: PurchaseOrder) => {
+  const handleView = async (order: PurchaseOrder) => {
     setViewingOrder(order)
     setEditingOrder(null)
     form.setFieldsValue({
       order_number: order.order_number,
+      supplier: (order as any).supplier || '',
+      contact_person: (order as any).contact_person || '',
+      contact_phone: (order as any).contact_phone || '',
+      expected_date: (order as any).expected_date ? dayjs((order as any).expected_date) : null,
       warehouse: (order as any).warehouse,
       notes: order.notes,
     })
-    // 加载采购明细
+    // 用订单中的产品信息构建选项（后端已返回product_name和product_code）
     if (order.items && order.items.length > 0) {
+      const orderProducts = order.items.map((item: any) => ({
+        id: Number(item.product_id),
+        name: item.product_name || '',
+        product_code: item.product_code || '',
+        purchase_price: item.unit_price || null,
+      }))
+      setProductList(orderProducts)
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
-        product_id: item.product_id,
+        product_id: Number(item.product_id) || null,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        notes: item.notes || '',
+      }))
+      setFormItems(items)
+    } else {
+      setProductList([])
+      setFormItems([createEmptyFormItem()])
+    }
+    fetchWarehouses()
+    setModalOpen(true)
+  }
+
+  const handleEdit = async (order: PurchaseOrder) => {
+    setViewingOrder(null)
+    setEditingOrder(order)
+    form.setFieldsValue({
+      order_number: order.order_number,
+      supplier: (order as any).supplier || '',
+      contact_person: (order as any).contact_person || '',
+      contact_phone: (order as any).contact_phone || '',
+      expected_date: (order as any).expected_date ? dayjs((order as any).expected_date) : null,
+      warehouse: (order as any).warehouse,
+      notes: order.notes,
+    })
+    // 用订单中的产品信息构建选项，同时后台加载完整列表供编辑时选择新商品
+    if (order.items && order.items.length > 0) {
+      const orderProducts = order.items.map((item: any) => ({
+        id: Number(item.product_id),
+        name: item.product_name || '',
+        product_code: item.product_code || '',
+        purchase_price: item.unit_price || null,
+      }))
+      setProductList(orderProducts)
+      const items = order.items.map((item: any) => ({
+        key: generateItemKey(),
+        product_id: Number(item.product_id) || null,
         quantity: item.quantity,
         unit_price: item.unit_price,
         notes: item.notes || '',
@@ -268,20 +323,7 @@ const PurchaseManagement: React.FC = () => {
     } else {
       setFormItems([createEmptyFormItem()])
     }
-    fetchProducts()
-    fetchWarehouses()
-    setModalOpen(true)
-  }
-
-  const handleEdit = (order: PurchaseOrder) => {
-    setViewingOrder(null)
-    setEditingOrder(order)
-    form.setFieldsValue({
-      order_number: order.order_number,
-      warehouse: (order as any).warehouse,
-      notes: order.notes,
-    })
-    setFormItems([createEmptyFormItem()])
+    // 后台异步加载完整产品列表（不阻塞弹窗打开）
     fetchProducts()
     fetchWarehouses()
     setModalOpen(true)
@@ -295,6 +337,10 @@ const PurchaseManagement: React.FC = () => {
       if (editingOrder) {
         const payload: Record<string, any> = {
           order_number: values.order_number,
+          supplier: values.supplier || '',
+          contact_person: values.contact_person || '',
+          contact_phone: values.contact_phone || '',
+          expected_date: values.expected_date ? dayjs(values.expected_date).format('YYYY-MM-DD') : null,
           warehouse: values.warehouse,
           notes: values.notes,
         }
@@ -314,6 +360,10 @@ const PurchaseManagement: React.FC = () => {
         }))
         const payload: Record<string, any> = {
           order_number: values.order_number,
+          supplier: values.supplier || '',
+          contact_person: values.contact_person || '',
+          contact_phone: values.contact_phone || '',
+          expected_date: values.expected_date ? dayjs(values.expected_date).format('YYYY-MM-DD') : null,
           warehouse: values.warehouse,
           notes: values.notes,
           items,
@@ -326,7 +376,8 @@ const PurchaseManagement: React.FC = () => {
       fetchData()
     } catch (e: any) {
       if (e.errorFields) return
-      message.error('操作失败')
+      const msg = e?.response?.data?.detail || e?.message || '操作失败'
+      message.error(msg)
     } finally {
       setSubmitting(false)
     }
@@ -503,7 +554,17 @@ const PurchaseManagement: React.FC = () => {
     try {
       const res = await purchaseOrdersApi.uploadPreview(file)
       if (res.data.success) {
-        setPreviewItems(res.data.data || [])
+        // 处理配件数据：计算初始数量（成品数量 × 绑定比例）
+        const items = (res.data.data || []).map((item: any) => ({
+          ...item,
+          bindings: (item.bindings || []).map((b: any) => ({
+            ...b,
+            calcQty: (item.quantity || 0) * (b.qty || 0), // 自动计算的配件数量
+            editableQty: (item.quantity || 0) * (b.qty || 0), // 用户可编辑的数量
+          })),
+        }))
+        setPreviewItems(items)
+        setPreviewOrderInfo(res.data.order_info || {})
         setPreviewModalOpen(true)
       } else {
         message.error(res.data.message || '文件解析失败')
@@ -517,26 +578,93 @@ const PurchaseManagement: React.FC = () => {
     }
   }
 
+  // 更新某行数量时，同步更新所有配件的计算数量
+  const updatePreviewQuantity = (index: number, newQty: number) => {
+    setPreviewItems(prev => prev.map((item, i) => {
+      if (i !== index) return item
+      return {
+        ...item,
+        quantity: newQty,
+        bindings: (item.bindings || []).map((b: any) => ({
+          ...b,
+          calcQty: newQty * b.qty,
+          editableQty: b.userEdited ? b.editableQty : newQty * b.qty,
+        })),
+      }
+    }))
+  }
+
+  // 手动编辑配件数量
+  const updateBindingQty = (rowIndex: number, bindIndex: number, qty: number) => {
+    setPreviewItems(prev => prev.map((item, i) => {
+      if (i !== rowIndex) return item
+      const newBindings = [...(item.bindings || [])]
+      newBindings[bindIndex] = { ...newBindings[bindIndex], editableQty: qty, userEdited: true }
+      return { ...item, bindings: newBindings }
+    }))
+  }
+
+  // 删除某个配件
+  const removeBinding = (rowIndex: number, bindIndex: number) => {
+    setPreviewItems(prev => prev.map((item, i) => {
+      if (i !== rowIndex) return item
+      const newBindings = (item.bindings || []).filter((_: any, j: number) => j !== bindIndex)
+      return { ...item, bindings: newBindings }
+    }))
+  }
+
+  // 计算某行总价（含配件）
+  const calcRowTotal = (item: any) => {
+    let total = (item.quantity || 0) * (item.unit_price || 0)
+    for (const b of (item.bindings || [])) {
+      total += (b.editableQty || 0) * (b.unit_price || 0)
+    }
+    return total
+  }
+
   const handleConfirmImport = () => {
     setPreviewModalOpen(false)
     // 打开新增弹窗
     handleCreate()
     // 延迟设置数据，确保弹窗已打开
     setTimeout(() => {
-      const newItems = previewItems.map((item) => ({
-        ...createEmptyFormItem(),
-        product_id: item.product_id,
-        quantity: item.quantity || 1,
-        unit_price: item.unit_price || 0,
-      }))
-      setFormItems(newItems)
-      
-      // 从预览数据中提取仓库（取第一个有值的仓库）
-      const warehouseFromImport = previewItems.find(item => item.warehouse)?.warehouse || ''
-      if (warehouseFromImport) {
-        form.setFieldsValue({ warehouse: warehouseFromImport })
+      // 展开成品+配件为独立行
+      const newItems: FormItemState[] = []
+      for (const item of previewItems) {
+        // 成品行
+        newItems.push({
+          ...createEmptyFormItem(),
+          product_id: item.product_id,
+          quantity: item.quantity || 1,
+          unit_price: item.unit_price || 0,
+        })
+        // 配件行（每个配件一行）
+        for (const b of (item.bindings || [])) {
+          if (b.editableQty > 0) {
+            newItems.push({
+              ...createEmptyFormItem(),
+              product_id: b.accessory_product_id || null, // 需要后端返回accessory_product_id
+              quantity: b.editableQty,
+              unit_price: b.unit_price || 0,
+            })
+          }
+        }
       }
-      
+      setFormItems(newItems)
+
+      // 从预览数据中提取仓库和订单级字段
+      const warehouseFromImport = previewItems.find(item => item.warehouse)?.warehouse || ''
+      const formValues: Record<string, any> = {}
+      if (warehouseFromImport) formValues.warehouse = warehouseFromImport
+      if (previewOrderInfo.supplier) formValues.supplier = previewOrderInfo.supplier
+      if (previewOrderInfo.contact_person) formValues.contact_person = previewOrderInfo.contact_person
+      if (previewOrderInfo.contact_phone) formValues.contact_phone = previewOrderInfo.contact_phone
+      if (previewOrderInfo.expected_date) formValues.expected_date = dayjs(previewOrderInfo.expected_date)
+      if (previewOrderInfo.notes) formValues.notes = previewOrderInfo.notes
+      if (Object.keys(formValues).length > 0) {
+        form.setFieldsValue(formValues)
+      }
+
       message.success('导入成功')
     }, 100)
   }
@@ -799,12 +927,50 @@ const PurchaseManagement: React.FC = () => {
         } }}
       >
         <Form form={form} layout="vertical">
-          <Form.Item
-            name="order_number"
-            label="采购单号"
-          >
-            <Input placeholder="请输入采购单号" disabled />
-          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                name="order_number"
+                label="采购单号"
+              >
+                <Input placeholder="请输入采购单号" disabled />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                name="supplier"
+                label="供应商"
+              >
+                <Input placeholder="请输入供应商名称" disabled={!!viewingOrder} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item
+                name="contact_person"
+                label="联系人"
+              >
+                <Input placeholder="请输入联系人" disabled={!!viewingOrder} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="contact_phone"
+                label="联系电话"
+              >
+                <Input placeholder="请输入联系电话" disabled={!!viewingOrder} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="expected_date"
+                label="期望到货日期"
+              >
+                <DatePicker style={{ width: '100%' }} placeholder="请选择日期" format="YYYY-MM-DD" disabled={!!viewingOrder} />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item
             name="warehouse"
             label="收货仓库"
@@ -937,21 +1103,116 @@ const PurchaseManagement: React.FC = () => {
         onCancel={() => setPreviewModalOpen(false)}
         okText="确认导入"
         cancelText="取消"
-        width={800}
+        width={900}
       >
         <Table
           dataSource={previewItems}
           rowKey={(record, index) => String(index)}
           pagination={false}
           size="small"
+          expandable={{
+            expandedRowRender: (record: any, index: number) => {
+              const bindings = record.bindings || []
+              if (bindings.length === 0) {
+                return <div style={{ padding: '12px 0', color: '#999' }}>无绑定配件</div>
+              }
+              return (
+                <table style={{ width: '100%', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: '#fafafa', color: '#666' }}>
+                      <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>配件编码</th>
+                      <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>配件名称</th>
+                      <th style={{ padding: '6px 8px', textAlign: 'center', fontWeight: 600, width: 80 }}>绑定比例</th>
+                      <th style={{ padding: '6px 8px', textAlign: 'center', fontWeight: 600, width: 120 }}>采购数量</th>
+                      <th style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600, width: 100 }}>单价</th>
+                      <th style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600, width: 80 }}>合计</th>
+                      <th style={{ padding: '6px 8px', textAlign: 'center', fontWeight: 600, width: 60 }}>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bindings.map((b: any, bi: number) => (
+                      <tr key={bi}>
+                        <td style={{ padding: '6px 8px' }}><Tag size="small" color="orange">{b.code}</Tag></td>
+                        <td style={{ padding: '6px 8px' }}>{b.name || '-'}</td>
+                        <td style={{ padding: '6px 8px', textAlign: 'center', color: '#999' }}>×{b.qty}</td>
+                        <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                          <InputNumber
+                            size="small"
+                            min={0}
+                            value={b.editableQty}
+                            onChange={(val: number | null) => updateBindingQty(index!, bi, val || 0)}
+                            style={{ width: 90 }}
+                          />
+                        </td>
+                        <td style={{ padding: '6px 8px', textAlign: 'right' }}>{b.unit_price != null ? `¥${b.unit_price.toFixed(2)}` : '-'}</td>
+                        <td style={{ padding: '6px 8px', textAlign: 'right', color: '#ff4d4f', fontWeight: 500 }}>
+                          ¥{((b.editableQty || 0) * (b.unit_price || 0)).toFixed(2)}
+                        </td>
+                        <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                          <Button type="link" size="small" danger icon={<MinusCircleOutlined />} onClick={() => removeBinding(index!, bi)} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            },
+            rowExpandable: (record: any) => (record.bindings && record.bindings.length > 0),
+          }}
           columns={[
-            { title: '商品编码', dataIndex: 'product_code', key: 'product_code' },
-            { title: '商品名称', dataIndex: 'product_name', key: 'product_name' },
-            { title: '收货仓库', dataIndex: 'warehouse', key: 'warehouse', render: (v: string) => v || '-' },
-            { title: '数量', dataIndex: 'quantity', key: 'quantity' },
-            { title: '单价', dataIndex: 'unit_price', key: 'unit_price', render: (v: number) => v != null ? `¥${v.toFixed(2)}` : '-' },
-            { title: '小计', key: 'total', render: (_: any, record: any) => `¥${((record.quantity || 0) * (record.unit_price || 0)).toFixed(2)}` },
+            { title: '商品编码', dataIndex: 'product_code', key: 'product_code', width: 140 },
+            { title: '商品名称', dataIndex: 'product_name', key: 'product_name', ellipsis: true },
+            {
+              title: '配件',
+              dataIndex: 'bindings',
+              key: 'bindings',
+              width: 80,
+              render: (v: any[]) => v && v.length > 0 ? (
+                <Tag color="orange">{v.length}个配件</Tag>
+              ) : <span style={{ color: '#999' }}>-</span>
+            },
+            { title: '收货仓库', dataIndex: 'warehouse', key: 'warehouse', width: 90, render: (v: string) => v || '-' },
+            {
+              title: '数量',
+              dataIndex: 'quantity',
+              key: 'quantity',
+              width: 90,
+              render: (_: any, record: any, index: number) => (
+                <InputNumber
+                  size="small"
+                  min={1}
+                  value={record.quantity}
+                  onChange={(val: number | null) => val && val > 0 && updatePreviewQuantity(index, val)}
+                  style={{ width: 70 }}
+                />
+              )
+            },
+            { title: '单价', dataIndex: 'unit_price', key: 'unit_price', width: 90, render: (v: number) => v != null ? `¥${v.toFixed(2)}` : '-' },
+            {
+              title: '合计（含配件）',
+              key: 'total',
+              width: 120,
+              render: (_: any, record: any) => {
+                const total = calcRowTotal(record)
+                return <span style={{ color: '#ff4d4f', fontWeight: 600 }}>¥{total.toFixed(2)}</span>
+              }
+            },
           ]}
+          summary={() => {
+            const grandTotal = previewItems.reduce((sum, item) => sum + calcRowTotal(item), 0)
+            return (
+              <Table.Summary fixed>
+                <Table.Summary.Row>
+                  <Table.Summary.Cell colSpan={6} style={{ textAlign: 'right', fontWeight: 700, paddingTop: 12 }}>
+                    合计（含配件）：
+                  </Table.Summary.Cell>
+                  <Table.Summary.Cell style={{ fontWeight: 700, color: '#ff4d4f', paddingTop: 12 }}>
+                    ¥{grandTotal.toFixed(2)}
+                  </Table.Summary.Cell>
+                </Table.Summary.Row>
+              </Table.Summary>
+            )
+          }}
         />
       </Modal>
 

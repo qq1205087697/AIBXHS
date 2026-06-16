@@ -1330,6 +1330,15 @@ async def batch_delete_products(
                 text("UPDATE products SET deleted_at = NOW() WHERE id = :id AND tenant_id = :tid"),
                 {"id": row[0], "tid": current_user.tenant_id}
             )
+            # 清理该产品的配件绑定关系（作为成品或作为配件）
+            db.execute(
+                text("""
+                    UPDATE product_bindings SET deleted_at = NOW()
+                    WHERE (finished_product_id = :pid OR accessory_product_id = :pid)
+                    AND deleted_at IS NULL
+                """),
+                {"pid": row[0]}
+            )
             log_product_delete(
                 db, current_user.tenant_id, current_user.id,
                 current_user.nickname or current_user.username,
@@ -2075,6 +2084,15 @@ async def delete_product(
         db.execute(
             text("UPDATE products SET deleted_at = NOW() WHERE id = :id AND tenant_id = :tid"),
             {"id": product_id, "tid": current_user.tenant_id}
+        )
+        # 清理该产品的配件绑定关系（作为成品或作为配件）
+        db.execute(
+            text("""
+                UPDATE product_bindings SET deleted_at = NOW()
+                WHERE (finished_product_id = :pid OR accessory_product_id = :pid)
+                AND deleted_at IS NULL
+            """),
+            {"pid": product_id}
         )
         
         # 记录日志（不提交，由业务逻辑提交）

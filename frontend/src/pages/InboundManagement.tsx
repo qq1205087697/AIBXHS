@@ -182,7 +182,7 @@ const InboundManagement: React.FC = () => {
   const fetchProducts = async () => {
     setProductsLoading(true)
     try {
-      const res = await productsApi.getList({ page: 1, page_size: 100 })
+      const res = await productsApi.getList({ page: 1, page_size: 500 })
       if (res.data.success) {
         setProductList(res.data.data || [])
       }
@@ -290,7 +290,7 @@ const InboundManagement: React.FC = () => {
     setModalOpen(true)
   }
 
-  const handleView = (order: InboundOrder) => {
+  const handleView = async (order: InboundOrder) => {
     setViewingOrder(order)
     setEditingOrder(null)
     form.setFieldsValue({
@@ -301,11 +301,18 @@ const InboundManagement: React.FC = () => {
       inbound_date: order.inbound_date ? dayjs(order.inbound_date) : undefined,
       notes: order.notes,
     })
-    // 加载入库明细
+    // 用订单中的产品信息构建选项（后端已返回product_name和product_code）
     if (order.items && order.items.length > 0) {
+      const orderProducts = order.items.map((item: any) => ({
+        id: Number(item.product_id),
+        name: item.product_name || '',
+        product_code: item.product_code || '',
+        purchase_price: item.unit_price || null,
+      }))
+      setProductList(orderProducts)
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
-        product_id: item.product_id,
+        product_id: Number(item.product_id) || null,
         quantity: item.quantity,
         unit_price: item.unit_price,
         shelf_number: item.shelf_number || '',
@@ -313,14 +320,14 @@ const InboundManagement: React.FC = () => {
       }))
       setFormItems(items)
     } else {
+      setProductList([])
       setFormItems([createEmptyFormItem()])
     }
-    fetchProducts()
     fetchWarehouses()
     setModalOpen(true)
   }
 
-  const handleEdit = (order: InboundOrder) => {
+  const handleEdit = async (order: InboundOrder) => {
     setViewingOrder(null)
     setEditingOrder(order)
     form.setFieldsValue({
@@ -331,11 +338,18 @@ const InboundManagement: React.FC = () => {
       inbound_date: order.inbound_date ? dayjs(order.inbound_date) : undefined,
       notes: order.notes,
     })
-    // 加载入库明细
+    // 用订单中的产品信息构建选项，同时后台加载完整列表供编辑时选择新商品
     if (order.items && order.items.length > 0) {
+      const orderProducts = order.items.map((item: any) => ({
+        id: Number(item.product_id),
+        name: item.product_name || '',
+        product_code: item.product_code || '',
+        purchase_price: item.unit_price || null,
+      }))
+      setProductList(orderProducts)
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
-        product_id: item.product_id,
+        product_id: Number(item.product_id) || null,
         quantity: item.quantity,
         unit_price: item.unit_price,
         shelf_number: item.shelf_number || '',
@@ -345,6 +359,7 @@ const InboundManagement: React.FC = () => {
     } else {
       setFormItems([createEmptyFormItem()])
     }
+    // 后台异步加载完整产品列表（不阻塞弹窗打开）
     fetchProducts()
     fetchWarehouses()
     setModalOpen(true)

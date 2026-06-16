@@ -184,6 +184,14 @@ async def create_purchase_order(
         if not data.items:
             raise HTTPException(status_code=400, detail="请至少添加一条采购明细")
 
+        # 校验仓库是否存在
+        if data.warehouse:
+            wh = db.execute(text(
+                "SELECT id FROM warehouses WHERE name = :name AND tenant_id = :tid AND deleted_at IS NULL"
+            ), {"name": data.warehouse, "tid": current_user.tenant_id}).fetchone()
+            if not wh:
+                raise HTTPException(status_code=400, detail=f"仓库 '{data.warehouse}' 不存在")
+
         total_amt = sum((item.quantity * (item.unit_price or 0)) for item in data.items)
 
         db.execute(text("""
@@ -291,6 +299,14 @@ async def update_purchase_order(
         else:
             await check_permission("purchase:edit", current_user, db)
 
+        # 校验仓库是否存在（更新时）
+        if data.warehouse is not None and data.warehouse != "":
+            wh = db.execute(text(
+                "SELECT id FROM warehouses WHERE name = :name AND tenant_id = :tid AND deleted_at IS NULL"
+            ), {"name": data.warehouse, "tid": current_user.tenant_id}).fetchone()
+            if not wh:
+                raise HTTPException(status_code=400, detail=f"仓库 '{data.warehouse}' 不存在")
+
         updates = []
         params = {"id": order_id}
         for field in ["order_number", "supplier", "contact_person", "contact_phone", "warehouse", "expected_date", "notes", "status"]:
@@ -390,24 +406,44 @@ async def upload_purchase_preview(
         
         file_bytes = await file.read()
         items = parse_purchase_excel(file_bytes, db, current_user.tenant_id)
-        
+        parsed_items = items.get("items", items) if isinstance(items, dict) else items
+        order_info = items.get("order_info", {}) if isinstance(items, dict) else {}
+
         # 补充产品信息
-        product_ids = [item["product_id"] for item in items]
+        product_ids = [item["product_id"] for item in parsed_items]
         product_map = {}
         if product_ids:
             products = db.execute(text("""
-                SELECT id, product_code, name 
-                FROM products 
+                SELECT id, product_code, name
+                FROM products
                 WHERE id IN :ids AND deleted_at IS NULL
             """), {"ids": tuple(product_ids)}).fetchall()
-            product_map = {p[0]: (p[1], p[2]) for p in products}
-        
-        for item in items:
-            pc, pn = product_map.get(item["product_id"], ("", ""))
-            item["product_code"] = pc
-            item["product_name"] = pn
-        
-        return {"success": True, "data": items}
+            product_map = {p[0]: {"code": p[1], "name": p[2]} for p in products}
+
+        # 查询这些产品绑定的配件（成品→配件）
+        bindings_map = {}
+        if product_ids:
+            bindings = db.execute(text("""
+                SELECT pb.finished_product_id, p.id AS accessory_product_id, p.product_code, p.name, p.purchase_price, pb.quantity
+                FROM product_bindings pb
+                JOIN products p ON p.id = pb.accessory_product_id
+                WHERE pb.finished_product_id IN :fids AND pb.deleted_at IS NULL AND p.deleted_at IS NULL
+            """), {"fids": tuple(product_ids)}).fetchall()
+            for b in bindings:
+                bindings_map.setdefault(b[0], []).append({
+                    "accessory_product_id": b[1],
+                    "code": b[2], "name": b[3], "unit_price": b[4], "qty": b[5]
+                })
+
+        for item in parsed_items:
+            pid = item["product_id"]
+            info = product_map.get(pid, {})
+            item["product_code"] = info.get("code", "")
+            item["product_name"] = info.get("name", "")
+            # 绑定配件信息
+            item["bindings"] = bindings_map.get(pid, [])
+
+        return {"success": True, "data": parsed_items, "order_info": order_info}
     except HTTPException:
         raise
     except ValueError as e:

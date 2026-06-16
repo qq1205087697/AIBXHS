@@ -413,6 +413,52 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  // 查询产品作为配件时的绑定成品列表，用于删除前提示
+  const fetchAccessoryBindings = async (productId: number) => {
+    try {
+      const res = await productBindingsApi.getByAccessory(productId)
+      return res.data.data || []
+    } catch {
+      return []
+    }
+  }
+
+  // 单个删除：先查绑定关系再弹确认框
+  const confirmDelete = async (record: any) => {
+    const bindings = await fetchAccessoryBindings(record.id)
+    let content: React.ReactNode
+    if (bindings.length > 0) {
+      const finishedNames = bindings.map((b: any) =>
+        b.finished_code && b.finished_name
+          ? `${b.finished_code} - ${b.finished_name}`
+          : b.finished_name || b.finished_code || `成品#${b.finished_product_id}`
+      )
+      content = (
+        <div>
+          <p>删除后不可恢复</p>
+          <p style={{ color: '#ff4d4f', fontWeight: 'bold' }}>
+            该产品作为配件已绑定 {bindings.length} 个成品，删除后将同时移除以下绑定关系：
+          </p>
+          <ul style={{ margin: '8px 0', paddingLeft: 20, color: '#ff4d4f' }}>
+            {finishedNames.map((name: string, i: number) => (
+              <li key={i}>{name}</li>
+            ))}
+          </ul>
+        </div>
+      )
+    } else {
+      content = '删除后不可恢复'
+    }
+    Modal.confirm({
+      title: `确定删除「${record.name || record.product_code}」?`,
+      content,
+      okText: '确定删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => handleDelete(record.id),
+    })
+  }
+
   const handleBatchDelete = async () => {
     try {
       const ids = selectedRowKeys.map(k => Number(k))
@@ -1331,11 +1377,7 @@ const productAttributeLabelMap: Record<string, string> = {
             icon: <DeleteOutlined />,
             onClick: (e: any) => {
               e.domEvent.stopPropagation()
-              Modal.confirm({
-                title: '确定删除?',
-                content: '删除后不可恢复',
-                onOk: () => handleDelete(record.id),
-              })
+              confirmDelete(record)
             },
           })
         }
