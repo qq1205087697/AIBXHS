@@ -212,11 +212,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           icon: <MessageSquare size={20} />,
           label: '差评机器人',
         }] : []),
-    {
-      key: '/email',
-      icon: <Mail size={20} />,
-      label: '邮件机器人',
-    },
+    ...(hasPermission('robot:email:view')
+      ? [{
+          key: '/email',
+          icon: <Mail size={20} />,
+          label: '邮件机器人',
+        }] : []),
     ...(hasPermission('product:view')
       ? [{
           key: '/products',

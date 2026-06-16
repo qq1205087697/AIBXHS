@@ -165,19 +165,22 @@ def parse_inbound_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List[
 def create_purchase_excel_template() -> io.BytesIO:
     """创建采购单Excel模板"""
     data = {
-        "产品编码": ["", "1001", "1002"],
-        "SKU": ["", "SKU-001", "SKU-002"],
+        "产品编码/SKU": ["", "1001", "SKU-001"],
+        "采购数量": [0, 50, 100],
         "品名": ["", "产品A", "产品B"],
+        "供应商": ["", "示例供应商", ""],
+        "联系人": ["", "张三", ""],
+        "联系电话": ["", "13800138000", ""],
+        "期望到货日期": ["", "2025-06-15", ""],
         "采购链接": ["", "https://...", "https://..."],
         "产品图": ["", "https://...", "https://..."],
         "收货仓库": ["", "主仓库", "分仓A"],
-        "采购数量": [0, 50, 100],
         "备注": ["", "样例备注1", "样例备注2"]
     }
     df = pd.DataFrame(data)
-    
+
     # 标记哪些是必填列
-    required_cols = ["产品编码", "采购数量"]
+    required_cols = ["产品编码/SKU", "采购数量"]
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -197,19 +200,26 @@ def create_purchase_excel_template() -> io.BytesIO:
 
 
 def parse_purchase_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List[Dict[str, Any]]:
-    """解析采购单Excel"""
+    """解析采购单Excel，支持产品编码或SKU自动识别"""
     df = pd.read_excel(io.BytesIO(file_bytes))
     df.columns = df.columns.str.strip()
-    
-    # 映射列名（支持新旧三种格式）
+
+    # 映射列名（支持多种格式）
     col_mapping = {
         "产品编码": "product_code",
         "产品编码（必填）": "product_code",
         "*产品编码": "product_code",
+        "产品编码/SKU": "sku",
+        "产品编码/SKU（必填）": "sku",
+        "*产品编码/SKU": "sku",
         "SKU": "sku",
         "SKU（选填）": "sku",
         "品名": "name",
         "品名（选填）": "name",
+        "供应商": "supplier",
+        "联系人": "contact_person",
+        "联系电话": "contact_phone",
+        "期望到货日期": "expected_date",
         "采购链接": "purchase_link",
         "采购链接（选填）": "purchase_link",
         "产品图": "product_image",
@@ -223,42 +233,99 @@ def parse_purchase_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List
         "备注（选填）": "notes"
     }
     df = df.rename(columns={k: v for k, v in col_mapping.items() if k in df.columns})
-    
-    # 验证必需列
-    required_cols = ["product_code", "quantity"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"缺少必需列: {col}")
-    
+
+    # 验证必需列（兼容旧模板的 product_code 和新模板的 sku）
+    has_sku = "sku" in df.columns
+    has_product_code = "product_code" in df.columns
+    if not has_sku and not has_product_code:
+        raise ValueError(f"缺少必需列: 产品编码 或 产品编码/SKU")
+    if "quantity" not in df.columns:
+        raise ValueError(f"缺少必需列: 采购数量")
+
+    # 构建映射表：先查所有产品(按product_code)，再查平台商品SKU
+    all_products = db.execute(text("""
+        SELECT p.id, p.product_code, p.name, p.purchase_price
+        FROM products p
+        WHERE p.tenant_id = :tid AND p.deleted_at IS NULL
+        ORDER BY p.product_code
+    """), {"tid": tenant_id}).fetchall()
+
+    product_code_map = {}  # product_code -> (id, name, purchase_price)
+    for p in all_products:
+        product_code_map[str(p[1]).strip().lower()] = (p[0], p[2], p[3])
+
+    # 平台商品SKU -> 产品ID 映射
+    platform_skus = db.execute(text("""
+        SELECT pp.sku, pp.product_id
+        FROM platform_products pp
+        JOIN products p ON p.id = pp.product_id
+        WHERE p.tenant_id = :tid AND pp.deleted_at IS NULL AND p.deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchall()
+    platform_sku_map = {str(s[0]).strip().lower(): s[1] for s in platform_skus if s[0]}
+
+    # 产品列表提示信息
+    product_list_str = "\n\n系统中存在的产品编码/平台SKU：\n" + "\n".join([
+        f"  - {p[1]} ({p[2]})" for p in all_products[:20]
+    ]) + ("\n  ..." if len(all_products) > 20 else "")
+
     items = []
+    order_info = {}  # 订单级字段：取第一个非空行的值
     for idx, row in df.iterrows():
-        product_code = str(row["product_code"]).strip() if pd.notna(row["product_code"]) else ""
+        # 取值：优先 sku 列，其次 product_code 列
+        raw_val = ""
+        if has_sku:
+            raw_val = str(row["sku"]).strip() if pd.notna(row["sku"]) else ""
+        elif has_product_code:
+            raw_val = str(row["product_code"]).strip() if pd.notna(row["product_code"]) else ""
+
         quantity = int(row["quantity"]) if pd.notna(row["quantity"]) else 0
-        
-        if not product_code or product_code == "nan":
-            raise ValueError(f"第 {idx + 2} 行: 产品编码不能为空")
-        
+
+        # 收集订单级字段（只取第一个非空行）
+        if not order_info:
+            for field in ["supplier", "contact_person", "contact_phone", "expected_date", "notes"]:
+                val = row.get(field)
+                if val is not None and str(val).strip() not in ("", "nan"):
+                    order_info[field] = str(val).strip()
+
+        if not raw_val or raw_val == "nan":
+            raise ValueError(f"第 {idx + 2} 行: 产品编码/SKU不能为空")
+
         if quantity <= 0:
             raise ValueError(f"第 {idx + 2} 行: 采购数量必须大于0")
-        
-        # 查询产品
-        product = db.execute(text("""
-            SELECT id, name, purchase_price 
-            FROM products 
-            WHERE tenant_id = :tid AND product_code = :code AND deleted_at IS NULL
-        """), {"tid": tenant_id, "code": product_code}).fetchone()
-        
-        if not product:
-            raise ValueError(f"第 {idx + 2} 行: 产品编码 {product_code} 不存在")
-        
+
+        # 先尝试按产品编码匹配
+        product_id = None
+        product_name = ""
+        unit_price = 0.0
+
+        val_lower = raw_val.lower()
+        if val_lower in product_code_map:
+            pid, pname, pprice = product_code_map[val_lower]
+            product_id = pid
+            product_name = pname or ""
+            unit_price = float(pprice) if pprice else 0.0
+        elif val_lower in platform_sku_map:
+            # 按平台SKU匹配到产品ID，再查产品详情
+            pid = platform_sku_map[val_lower]
+            product_id = pid
+            # 从已查出的产品中找名称和价格
+            for p in all_products:
+                if p[0] == pid:
+                    product_name = p[2] or ""
+                    unit_price = float(p[3]) if p[3] else 0.0
+                    break
+
+        if not product_id:
+            raise ValueError(f"第 {idx + 2} 行: 产品编码/SKU '{raw_val}' 不存在{product_list_str}")
+
         items.append({
-            "product_id": product[0],
+            "product_id": product_id,
             "quantity": quantity,
-            "unit_price": float(product[2]) if product[2] else 0,
+            "unit_price": unit_price,
             "warehouse": str(row.get("warehouse", "")).strip() if pd.notna(row.get("warehouse")) else "",
             "notes": str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
         })
-    return items
+    return {"items": items, "order_info": order_info}
 
 
 def create_outbound_excel_template() -> io.BytesIO:
