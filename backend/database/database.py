@@ -114,6 +114,7 @@ def init_db():
                     weight_kg FLOAT NULL COMMENT '重量(kg)',
                     cost_at_15_profit DECIMAL(12, 2) NULL COMMENT '15%毛利时成本',
                     product_type VARCHAR(100) NULL COMMENT '类型',
+                    site VARCHAR(50) NULL COMMENT '站点',
                     monthly_sales INT NULL COMMENT '近一个月销量',
                     traffic_trend VARCHAR(200) NULL COMMENT '流量趋势',
             seasonality TEXT NULL COMMENT '季节性判断',
@@ -136,6 +137,12 @@ def init_db():
             """
             conn.execute(text(create_product_selection_table_sql))
             conn.commit()
+            # 为已存在的表添加 site 列（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN site VARCHAR(50) NULL COMMENT '站点' AFTER product_type"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:

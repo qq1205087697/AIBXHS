@@ -898,13 +898,16 @@ export const productBindingsApi = {
 
 // ========== Product Selection API ==========
 export const productSelectionApi = {
+  getTypes: () => apiClient.get("/product-selection/types"),
+  getDates: () => apiClient.get("/product-selection/dates"),
+  getSites: () => apiClient.get("/product-selection/sites"),
   getList: (params?: {
     page?: number;
     page_size?: number;
-    asin_search?: string;
-    keyword_search?: string;
-    title_search?: string;
+    search?: string;
     product_type?: string;
+    site?: string;
+    date_filter?: string;
     sort_by?: string;
     sort_order?: string;
   }) => apiClient.get("/product-selection/", { params }),
@@ -957,6 +960,7 @@ export const productSelectionApi = {
       ids,
       { timeout: 300000 },
     ),
+  recalcScores: () => apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
 };
 
 export default apiClient;

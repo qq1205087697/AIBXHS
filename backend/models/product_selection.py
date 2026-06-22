@@ -23,6 +23,7 @@ class ProductSelection(BaseModel):
     weight_kg = Column(Float, nullable=True, comment="重量(kg)")
     cost_at_15_profit = Column(DECIMAL(12, 2), nullable=True, comment="15%毛利时成本")
     product_type = Column(String(100), nullable=True, comment="类型")
+    site = Column(String(50), nullable=True, index=True, comment="站点")
     monthly_sales = Column(Integer, nullable=True, comment="近一个月销量")
     traffic_trend = Column(String(200), nullable=True, comment="流量趋势")
 

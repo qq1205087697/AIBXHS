@@ -219,6 +219,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           icon: <Mail size={20} />,
           label: '邮件机器人',
         }] : []),
+    ...(hasPermission('product_selection:view')
+      ? [{
+          key: '/product-selection',
+          icon: <Target size={20} />,
+          label: '选品机器人',
+        }] : []),
     ...(hasPermission('product:view')
       ? [{
           key: '/products',
