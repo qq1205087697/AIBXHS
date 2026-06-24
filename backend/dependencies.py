@@ -13,6 +13,15 @@ settings = get_settings()
 # 认证 Scheme
 security = HTTPBearer()
 
+# 角色权限映射
+ROLE_PERMISSIONS = {
+    "admin": ["view", "edit", "delete", "execute", "confirm", "manage_users"],
+    "operator": ["view", "edit", "delete", "execute", "confirm"],
+    "ad_specialist": ["view", "execute", "confirm"],
+    "supervisor": ["view", "confirm"],
+    "read_only": ["view"],
+}
+
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
     """获取当前用户"""

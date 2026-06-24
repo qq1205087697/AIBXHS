@@ -25,6 +25,7 @@ import {
   Boxes,
   Settings,
   Mail,
+  Megaphone,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -218,6 +219,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           icon: <Mail size={20} />,
           label: '邮件机器人',
         }] : []),
+    ...(hasPermission('robot:ad:view')
+      ? [{
+          key: '/ads',
+          icon: <Megaphone size={20} />,
+          label: '广告机器人',
+        }] : []),
     ...(hasPermission('product:view')
       ? [{
           key: '/products',
@@ -313,6 +320,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/business-settings': '业务设置',
       '/review': '差评机器人',
       '/email': '邮件机器人',
+      '/ads': '广告机器人',
       '/org': '组织管理',
       '/permissions': '权限管理',
       '/stores': '店铺管理',

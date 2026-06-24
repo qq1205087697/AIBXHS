@@ -70,6 +70,7 @@ interface StockoutItem {
   fba_stock: number;
   daily_sales: number;
   stockout_date: string;
+  total_stock: number;
   suggest_qty?: number;
   reason?: string;
 }
@@ -83,7 +84,7 @@ interface OverstockItem {
   age_12_plus: number;
   age_9_12: number;
   age_6_9: number;
-  age_3_6?: number;
+  age_3_6: number;
 }
 
 interface InventoryItem {
@@ -114,6 +115,7 @@ interface InventoryItem {
   replenishment_reason?: string;
   age_12_plus?: number;
   gross_margin?: number;
+  is_holiday?: boolean;
 }
 
 interface InboundDetail {
@@ -178,49 +180,59 @@ const InventoryBot: React.FC = () => {
   const [importLoading, setImportLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [syncingFeishu, setSyncingFeishu] = useState(false);
-  const [syncButtonLabel, setSyncButtonLabel] = useState('同步FBA在途');
+  const [syncButtonLabel, setSyncButtonLabel] = useState("同步FBA在途");
   const [syncProgress, setSyncProgress] = useState(0);
-  const [syncStep, setSyncStep] = useState('');
+  const [syncStep, setSyncStep] = useState("");
 
   // --- 补货计算状态（跨页面持久化） ---
   const [calculating, setCalculating] = useState(false);
-  const [calcButtonLabel, setCalcButtonLabel] = useState('重新计算');
+  const [calcButtonLabel, setCalcButtonLabel] = useState("重新计算");
 
   // --- Export states ---
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [selectedExportFields, setSelectedExportFields] = useState<string[]>([
-    'asin', 'sku', 'product_name', 'account', 'country', 'fba_stock', 
-    'fba_inbound', 'total_stock', 'daily_sales', 'days_of_supply', 
-    'risk_level', 'suggest_qty'
+    "asin",
+    "sku",
+    "product_name",
+    "account",
+    "country",
+    "fba_stock",
+    "fba_inbound",
+    "total_stock",
+    "daily_sales",
+    "days_of_supply",
+    "risk_level",
+    "suggest_qty",
   ]);
   // 导出字段选项
   const exportFieldOptions = [
-    { label: 'ASIN', value: 'asin' },
-    { label: 'SKU', value: 'sku' },
-    { label: 'FNSKU', value: 'fnsku' },
-    { label: 'MSKU', value: 'msku' },
-    { label: '品名', value: 'product_name' },
-    { label: '店铺', value: 'account' },
-    { label: '国家', value: 'country' },
-    { label: '分类', value: 'category' },
-    { label: '品牌', value: 'brand' },
-    { label: 'FBA库存', value: 'fba_stock' },
-    { label: '可售', value: 'fba_available' },
-    { label: '待调仓', value: 'fba_pending_transfer' },
-    { label: 'FBA预留', value: 'fba_in_transfer' },
-    { label: '入库中', value: 'fba_inbound_processing' },
-    { label: '在途', value: 'fba_inbound' },
-    { label: '查验货件数量', value: 'inspection_quantity' },
-    { label: '本地仓库存', value: 'local_inventory' },
-    { label: '总库存', value: 'total_stock' },
-    { label: '毛利率', value: 'gross_margin' },
-    { label: '日均销量', value: 'daily_sales' },
-    { label: '可售天数', value: 'days_of_supply' },
-    { label: '断货时间', value: 'stockout_date' },
-    { label: '风险等级', value: 'risk_level' },
-    { label: '建议补货数量', value: 'suggest_qty' },
-    { label: '补货原因', value: 'replenishment_reason' },
-    { label: '补货状态', value: 'replenishment_status' },
+    { label: "ASIN", value: "asin" },
+    { label: "SKU", value: "sku" },
+    { label: "FNSKU", value: "fnsku" },
+    { label: "MSKU", value: "msku" },
+    { label: "品名", value: "product_name" },
+    { label: "店铺", value: "account" },
+    { label: "国家", value: "country" },
+    { label: "分类", value: "category" },
+    { label: "品牌", value: "brand" },
+    { label: "FBA库存", value: "fba_stock" },
+    { label: "可售", value: "fba_available" },
+    { label: "待调仓", value: "fba_pending_transfer" },
+    { label: "FBA预留", value: "fba_in_transfer" },
+    { label: "入库中", value: "fba_inbound_processing" },
+    { label: "在途", value: "fba_inbound" },
+    { label: "查验货件数量", value: "inspection_quantity" },
+    { label: "本地仓库存", value: "local_inventory" },
+    { label: "总库存", value: "total_stock" },
+    { label: "毛利率", value: "gross_margin" },
+    { label: "日均销量", value: "daily_sales" },
+    { label: "可售天数", value: "days_of_supply" },
+    { label: "断货时间", value: "stockout_date" },
+    { label: "风险等级", value: "risk_level" },
+    { label: "建议补货数量", value: "suggest_qty" },
+    { label: "补货原因", value: "replenishment_reason" },
+    { label: "补货状态", value: "replenishment_status" },
+    { label: "节日产品", value: "is_holiday" },
   ];
 
   // --- Data states ---
@@ -259,6 +271,8 @@ const InventoryBot: React.FC = () => {
   const [tableRiskFilter, setTableRiskFilter] = useState<string[] | undefined>(
     undefined,
   );
+  const [holidayFilter, setHolidayFilter] =
+    useState<string>("only_non_holiday");
 
   // --- Modal states ---
   const [inboundModalVisible, setInboundModalVisible] = useState(false);
@@ -277,16 +291,23 @@ const InventoryBot: React.FC = () => {
   const [overstockCollapsed, setOverstockCollapsed] = useState(true);
 
   // --- Local inventory states ---
-  const [localSummary, setLocalSummary] = useState<LocalInventorySummary | null>(null);
+  const [localSummary, setLocalSummary] =
+    useState<LocalInventorySummary | null>(null);
   const [localLoading, setLocalLoading] = useState(false);
 
   // --- Inspection editing states ---
-  const [editingInspectionId, setEditingInspectionId] = useState<number | null>(null);
+  const [editingInspectionId, setEditingInspectionId] = useState<number | null>(
+    null,
+  );
   const [editingInspectionVal, setEditingInspectionVal] = useState<number>(0);
 
   // --- Summary expandable states ---
-  const [expandedParentIds, setExpandedParentIds] = useState<Set<number>>(new Set());
-  const [childrenMap, setChildrenMap] = useState<Record<number, InventoryItem[]>>({});
+  const [expandedParentIds, setExpandedParentIds] = useState<Set<number>>(
+    new Set(),
+  );
+  const [childrenMap, setChildrenMap] = useState<
+    Record<number, InventoryItem[]>
+  >({});
 
   // --- Reduction import states ---
   const [reductionModalVisible, setReductionModalVisible] = useState(false);
@@ -302,33 +323,40 @@ const InventoryBot: React.FC = () => {
   } | null>(null);
 
   // --- Column settings states ---
-  const COLUMN_META = useMemo(() => [
-    { key: "asin", label: "ASIN" },
-    { key: "sku", label: "SKU" },
-    { key: "product_name", label: "品名" },
-    { key: "account", label: "店铺" },
-    { key: "country", label: "国家" },
-    { key: "fba_stock", label: "FBA库存" },
-    { key: "fba_inbound", label: "在途" },
-    { key: "inspection_quantity", label: "查验货件" },
-    { key: "total_stock", label: "总库存" },
-    { key: "gross_margin", label: "毛利率" },
-    { key: "local_inventory", label: "本地仓" },
-    { key: "daily_sales", label: "日均销量" },
-    { key: "days_of_supply", label: "可售天数" },
-    { key: "stockout_date", label: "断货时间" },
-    { key: "suggest_qty", label: "建议补货" },
-    { key: "age_12_plus", label: "12月+库龄" },
-    { key: "risk_level", label: "风险等级" },
-  ], []);
+  const COLUMN_META = useMemo(
+    () => [
+      { key: "asin", label: "ASIN" },
+      { key: "sku", label: "SKU" },
+      { key: "product_name", label: "品名" },
+      { key: "account", label: "店铺" },
+      { key: "country", label: "国家" },
+      { key: "fba_stock", label: "FBA库存" },
+      { key: "fba_inbound", label: "在途" },
+      { key: "inspection_quantity", label: "查验货件" },
+      { key: "total_stock", label: "总库存" },
+      { key: "gross_margin", label: "毛利率" },
+      { key: "local_inventory", label: "本地仓" },
+      { key: "daily_sales", label: "日均销量" },
+      { key: "days_of_supply", label: "可售天数" },
+      { key: "stockout_date", label: "断货时间" },
+      { key: "suggest_qty", label: "建议补货" },
+      { key: "age_12_plus", label: "12月+库龄" },
+      { key: "risk_level", label: "风险等级" },
+    ],
+    [],
+  );
 
-  const defaultVisibility = useMemo(() =>
-    Object.fromEntries(COLUMN_META.map(col => [col.key, true])),
-  [COLUMN_META]);
+  const defaultVisibility = useMemo(
+    () => Object.fromEntries(COLUMN_META.map((col) => [col.key, true])),
+    [COLUMN_META],
+  );
 
-  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(defaultVisibility);
+  const [columnVisibility, setColumnVisibility] =
+    useState<Record<string, boolean>>(defaultVisibility);
   const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
-  const [frozenColumns, setFrozenColumns] = useState<Set<string>>(new Set(["_expand", "asin", "action"]));
+  const [frozenColumns, setFrozenColumns] = useState<Set<string>>(
+    new Set(["_expand", "asin", "action"]),
+  );
 
   // ==================== Data Fetching ====================
 
@@ -372,6 +400,7 @@ const InventoryBot: React.FC = () => {
       country?: string[],
       sortF?: string,
       sortOrd?: string,
+      holiday?: string,
     ) => {
       try {
         setTableLoading(true);
@@ -385,6 +414,7 @@ const InventoryBot: React.FC = () => {
         if (country && country.length > 0) params.country = country;
         if (sortF) params.sort_field = sortF;
         if (sortOrd) params.sort_order = sortOrd;
+        if (holiday && holiday !== "all") params.holiday_filter = holiday;
 
         console.log("发送请求参数:", params);
 
@@ -421,20 +451,24 @@ const InventoryBot: React.FC = () => {
       countryFilter,
       sortField,
       sortOrder,
+      holidayFilter,
     );
 
     // 获取筛选选项
-    inventoryApi.getFilterOptions().then(res => {
-      const data = res.data?.data || res.data;
-      if (data) {
-        // 后端返回的是对象数组 [{value, label}]，直接使用
-        setAccountOptions(data.stores || []);
-        setAllAccountOptions(data.stores || []); // 保存所有店铺选项
-        setCountryOptions(data.countries || []);
-      }
-    }).catch(err => {
-      console.error('获取筛选选项失败:', err);
-    });
+    inventoryApi
+      .getFilterOptions()
+      .then((res) => {
+        const data = res.data?.data || res.data;
+        if (data) {
+          // 后端返回的是对象数组 [{value, label}]，直接使用
+          setAccountOptions(data.stores || []);
+          setAllAccountOptions(data.stores || []); // 保存所有店铺选项
+          setCountryOptions(data.countries || []);
+        }
+      })
+      .catch((err) => {
+        console.error("获取筛选选项失败:", err);
+      });
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -453,6 +487,7 @@ const InventoryBot: React.FC = () => {
       countryFilter,
       sortField,
       sortOrder,
+      holidayFilter,
     );
   };
 
@@ -468,6 +503,7 @@ const InventoryBot: React.FC = () => {
       countryFilter,
       sortField,
       sortOrder,
+      holidayFilter,
     );
   };
 
@@ -481,33 +517,36 @@ const InventoryBot: React.FC = () => {
     if (selectedCountries.length > 0) {
       // 店铺格式是 "店铺名-国家代码"，如 "JeVenis-US"
       // 国家选项是中文，需要匹配店铺中的国家代码
-      const filteredStores = allAccountOptions.filter(store => {
+      const filteredStores = allAccountOptions.filter((store) => {
         // 店铺值格式: "店铺名-US" 或 "店铺名-美国"
-        return selectedCountries.some(country => {
+        return selectedCountries.some((country) => {
           // 尝试匹配国家代码或国家名称
           const countryCodeMap: Record<string, string> = {
-            '美国': 'US',
-            '英国': 'UK',
-            '德国': 'DE',
-            '法国': 'FR',
-            '意大利': 'IT',
-            '西班牙': 'ES',
-            '日本': 'JP',
-            '加拿大': 'CA',
-            '墨西哥': 'MX',
-            '澳大利亚': 'AU',
-            '荷兰': 'NL',
-            '瑞典': 'SE',
-            '波兰': 'PL',
-            '比利时': 'BE',
-            '新加坡': 'SG',
-            '阿联酋': 'AE',
-            '印度': 'IN',
-            '巴西': 'BR',
+            美国: "US",
+            英国: "UK",
+            德国: "DE",
+            法国: "FR",
+            意大利: "IT",
+            西班牙: "ES",
+            日本: "JP",
+            加拿大: "CA",
+            墨西哥: "MX",
+            澳大利亚: "AU",
+            荷兰: "NL",
+            瑞典: "SE",
+            波兰: "PL",
+            比利时: "BE",
+            新加坡: "SG",
+            阿联酋: "AE",
+            印度: "IN",
+            巴西: "BR",
           };
           const code = countryCodeMap[country] || country;
           // 检查店铺值是否包含国家代码
-          return store.value.includes(`-${code}`) || store.value.includes(`-${country}`);
+          return (
+            store.value.includes(`-${code}`) ||
+            store.value.includes(`-${country}`)
+          );
         });
       });
       setAccountOptions(filteredStores);
@@ -525,6 +564,7 @@ const InventoryBot: React.FC = () => {
       selectedCountries,
       sortField,
       sortOrder,
+      holidayFilter,
     );
   };
 
@@ -558,11 +598,12 @@ const InventoryBot: React.FC = () => {
       countryFilter,
       newSortField,
       newSortOrder,
+      holidayFilter,
     );
   };
 
   const handlePageChange = (page: number, pageSize: number) => {
-    setPagination(prev => ({ ...prev, current: page, pageSize }));
+    setPagination((prev) => ({ ...prev, current: page, pageSize }));
     fetchInventoryList(
       page,
       pageSize,
@@ -572,6 +613,7 @@ const InventoryBot: React.FC = () => {
       countryFilter,
       sortField,
       sortOrder,
+      holidayFilter,
     );
   };
 
@@ -588,6 +630,7 @@ const InventoryBot: React.FC = () => {
       countryFilter,
       sortField,
       sortOrder,
+      holidayFilter,
     );
   };
 
@@ -598,12 +641,22 @@ const InventoryBot: React.FC = () => {
       const taskId = response.data?.data?.task_id;
       if (taskId) {
         setCalculating(true);
-        setCalcButtonLabel('计算中...');
+        setCalcButtonLabel("计算中...");
         saveCalcStatusToStorage({ status: "running", taskId, step: "启动中" });
         pollCalcStatus(taskId);
       } else {
         messageApi.success("补货计算完成");
-        fetchInventoryList(1, pagination.pageSize, searchText, tableRiskFilter, accountFilter, countryFilter, sortField, sortOrder);
+        fetchInventoryList(
+          1,
+          pagination.pageSize,
+          searchText,
+          tableRiskFilter,
+          accountFilter,
+          countryFilter,
+          sortField,
+          sortOrder,
+          holidayFilter,
+        );
         fetchOverview();
       }
     } catch (error: any) {
@@ -638,7 +691,10 @@ const InventoryBot: React.FC = () => {
       return;
     }
     try {
-      await inventoryApi.updateInspectionQuantity(record.id, editingInspectionVal);
+      await inventoryApi.updateInspectionQuantity(
+        record.id,
+        editingInspectionVal,
+      );
       messageApi.success("查验数量已更新");
       setEditingInspectionId(null);
       fetchInventoryList(
@@ -650,6 +706,7 @@ const InventoryBot: React.FC = () => {
         countryFilter,
         sortField,
         sortOrder,
+        holidayFilter,
       );
     } catch (error: any) {
       console.error("更新查验数量失败:", error);
@@ -663,7 +720,7 @@ const InventoryBot: React.FC = () => {
     const parentId = record.id;
     if (!parentId) return;
     if (expandedParentIds.has(parentId)) {
-      setExpandedParentIds(prev => {
+      setExpandedParentIds((prev) => {
         const next = new Set(prev);
         next.delete(parentId);
         return next;
@@ -673,9 +730,12 @@ const InventoryBot: React.FC = () => {
     try {
       const response = await inventoryApi.getSummaryChildren(record.asin);
       const data = response.data?.data || [];
-      const children = (Array.isArray(data) ? data : []).map(c => ({ ...c, _isChild: true }));
-      setChildrenMap(prev => ({ ...prev, [parentId]: children }));
-      setExpandedParentIds(prev => {
+      const children = (Array.isArray(data) ? data : []).map((c) => ({
+        ...c,
+        _isChild: true,
+      }));
+      setChildrenMap((prev) => ({ ...prev, [parentId]: children }));
+      setExpandedParentIds((prev) => {
         const next = new Set(prev);
         next.add(parentId);
         return next;
@@ -691,7 +751,11 @@ const InventoryBot: React.FC = () => {
     for (const item of inventoryList) {
       result.push(item);
       if (item.id && expandedParentIds.has(item.id) && childrenMap[item.id]) {
-        result.push(...childrenMap[item.id].map(c => ({ ...c, _isChild: true } as InventoryItem)));
+        result.push(
+          ...childrenMap[item.id].map(
+            (c) => ({ ...c, _isChild: true }) as InventoryItem,
+          ),
+        );
       }
     }
     return result;
@@ -715,6 +779,7 @@ const InventoryBot: React.FC = () => {
           countryFilter,
           sortField,
           sortOrder,
+          holidayFilter,
         );
       } else {
         messageApi.warning(response.data?.message || "导入完成，请检查数据");
@@ -727,8 +792,6 @@ const InventoryBot: React.FC = () => {
     }
     return false; // 阻止默认上传行为
   };
-
-  
 
   const handleClearLocalInventory = async () => {
     try {
@@ -747,6 +810,7 @@ const InventoryBot: React.FC = () => {
           countryFilter,
           sortField,
           sortOrder,
+          holidayFilter,
         );
       }
     } catch (error: any) {
@@ -768,25 +832,46 @@ const InventoryBot: React.FC = () => {
     try {
       setReductionImporting(true);
       setReductionResult(null);
-      const response = await localInventoryApi.importReduction(reductionCountry, reductionFile);
+      const response = await localInventoryApi.importReduction(
+        reductionCountry,
+        reductionFile,
+      );
       if (response.data?.success) {
         const data = response.data.data;
         setReductionResult(data);
-        messageApi.success(`导入完成：共${data.total}条，更新${data.updated}条，跳过${data.skipped}条`);
+        messageApi.success(
+          `导入完成：共${data.total}条，更新${data.updated}条，跳过${data.skipped}条`,
+        );
 
         // 自动触发增量补货计算（异步）
         if (data.snapshot_ids && data.snapshot_ids.length > 0) {
           try {
-            const calcResp = await inventoryApi.calculate({ snapshot_ids: data.snapshot_ids.join(",") });
+            const calcResp = await inventoryApi.calculate({
+              snapshot_ids: data.snapshot_ids.join(","),
+            });
             const taskId = calcResp.data?.data?.task_id;
             if (taskId) {
               setCalculating(true);
-              setCalcButtonLabel('计算中...');
-              saveCalcStatusToStorage({ status: "running", taskId, step: "启动中" });
+              setCalcButtonLabel("计算中...");
+              saveCalcStatusToStorage({
+                status: "running",
+                taskId,
+                step: "启动中",
+              });
               pollCalcStatus(taskId);
             } else {
               messageApi.success("补货计算完成");
-              fetchInventoryList(1, pagination.pageSize, searchText, tableRiskFilter, accountFilter, countryFilter, sortField, sortOrder);
+              fetchInventoryList(
+                1,
+                pagination.pageSize,
+                searchText,
+                tableRiskFilter,
+                accountFilter,
+                countryFilter,
+                sortField,
+                sortOrder,
+                holidayFilter,
+              );
               fetchOverview();
             }
           } catch (calcError) {
@@ -809,17 +894,17 @@ const InventoryBot: React.FC = () => {
     try {
       const response = await localInventoryApi.downloadReductionResult(fileId);
       const blob = new Blob([response.data], {
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
       a.download = `减表导入结果_${new Date().toISOString().slice(0, 10)}.xlsx`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      messageApi.success('结果文件下载成功');
+      messageApi.success("结果文件下载成功");
     } catch (error) {
       console.error("下载结果文件失败:", error);
       messageApi.error("下载结果文件失败");
@@ -837,9 +922,22 @@ const InventoryBot: React.FC = () => {
       accountFilter,
       countryFilter,
       sortField,
-      sortOrder
+      sortOrder,
+      holidayFilter,
     );
-  }, [fetchOverview, fetchLocalSummary, fetchInventoryList, pagination, searchText, tableRiskFilter, accountFilter, countryFilter, sortField, sortOrder]);
+  }, [
+    fetchOverview,
+    fetchLocalSummary,
+    fetchInventoryList,
+    pagination,
+    searchText,
+    tableRiskFilter,
+    accountFilter,
+    countryFilter,
+    sortField,
+    sortOrder,
+    holidayFilter,
+  ]);
 
   const handleExport = async () => {
     setExportModalVisible(true);
@@ -850,27 +948,31 @@ const InventoryBot: React.FC = () => {
     try {
       const res = await inventoryApi.exportInventory({
         keyword: searchText || undefined,
-        risk_level: tableRiskFilter && tableRiskFilter.length > 0 ? tableRiskFilter : undefined,
+        risk_level:
+          tableRiskFilter && tableRiskFilter.length > 0
+            ? tableRiskFilter
+            : undefined,
         account: accountFilter.length > 0 ? accountFilter : undefined,
         country: countryFilter.length > 0 ? countryFilter : undefined,
-        fields: selectedExportFields.length > 0 ? selectedExportFields : undefined,
+        fields:
+          selectedExportFields.length > 0 ? selectedExportFields : undefined,
       });
 
       const blob = new Blob([res.data], {
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
       a.download = `库存明细_${new Date().toISOString().slice(0, 10)}.xlsx`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      messageApi.success('导出成功');
+      messageApi.success("导出成功");
       setExportModalVisible(false);
     } catch (error) {
-      messageApi.error('导出失败');
+      messageApi.error("导出失败");
     } finally {
       setExporting(false);
     }
@@ -878,15 +980,18 @@ const InventoryBot: React.FC = () => {
 
   // 保存同步状态到 localStorage
   const saveSyncStatusToStorage = (status: any) => {
-    localStorage.setItem('feishuSyncStatus', JSON.stringify({
-      ...status,
-      savedAt: Date.now()
-    }));
+    localStorage.setItem(
+      "feishuSyncStatus",
+      JSON.stringify({
+        ...status,
+        savedAt: Date.now(),
+      }),
+    );
   };
 
   // 从 localStorage 读取同步状态
   const loadSyncStatusFromStorage = () => {
-    const saved = localStorage.getItem('feishuSyncStatus');
+    const saved = localStorage.getItem("feishuSyncStatus");
     if (saved) {
       try {
         const status = JSON.parse(saved);
@@ -895,7 +1000,7 @@ const InventoryBot: React.FC = () => {
           return status;
         }
       } catch (e) {
-        console.error('解析同步状态失败', e);
+        console.error("解析同步状态失败", e);
       }
     }
     return null;
@@ -907,15 +1012,15 @@ const InventoryBot: React.FC = () => {
     try {
       const res = await inventoryApi.syncFeishuInbound();
       if (res.data?.data?.started) {
-        messageApi.success('同步任务已启动，请稍候...');
+        messageApi.success("同步任务已启动，请稍候...");
         // 开始轮询状态
         pollSyncStatus();
       } else {
-        messageApi.warning(res.data?.data?.message || '同步任务正在运行中');
+        messageApi.warning(res.data?.data?.message || "同步任务正在运行中");
         setSyncingFeishu(false);
       }
     } catch (error) {
-      messageApi.error('启动同步失败');
+      messageApi.error("启动同步失败");
       setSyncingFeishu(false);
     }
   };
@@ -925,13 +1030,13 @@ const InventoryBot: React.FC = () => {
     try {
       const res = await inventoryApi.getSyncFeishuStatus();
       const status = res.data?.data;
-      
+
       // 保存状态到 localStorage
       saveSyncStatusToStorage(status);
-      
+
       if (status?.is_running) {
         // 更新按钮文字显示进度
-        const step = status.step || '';
+        const step = status.step || "";
         const progress = status.progress || 0;
         setSyncButtonLabel(`同步中 ${progress}% - ${step}`);
         setSyncProgress(progress);
@@ -941,12 +1046,12 @@ const InventoryBot: React.FC = () => {
       } else {
         // 同步完成
         setSyncingFeishu(false);
-        setSyncButtonLabel('同步FBA在途');
+        setSyncButtonLabel("同步FBA在途");
         setSyncProgress(0);
-        setSyncStep('');
+        setSyncStep("");
         // 清除 localStorage
-        localStorage.removeItem('feishuSyncStatus');
-        
+        localStorage.removeItem("feishuSyncStatus");
+
         if (status?.error) {
           messageApi.error(`同步失败: ${status.error}`);
         } else if (status?.progress === 100) {
@@ -955,10 +1060,10 @@ const InventoryBot: React.FC = () => {
       }
     } catch (error) {
       setSyncingFeishu(false);
-      setSyncButtonLabel('同步FBA在途');
+      setSyncButtonLabel("同步FBA在途");
       setSyncProgress(0);
-      setSyncStep('');
-      messageApi.error('获取同步状态失败');
+      setSyncStep("");
+      messageApi.error("获取同步状态失败");
     }
   };
 
@@ -968,9 +1073,11 @@ const InventoryBot: React.FC = () => {
     if (savedStatus && savedStatus.is_running) {
       // 恢复同步状态
       setSyncingFeishu(true);
-      setSyncButtonLabel(`同步中 ${savedStatus.progress || 0}% - ${savedStatus.step || ''}`);
+      setSyncButtonLabel(
+        `同步中 ${savedStatus.progress || 0}% - ${savedStatus.step || ""}`,
+      );
       setSyncProgress(savedStatus.progress || 0);
-      setSyncStep(savedStatus.step || '');
+      setSyncStep(savedStatus.step || "");
       // 继续轮询
       pollSyncStatus();
     }
@@ -978,13 +1085,16 @@ const InventoryBot: React.FC = () => {
 
   // ========== 补货计算状态持久化（跨页面） ==========
 
-  const CALC_STATUS_KEY = 'calcStatus';
+  const CALC_STATUS_KEY = "calcStatus";
 
   const saveCalcStatusToStorage = (status: any) => {
-    localStorage.setItem(CALC_STATUS_KEY, JSON.stringify({
-      ...status,
-      savedAt: Date.now()
-    }));
+    localStorage.setItem(
+      CALC_STATUS_KEY,
+      JSON.stringify({
+        ...status,
+        savedAt: Date.now(),
+      }),
+    );
   };
 
   const loadCalcStatusFromStorage = () => {
@@ -996,7 +1106,7 @@ const InventoryBot: React.FC = () => {
           return status;
         }
       } catch (e) {
-        console.error('解析计算状态失败', e);
+        console.error("解析计算状态失败", e);
       }
     }
     return null;
@@ -1010,17 +1120,27 @@ const InventoryBot: React.FC = () => {
       saveCalcStatusToStorage({ ...task, taskId });
 
       if (task?.status === "running" || task?.status === "pending") {
-        const progressText = task.progress != null ? ` ${task.progress}%` : '';
+        const progressText = task.progress != null ? ` ${task.progress}%` : "";
         setCalcButtonLabel(`计算中${progressText}`);
         setTimeout(() => pollCalcStatus(taskId), 2000);
       } else {
         setCalculating(false);
-        setCalcButtonLabel('重新计算');
+        setCalcButtonLabel("重新计算");
         localStorage.removeItem(CALC_STATUS_KEY);
 
         if (task?.status === "completed") {
           messageApi.success(`补货计算完成`);
-          fetchInventoryList(1, pagination.pageSize, searchText, tableRiskFilter, accountFilter, countryFilter, sortField, sortOrder);
+          fetchInventoryList(
+            1,
+            pagination.pageSize,
+            searchText,
+            tableRiskFilter,
+            accountFilter,
+            countryFilter,
+            sortField,
+            sortOrder,
+            holidayFilter,
+          );
           fetchOverview();
         } else if (task?.status === "failed") {
           messageApi.warning(`补货计算失败: ${task?.error || "未知错误"}`);
@@ -1028,18 +1148,22 @@ const InventoryBot: React.FC = () => {
       }
     } catch (error) {
       setCalculating(false);
-      setCalcButtonLabel('重新计算');
+      setCalcButtonLabel("重新计算");
       localStorage.removeItem(CALC_STATUS_KEY);
-      messageApi.warning('查询计算状态失败');
+      messageApi.warning("查询计算状态失败");
     }
   };
 
   // 页面加载时检查是否有正在运行的计算任务
   useEffect(() => {
     const savedStatus = loadCalcStatusFromStorage();
-    if (savedStatus && (savedStatus.status === "running" || savedStatus.status === "pending") && savedStatus.taskId) {
+    if (
+      savedStatus &&
+      (savedStatus.status === "running" || savedStatus.status === "pending") &&
+      savedStatus.taskId
+    ) {
       setCalculating(true);
-      setCalcButtonLabel(`计算中...${savedStatus.step || ''}`);
+      setCalcButtonLabel(`计算中...${savedStatus.step || ""}`);
       pollCalcStatus(savedStatus.taskId);
     }
   }, []);
@@ -1057,10 +1181,21 @@ const InventoryBot: React.FC = () => {
         const isExpanded = record.id ? expandedParentIds.has(record.id) : false;
         return (
           <span
-            onClick={(e) => { e.stopPropagation(); handleToggleExpand(record); }}
-            style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleToggleExpand(record);
+            }}
+            style={{
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+            }}
           >
-            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {isExpanded ? (
+              <ChevronDown size={14} />
+            ) : (
+              <ChevronRight size={14} />
+            )}
           </span>
         );
       },
@@ -1206,7 +1341,15 @@ const InventoryBot: React.FC = () => {
                       color: "#faad14",
                     }}
                   >
-                    {formatNumber(Math.max(0, (record.fba_stock || 0) - (record.fba_available || 0) - (record.fba_pending_transfer || 0) - (record.fba_inbound_processing || 0)))}
+                    {formatNumber(
+                      Math.max(
+                        0,
+                        (record.fba_stock || 0) -
+                          (record.fba_available || 0) -
+                          (record.fba_pending_transfer || 0) -
+                          (record.fba_inbound_processing || 0),
+                      ),
+                    )}
                   </td>
                 </tr>
                 <tr>
@@ -1231,10 +1374,15 @@ const InventoryBot: React.FC = () => {
                     style={{
                       padding: "4px 0",
                       fontWeight: 500,
-                      color: record.gross_margin != null && record.gross_margin >= 0 ? "#52c41a" : "#999",
+                      color:
+                        record.gross_margin != null && record.gross_margin >= 0
+                          ? "#52c41a"
+                          : "#999",
                     }}
                   >
-                    {record.gross_margin != null ? `${(record.gross_margin * 100).toFixed(1)}%` : "-"}
+                    {record.gross_margin != null
+                      ? `${(record.gross_margin * 100).toFixed(1)}%`
+                      : "-"}
                   </td>
                 </tr>
               </tbody>
@@ -1301,15 +1449,30 @@ const InventoryBot: React.FC = () => {
           <div style={{ padding: "4px 0" }}>
             <div style={{ fontSize: 12, marginBottom: 4 }}>
               <span style={{ color: "#8c8c8c" }}>原始导入在途: </span>
-              <span style={{ fontWeight: 500 }}>{formatNumber(originalInbound)}</span>
+              <span style={{ fontWeight: 500 }}>
+                {formatNumber(originalInbound)}
+              </span>
             </div>
             <div style={{ fontSize: 12, marginBottom: 4 }}>
               <span style={{ color: "#8c8c8c" }}>已查验: </span>
-              <span style={{ fontWeight: 500, color: "#722ed1" }}>{formatNumber(inspected)}</span>
+              <span style={{ fontWeight: 500, color: "#722ed1" }}>
+                {formatNumber(inspected)}
+              </span>
             </div>
-            <div style={{ fontSize: 12, borderTop: "1px solid #434343", paddingTop: 4 }}>
+            <div
+              style={{
+                fontSize: 12,
+                borderTop: "1px solid #434343",
+                paddingTop: 4,
+              }}
+            >
               <span style={{ color: "#8c8c8c" }}>实际在途: </span>
-              <span style={{ fontWeight: 700, color: effectiveInbound > 0 ? "#1890ff" : "#999" }}>
+              <span
+                style={{
+                  fontWeight: 700,
+                  color: effectiveInbound > 0 ? "#1890ff" : "#999",
+                }}
+              >
                 {formatNumber(effectiveInbound)}
               </span>
             </div>
@@ -1317,7 +1480,12 @@ const InventoryBot: React.FC = () => {
         );
         return (
           <Tooltip title={tooltipContent} color="#262626">
-            <span style={{ color: effectiveInbound > 0 ? "#1890ff" : "#999", fontWeight: effectiveInbound > 0 ? 600 : 400 }}>
+            <span
+              style={{
+                color: effectiveInbound > 0 ? "#1890ff" : "#999",
+                fontWeight: effectiveInbound > 0 ? 600 : 400,
+              }}
+            >
               {formatNumber(effectiveInbound)}
             </span>
           </Tooltip>
@@ -1355,7 +1523,11 @@ const InventoryBot: React.FC = () => {
               setEditingInspectionId(record.id);
               setEditingInspectionVal(qty);
             }}
-            style={{ color: qty > 0 ? "#722ed1" : "#d9d9d9", fontWeight: qty > 0 ? 600 : 400, cursor: "pointer" }}
+            style={{
+              color: qty > 0 ? "#722ed1" : "#d9d9d9",
+              fontWeight: qty > 0 ? 600 : 400,
+              cursor: "pointer",
+            }}
           >
             {qty > 0 ? qty.toLocaleString() : "点击填写"}
           </span>
@@ -1391,7 +1563,9 @@ const InventoryBot: React.FC = () => {
         }
         if (val === null || val === undefined) return "-";
         return (
-          <span style={{ color: val >= 0 ? "#52c41a" : "#cf1322", fontWeight: 500 }}>
+          <span
+            style={{ color: val >= 0 ? "#52c41a" : "#cf1322", fontWeight: 500 }}
+          >
             {(val * 100).toFixed(1)}%
           </span>
         );
@@ -1492,7 +1666,9 @@ const InventoryBot: React.FC = () => {
         const qty = val || 0;
         if (qty > 0) {
           return (
-            <Tooltip title={record.replenishment_reason || `建议补货 ${qty} 件`}>
+            <Tooltip
+              title={record.replenishment_reason || `建议补货 ${qty} 件`}
+            >
               <span
                 style={{
                   display: "inline-block",
@@ -1527,8 +1703,18 @@ const InventoryBot: React.FC = () => {
             : "descend"
           : undefined,
       render: (val: number) => {
-        if (val == null || val === 0) return <span style={{ color: "#d9d9d9" }}>-</span>;
-        return <span style={{ color: val > 0 ? "#cf1322" : undefined, fontWeight: val > 0 ? 600 : undefined }}>{val.toLocaleString()}</span>;
+        if (val == null || val === 0)
+          return <span style={{ color: "#d9d9d9" }}>-</span>;
+        return (
+          <span
+            style={{
+              color: val > 0 ? "#cf1322" : undefined,
+              fontWeight: val > 0 ? 600 : undefined,
+            }}
+          >
+            {val.toLocaleString()}
+          </span>
+        );
       },
     },
     {
@@ -1547,54 +1733,156 @@ const InventoryBot: React.FC = () => {
     {
       title: "操作",
       key: "action",
-      width: 120,
+      width: 200,
       fixed: "right",
       render: (_: any, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
           return null;
         }
+        const isSummary = record.summary_flag === "是";
+        const confirmMessage = (action: string) => {
+          let msg = `确定要${action}该商品吗？`;
+          if (isSummary) {
+            msg += "该操作将同时标记/取消标记其所有子行，是否继续？";
+          }
+          return msg;
+        };
         return (
-          <Button
-            type="link"
-            size="small"
-            icon={<Truck size={14} />}
-            onClick={() => handleViewInbound(record.asin, record.account)}
-          >
-            在途详情
-          </Button>
+          <Space size={4}>
+            <Button
+              type="link"
+              size="small"
+              icon={<Truck size={14} />}
+              onClick={() => handleViewInbound(record.asin, record.account)}
+            >
+              在途详情
+            </Button>
+            {record.is_holiday === true ? (
+              <Popconfirm
+                title="取消节日标记"
+                description={confirmMessage("取消节日标记")}
+                onConfirm={async () => {
+                  try {
+                    await inventoryApi.markHoliday([record.id], false);
+                    messageApi.success("已取消节日标记");
+                    fetchInventoryList(
+                      pagination.current || 1,
+                      pagination.pageSize || 20,
+                      searchText,
+                      tableRiskFilter,
+                      accountFilter,
+                      countryFilter,
+                      sortField,
+                      sortOrder,
+                      holidayFilter,
+                    );
+                    fetchOverview();
+                  } catch (error: any) {
+                    messageApi.error(
+                      error?.response?.data?.detail || "操作失败",
+                    );
+                  }
+                }}
+                okText="确定"
+                cancelText="取消"
+              >
+                <Tag color="purple" style={{ cursor: "pointer" }}>
+                  节日
+                </Tag>
+              </Popconfirm>
+            ) : (
+              <Popconfirm
+                title="标记为节日产品"
+                description={confirmMessage("标记为节日产品")}
+                onConfirm={async () => {
+                  try {
+                    await inventoryApi.markHoliday([record.id], true);
+                    messageApi.success("已标记为节日产品");
+                    fetchInventoryList(
+                      pagination.current || 1,
+                      pagination.pageSize || 20,
+                      searchText,
+                      tableRiskFilter,
+                      accountFilter,
+                      countryFilter,
+                      sortField,
+                      sortOrder,
+                      holidayFilter,
+                    );
+                    fetchOverview();
+                  } catch (error: any) {
+                    messageApi.error(
+                      error?.response?.data?.detail || "操作失败",
+                    );
+                  }
+                }}
+                okText="确定"
+                cancelText="取消"
+              >
+                <Button type="link" size="small">
+                  标记节日
+                </Button>
+              </Popconfirm>
+            )}
+          </Space>
         );
       },
     },
   ];
 
-  const CHILD_REAL_FIELDS = new Set(["asin", "sku", "product_name", "account", "country", "local_inventory", "gross_margin", "daily_sales"]);
+  const CHILD_REAL_FIELDS = new Set([
+    "asin",
+    "sku",
+    "product_name",
+    "account",
+    "country",
+    "local_inventory",
+    "gross_margin",
+    "daily_sales",
+  ]);
 
   const childWrappedColumns = useMemo(() => {
-    const visibleCols = inventoryColumns.filter(col => {
+    const visibleCols = inventoryColumns.filter((col) => {
       const key = (col as any).key;
       if (key === "_expand" || key === "action") return true;
       return columnVisibility[key] !== false;
     });
-    return visibleCols.map(col => {
+    return visibleCols.map((col) => {
       const colType = col as any;
       const dataKey = colType.dataIndex as string;
       const originalRender = colType.render;
       const colKey = colType.key as string;
-      const isFrozen = colType.fixed === "left" || colType.fixed === "right" || frozenColumns.has(colKey);
+      const isFrozen =
+        colType.fixed === "left" ||
+        colType.fixed === "right" ||
+        frozenColumns.has(colKey);
       return {
         ...colType,
-        fixed: isFrozen ? (colType.fixed || "left") : undefined,
+        fixed: isFrozen ? colType.fixed || "left" : undefined,
         render: (val: any, record: any, index: number) => {
           if (!record._isChild) {
-            return originalRender ? originalRender(val, record, index) : (val ?? "-");
+            return originalRender
+              ? originalRender(val, record, index)
+              : (val ?? "-");
           }
           if (!dataKey) return <span style={{ color: "#ccc" }}>-</span>;
           if (dataKey === "gross_margin") {
-            if (val === null || val === undefined) return <span style={{ color: "#ccc" }}>-</span>;
-            return <span style={{ color: val >= 0 ? "#52c41a" : "#cf1322", fontWeight: 500 }}>{(val * 100).toFixed(1)}%</span>;
+            if (val === null || val === undefined)
+              return <span style={{ color: "#ccc" }}>-</span>;
+            return (
+              <span
+                style={{
+                  color: val >= 0 ? "#52c41a" : "#cf1322",
+                  fontWeight: 500,
+                }}
+              >
+                {(val * 100).toFixed(1)}%
+              </span>
+            );
           }
           if (dataKey === "daily_sales") {
-            if (val == null || val === undefined) return <span style={{ color: "#ccc" }}>-</span>;
+            if (val == null || val === undefined)
+              return <span style={{ color: "#ccc" }}>-</span>;
             return <span style={{ fontWeight: 500 }}>{val.toFixed(2)}</span>;
           }
           if (CHILD_REAL_FIELDS.has(dataKey)) {
@@ -1659,7 +1947,14 @@ const InventoryBot: React.FC = () => {
   const snapshotDate = overviewData?.snapshot_date || "";
 
   return (
-    <div style={{ height: "100%", overflowY: "auto", overflowX: "hidden", padding: "0 0 24px 0" }}>
+    <div
+      style={{
+        height: "100%",
+        overflowY: "auto",
+        overflowX: "hidden",
+        padding: "0 0 24px 0",
+      }}
+    >
       {contextHolder}
 
       {/* ===== 1. Page Title Bar ===== */}
@@ -1700,7 +1995,7 @@ const InventoryBot: React.FC = () => {
           >
             {calcButtonLabel}
           </Button>
-          
+
           {localSummary && localSummary.total_sku > 0 && (
             <Popconfirm
               title="确定要清空所有本地仓库存数据吗？"
@@ -1726,11 +2021,12 @@ const InventoryBot: React.FC = () => {
               borderColor: currentTheme.primary,
             }}
             onClick={() => {
-            setReductionModalVisible(true);
-            setReductionCountry("");
-            setReductionFile(null);
-            setReductionResult(null);
-          }}>
+              setReductionModalVisible(true);
+              setReductionCountry("");
+              setReductionFile(null);
+              setReductionResult(null);
+            }}
+          >
             导入本地仓库
           </Button>
         </div>
@@ -1753,17 +2049,35 @@ const InventoryBot: React.FC = () => {
               onClick={() => handleTableRiskFilterChange([])}
               onMouseEnter={(e) => {
                 e.currentTarget.style.borderColor = "#1890ff";
-                e.currentTarget.style.boxShadow = "0 2px 8px rgba(24, 144, 255, 0.15)";
+                e.currentTarget.style.boxShadow =
+                  "0 2px 8px rgba(24, 144, 255, 0.15)";
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.borderColor = "#f0f0f0";
                 e.currentTarget.style.boxShadow = "none";
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
                 <div>
-                  <div style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}>总SKU数</div>
-                  <div style={{ fontSize: 28, fontWeight: 700, color: "#1890ff", lineHeight: 1 }}>
+                  <div
+                    style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}
+                  >
+                    总SKU数
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 28,
+                      fontWeight: 700,
+                      color: "#1890ff",
+                      lineHeight: 1,
+                    }}
+                  >
                     {overviewData?.total_sku ?? 0}
                   </div>
                 </div>
@@ -1779,20 +2093,27 @@ const InventoryBot: React.FC = () => {
                 borderRadius: 8,
                 cursor: "pointer",
                 transition: "all 0.2s ease",
-                border: tableRiskFilter?.includes("red") ? "2px solid #cf1322" : "1px solid #f0f0f0",
-                background: tableRiskFilter?.includes("red") ? "#fff1f0" : "white",
+                border: tableRiskFilter?.includes("red")
+                  ? "2px solid #cf1322"
+                  : "1px solid #f0f0f0",
+                background: tableRiskFilter?.includes("red")
+                  ? "#fff1f0"
+                  : "white",
               }}
               bodyStyle={{ padding: "16px 20px" }}
               onClick={() => {
                 const newFilter = tableRiskFilter?.includes("red")
-                  ? tableRiskFilter.filter(f => f !== "red")
+                  ? tableRiskFilter.filter((f) => f !== "red")
                   : [...(tableRiskFilter || []), "red"];
-                handleTableRiskFilterChange(newFilter.length > 0 ? newFilter : []);
+                handleTableRiskFilterChange(
+                  newFilter.length > 0 ? newFilter : [],
+                );
               }}
               onMouseEnter={(e) => {
                 if (!tableRiskFilter?.includes("red")) {
                   e.currentTarget.style.borderColor = "#cf1322";
-                  e.currentTarget.style.boxShadow = "0 2px 8px rgba(207, 19, 34, 0.15)";
+                  e.currentTarget.style.boxShadow =
+                    "0 2px 8px rgba(207, 19, 34, 0.15)";
                 }
               }}
               onMouseLeave={(e) => {
@@ -1802,15 +2123,45 @@ const InventoryBot: React.FC = () => {
                 }
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
                 <div>
-                  <div style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}>断货风险</div>
-                  <div style={{ fontSize: 28, fontWeight: 700, color: "#cf1322", lineHeight: 1 }}>
+                  <div
+                    style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}
+                  >
+                    断货风险
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 28,
+                      fontWeight: 700,
+                      color: "#cf1322",
+                      lineHeight: 1,
+                    }}
+                  >
                     {overviewData?.red_count ?? 0}
-                    <span style={{ fontSize: 12, fontWeight: 400, color: "#cf1322", marginLeft: 4 }}>SKU</span>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 400,
+                        color: "#cf1322",
+                        marginLeft: 4,
+                      }}
+                    >
+                      SKU
+                    </span>
                   </div>
                 </div>
-                <AlertTriangle size={32} color="#cf1322" style={{ opacity: 0.8 }} />
+                <AlertTriangle
+                  size={32}
+                  color="#cf1322"
+                  style={{ opacity: 0.8 }}
+                />
               </div>
             </Card>
           </Col>
@@ -1822,20 +2173,27 @@ const InventoryBot: React.FC = () => {
                 borderRadius: 8,
                 cursor: "pointer",
                 transition: "all 0.2s ease",
-                border: tableRiskFilter?.includes("yellow") ? "2px solid #fa8c16" : "1px solid #f0f0f0",
-                background: tableRiskFilter?.includes("yellow") ? "#fff7e6" : "white",
+                border: tableRiskFilter?.includes("yellow")
+                  ? "2px solid #fa8c16"
+                  : "1px solid #f0f0f0",
+                background: tableRiskFilter?.includes("yellow")
+                  ? "#fff7e6"
+                  : "white",
               }}
               bodyStyle={{ padding: "16px 20px" }}
               onClick={() => {
                 const newFilter = tableRiskFilter?.includes("yellow")
-                  ? tableRiskFilter.filter(f => f !== "yellow")
+                  ? tableRiskFilter.filter((f) => f !== "yellow")
                   : [...(tableRiskFilter || []), "yellow"];
-                handleTableRiskFilterChange(newFilter.length > 0 ? newFilter : []);
+                handleTableRiskFilterChange(
+                  newFilter.length > 0 ? newFilter : [],
+                );
               }}
               onMouseEnter={(e) => {
                 if (!tableRiskFilter?.includes("yellow")) {
                   e.currentTarget.style.borderColor = "#fa8c16";
-                  e.currentTarget.style.boxShadow = "0 2px 8px rgba(250, 140, 22, 0.15)";
+                  e.currentTarget.style.boxShadow =
+                    "0 2px 8px rgba(250, 140, 22, 0.15)";
                 }
               }}
               onMouseLeave={(e) => {
@@ -1845,15 +2203,45 @@ const InventoryBot: React.FC = () => {
                 }
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
                 <div>
-                  <div style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}>库存预警</div>
-                  <div style={{ fontSize: 28, fontWeight: 700, color: "#fa8c16", lineHeight: 1 }}>
+                  <div
+                    style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}
+                  >
+                    库存预警
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 28,
+                      fontWeight: 700,
+                      color: "#fa8c16",
+                      lineHeight: 1,
+                    }}
+                  >
                     {overviewData?.yellow_count ?? 0}
-                    <span style={{ fontSize: 12, fontWeight: 400, color: "#fa8c16", marginLeft: 4 }}>SKU</span>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 400,
+                        color: "#fa8c16",
+                        marginLeft: 4,
+                      }}
+                    >
+                      SKU
+                    </span>
                   </div>
                 </div>
-                <AlertCircle size={32} color="#fa8c16" style={{ opacity: 0.8 }} />
+                <AlertCircle
+                  size={32}
+                  color="#fa8c16"
+                  style={{ opacity: 0.8 }}
+                />
               </div>
             </Card>
           </Col>
@@ -1865,20 +2253,27 @@ const InventoryBot: React.FC = () => {
                 borderRadius: 8,
                 cursor: "pointer",
                 transition: "all 0.2s ease",
-                border: tableRiskFilter?.includes("green") ? "2px solid #52c41a" : "1px solid #f0f0f0",
-                background: tableRiskFilter?.includes("green") ? "#f6ffed" : "white",
+                border: tableRiskFilter?.includes("green")
+                  ? "2px solid #52c41a"
+                  : "1px solid #f0f0f0",
+                background: tableRiskFilter?.includes("green")
+                  ? "#f6ffed"
+                  : "white",
               }}
               bodyStyle={{ padding: "16px 20px" }}
               onClick={() => {
                 const newFilter = tableRiskFilter?.includes("green")
-                  ? tableRiskFilter.filter(f => f !== "green")
+                  ? tableRiskFilter.filter((f) => f !== "green")
                   : [...(tableRiskFilter || []), "green"];
-                handleTableRiskFilterChange(newFilter.length > 0 ? newFilter : []);
+                handleTableRiskFilterChange(
+                  newFilter.length > 0 ? newFilter : [],
+                );
               }}
               onMouseEnter={(e) => {
                 if (!tableRiskFilter?.includes("green")) {
                   e.currentTarget.style.borderColor = "#52c41a";
-                  e.currentTarget.style.boxShadow = "0 2px 8px rgba(82, 196, 26, 0.15)";
+                  e.currentTarget.style.boxShadow =
+                    "0 2px 8px rgba(82, 196, 26, 0.15)";
                 }
               }}
               onMouseLeave={(e) => {
@@ -1888,15 +2283,45 @@ const InventoryBot: React.FC = () => {
                 }
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
                 <div>
-                  <div style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}>库存正常</div>
-                  <div style={{ fontSize: 28, fontWeight: 700, color: "#52c41a", lineHeight: 1 }}>
+                  <div
+                    style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}
+                  >
+                    库存正常
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 28,
+                      fontWeight: 700,
+                      color: "#52c41a",
+                      lineHeight: 1,
+                    }}
+                  >
                     {overviewData?.green_count ?? 0}
-                    <span style={{ fontSize: 12, fontWeight: 400, color: "#52c41a", marginLeft: 4 }}>SKU</span>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 400,
+                        color: "#52c41a",
+                        marginLeft: 4,
+                      }}
+                    >
+                      SKU
+                    </span>
                   </div>
                 </div>
-                <CheckCircle size={32} color="#52c41a" style={{ opacity: 0.8 }} />
+                <CheckCircle
+                  size={32}
+                  color="#52c41a"
+                  style={{ opacity: 0.8 }}
+                />
               </div>
             </Card>
           </Col>
@@ -1939,9 +2364,7 @@ const InventoryBot: React.FC = () => {
             <Space size="large">
               <span style={{ color: "#666" }}>
                 已录入{" "}
-                <b style={{ color: "#722ed1" }}>
-                  {localSummary.total_sku}
-                </b>{" "}
+                <b style={{ color: "#722ed1" }}>{localSummary.total_sku}</b>{" "}
                 个SKU
               </span>
               <span style={{ color: "#666" }}>
@@ -2090,7 +2513,16 @@ const InventoryBot: React.FC = () => {
                             {item.product_name || "-"}
                           </div>
                         </div>
-                        <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "row", gap: 6, alignItems: "center" }}>
+                        <div
+                          style={{
+                            textAlign: "right",
+                            flexShrink: 0,
+                            display: "flex",
+                            flexDirection: "row",
+                            gap: 6,
+                            alignItems: "center",
+                          }}
+                        >
                           <span
                             style={{
                               fontWeight: 700,
@@ -2104,7 +2536,11 @@ const InventoryBot: React.FC = () => {
                             {item.days_of_supply}天
                           </span>
                           {(item.suggest_qty ?? 0) > 0 && (
-                            <Tooltip title={item.reason || `建议补货 ${item.suggest_qty} 件`}>
+                            <Tooltip
+                              title={
+                                item.reason || `建议补货 ${item.suggest_qty} 件`
+                              }
+                            >
                               <span
                                 style={{
                                   fontWeight: 600,
@@ -2144,27 +2580,49 @@ const InventoryBot: React.FC = () => {
                           >
                             <div>
                               <span style={{ color: "#8c8c8c" }}>店铺: </span>
-                              <span style={{ color: "#262626" }}>{item.account || "-"}</span>
+                              <span style={{ color: "#262626" }}>
+                                {item.account || "-"}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>国家: </span>
-                              <span style={{ color: "#262626" }}>{item.country || "-"}</span>
+                              <span style={{ color: "#262626" }}>
+                                {item.country || "-"}
+                              </span>
                             </div>
                             <div>
-                              <span style={{ color: "#8c8c8c" }}>FBA库存: </span>
-                              <span style={{ color: "#262626" }}>{formatNumber(item.fba_stock)}</span>
+                              <span style={{ color: "#8c8c8c" }}>
+                                FBA库存:{" "}
+                              </span>
+                              <span style={{ color: "#262626" }}>
+                                {formatNumber(item.fba_stock)}
+                              </span>
                             </div>
                             <div>
-                              <span style={{ color: "#8c8c8c" }}>日均销量: </span>
-                              <span style={{ color: "#262626" }}>{item.daily_sales != null ? item.daily_sales.toFixed(2) : "-"}</span>
+                              <span style={{ color: "#8c8c8c" }}>
+                                日均销量:{" "}
+                              </span>
+                              <span style={{ color: "#262626" }}>
+                                {item.daily_sales != null
+                                  ? item.daily_sales.toFixed(2)
+                                  : "-"}
+                              </span>
                             </div>
                             <div>
-                              <span style={{ color: "#8c8c8c" }}>预计断货: </span>
-                              <span style={{ color: "#cf1322", fontWeight: 500 }}>{item.stockout_date || "-"}</span>
+                              <span style={{ color: "#8c8c8c" }}>
+                                预计断货:{" "}
+                              </span>
+                              <span
+                                style={{ color: "#cf1322", fontWeight: 500 }}
+                              >
+                                {item.stockout_date || "-"}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>总库存: </span>
-                              <span style={{ color: "#262626" }}>{formatNumber(item.total_stock)}</span>
+                              <span style={{ color: "#262626" }}>
+                                {formatNumber(item.total_stock)}
+                              </span>
                             </div>
                           </div>
                         </div>
@@ -2345,32 +2803,50 @@ const InventoryBot: React.FC = () => {
                           >
                             <div>
                               <span style={{ color: "#8c8c8c" }}>店铺: </span>
-                              <span style={{ color: "#262626" }}>{item.account || "-"}</span>
+                              <span style={{ color: "#262626" }}>
+                                {item.account || "-"}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>国家: </span>
-                              <span style={{ color: "#262626" }}>{item.country || "-"}</span>
+                              <span style={{ color: "#262626" }}>
+                                {item.country || "-"}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>总库存: </span>
-                              <span style={{ color: "#fa8c16", fontWeight: 600 }}>{formatNumber(item.total_stock)}</span>
+                              <span
+                                style={{ color: "#fa8c16", fontWeight: 600 }}
+                              >
+                                {formatNumber(item.total_stock)}
+                              </span>
                             </div>
                             <div></div>
                             <div>
-                              <span style={{ color: "#8c8c8c" }}>12月以上: </span>
-                              <span style={{ color: "#262626" }}>{formatNumber(item.age_12_plus)}</span>
+                              <span style={{ color: "#8c8c8c" }}>
+                                12月以上:{" "}
+                              </span>
+                              <span style={{ color: "#262626" }}>
+                                {formatNumber(item.age_12_plus)}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>9-12月: </span>
-                              <span style={{ color: "#262626" }}>{formatNumber(item.age_9_12)}</span>
+                              <span style={{ color: "#262626" }}>
+                                {formatNumber(item.age_9_12)}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>6-9月: </span>
-                              <span style={{ color: "#262626" }}>{formatNumber(item.age_6_9)}</span>
+                              <span style={{ color: "#262626" }}>
+                                {formatNumber(item.age_6_9)}
+                              </span>
                             </div>
                             <div>
                               <span style={{ color: "#8c8c8c" }}>3-6月: </span>
-                              <span style={{ color: "#262626" }}>{formatNumber(item.age_3_6)}</span>
+                              <span style={{ color: "#262626" }}>
+                                {formatNumber(item.age_3_6)}
+                              </span>
                             </div>
                           </div>
                         </div>
@@ -2389,7 +2865,14 @@ const InventoryBot: React.FC = () => {
         style={{ marginBottom: 24, borderRadius: 8 }}
         bordered={false}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
+        >
           <Input
             placeholder="搜索ASIN/SKU/品名/店铺..."
             prefix={<Search size={15} color="#bbb" />}
@@ -2430,6 +2913,31 @@ const InventoryBot: React.FC = () => {
                 .includes(input.toLowerCase())
             }
           />
+          <Select
+            placeholder="节日筛选"
+            style={{ width: 140 }}
+            value={holidayFilter}
+            onChange={(value) => {
+              setHolidayFilter(value);
+              setPagination((prev) => ({ ...prev, current: 1 }));
+              fetchInventoryList(
+                1,
+                pagination.pageSize,
+                searchText,
+                tableRiskFilter,
+                accountFilter,
+                countryFilter,
+                sortField,
+                sortOrder,
+                value,
+              );
+            }}
+            options={[
+              { label: "只查看非节日", value: "only_non_holiday" },
+              { label: "只查看节日", value: "only_holiday" },
+              { label: "两者都查看", value: "all" },
+            ]}
+          />
           <Button
             icon={<RefreshCw size={16} />}
             onClick={handleSyncFeishu}
@@ -2444,7 +2952,11 @@ const InventoryBot: React.FC = () => {
                 <Tag
                   color="error"
                   closable
-                  onClose={() => handleTableRiskFilterChange(tableRiskFilter.filter(f => f !== "red"))}
+                  onClose={() =>
+                    handleTableRiskFilterChange(
+                      tableRiskFilter.filter((f) => f !== "red"),
+                    )
+                  }
                 >
                   断货风险
                 </Tag>
@@ -2453,7 +2965,11 @@ const InventoryBot: React.FC = () => {
                 <Tag
                   color="warning"
                   closable
-                  onClose={() => handleTableRiskFilterChange(tableRiskFilter.filter(f => f !== "yellow"))}
+                  onClose={() =>
+                    handleTableRiskFilterChange(
+                      tableRiskFilter.filter((f) => f !== "yellow"),
+                    )
+                  }
                 >
                   库存预警
                 </Tag>
@@ -2462,12 +2978,21 @@ const InventoryBot: React.FC = () => {
                 <Tag
                   color="success"
                   closable
-                  onClose={() => handleTableRiskFilterChange(tableRiskFilter.filter(f => f !== "green"))}
+                  onClose={() =>
+                    handleTableRiskFilterChange(
+                      tableRiskFilter.filter((f) => f !== "green"),
+                    )
+                  }
                 >
                   库存正常
                 </Tag>
               )}
-              <Button type="link" size="small" onClick={() => handleTableRiskFilterChange([])} style={{ padding: 0, height: "auto" }}>
+              <Button
+                type="link"
+                size="small"
+                onClick={() => handleTableRiskFilterChange([])}
+                style={{ padding: 0, height: "auto" }}
+              >
                 清除
               </Button>
             </div>
@@ -2496,7 +3021,14 @@ const InventoryBot: React.FC = () => {
       {/* ===== 5. Inventory Detail Table ===== */}
       <Card
         title={
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              width: "100%",
+            }}
+          >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Package size={18} color={currentTheme.primary} />
               <span>库存明细</span>
@@ -2526,14 +3058,23 @@ const InventoryBot: React.FC = () => {
                 title={
                   <div style={{ fontWeight: 600, fontSize: 13 }}>
                     列设置
-                    <span style={{ fontWeight: 400, color: "#888", marginLeft: 8, fontSize: 12 }}>
+                    <span
+                      style={{
+                        fontWeight: 400,
+                        color: "#888",
+                        marginLeft: 8,
+                        fontSize: 12,
+                      }}
+                    >
                       （勾选显示 / 点击固定）
                     </span>
                   </div>
                 }
                 content={
-                  <div style={{ width: 240, maxHeight: 400, overflowY: "auto" }}>
-                    {COLUMN_META.map(col => {
+                  <div
+                    style={{ width: 240, maxHeight: 400, overflowY: "auto" }}
+                  >
+                    {COLUMN_META.map((col) => {
                       const isVisible = columnVisibility[col.key] !== false;
                       const isFrozen = frozenColumns.has(col.key);
                       return (
@@ -2546,7 +3087,11 @@ const InventoryBot: React.FC = () => {
                             padding: "6px 8px",
                             borderRadius: 6,
                             cursor: "pointer",
-                            background: isVisible ? (isFrozen ? "#f0f7ff" : "transparent") : "#fafafa",
+                            background: isVisible
+                              ? isFrozen
+                                ? "#f0f7ff"
+                                : "transparent"
+                              : "#fafafa",
                             transition: "background 0.2s",
                             marginBottom: 2,
                           }}
@@ -2566,17 +3111,27 @@ const InventoryBot: React.FC = () => {
                             checked={isVisible}
                             onChange={(e) => {
                               e.stopPropagation();
-                              setColumnVisibility(prev => ({ ...prev, [col.key]: e.target.checked }));
+                              setColumnVisibility((prev) => ({
+                                ...prev,
+                                [col.key]: e.target.checked,
+                              }));
                             }}
                           >
-                            <span style={{ fontSize: 13, color: isVisible ? "#262626" : "#bbb" }}>
+                            <span
+                              style={{
+                                fontSize: 13,
+                                color: isVisible ? "#262626" : "#bbb",
+                              }}
+                            >
                               {col.label}
                             </span>
                           </Checkbox>
                           <span
                             style={{
                               fontSize: 11,
-                              color: isFrozen ? currentTheme.primary : "#d9d9d9",
+                              color: isFrozen
+                                ? currentTheme.primary
+                                : "#d9d9d9",
                               fontWeight: isFrozen ? 600 : 400,
                               transition: "color 0.2s",
                             }}
@@ -2592,8 +3147,14 @@ const InventoryBot: React.FC = () => {
                         size="small"
                         block
                         onClick={() => {
-                          setColumnVisibility(Object.fromEntries(COLUMN_META.map(c => [c.key, true])));
-                          setFrozenColumns(new Set(["_expand", "asin", "action"]));
+                          setColumnVisibility(
+                            Object.fromEntries(
+                              COLUMN_META.map((c) => [c.key, true]),
+                            ),
+                          );
+                          setFrozenColumns(
+                            new Set(["_expand", "asin", "action"]),
+                          );
                         }}
                       >
                         重置
@@ -2614,10 +3175,7 @@ const InventoryBot: React.FC = () => {
                   </div>
                 }
               >
-                <Button
-                  icon={<Columns size={14} />}
-                  size="small"
-                >
+                <Button icon={<Columns size={14} />} size="small">
                   列设置
                 </Button>
               </Popover>
@@ -2631,7 +3189,9 @@ const InventoryBot: React.FC = () => {
         <Table
           columns={childWrappedColumns}
           dataSource={displayList}
-          rowKey={(record: any) => record._isChild ? `child_${record.id}` : record.id}
+          rowKey={(record: any) =>
+            record._isChild ? `child_${record.id}` : record.id
+          }
           loading={tableLoading}
           pagination={false}
           onChange={handleTableChange}
@@ -2639,7 +3199,10 @@ const InventoryBot: React.FC = () => {
           size="small"
           rowClassName={(record) => {
             let classes = [];
-            if (record.summary_flag === "共享库存" || record.summary_flag === "是") {
+            if (
+              record.summary_flag === "共享库存" ||
+              record.summary_flag === "是"
+            ) {
               classes.push("summary-row");
             }
             if (record.risk_level === "red") {
@@ -2653,7 +3216,13 @@ const InventoryBot: React.FC = () => {
           }}
         />
         {total > 0 && (
-          <div style={{ display: "flex", justifyContent: "flex-end", padding: "16px 0 0" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              padding: "16px 0 0",
+            }}
+          >
             <Pagination
               current={pagination.current || 1}
               pageSize={pagination.pageSize || 20}
@@ -2717,23 +3286,33 @@ const InventoryBot: React.FC = () => {
           <Space>
             <Button
               size="small"
-              onClick={() => setSelectedExportFields(exportFieldOptions.map(f => f.value))}
+              onClick={() =>
+                setSelectedExportFields(exportFieldOptions.map((f) => f.value))
+              }
             >
               全选
             </Button>
-            <Button
-              size="small"
-              onClick={() => setSelectedExportFields([])}
-            >
+            <Button size="small" onClick={() => setSelectedExportFields([])}>
               清空
             </Button>
             <Button
               size="small"
-              onClick={() => setSelectedExportFields([
-                'asin', 'sku', 'product_name', 'account', 'country', 'fba_stock', 
-                'fba_inbound', 'total_stock', 'daily_sales', 'days_of_supply', 
-                'risk_level', 'suggest_qty'
-              ])}
+              onClick={() =>
+                setSelectedExportFields([
+                  "asin",
+                  "sku",
+                  "product_name",
+                  "account",
+                  "country",
+                  "fba_stock",
+                  "fba_inbound",
+                  "total_stock",
+                  "daily_sales",
+                  "days_of_supply",
+                  "risk_level",
+                  "suggest_qty",
+                ])
+              }
             >
               默认
             </Button>
@@ -2742,10 +3321,10 @@ const InventoryBot: React.FC = () => {
         <Checkbox.Group
           value={selectedExportFields}
           onChange={(values) => setSelectedExportFields(values as string[])}
-          style={{ width: '100%' }}
+          style={{ width: "100%" }}
         >
           <Row gutter={[16, 8]}>
-            {exportFieldOptions.map(field => (
+            {exportFieldOptions.map((field) => (
               <Col span={8} key={field.value}>
                 <Checkbox value={field.value}>{field.label}</Checkbox>
               </Col>
@@ -2763,7 +3342,16 @@ const InventoryBot: React.FC = () => {
           if (reductionResult) {
             fetchLocalSummary();
             fetchOverview();
-            fetchInventoryList(1, pagination.pageSize, searchText, tableRiskFilter, accountFilter, countryFilter, sortField, sortOrder);
+            fetchInventoryList(
+              1,
+              pagination.pageSize,
+              searchText,
+              tableRiskFilter,
+              accountFilter,
+              countryFilter,
+              sortField,
+              sortOrder,
+            );
           }
         }}
         footer={null}
@@ -2771,7 +3359,9 @@ const InventoryBot: React.FC = () => {
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div>
-            <div style={{ marginBottom: 8, fontWeight: 500 }}>选择国家 <span style={{ color: "red" }}>*</span></div>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>
+              选择国家 <span style={{ color: "red" }}>*</span>
+            </div>
             <Select
               style={{ width: "100%" }}
               placeholder="请选择国家"
@@ -2781,7 +3371,9 @@ const InventoryBot: React.FC = () => {
             />
           </div>
           <div>
-            <div style={{ marginBottom: 8, fontWeight: 500 }}>上传文件 <span style={{ color: "red" }}>*</span></div>
+            <div style={{ marginBottom: 8, fontWeight: 500 }}>
+              上传文件 <span style={{ color: "red" }}>*</span>
+            </div>
             <Upload
               accept=".xlsx,.xls"
               beforeUpload={(file) => {
@@ -2804,7 +3396,15 @@ const InventoryBot: React.FC = () => {
             导入
           </Button>
           {reductionResult && (
-            <div style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, padding: 12, marginTop: 8 }}>
+            <div
+              style={{
+                background: "#f6ffed",
+                border: "1px solid #b7eb8f",
+                borderRadius: 6,
+                padding: 12,
+                marginTop: 8,
+              }}
+            >
               <div style={{ fontWeight: 500, marginBottom: 8 }}>导入结果</div>
               <div>总条数：{reductionResult.total}</div>
               <div>更新：{reductionResult.updated}</div>
@@ -2812,7 +3412,9 @@ const InventoryBot: React.FC = () => {
               <Button
                 type="link"
                 icon={<DownloadOutlined />}
-                onClick={() => handleDownloadReductionResult(reductionResult.result_file_id)}
+                onClick={() =>
+                  handleDownloadReductionResult(reductionResult.result_file_id)
+                }
                 style={{ padding: 0, marginTop: 8 }}
               >
                 下载导入结果

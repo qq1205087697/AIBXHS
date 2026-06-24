@@ -1048,7 +1048,8 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
 def search_inventory(db: Session, keyword: str = None, risk_level=None,
                      replenishment_status: str = None, account: str = None,
-                     country: str = None, sort_field: str = None, sort_order: str = None,
+                     country: str = None, holiday_filter: str = None,
+                     sort_field: str = None, sort_order: str = None,
                      page: int = 1, page_size: int = 20,
                      user_id: int = None, user_role: str = None) -> dict:
     """搜索库存"""
@@ -1108,6 +1109,17 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             (InventorySnapshot.product_name.like(kw)) |
             (InventorySnapshot.account.like(kw))
         )
+
+    # 节日产品筛选
+    if holiday_filter and holiday_filter != "all":
+        if holiday_filter == "only_holiday":
+            valid_snapshot_query = valid_snapshot_query.filter(
+                InventorySnapshot.is_holiday == True
+            )
+        elif holiday_filter == "only_non_holiday":
+            valid_snapshot_query = valid_snapshot_query.filter(
+                (InventorySnapshot.is_holiday == False) | (InventorySnapshot.is_holiday.is_(None))
+            )
 
     # 国家和店铺筛选逻辑：
     # 1. 如果只选国家：筛选该国家的所有库存（基于店铺字段匹配）
@@ -1237,6 +1249,7 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             "replenishment_reason": dec.reason if dec else "",
             "inspection_quantity": snap.inspection_quantity or 0,
             "gross_margin": snap.gross_margin,
+            "is_holiday": snap.is_holiday if snap.is_holiday is not None else False,
         })
 
     # 汇总行的 local_inventory = 子行 local_inventory 之和

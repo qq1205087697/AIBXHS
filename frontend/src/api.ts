@@ -131,19 +131,32 @@ export const inventoryApi = {
     fields?: string[];
   }) => {
     const searchParams = new URLSearchParams();
-    if (params?.keyword) searchParams.append('keyword', params.keyword);
-    if (params?.risk_level) params.risk_level.forEach(r => searchParams.append('risk_level', r));
-    if (params?.account) params.account.forEach(a => searchParams.append('account', a));
-    if (params?.country) params.country.forEach(c => searchParams.append('country', c));
-    if (params?.fields) params.fields.forEach(f => searchParams.append('fields', f));
-    return apiClient.get(`/restock/export?${searchParams.toString()}`, { responseType: 'blob' });
+    if (params?.keyword) searchParams.append("keyword", params.keyword);
+    if (params?.risk_level)
+      params.risk_level.forEach((r) => searchParams.append("risk_level", r));
+    if (params?.account)
+      params.account.forEach((a) => searchParams.append("account", a));
+    if (params?.country)
+      params.country.forEach((c) => searchParams.append("country", c));
+    if (params?.fields)
+      params.fields.forEach((f) => searchParams.append("fields", f));
+    return apiClient.get(`/restock/export?${searchParams.toString()}`, {
+      responseType: "blob",
+    });
   },
   syncFeishuInbound: () => apiClient.post("/restock/sync-feishu-inbound"),
   getSyncFeishuStatus: () => apiClient.get("/restock/sync-feishu-status"),
   updateInspectionQuantity: (snapshotId: number, quantity: number) =>
-    apiClient.put("/restock/inspection-quantity", null, { params: { snapshot_id: snapshotId, inspection_quantity: quantity } }),
+    apiClient.put("/restock/inspection-quantity", null, {
+      params: { snapshot_id: snapshotId, inspection_quantity: quantity },
+    }),
   getSummaryChildren: (asin: string) =>
     apiClient.get("/restock/summary-children", { params: { asin } }),
+  markHoliday: (snapshotIds: number[], isHoliday: boolean) =>
+    apiClient.post("/restock/mark-holiday", {
+      snapshot_ids: snapshotIds,
+      is_holiday: isHoliday,
+    }),
 };
 
 // ========== Local Inventory API ==========
@@ -162,12 +175,18 @@ export const localInventoryApi = {
   importReduction: (country: string, file: File) => {
     const formData = new FormData();
     formData.append("file", file);
-    return apiClient.post(`/local-inventory/import-reduction?country=${encodeURIComponent(country)}`, formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
+    return apiClient.post(
+      `/local-inventory/import-reduction?country=${encodeURIComponent(country)}`,
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+      },
+    );
   },
   downloadReductionResult: (fileId: string) =>
-    apiClient.get(`/local-inventory/import-reduction/result/${fileId}`, { responseType: 'blob' }),
+    apiClient.get(`/local-inventory/import-reduction/result/${fileId}`, {
+      responseType: "blob",
+    }),
 };
 
 // ========== Reviews API ==========
@@ -261,19 +280,25 @@ export const notificationsApi = {
 
 // ========== Chat API ==========
 export const chatApi = {
-  sendMessage: (message: string, sessionId?: string, chatType: string = "review") =>
+  sendMessage: (
+    message: string,
+    sessionId?: string,
+    chatType: string = "review",
+  ) =>
     apiClient.post(
       "/chat",
       { message, session_id: sessionId, chat_type: chatType },
       { timeout: 300000 },
     ),
   getSessions: (chatType?: string) =>
-    apiClient.get("/chat/sessions", { params: chatType ? { chat_type: chatType } : {} }),
+    apiClient.get("/chat/sessions", {
+      params: chatType ? { chat_type: chatType } : {},
+    }),
   getSessionMessages: (sessionId: string) =>
     apiClient.get(`/chat/sessions/${sessionId}/messages`),
 
   deleteSession: (sessionId: string) =>
-    apiClient.delete(`/chat/sessions/${sessionId}`)
+    apiClient.delete(`/chat/sessions/${sessionId}`),
 };
 
 // ========== Chat API (Streaming) ==========
@@ -281,23 +306,34 @@ export const chatStreamApi = {
   sendMessage: async (
     message: string,
     sessionId?: string,
-    chatType: string = "review"
+    chatType: string = "review",
   ): Promise<Response> => {
-    return fetch('/api/chat/stream', {
-      method: 'POST',
+    return fetch("/api/chat/stream", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
       },
-      body: JSON.stringify({ message, session_id: sessionId, chat_type: chatType })
+      body: JSON.stringify({
+        message,
+        session_id: sessionId,
+        chat_type: chatType,
+      }),
     });
   },
 
   searchSessions: (query: string, chatType?: string, limit?: number) =>
     apiClient.post("/chat/search", { query, chat_type: chatType, limit }),
 
-  exportSession: (sessionId: string, format: 'markdown' | 'json' | 'txt' = 'markdown') =>
-    apiClient.post("/chat/export", { session_id: sessionId, format }, { responseType: 'text' })
+  exportSession: (
+    sessionId: string,
+    format: "markdown" | "json" | "txt" = "markdown",
+  ) =>
+    apiClient.post(
+      "/chat/export",
+      { session_id: sessionId, format },
+      { responseType: "text" },
+    ),
 };
 
 // ========== Stores API ==========
@@ -828,14 +864,18 @@ export const emailsApi = {
     return apiClient.get("/emails/", { params: filteredParams });
   },
   getById: (id: string) => apiClient.get(`/emails/${id}`),
-  updateFollowUp: (id: string, follow_up_status: number) => 
+  updateFollowUp: (id: string, follow_up_status: number) =>
     apiClient.put(`/emails/${id}/follow-up`, { follow_up_status }),
-  updateNeedReply: (id: string, need_reply: number, reply_text?: string) => 
+  updateNeedReply: (id: string, need_reply: number, reply_text?: string) =>
     apiClient.put(`/emails/${id}/need-reply`, { need_reply, reply_text }),
   getStoreNames: () => apiClient.get("/emails/store-names"),
   getUnfollowedCount: () => apiClient.get("/emails/unfollowed-count"),
   aiReply: (id: string, requirements: string) =>
-    apiClient.post(`/emails/${id}/ai-reply`, { requirements }, { timeout: 180000 }),
+    apiClient.post(
+      `/emails/${id}/ai-reply`,
+      { requirements },
+      { timeout: 180000 },
+    ),
   batchUpdateFollowUp: (email_ids: string[], follow_up_status: number) =>
     apiClient.put('/emails/batch/follow-up', { email_ids, follow_up_status }),
   getDepartmentTodos: () => apiClient.get('/emails/department-todos'),
@@ -866,10 +906,12 @@ export const businessSettingsApi = {
   getSetting: (settingType: string) =>
     apiClient.get<BusinessSetting>(`/business-settings/${settingType}`),
 
-  listSettings: () =>
-    apiClient.get<BusinessSetting[]>("/business-settings/"),
+  listSettings: () => apiClient.get<BusinessSetting[]>("/business-settings/"),
 
-  updateSetting: (settingType: string, data: { formula_config: DailySalesConfig; is_active?: number }) =>
+  updateSetting: (
+    settingType: string,
+    data: { formula_config: DailySalesConfig; is_active?: number },
+  ) =>
     apiClient.put<BusinessSetting>(`/business-settings/${settingType}`, data),
 
   resetSetting: (settingType: string) =>
@@ -894,6 +936,83 @@ export const productBindingsApi = {
   }) => apiClient.put(`/product-bindings/${bindingId}`, data),
   delete: (bindingId: number) =>
     apiClient.delete(`/product-bindings/${bindingId}`),
+};
+
+// ========== Ads API ==========
+export const adsApi = {
+  import: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post("/ads/import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  getImportStatus: () => apiClient.get("/ads/import-status"),
+  getOverview: (params?: {
+    account?: string[];
+    country?: string[];
+    date_from?: string;
+    date_to?: string;
+    report_type?: string;
+  }) => apiClient.get("/ads/overview", { params }),
+  search: (params: any) => apiClient.get("/ads/search", { params }),
+  getPerformance: (params?: any) => apiClient.get("/ads/performance", { params }),
+  getKeywordAnalysis: (params?: any) => apiClient.get("/ads/keyword-analysis", { params }),
+  getSearchTermAnalysis: (params?: any) => apiClient.get("/ads/search-term-analysis", { params }),
+  export: (params?: any) => apiClient.get("/ads/export", {
+    params,
+    responseType: "blob",
+  }),
+  getFilterOptions: (country?: string) =>
+    apiClient.get("/ads/filter-options", { params: country ? { country } : {} }),
+  getAiSuggestions: (params?: any) => apiClient.get("/ads/ai-suggestions", { params }),
+  getHealthScore: (params?: { campaign_id?: string; date_from?: string; date_to?: string }) =>
+    apiClient.get("/ads/health-score", { params }),
+  syncRpa: (data: { report_type: string; date: string; records: any[] }) =>
+    apiClient.post("/ads/sync/rpa", data),
+};
+
+// ========== Ad Rules API ==========
+export const adRulesApi = {
+  getList: () => apiClient.get("/ad-rules/list"),
+  create: (data: { name: string; rule_type: string; conditions: any; actions: any }) =>
+    apiClient.post("/ad-rules/create", data),
+  update: (id: number, data: any) => apiClient.put(`/ad-rules/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/ad-rules/${id}`),
+  execute: (ruleIds?: number[]) => {
+    const params = new URLSearchParams();
+    if (ruleIds) ruleIds.forEach(id => params.append("rule_ids", String(id)));
+    return apiClient.post(`/ad-rules/execute?${params.toString()}`);
+  },
+  getPredefined: () => apiClient.get("/ad-rules/predefined"),
+};
+
+// ========== Ad Suggestions API ==========
+export const adSuggestionsApi = {
+  list: (params?: {
+    status?: string;
+    priority?: string;
+    target_type?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/ad-suggestions/list", { params }),
+  getById: (id: number) => apiClient.get(`/ad-suggestions/${id}`),
+  updateStatus: (id: number, status: string) =>
+    apiClient.put(`/ad-suggestions/${id}/status`, { status }),
+  runRules: (date: string) =>
+    apiClient.post("/ad-suggestions/run-rules", { date }),
+  delete: (id: number) => apiClient.delete(`/ad-suggestions/${id}`),
+};
+
+// ========== Ad Execution Logs API ==========
+export const adExecutionLogsApi = {
+  list: (params?: {
+    rule_name?: string;
+    status?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/ad-execution-logs/list", { params }),
+  getById: (id: number) => apiClient.get(`/ad-execution-logs/${id}`),
 };
 
 export default apiClient;

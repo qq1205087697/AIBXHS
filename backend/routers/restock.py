@@ -148,6 +148,7 @@ async def search_inventory(
     replenishment_status: Optional[str] = Query(None, description="补货状态"),
     account: Optional[List[str]] = Query(None, description="店铺账号"),
     country: Optional[List[str]] = Query(None, description="国家/站点"),
+    holiday_filter: Optional[str] = Query(None, description="节日筛选: only_holiday/only_non_holiday/all"),
     sort_field: Optional[str] = Query(None, description="排序字段"),
     sort_order: Optional[str] = Query(None, description="排序方式: asc/desc"),
     page: int = Query(1, ge=1, description="页码"),
@@ -157,7 +158,7 @@ async def search_inventory(
 ):
     """
     搜索库存数据
-    支持按关键词、风险等级、补货状态、账号、国家筛选，分页返回，支持排序
+    支持按关键词、风险等级、补货状态、账号、国家、节日筛选，分页返回，支持排序
     """
     try:
         from services.inventory_service import search_inventory
@@ -178,6 +179,7 @@ async def search_inventory(
             replenishment_status=replenishment_status,
             account=account,
             country=country,
+            holiday_filter=holiday_filter,
             sort_field=sort_field,
             sort_order=sort_order,
             page=page,
@@ -516,4 +518,60 @@ async def get_summary_children(
     except Exception as e:
         logger.error(f"获取汇总行子行数据失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取汇总行子行数据失败: {str(e)}")
+
+
+# ==================== 13. 标记/取消节日产品 ====================
+
+@router.post("/mark-holiday")
+async def mark_holiday(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    批量标记或取消节日产品
+    请求体: {"snapshot_ids": [1,2,3], "is_holiday": true}
+    如果是汇总行(summary_flag="是")，同时标记其所有子行(共享库存)
+    """
+    from models.restock import InventorySnapshot
+
+    body = await request.json()
+    snapshot_ids = body.get("snapshot_ids", [])
+    is_holiday = body.get("is_holiday", True)
+
+    if not snapshot_ids:
+        raise HTTPException(status_code=400, detail="snapshot_ids不能为空")
+
+    # 查询这些快照，找出汇总行
+    snapshots = db.query(InventorySnapshot).filter(
+        InventorySnapshot.id.in_(snapshot_ids),
+        InventorySnapshot.deleted_at.is_(None)
+    ).all()
+
+    all_ids = set(snapshot_ids)
+    for snap in snapshots:
+        # 如果是汇总行，找到其子行（共享库存）
+        if snap.summary_flag == "是" and snap.asin:
+            children = db.query(InventorySnapshot).filter(
+                InventorySnapshot.summary_flag == "共享库存",
+                InventorySnapshot.asin == snap.asin,
+                InventorySnapshot.deleted_at.is_(None)
+            ).all()
+            for child in children:
+                all_ids.add(child.id)
+
+    # 批量更新
+    db.query(InventorySnapshot).filter(
+        InventorySnapshot.id.in_(list(all_ids)),
+        InventorySnapshot.deleted_at.is_(None)
+    ).update({InventorySnapshot.is_holiday: is_holiday}, synchronize_session=False)
+
+    db.commit()
+    return {
+        "success": True,
+        "data": {
+            "updated_count": len(all_ids),
+            "is_holiday": is_holiday
+        }
+    }
 

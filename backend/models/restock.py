@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, Boolean
 from models.base import BaseModel
 
 
@@ -89,6 +89,9 @@ class InventorySnapshot(BaseModel):
     age_9_12 = Column(Float, comment="9-12个月库龄")
     age_12_plus = Column(Float, comment="12个月以上库龄")
     gross_margin = Column(Float, comment="毛利率参考")
+
+    # 节日产品标记
+    is_holiday = Column(Boolean, default=False, comment="节日产品标记")
 
 
 class InboundShipmentDetail(BaseModel):

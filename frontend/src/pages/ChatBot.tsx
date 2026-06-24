@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { Input, Button, Typography, message, Spin, List, Avatar, Popconfirm, Empty } from 'antd'
-import { Send, MessageSquare, Plus, Package, Trash2, StopCircle, ChevronRight, MessageCircle, Zap, BarChart3, Bot } from 'lucide-react'
+import { Send, MessageSquare, Plus, Package, Trash2, StopCircle, ChevronRight, MessageCircle, Zap, BarChart3, Bot, Megaphone } from 'lucide-react'
 import { chatApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import MarkdownRenderer from '../components/common/MarkdownRenderer'
@@ -48,6 +48,14 @@ const CHAT_CONFIGS = {
     welcome: '您好！我是库存AI分析助手。\n\n您可以问我以下问题：\n- 哪些商品有断货风险？\n- 需要补货的商品有哪些？\n- 帮我分析一下库存状况\n- 低库存商品有哪些？',
     placeholder: '输入库存相关问题，如：哪些商品有断货风险？',
     icon: Package,
+  },
+  ad: {
+    title: '广告分析助手',
+    subtitle: '智能分析广告表现，提供竞价和关键词优化建议',
+    color: '#eb2f96',
+    welcome: '您好！我是亚马逊广告优化专家。\n\n您可以问我以下问题：\n- 分析我的广告ACOS表现\n- 哪些关键词花费太高需要优化？\n- 推荐一些否定关键词\n- 帮我看看广告ROAS趋势',
+    placeholder: '输入广告相关问题，如：分析我的广告ACOS表现',
+    icon: Megaphone,
   },
 }
 
@@ -260,7 +268,7 @@ const RecommendCard = ({
 
 const ChatBot: React.FC = () => {
   const { currentTheme } = useTheme()
-  const [chatType] = useState<'unified' | 'review' | 'inventory'>('unified')
+  const [chatType] = useState<'unified' | 'review' | 'inventory' | 'ad'>('unified')
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
