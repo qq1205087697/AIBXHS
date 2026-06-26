@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+__pycache__/
+
+# Data files
+*.xlsx
+*.csv
+*.png
+*.jpg
+*.jpeg
+
+# Backup files
+backup_*.csv
+
+# Docs & artifacts
+docs/
+.trae/documents/
+.trae/specs/
+
+# Python
+*.pyc
+*.pyo
+.pytest_cache/
