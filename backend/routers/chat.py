@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import Optional, List
-from database.database import get_db
-from services.chat_service import process_chat, create_session_id
+from typing import List
+from concurrent.futures import ThreadPoolExecutor
+from database.database import SessionLocal, get_db
+from services.chat_service import process_chat, create_session_id, save_message, get_conversation_history
 from services.streaming_service import StreamingService
 from dependencies import get_current_user
 from models.user import User
@@ -14,11 +14,20 @@ from schemas.chat_schemas import (
     ChatSessionResponse, ChatMessageResponse
 )
 import json
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+# ============================================================
+# 专用 AI 线程池 + 信号量
+# - 线程池大小 10：允许最多 10 个 AI 请求并行执行
+# - 信号量大小 5 ：同时调用 OpenAI API 的并发数不超过 5
+#   （避免 API 限流 429 + 控制数据库连接消耗）
+# ============================================================
+AI_THREAD_POOL = ThreadPoolExecutor(max_workers=10, thread_name_prefix="ai_worker")
 
 # 初始化流式服务
 streaming_service = StreamingService()
@@ -27,17 +36,27 @@ streaming_service = StreamingService()
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     request: ChatRequest,
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """标准聊天接口（非流式）"""
+    """标准聊天接口（非流式）- 专用线程池 + 信号量控制并发"""
     logger.info(f"[CHAT] 收到聊天请求: user_id={current_user.id}, message={request.message}, chat_type={request.chat_type}")
     try:
         session_id = request.session_id or create_session_id()
-        reply = process_chat(
-            db, current_user.id, session_id,
-            request.message,
-            chat_type=request.chat_type
+
+        def _run_with_semaphore():
+            """在信号量保护下执行，防止 AI 并发过高"""
+            db = SessionLocal()
+            try:
+                return process_chat(
+                    db, current_user.id, session_id,
+                    request.message,
+                    request.chat_type
+                )
+            finally:
+                db.close()
+
+        reply = await asyncio.get_event_loop().run_in_executor(
+            AI_THREAD_POOL, _run_with_semaphore
         )
 
         logger.info(f"[CHAT] 处理完成: session_id={session_id}")
@@ -53,20 +72,35 @@ async def chat_endpoint(
 @router.post("/chat/stream")
 async def chat_stream_endpoint(
     request: ChatRequest,
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """流式聊天接口 - SSE"""
+    """流式聊天接口 - SSE - 按需创建 DB 连接，分段释放避免长连接占用"""
+
+    session_id = request.session_id or create_session_id()
 
     def event_generator():
-        for chunk in streaming_service.stream_chat_response(
-            db=db,
-            user_id=current_user.id,
-            session_id=request.session_id or create_session_id(),
-            user_message=request.message,
-            chat_type=request.chat_type
-        ):
-            yield chunk
+        """流式生成器：每次 DB 操作按需创建连接，用完即释放"""
+        # 阶段1：保存用户消息 + 获取历史（短连接）
+        AI_SEMAPHORE.acquire()
+        try:
+            db = SessionLocal()
+            try:
+                save_message(db, current_user.id, session_id, "user", request.message, chat_type=request.chat_type)
+                history = get_conversation_history(db, current_user.id, session_id, limit=10)
+            finally:
+                db.close()
+
+            # 阶段2：流式生成响应
+            for chunk in streaming_service.stream_chat_response_lightweight(
+                user_id=current_user.id,
+                session_id=session_id,
+                user_message=request.message,
+                chat_type=request.chat_type,
+                history=history
+            ):
+                yield chunk
+        finally:
+            AI_SEMAPHORE.release()
 
     return StreamingResponse(
         event_generator(),

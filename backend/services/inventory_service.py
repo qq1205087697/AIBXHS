@@ -820,7 +820,7 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
 def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids: list = None, progress_callback=None) -> dict:
     """公开API：计算补货决策"""
     # 查找最新快照日期
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
 
     if snapshot_date:
         target_date = datetime.strptime(snapshot_date, "%Y-%m-%d").date()
@@ -924,15 +924,16 @@ def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids
     return _calculate_replenishment_fast(db, df, snapshot_ids, target_date, progress_callback=progress_callback)
 
 
-def get_inventory_overview(db: Session, user_id: int = None, user_role: str = None) -> dict:
+def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> dict:
     """获取库存概览"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
                 "snapshot_date": None, "stockout_top10": [], "overstock_top10": []}
 
     # 构建基础查询（排除共享库存）
     base_query = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None)),
@@ -977,18 +978,21 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
     valid_snap_ids = [s.id for s in base_query.with_entities(InventorySnapshot.id).all()]
 
     red = db.query(ReplenishmentDecision).filter(
+        ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
         ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
         ReplenishmentDecision.risk_level == "红",
     ).count()
     yellow = db.query(ReplenishmentDecision).filter(
+        ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
         ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
         ReplenishmentDecision.risk_level == "黄",
     ).count()
     green = db.query(ReplenishmentDecision).filter(
+        ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
         ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
@@ -997,6 +1001,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
     # TOP10
     stockout_ids = db.query(ReplenishmentDecision.snapshot_id).filter(
+        ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
         ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
@@ -1005,8 +1010,8 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
     stockout_items = []
     if snap_ids:
-        snaps = {s.id: s for s in db.query(InventorySnapshot).filter(InventorySnapshot.id.in_(snap_ids), InventorySnapshot.deleted_at.is_(None)).all()}
-        decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(ReplenishmentDecision.snapshot_id.in_(snap_ids), ReplenishmentDecision.deleted_at.is_(None)).all()}
+        snaps = {s.id: s for s in db.query(InventorySnapshot).filter(InventorySnapshot.tenant_id == tenant_id, InventorySnapshot.id.in_(snap_ids), InventorySnapshot.deleted_at.is_(None)).all()}
+        decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(ReplenishmentDecision.tenant_id == tenant_id, ReplenishmentDecision.snapshot_id.in_(snap_ids), ReplenishmentDecision.deleted_at.is_(None)).all()}
         for sid in snap_ids:
             if sid in snaps and sid in decs:
                 s, d = snaps[sid], decs[sid]
@@ -1023,6 +1028,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
     overstock_top10 = []
     overstock_snaps = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         InventorySnapshot.id.in_(valid_snap_ids),
@@ -1046,7 +1052,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
     }
 
 
-def search_inventory(db: Session, keyword: str = None, risk_level=None,
+def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_level=None,
                      replenishment_status: str = None, account: str = None,
                      country: str = None, sort_field: str = None, sort_order: str = None,
                      page: int = 1, page_size: int = 20,
@@ -1078,12 +1084,13 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             # 用户不属于任何部门，返回空
             return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
     # 1. 先筛选出不包含共享库存的 snapshot_ids
     valid_snapshot_query = db.query(InventorySnapshot.id).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None))
@@ -1175,6 +1182,7 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
         risk_map = {"red": "红", "yellow": "黄", "green": "绿"}
         rls = [risk_map.get(rl, rl) for rl in ([risk_level] if isinstance(risk_level, str) else risk_level)]
         matching_ids = [d.snapshot_id for d in db.query(ReplenishmentDecision.snapshot_id).filter(
+            ReplenishmentDecision.tenant_id == tenant_id,
             ReplenishmentDecision.snapshot_date == latest,
             ReplenishmentDecision.deleted_at.is_(None),
             ReplenishmentDecision.snapshot_id.in_(valid_snapshot_ids),
@@ -1189,8 +1197,10 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     query = db.query(InventorySnapshot, ReplenishmentDecision).outerjoin(
         ReplenishmentDecision,
         (ReplenishmentDecision.snapshot_id == InventorySnapshot.id) & 
-        (ReplenishmentDecision.snapshot_date == latest)
+        (ReplenishmentDecision.snapshot_date == latest) &
+        (ReplenishmentDecision.tenant_id == tenant_id)
     ).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.id.in_(final_snapshot_ids),
         InventorySnapshot.deleted_at.is_(None)
     )
@@ -1246,6 +1256,7 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             InventorySnapshot.asin,
             func.coalesce(func.sum(InventorySnapshot.local_inventory), 0)
         ).filter(
+            InventorySnapshot.tenant_id == tenant_id,
             InventorySnapshot.snapshot_date == latest,
             InventorySnapshot.deleted_at.is_(None),
             InventorySnapshot.asin.in_(summary_asins),
@@ -1261,14 +1272,15 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) -> list:
+def get_stockout_top10(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> list:
     """断货风险TOP10"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     # 构建基础查询
     base_filter = [
+        ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
         (ReplenishmentDecision.summary_flag != "共享库存") | (ReplenishmentDecision.summary_flag.is_(None))
@@ -1301,6 +1313,7 @@ def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) 
                 InventorySnapshot.account.like(f"%{s}%") for s in user_stores
             ]
             visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
+                InventorySnapshot.tenant_id == tenant_id,
                 InventorySnapshot.snapshot_date == latest,
                 InventorySnapshot.deleted_at.is_(None),
                 or_(*snap_store_conditions)
@@ -1335,13 +1348,14 @@ def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) 
     return result
 
 
-def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None) -> list:
+def get_overstock_top10(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> list:
     """冗余库存TOP10"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     base_query = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None))
@@ -1386,13 +1400,14 @@ def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None)
     } for s in items]
 
 
-def get_inbound_details(db: Session, asin: str, account: str = None) -> list:
+def get_inbound_details(db: Session, tenant_id: int, asin: str, account: str = None) -> list:
     """查询在途详情"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     query = db.query(InventorySnapshot.id).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest, InventorySnapshot.asin == asin,
         InventorySnapshot.deleted_at.is_(None)
     )
@@ -1404,6 +1419,7 @@ def get_inbound_details(db: Session, asin: str, account: str = None) -> list:
         return []
 
     details = db.query(InboundShipmentDetail).filter(
+        InboundShipmentDetail.tenant_id == tenant_id,
         InboundShipmentDetail.snapshot_id.in_(snapshot_ids),
         InboundShipmentDetail.deleted_at.is_(None)
     ).all()
@@ -1418,19 +1434,20 @@ def get_inbound_details(db: Session, asin: str, account: str = None) -> list:
     } for d in details]
 
 
-def get_latest_snapshot_date(db: Session) -> str:
+def get_latest_snapshot_date(db: Session, tenant_id: int) -> str:
     """获取最新快照日期"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     return latest.isoformat() if latest else None
 
 
-def get_summary_children(db: Session, asin: str):
+def get_summary_children(db: Session, tenant_id: int, asin: str):
     """获取汇总行的子行数据"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     children = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         InventorySnapshot.asin == asin,

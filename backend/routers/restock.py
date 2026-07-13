@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Request
 from typing import Optional, List
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from database.database import get_db
 from dependencies import get_current_user
 from models.user import User
@@ -13,6 +14,26 @@ from models.user import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/restock", tags=["restock"])
+
+
+def is_admin_user(user: User, db: Session) -> bool:
+    """判断用户是否是管理员（通过 role_id）"""
+    if not user.role_id:
+        return False
+    role = db.execute(text("""
+        SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+    """), {"role_id": user.role_id}).fetchone()
+    return role and role[0] == "admin"
+
+
+def get_user_role_code(user: User, db: Session) -> str:
+    """获取用户角色编码（通过 role_id）"""
+    if not user.role_id:
+        return ""
+    role = db.execute(text("""
+        SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+    """), {"role_id": user.role_id}).fetchone()
+    return role[0] if role else ""
 
 
 # ==================== 1. 导入补货建议Excel ====================
@@ -130,7 +151,7 @@ async def get_inventory_overview(
     try:
         from services.inventory_service import get_inventory_overview
 
-        result = get_inventory_overview(db, user_id=current_user.id, user_role=current_user.role)
+        result = get_inventory_overview(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=get_user_role_code(current_user, db))
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -173,6 +194,7 @@ async def search_inventory(
 
         result = search_inventory(
             db,
+            tenant_id=current_user.tenant_id,
             keyword=keyword,
             risk_level=final_risk_level,
             replenishment_status=replenishment_status,
@@ -183,7 +205,7 @@ async def search_inventory(
             page=page,
             page_size=page_size,
             user_id=current_user.id,
-            user_role=current_user.role
+            user_role=get_user_role_code(current_user, db)
         )
         return {"success": True, "data": result}
 
@@ -206,7 +228,7 @@ async def get_stockout_top10(
     try:
         from services.inventory_service import get_stockout_top10
 
-        result = get_stockout_top10(db, user_id=current_user.id, user_role=current_user.role)
+        result = get_stockout_top10(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=current_user.role)
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -228,7 +250,7 @@ async def get_overstock_top10(
     try:
         from services.inventory_service import get_overstock_top10
 
-        result = get_overstock_top10(db, user_id=current_user.id, user_role=current_user.role)
+        result = get_overstock_top10(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=current_user.role)
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -251,7 +273,7 @@ async def get_inbound_details(
     try:
         from services.inventory_service import get_inbound_details
 
-        result = get_inbound_details(db, asin=asin, account=account)
+        result = get_inbound_details(db, tenant_id=current_user.tenant_id, asin=asin, account=account)
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -262,7 +284,7 @@ async def get_inbound_details(
 # ==================== 8. 获取最新快照日期 ====================
 
 @router.get("/latest-date")
-async def get_latest_snapshot_date(db: Session = Depends(get_db)):
+async def get_latest_snapshot_date(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     获取最新的库存快照日期
     用于前端展示当前数据的时间范围
@@ -270,7 +292,7 @@ async def get_latest_snapshot_date(db: Session = Depends(get_db)):
     try:
         from services.inventory_service import get_latest_snapshot_date
 
-        snapshot_date = get_latest_snapshot_date(db)
+        snapshot_date = get_latest_snapshot_date(db, tenant_id=current_user.tenant_id)
         return {"success": True, "data": {"snapshot_date": snapshot_date}}
 
     except Exception as e:
@@ -297,14 +319,14 @@ async def get_filter_options(
     from sqlalchemy import text, or_
 
     # 获取用户可见的店铺
-    if current_user.role == "admin":
-        dept_ids = None
+    if is_admin_user(current_user, db):
+        user_store_ids = None
     else:
-        dept_ids = db.execute(
-            text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": current_user.id}
+        user_stores = db.execute(
+            text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+            {"uid": current_user.id, "tid": current_user.tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_ids if d[0]]
+        user_store_ids = [s[0] for s in user_stores if s[0]]
 
     # 查询店铺
     query = db.query(Store).filter(
@@ -316,8 +338,8 @@ async def get_filter_options(
     if country:
         query = query.filter(Store.site == country)
 
-    if dept_ids:
-        query = query.filter(Store.department_id.in_(dept_ids))
+    if user_store_ids:
+        query = query.filter(Store.id.in_(user_store_ids))
 
     stores = query.all()
 
@@ -339,7 +361,7 @@ async def get_filter_options(
     # 从库存表中提取所有国家（拆分集合值如"美国、英国"）
     countries = set()
 
-    if current_user.role == "admin":
+    if is_admin_user(current_user, db):
         # admin用户：显示所有国家
         country_records = db.query(InventorySnapshot.country).filter(
             InventorySnapshot.country.isnot(None),

@@ -25,6 +25,8 @@ import {
   Boxes,
   Settings,
   Mail,
+  PackagePlus,
+  Ship,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -158,7 +160,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     setDetailModalOpen(false)
   }
 
-  const inventoryPaths = ['/purchase', '/inbound', '/outbound', '/stock-transfer', '/warehouses']
+  const inventoryPaths = ['/replenishment', '/purchase', '/inbound', '/outbound', '/stock-transfer', '/shipment', '/warehouses']
   const systemPaths = ['/org', '/permissions', '/operation-logs', '/tenants', '/stores']
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
@@ -229,6 +231,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <Boxes size={20} />,
       label: '进销存',
       children: [
+        ...(hasPermission('replenishment:view')
+          ? [{
+              key: '/replenishment',
+              icon: <PackagePlus size={18} />,
+              label: '补货管理',
+            }] : []),
         ...(hasPermission('purchase:view')
           ? [{
               key: '/purchase',
@@ -252,6 +260,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               key: '/stock-transfer',
               icon: <ArrowLeftRight size={18} />,
               label: '挪货管理',
+            }] : []),
+        ...(hasPermission('shipment:view')
+          ? [{
+              key: '/shipment',
+              icon: <Ship size={18} />,
+              label: '发货管理',
             }] : []),
         ...(hasPermission('warehouse:view')
           ? [{
@@ -289,11 +303,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               icon: <Building2 size={18} />,
               label: '公司设置',
             },
-          {
+          ...(hasPermission('robot:inventory:settings')
+          ? [{
             key: '/business-settings',
             icon: <Settings size={20} />,
             label: '业务设置',
-          },
+          }] : []),
         ...(hasPermission('store:view')
           ? [{
               key: '/stores',
@@ -320,7 +335,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/inbound': '入库管理',
       '/outbound': '出库管理',
       '/purchase': '采购管理',
+      '/replenishment': '补货管理',
       '/stock-transfer': '挪货管理',
+      '/shipment': '发货管理',
       '/warehouses': '仓库管理',
       '/operation-logs': '操作日志',
       '/tenants': '公司设置',

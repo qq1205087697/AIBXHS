@@ -25,14 +25,21 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     try:
         token = credentials.credentials
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        username: Optional[str] = payload.get("sub")
+        user_id = payload.get("uid")
+        tenant_id = payload.get("tid")
+        if username is None and user_id is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
     
-    from services.auth_service import get_user
-    user = get_user(db, username=username)
+    from services.auth_service import get_user_by_identity
+    user = get_user_by_identity(
+        db,
+        user_id=int(user_id) if user_id is not None else None,
+        tenant_id=int(tenant_id) if tenant_id is not None else None,
+        username=username
+    )
     if user is None:
         raise credentials_exception
 

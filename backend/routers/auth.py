@@ -87,7 +87,7 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
     )
     
     # 创建访问令牌
-    access_token = create_access_token(data={"sub": user.username})
+    access_token = create_access_token(data={"sub": user.username, "uid": user.id, "tid": user.tenant_id})
     
     return TokenResponse(access_token=access_token)
 
@@ -102,7 +102,7 @@ async def login(user_data: UserLogin, db: Session = Depends(get_db)):
             detail="用户名或密码错误"
         )
     
-    access_token = create_access_token(data={"sub": user.username})
+    access_token = create_access_token(data={"sub": user.username, "uid": user.id, "tid": user.tenant_id})
     return TokenResponse(access_token=access_token)
 
 

@@ -211,6 +211,17 @@ async def confirm_inventory_count(
                     )
 
                     for (uid,) in notification_users:
+                        exists = db.execute(text("""
+                            SELECT COUNT(*) FROM notifications
+                            WHERE tenant_id = :tid AND user_id = :uid AND title = :title
+                              AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+                        """), {
+                            "tid": current_user.tenant_id,
+                            "uid": uid,
+                            "title": title,
+                        }).scalar()
+                        if exists > 0:
+                            continue
                         db.execute(text("""
                             INSERT INTO notifications (tenant_id, user_id, type, title, content, link)
                             VALUES (:tid, :uid, 'warning', :title, :content, '/products')
