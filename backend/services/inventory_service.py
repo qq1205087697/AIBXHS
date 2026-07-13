@@ -942,31 +942,25 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
     # 用户数据隔离
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-            if user_stores:
-                store_conditions = [
-                    InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-                ]
-                base_query = base_query.filter(or_(*store_conditions))
-            else:
-                return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
-                        "snapshot_date": latest.isoformat(), "stockout_top10": [], "overstock_top10": []}
+        user_stores = [s[0] for s in user_store_rows]
+        if user_stores:
+            store_conditions = [
+                InventorySnapshot.account.like(f"%{s}%") for s in user_stores
+            ]
+            base_query = base_query.filter(or_(*store_conditions))
         else:
             return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
                     "snapshot_date": latest.isoformat(), "stockout_top10": [], "overstock_top10": []}
@@ -1062,26 +1056,22 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
     user_stores = None
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            # 使用原生 SQL 查询避免模型导入问题
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-        else:
-            # 用户不属于任何部门，返回空
+        user_stores = [s[0] for s in user_store_rows]
+        if not user_stores:
+            # 用户没有被分配任何店铺，返回空
             return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
     latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
@@ -1289,40 +1279,35 @@ def get_stockout_top10(db: Session, tenant_id: int, user_id: int = None, user_ro
     # 用户数据隔离
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-            if not user_stores:
-                return []
-            # 获取可见的 snapshot_ids
-            snap_store_conditions = [
-                InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-            ]
-            visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
-                InventorySnapshot.tenant_id == tenant_id,
-                InventorySnapshot.snapshot_date == latest,
-                InventorySnapshot.deleted_at.is_(None),
-                or_(*snap_store_conditions)
-            ).all()]
-            if not visible_snap_ids:
-                return []
-            base_filter.append(ReplenishmentDecision.snapshot_id.in_(visible_snap_ids))
-        else:
+        user_stores = [s[0] for s in user_store_rows]
+        if not user_stores:
             return []
+        # 获取可见的 snapshot_ids
+        snap_store_conditions = [
+            InventorySnapshot.account.like(f"%{s}%") for s in user_stores
+        ]
+        visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
+            InventorySnapshot.tenant_id == tenant_id,
+            InventorySnapshot.snapshot_date == latest,
+            InventorySnapshot.deleted_at.is_(None),
+            or_(*snap_store_conditions)
+        ).all()]
+        if not visible_snap_ids:
+            return []
+        base_filter.append(ReplenishmentDecision.snapshot_id.in_(visible_snap_ids))
 
     risk_orders = db.query(ReplenishmentDecision.snapshot_id).filter(
         *base_filter
@@ -1364,31 +1349,26 @@ def get_overstock_top10(db: Session, tenant_id: int, user_id: int = None, user_r
     # 用户数据隔离
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-            if not user_stores:
-                return []
-            store_conditions = [
-                InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-            ]
-            base_query = base_query.filter(or_(*store_conditions))
-        else:
+        user_stores = [s[0] for s in user_store_rows]
+        if not user_stores:
             return []
+        store_conditions = [
+            InventorySnapshot.account.like(f"%{s}%") for s in user_stores
+        ]
+        base_query = base_query.filter(or_(*store_conditions))
 
     items = base_query.order_by(InventorySnapshot.age_12_plus.desc()).limit(10).all()
 
