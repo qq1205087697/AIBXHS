@@ -43,6 +43,7 @@ import {
     SwapOutlined,
     HomeOutlined,
     MailOutlined,
+    PlusSquareOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
 
@@ -356,6 +357,8 @@ const PermissionManagement: React.FC = () => {
         '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
         '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
         '邮件机器人': { icon: <MailOutlined />, color: '#1890ff' },
+        '补货管理': { icon: <PlusSquareOutlined />, color: '#7c3aed' },
+        '发货管理': { icon: <ShopOutlined />, color: '#1890ff' },
     };
 
   // 计算权限总数
@@ -764,22 +767,20 @@ const PermissionManagement: React.FC = () => {
         width={900}
       >
         <Transfer
-          dataSource={allUsers
-            // 过滤掉已经有其他角色的用户（当前角色的用户除外）
-            .filter(user => {
-              const hasOtherRole = user.roles && user.roles.length > 0 && 
-                user.roles.some(r => r.id !== selectedRole?.id);
-              const isCurrentRoleUser = roleUsers.some(ru => ru.id === user.id);
-              return !hasOtherRole || isCurrentRoleUser;
-            })
-            .map(user => ({
+          dataSource={allUsers.map(user => {
+            // 判断用户是否已有其他角色（非当前选中角色）
+            const hasOtherRole = user.roles && user.roles.length > 0 &&
+              user.roles.some((r: any) => r.id !== selectedRole?.id);
+            // 无任何角色的用户，或者仅属于当前角色的用户，都可以选择
+            const hasNoRole = !user.roles || user.roles.length === 0;
+            return {
               key: user.id,
               title: user.username,
               description: user.nickname || user.email,
               roles: user.roles,
-              disabled: user.roles && user.roles.length > 0 && 
-                user.roles.some(r => r.id !== selectedRole?.id)
-            }))}
+              disabled: hasOtherRole, // 已有其他角色的用户禁用，防止误操作
+            };
+          })}
           titles={['可用用户', '已选用户']}
           targetKeys={selectedUserIds}
           onChange={(targetKeys) => setSelectedUserIds(targetKeys as number[])}

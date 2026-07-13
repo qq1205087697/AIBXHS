@@ -69,7 +69,7 @@ def init_db():
         from models.department import Department, UserDepartment
         from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
         from models.local_inventory import LocalInventory
-        from models.inventory_management import PurchaseOrder, PurchaseOrderItem, InboundOrder, InboundOrderItem, OutboundOrder, OutboundOrderItem, InventoryBatch, OperationLog, StockTransferOrder, StockTransferOrderItem, Warehouse
+        from models.inventory_management import PurchaseOrder, PurchaseOrderItem, InboundOrder, InboundOrderItem, OutboundOrder, OutboundOrderItem, InventoryBatch, OperationLog, StockTransferOrder, StockTransferOrderItem, Warehouse, ReplenishmentOrder, ReplenishmentItem, ShipmentOrder, ShipmentOrderItem
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)

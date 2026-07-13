@@ -334,6 +334,11 @@ export const storesApi = {
     store_ids: number[];
     department_id?: number;
   }) => apiClient.post("/stores/batch-update-department", data),
+  // 店铺分配人员
+  getMembers: (storeId: number) => apiClient.get(`/stores/${storeId}/members`),
+  addMembers: (storeId: number, data: { user_ids: number[] }) => apiClient.post(`/stores/${storeId}/members`, data),
+  removeMember: (storeId: number, userId: number) => apiClient.delete(`/stores/${storeId}/members/${userId}`),
+  setMembers: (storeId: number, data: { user_ids: number[] }) => apiClient.put(`/stores/${storeId}/members`, data),
 };
 
 // ========== Products API ==========
@@ -344,6 +349,7 @@ export const productsApi = {
     search?: string;
     product_type?: string;
     status?: string;
+    hide_zero_stock?: boolean;
   }) => apiClient.get("/products/", { params }),
   getById: (id: number) => apiClient.get(`/products/${id}`),
   create: (data: {
@@ -516,6 +522,9 @@ export const storeGroupsApi = {
     apiClient.post(`/store-groups/${groupId}/stores`, { store_ids: storeIds }),
   removeStore: (groupId: number, storeId: number) =>
     apiClient.delete(`/store-groups/${groupId}/stores/${storeId}`),
+  // 店铺分组人员管理
+  getMembers: (groupId: number) => apiClient.get(`/store-groups/${groupId}/members`),
+  setMembers: (groupId: number, data: { user_ids: number[] }) => apiClient.put(`/store-groups/${groupId}/members`, data),
 };
 
 // ========== Tenants API ==========
@@ -548,6 +557,8 @@ export const inboundOrdersApi = {
     inbound_type?: string;
     search?: string;
   }) => apiClient.get("/inbound-orders/", { params }),
+  getPendingPurchaseItems: (productId: number) =>
+    apiClient.get(`/inbound-orders/pending-purchase-items/${productId}`),
   create: (data: {
     order_number: string;
     inbound_type: string;
@@ -564,7 +575,9 @@ export const inboundOrdersApi = {
       production_date?: string;
       expiry_date?: string;
       warehouse?: string;
+      shelf_number?: string;
       notes?: string;
+      purchase_order_item_id?: number;
     }[];
   }) => apiClient.post("/inbound-orders/", data),
   update: (id: number, data: {
@@ -577,6 +590,13 @@ export const inboundOrdersApi = {
     notes?: string;
   }) => apiClient.put(`/inbound-orders/${id}`, data),
   confirm: (id: number) => apiClient.put(`/inbound-orders/${id}/confirm`),
+  checkPurchaseDiff: (items: Array<{ product_id: number; quantity: number; purchase_order_item_id?: number | null }>) =>
+    apiClient.post('/inbound-orders/check-purchase-diff', items),
+  notifyInboundDiff: (order_number: string, warnings: any[]) =>
+    apiClient.post('/inbound-orders/notify-inbound-diff', { order_number, warnings }),
+  getPendingDiffItems: () => apiClient.get('/inbound-orders/pending-diff-items'),
+  resolveDiffs: (resolutions: Array<{ inbound_item_id: number; resolution: string }>) =>
+    apiClient.post('/inbound-orders/resolve-diffs', resolutions),
   delete: (id: number) => apiClient.delete(`/inbound-orders/${id}`),
   downloadTemplate: () => apiClient.get(`/inbound-orders/template/download`, {
     responseType: 'blob',
@@ -668,8 +688,16 @@ export const purchaseOrdersApi = {
     expected_date?: string;
     notes?: string;
     status?: string;
+    items?: {
+      product_id: number;
+      quantity: number;
+      unit_price?: number;
+      supplier?: string;
+      notes?: string;
+    }[];
   }) => apiClient.put(`/purchase-orders/${id}`, data),
   delete: (id: number) => apiClient.delete(`/purchase-orders/${id}`),
+  cancelApproval: (id: number) => apiClient.post(`/purchase-orders/${id}/cancel-approval`),
   downloadTemplate: () => apiClient.get(`/purchase-orders/template/download`, {
     responseType: 'blob',
   }),
@@ -894,6 +922,59 @@ export const productBindingsApi = {
   }) => apiClient.put(`/product-bindings/${bindingId}`, data),
   delete: (bindingId: number) =>
     apiClient.delete(`/product-bindings/${bindingId}`),
+};
+
+// ========== Replenishment Orders API ==========
+export const replenishmentOrdersApi = {
+  getList: (params?: { page?: number; page_size?: number; status?: string; platform?: string; search?: string }) =>
+    apiClient.get("/replenishment-orders/", { params }),
+  getDetail: (id: number) => apiClient.get(`/replenishment-orders/${id}`),
+  create: (data: any) => apiClient.post("/replenishment-orders/", data),
+  update: (id: number, data: any) => apiClient.put(`/replenishment-orders/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/replenishment-orders/${id}`),
+  batchDelete: (ids: number[]) => apiClient.post('/replenishment-orders/batch-delete', { ids }),
+  batchConvert: (data: { ids: number[]; supplier?: string; contact_person?: string; contact_phone?: string; notes?: string }) =>
+    apiClient.post("/replenishment-orders/batch-convert", data),
+  approve: (id: number) => apiClient.post(`/replenishment-orders/${id}/approve`),
+  cancelApproval: (id: number) => apiClient.post(`/replenishment-orders/${id}/cancel-approval`),
+  downloadTemplate: () => apiClient.get("/replenishment-orders/template/download", { responseType: 'blob' }),
+  uploadPreview: (file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return apiClient.post("/replenishment-orders/upload/preview", formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+}
+
+// ========== Shipments API ==========
+export const shipmentsApi = {
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    search?: string;
+    start_date?: string;
+    end_date?: string;
+    store_group_id?: number;
+  }) => apiClient.get("/shipments/", { params }),
+  getDetail: (id: number) => apiClient.get(`/shipments/${id}`),
+  create: (data: {
+    order_number: string;
+    store_group_id?: number;
+    store_group_name?: string;
+    notes?: string;
+    items: {
+      product_id: number;
+      product_code?: string;
+      product_name?: string;
+      stock_quantity?: number;
+    }[];
+  }) => apiClient.post("/shipments/", data),
+  update: (id: number, data: any) => apiClient.put(`/shipments/${id}`, data),
+  confirm: (id: number) => apiClient.put(`/shipments/${id}/confirm`),
+  delete: (id: number) => apiClient.delete(`/shipments/${id}`),
+  getKpiCount: () => apiClient.get("/shipments/kpi-count"),
 };
 
 export default apiClient;

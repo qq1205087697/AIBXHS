@@ -271,11 +271,15 @@ async def update_role_permissions(
     """更新角色权限"""
     # 检查角色是否存在
     role = db.execute(text("""
-        SELECT id FROM roles WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL
+        SELECT id, code FROM roles WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL
     """), {"id": role_id, "tenant_id": current_user.tenant_id}).fetchone()
     
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
+    
+    # 管理员角色权限不可更改
+    if role[1] == "admin":
+        raise HTTPException(status_code=400, detail="管理员角色权限不可更改，默认拥有所有权限")
     
     try:
         # 先删除原有权限
@@ -447,9 +451,9 @@ async def get_all_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """获取所有用户（用于分配角色，同时兼容 role_id 和 role 字段）"""
+    """获取所有用户（用于分配角色）"""
     users = db.execute(text("""
-        SELECT id, username, nickname, email, status, role_id, role
+        SELECT id, username, nickname, email, status, role_id
         FROM users
         WHERE tenant_id = :tenant_id AND deleted_at IS NULL
         ORDER BY id ASC
@@ -457,25 +461,14 @@ async def get_all_users(
     
     user_list = []
     for user in users:
-        # 获取用户角色（优先 role_id，其次 role）
+        # 获取用户角色（通过 role_id）
         role = None
-        # 尝试通过 role_id 获取
-        if user[5]:
+        if user[5] and user[5] > 0:  # user[5] 是 role_id
             role_result = db.execute(text("""
                 SELECT r.id, r.name
                 FROM roles r
-                WHERE r.id = :role_id AND r.deleted_at IS NULL
-            """), {"role_id": user[5]}).fetchone()
-            if role_result:
-                role = {"id": role_result[0], "name": role_result[1]}
-        
-        # 如果没有 role_id，尝试通过 role 字段获取
-        if not role and user[6]:
-            role_result = db.execute(text("""
-                SELECT r.id, r.name
-                FROM roles r
-                WHERE r.code = :role_code AND r.tenant_id = :tenant_id AND r.deleted_at IS NULL
-            """), {"role_code": user[6], "tenant_id": current_user.tenant_id}).fetchone()
+                WHERE r.id = :role_id AND r.tenant_id = :tenant_id AND r.deleted_at IS NULL
+            """), {"role_id": user[5], "tenant_id": current_user.tenant_id}).fetchone()
             if role_result:
                 role = {"id": role_result[0], "name": role_result[1]}
         
@@ -559,9 +552,6 @@ async def init_default_permissions(
         {"name": "删除采购", "code": "purchase:delete", "type": "function", "module": "采购管理", "sort_order": 28},
         {"name": "导入采购", "code": "purchase:import", "type": "function", "module": "采购管理", "sort_order": 29},
         {"name": "导出采购", "code": "purchase:export", "type": "function", "module": "采购管理", "sort_order": 30},
-        # 库存管理
-        {"name": "查看库存", "code": "inventory:view", "type": "function", "module": "库存管理", "sort_order": 31},
-        {"name": "调整库存", "code": "inventory:adjust", "type": "function", "module": "库存管理", "sort_order": 32},
         # 店铺管理
         {"name": "查看店铺", "code": "store:view", "type": "function", "module": "店铺管理", "sort_order": 33},
         {"name": "新增店铺", "code": "store:create", "type": "function", "module": "店铺管理", "sort_order": 34},
@@ -580,27 +570,50 @@ async def init_default_permissions(
         {"name": "使用AI聊天助手", "code": "chat:use", "type": "function", "module": "AI聊天助手", "sort_order": 43},
         # 库存机器人
         {"name": "查看库存数据", "code": "robot:inventory:view", "type": "function", "module": "库存机器人", "sort_order": 44},
+        {"name": "业务设置", "code": "robot:inventory:settings", "type": "function", "module": "库存机器人", "sort_order": 45},
         # 差评机器人
-        {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 45},
-        {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 46},
-        {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 47},
+        {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 46},
+        {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 47},
+        {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 48},
         # 邮件机器人
         {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
         {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
         {"name": "管理邮件状态", "code": "robot:email:manage", "type": "function", "module": "邮件机器人", "sort_order": 59},
+        # KPI卡片权限 - 控制首页各卡片是否显示
+        {"name": "差评机器人KPI卡片", "code": "robot:review:kpi", "type": "function", "module": "差评机器人", "sort_order": 48},
+        {"name": "库存机器人KPI卡片", "code": "robot:inventory:kpi", "type": "function", "module": "库存机器人", "sort_order": 49},
+        {"name": "AI聊天助手KPI卡片", "code": "chat:kpi", "type": "function", "module": "AI聊天助手", "sort_order": 50},
+        {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
+        {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
+        {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
+        {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
         # 挪货管理
-        {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 48},
-        {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 49},
-        {"name": "编辑挪货", "code": "stock_transfer:edit", "type": "function", "module": "挪货管理", "sort_order": 50},
-        {"name": "审批挪货", "code": "stock_transfer:confirm", "type": "function", "module": "挪货管理", "sort_order": 51},
-        {"name": "删除挪货", "code": "stock_transfer:delete", "type": "function", "module": "挪货管理", "sort_order": 52},
+        {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 55},
+        {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 56},
+        {"name": "编辑挪货", "code": "stock_transfer:edit", "type": "function", "module": "挪货管理", "sort_order": 57},
+        {"name": "审批挪货", "code": "stock_transfer:confirm", "type": "function", "module": "挪货管理", "sort_order": 58},
+        {"name": "删除挪货", "code": "stock_transfer:delete", "type": "function", "module": "挪货管理", "sort_order": 59},
         # 仓库管理
-        {"name": "查看仓库", "code": "warehouse:view", "type": "function", "module": "仓库管理", "sort_order": 53},
-        {"name": "新增仓库", "code": "warehouse:create", "type": "function", "module": "仓库管理", "sort_order": 54},
-        {"name": "编辑仓库", "code": "warehouse:edit", "type": "function", "module": "仓库管理", "sort_order": 55},
-        {"name": "删除仓库", "code": "warehouse:delete", "type": "function", "module": "仓库管理", "sort_order": 56},
+        {"name": "查看仓库", "code": "warehouse:view", "type": "function", "module": "仓库管理", "sort_order": 60},
+        {"name": "新增仓库", "code": "warehouse:create", "type": "function", "module": "仓库管理", "sort_order": 61},
+        {"name": "编辑仓库", "code": "warehouse:edit", "type": "function", "module": "仓库管理", "sort_order": 62},
+        {"name": "删除仓库", "code": "warehouse:delete", "type": "function", "module": "仓库管理", "sort_order": 63},
+        # 补货管理
+        {"name": "查看补货", "code": "replenishment:view", "type": "function", "module": "补货管理", "sort_order": 64},
+        {"name": "新增补货", "code": "replenishment:create", "type": "function", "module": "补货管理", "sort_order": 65},
+        {"name": "编辑补货", "code": "replenishment:edit", "type": "function", "module": "补货管理", "sort_order": 66},
+        {"name": "删除补货", "code": "replenishment:delete", "type": "function", "module": "补货管理", "sort_order": 67},
+        {"name": "审批补货", "code": "replenishment:approve", "type": "function", "module": "补货管理", "sort_order": 68},
+        {"name": "转采购单", "code": "replenishment:convert", "type": "function", "module": "补货管理", "sort_order": 69},
+        # 发货管理
+        {"name": "查看发货", "code": "shipment:view", "type": "function", "module": "发货管理", "sort_order": 70},
+        {"name": "新增发货", "code": "shipment:create", "type": "function", "module": "发货管理", "sort_order": 71},
+        {"name": "编辑发货", "code": "shipment:edit", "type": "function", "module": "发货管理", "sort_order": 72},
+        {"name": "确认发货", "code": "shipment:confirm", "type": "function", "module": "发货管理", "sort_order": 73},
+        {"name": "删除发货", "code": "shipment:delete", "type": "function", "module": "发货管理", "sort_order": 74},
+        {"name": "发货管理KPI卡片", "code": "shipment:kpi", "type": "function", "module": "发货管理", "sort_order": 75},
     ]
-    
+
     for perm in default_permissions:
         db.execute(text("""
             INSERT INTO permissions (tenant_id, name, code, type, module, sort_order, created_at, updated_at)
@@ -640,29 +653,52 @@ async def add_missing_permissions(
         {"name": "使用AI聊天助手", "code": "chat:use", "type": "function", "module": "AI聊天助手", "sort_order": 43},
         # 库存机器人
         {"name": "查看库存数据", "code": "robot:inventory:view", "type": "function", "module": "库存机器人", "sort_order": 44},
+        {"name": "业务设置", "code": "robot:inventory:settings", "type": "function", "module": "库存机器人", "sort_order": 45},
         # 差评机器人
-        {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 45},
-        {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 46},
-        {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 47},
+        {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 46},
+        {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 47},
+        {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 48},
         # 邮件机器人
         {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
         {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
         {"name": "管理邮件状态", "code": "robot:email:manage", "type": "function", "module": "邮件机器人", "sort_order": 59},
+        # KPI卡片权限 - 控制首页各卡片是否显示
+        {"name": "差评机器人KPI卡片", "code": "robot:review:kpi", "type": "function", "module": "差评机器人", "sort_order": 48},
+        {"name": "库存机器人KPI卡片", "code": "robot:inventory:kpi", "type": "function", "module": "库存机器人", "sort_order": 49},
+        {"name": "AI聊天助手KPI卡片", "code": "chat:kpi", "type": "function", "module": "AI聊天助手", "sort_order": 50},
+        {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
+        {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
+        {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
+        {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
         # 挪货管理
-        {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 48},
-        {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 49},
-        {"name": "编辑挪货", "code": "stock_transfer:edit", "type": "function", "module": "挪货管理", "sort_order": 50},
-        {"name": "审批挪货", "code": "stock_transfer:confirm", "type": "function", "module": "挪货管理", "sort_order": 51},
-        {"name": "删除挪货", "code": "stock_transfer:delete", "type": "function", "module": "挪货管理", "sort_order": 52},
+        {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 55},
+        {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 56},
+        {"name": "编辑挪货", "code": "stock_transfer:edit", "type": "function", "module": "挪货管理", "sort_order": 57},
+        {"name": "审批挪货", "code": "stock_transfer:confirm", "type": "function", "module": "挪货管理", "sort_order": 58},
+        {"name": "删除挪货", "code": "stock_transfer:delete", "type": "function", "module": "挪货管理", "sort_order": 59},
         # 仓库管理
-        {"name": "查看仓库", "code": "warehouse:view", "type": "function", "module": "仓库管理", "sort_order": 53},
-        {"name": "新增仓库", "code": "warehouse:create", "type": "function", "module": "仓库管理", "sort_order": 54},
-        {"name": "编辑仓库", "code": "warehouse:edit", "type": "function", "module": "仓库管理", "sort_order": 55},
-        {"name": "删除仓库", "code": "warehouse:delete", "type": "function", "module": "仓库管理", "sort_order": 56},
+        {"name": "查看仓库", "code": "warehouse:view", "type": "function", "module": "仓库管理", "sort_order": 60},
+        {"name": "新增仓库", "code": "warehouse:create", "type": "function", "module": "仓库管理", "sort_order": 61},
+        {"name": "编辑仓库", "code": "warehouse:edit", "type": "function", "module": "仓库管理", "sort_order": 62},
+        {"name": "删除仓库", "code": "warehouse:delete", "type": "function", "module": "仓库管理", "sort_order": 63},
+        # 补货管理
+        {"name": "查看补货", "code": "replenishment:view", "type": "function", "module": "补货管理", "sort_order": 64},
+        {"name": "新增补货", "code": "replenishment:create", "type": "function", "module": "补货管理", "sort_order": 65},
+        {"name": "编辑补货", "code": "replenishment:edit", "type": "function", "module": "补货管理", "sort_order": 66},
+        {"name": "删除补货", "code": "replenishment:delete", "type": "function", "module": "补货管理", "sort_order": 67},
+        {"name": "审批补货", "code": "replenishment:approve", "type": "function", "module": "补货管理", "sort_order": 68},
+        {"name": "转采购单", "code": "replenishment:convert", "type": "function", "module": "补货管理", "sort_order": 69},
+        # 发货管理
+        {"name": "查看发货", "code": "shipment:view", "type": "function", "module": "发货管理", "sort_order": 70},
+        {"name": "新增发货", "code": "shipment:create", "type": "function", "module": "发货管理", "sort_order": 71},
+        {"name": "编辑发货", "code": "shipment:edit", "type": "function", "module": "发货管理", "sort_order": 72},
+        {"name": "确认发货", "code": "shipment:confirm", "type": "function", "module": "发货管理", "sort_order": 73},
+        {"name": "删除发货", "code": "shipment:delete", "type": "function", "module": "发货管理", "sort_order": 74},
+        {"name": "发货管理KPI卡片", "code": "shipment:kpi", "type": "function", "module": "发货管理", "sort_order": 75},
     ]
 
     # 先清理无用的旧权限码
-    removed_codes = ["dashboard:view", "review:reply", "robot:inventory", "robot:review"]
+    removed_codes = ["dashboard:view", "review:reply", "robot:inventory", "robot:review", "replenishment:confirm", "replenishment:import"]
     removed_count = 0
     for code in removed_codes:
         result = db.execute(text("""

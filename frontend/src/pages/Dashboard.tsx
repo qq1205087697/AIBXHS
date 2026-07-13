@@ -111,11 +111,11 @@ const Dashboard: React.FC = () => {
   const reviewColumns = [
     { title: 'ASIN', dataIndex: 'asin', key: 'asin' },
     { title: '商品名称', dataIndex: 'productName', key: 'productName' },
-    { 
-      title: '评分', 
-      dataIndex: 'rating', 
-      key: 'rating', 
-      render: (rating: number) => '⭐'.repeat(rating) 
+    {
+      title: '评分',
+      dataIndex: 'rating',
+      key: 'rating',
+      render: (rating: number) => '⭐'.repeat(rating)
     },
     { title: '日期', dataIndex: 'date', key: 'date' },
   ]
@@ -201,21 +201,21 @@ const Dashboard: React.FC = () => {
       <Row gutter={16}>
         <Col span={12}>
           <Card title="库存预警" style={{ marginBottom: 24 }} loading={loading}>
-            <Table 
-              dataSource={inventoryAlerts.slice(0, 5)} 
-              columns={inventoryColumns} 
-              rowKey="id" 
-              pagination={false} 
+            <Table
+              dataSource={inventoryAlerts.slice(0, 5)}
+              columns={inventoryColumns}
+              rowKey="id"
+              pagination={false}
             />
           </Card>
         </Col>
         <Col span={12}>
           <Card title="最新差评" style={{ marginBottom: 24 }} loading={loading}>
-            <Table 
-              dataSource={reviews.slice(0, 5)} 
-              columns={reviewColumns} 
-              rowKey="id" 
-              pagination={false} 
+            <Table
+              dataSource={reviews.slice(0, 5)}
+              columns={reviewColumns}
+              rowKey="id"
+              pagination={false}
             />
           </Card>
         </Col>

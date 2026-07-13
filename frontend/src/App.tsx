@@ -1,5 +1,4 @@
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
-import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import MainLayout from "./components/Layout/MainLayout";
 import Home from "./pages/Home";
@@ -15,8 +14,10 @@ import ProductManagement from "./pages/ProductManagement";
 import InboundManagement from './pages/InboundManagement'
 import OutboundManagement from './pages/OutboundManagement'
 import PurchaseManagement from './pages/PurchaseManagement'
+import ReplenishmentManagement from './pages/ReplenishmentManagement'
 import OperationLogs from './pages/OperationLogs'
 import StockTransferManagement from './pages/StockTransferManagement'
+import ShipmentManagement from './pages/ShipmentManagement'
 import WarehouseManagement from './pages/WarehouseManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
@@ -169,6 +170,16 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/replenishment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ReplenishmentManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/operation-logs"
         element={
           <ProtectedRoute>
@@ -184,6 +195,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <StockTransferManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/shipment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ShipmentManagement />
             </MainLayout>
           </ProtectedRoute>
         }
@@ -224,11 +245,9 @@ function AppRoutes() {
 
 function App() {
   return (
-    <AuthProvider>
-      <Router>
-        <AppRoutes />
-      </Router>
-    </AuthProvider>
+    <Router>
+      <AppRoutes />
+    </Router>
   );
 }
 

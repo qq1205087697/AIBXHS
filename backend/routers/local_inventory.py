@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from typing import Optional
 from sqlalchemy.orm import Session
 from database.database import get_db
+from dependencies import get_current_user
+from models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ async def import_local_inventory(
         if not content:
             raise HTTPException(status_code=400, detail="上传的文件为空")
 
-        result = import_local_inventory(db, file_content=content, filename=file.filename)
+        result = import_local_inventory(db, current_user.tenant_id, file_content=content, filename=file.filename)
         return {"success": True, "data": result}
 
     except ValueError as e:
@@ -43,11 +45,11 @@ async def import_local_inventory(
 
 
 @router.get("/summary")
-async def get_local_inventory_summary(db: Session = Depends(get_db)):
+async def get_local_inventory_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """获取本地仓库存汇总统计"""
     try:
         from services.local_inventory_service import get_local_inventory_summary
-        result = get_local_inventory_summary(db)
+        result = get_local_inventory_summary(db, current_user.tenant_id)
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"获取本地仓库存汇总失败: {e}")
@@ -64,7 +66,7 @@ async def get_local_inventory_list(
     """查询本地仓库存列表"""
     try:
         from services.local_inventory_service import get_local_inventory_list
-        result = get_local_inventory_list(db, keyword=keyword, page=page, page_size=page_size)
+        result = get_local_inventory_list(db, current_user.tenant_id, keyword=keyword, page=page, page_size=page_size)
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"查询本地仓库存列表失败: {e}")
@@ -72,11 +74,11 @@ async def get_local_inventory_list(
 
 
 @router.delete("/clear")
-async def clear_local_inventory(db: Session = Depends(get_db)):
+async def clear_local_inventory(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """清空本地仓库存数据"""
     try:
         from services.local_inventory_service import clear_local_inventory
-        result = clear_local_inventory(db)
+        result = clear_local_inventory(db, current_user.tenant_id)
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"清空本地仓库存失败: {e}")
@@ -101,7 +103,7 @@ async def import_reduction_table(
         if not content:
             raise HTTPException(status_code=400, detail="上传的文件为空")
 
-        result = import_reduction_table(db, country=country, file_content=content)
+        result = import_reduction_table(db, country=country, file_content=content, tenant_id=current_user.tenant_id)
         return {"success": True, "data": result}
 
     except ValueError as e:

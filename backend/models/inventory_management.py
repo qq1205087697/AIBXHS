@@ -59,6 +59,8 @@ class PurchaseOrder(BaseModel):
     contact_person = Column(String(100), nullable=True, comment="联系人")
     contact_phone = Column(String(50), nullable=True, comment="联系电话")
     warehouse = Column(String(100), nullable=True, comment="收货仓库")
+    store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=True, index=True, comment="店铺分组ID")
+    platform = Column(String(50), nullable=True, comment="所属平台(向后兼容)")
     expected_date = Column(Date, nullable=True, comment="预计到货日期")
     total_amount = Column(DECIMAL(12, 2), default=0, comment="总金额")
     status = Column(Enum(PurchaseOrderStatus), default=PurchaseOrderStatus.DRAFT, comment="状态")
@@ -117,11 +119,17 @@ class InboundOrderItem(BaseModel):
     notes = Column(Text, nullable=True, comment="备注")
 
 
+class BatchType(str, enum.Enum):
+    PURCHASE = "purchase"       # 采购入库
+    ASSEMBLY = "assembly"       # 组装入库
+
+
 class InventoryBatch(BaseModel):
     __tablename__ = "inventory_batches"
 
     id = Column(Integer, primary_key=True, index=True, comment="批次ID")
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
+    store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=True, index=True, comment="店铺分组ID")
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True, comment="商品ID")
     inbound_order_id = Column(Integer, ForeignKey("inbound_orders.id"), nullable=True, comment="关联入库单ID")
     inbound_item_id = Column(Integer, ForeignKey("inbound_order_items.id"), nullable=True, comment="关联入库明细ID")
@@ -138,6 +146,9 @@ class InventoryBatch(BaseModel):
     production_date = Column(Date, nullable=True, comment="生产日期")
     expiry_date = Column(Date, nullable=True, comment="过期日期")
     status = Column(Enum(BatchStatus), default=BatchStatus.ACTIVE, comment="批次状态")
+    batch_type = Column(Enum(BatchType), default=BatchType.PURCHASE, comment="批次类型")
+    source_batch_id = Column(Integer, ForeignKey("inventory_batches.id"), nullable=True, comment="来源批次ID(组装入库时记录配件批次)")
+    assembly_quantity = Column(Integer, nullable=True, comment="组装数量(每个成品消耗的配件数量)")
     notes = Column(Text, nullable=True, comment="备注")
 
 
@@ -154,6 +165,7 @@ class OutboundOrder(BaseModel):
     total_quantity = Column(Integer, nullable=False, default=0, comment="出库总数量")
     total_amount = Column(DECIMAL(12, 2), default=0, comment="出库总金额")
     status = Column(Enum(OutboundOrderStatus), default=OutboundOrderStatus.DRAFT, comment="状态")
+    store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=True, index=True, comment="店铺分组ID")
     notes = Column(Text, nullable=True, comment="备注")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
     confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="确认人")
@@ -187,8 +199,10 @@ class StockTransferOrder(BaseModel):
     id = Column(Integer, primary_key=True, index=True, comment="挪货申请ID")
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
     order_number = Column(String(50), nullable=False, comment="挪货单号")
-    source_warehouse = Column(String(100), nullable=False, comment="源仓库")
-    target_warehouse = Column(String(100), nullable=False, comment="目标仓库")
+    source_store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=False, index=True, comment="源店铺分组ID")
+    target_store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=False, index=True, comment="目标店铺分组ID")
+    source_warehouse = Column(String(100), nullable=True, comment="源仓库（可选）")
+    target_warehouse = Column(String(100), nullable=True, comment="目标仓库（可选）")
     total_quantity = Column(Integer, nullable=False, default=0, comment="总数量")
     total_amount = Column(DECIMAL(12, 2), default=0, comment="总金额")
     status = Column(Enum(StockTransferOrderStatus), default=StockTransferOrderStatus.DRAFT, comment="状态")
@@ -211,6 +225,52 @@ class StockTransferOrderItem(BaseModel):
     quantity = Column(Integer, nullable=False, default=0, comment="数量")
     unit_price = Column(DECIMAL(12, 2), default=0, comment="单价")
     total_price = Column(DECIMAL(12, 2), default=0, comment="小计金额")
+    notes = Column(Text, nullable=True, comment="备注")
+
+
+class ShipmentOrderStatus(str, enum.Enum):
+    DRAFT = "draft"                    # 草稿
+    CONFIRMED = "confirmed"            # 已确认
+    CANCELLED = "cancelled"            # 已取消
+
+
+class ShipmentOrder(BaseModel):
+    __tablename__ = "shipment_orders"
+
+    id = Column(Integer, primary_key=True, index=True, comment="发货单ID")
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
+    order_number = Column(String(50), nullable=False, comment="发货单号")
+    store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=True, index=True, comment="店铺分组ID")
+    store_group_name = Column(String(100), nullable=True, comment="店铺分组名称")
+    total_quantity = Column(Integer, nullable=False, default=0, comment="总数量")
+    status = Column(Enum(ShipmentOrderStatus), default=ShipmentOrderStatus.DRAFT, comment="状态")
+    notes = Column(Text, nullable=True, comment="备注")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
+    creator_name = Column(String(100), nullable=True, comment="创建人姓名")
+    warehouse_confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="仓库确认人")
+    warehouse_confirmer_name = Column(String(100), nullable=True, comment="仓库确认人姓名")
+    warehouse_confirmed_at = Column(DateTime, nullable=True, comment="仓库确认时间")
+    operations_filled_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="运营填写人")
+    operations_filler_name = Column(String(100), nullable=True, comment="运营填写人姓名")
+    operations_filled_at = Column(DateTime, nullable=True, comment="运营填写时间")
+    completed_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="完成人")
+    completed_name = Column(String(100), nullable=True, comment="完成人姓名")
+    completed_at = Column(DateTime, nullable=True, comment="完成时间")
+
+
+class ShipmentOrderItem(BaseModel):
+    __tablename__ = "shipment_order_items"
+
+    id = Column(Integer, primary_key=True, index=True, comment="明细ID")
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
+    shipment_order_id = Column(Integer, ForeignKey("shipment_orders.id"), nullable=False, index=True, comment="发货单ID")
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True, comment="产品ID")
+    product_code = Column(String(100), nullable=True, comment="产品编码")
+    product_name = Column(String(200), nullable=True, comment="产品名称")
+    stock_quantity = Column(Integer, nullable=False, default=0, comment="库存数")
+    profit_margin = Column(DECIMAL(10, 2), nullable=True, comment="毛利率(%)")
+    red_list = Column(String(50), nullable=True, comment="红单")
+    sea_freight = Column(String(50), nullable=True, comment="海运")
     notes = Column(Text, nullable=True, comment="备注")
 
 
@@ -249,3 +309,42 @@ class Warehouse(BaseModel):
     contact_phone = Column(String(50), nullable=True, comment="联系电话")
     status = Column(Enum(WarehouseStatus), default=WarehouseStatus.ACTIVE, comment="状态")
     notes = Column(Text, nullable=True, comment="备注")
+
+
+class ReplenishmentStatus(str, enum.Enum):
+    PENDING = "pending"          # 待审批
+    APPROVED = "approved"        # 已审批
+    PURCHASED = "purchased"      # 已采购
+    COMPLETED = "completed"      # 已完成
+    CANCELLED = "cancelled"      # 已取消
+
+
+class ReplenishmentOrder(BaseModel):
+    """补货申请单"""
+    __tablename__ = "replenishment_orders"
+
+    id = Column(Integer, primary_key=True, index=True, comment="补货申请ID")
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
+    order_number = Column(String(50), nullable=False, comment="补货单号")
+    store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=True, index=True, comment="店铺分组ID")
+    platform = Column(String(50), nullable=True, comment="所属平台(向后兼容)")
+    status = Column(Enum(ReplenishmentStatus), default=ReplenishmentStatus.PENDING, comment="状态")
+    notes = Column(Text, nullable=True, comment="备注")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人(运营)")
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="审批人")
+    approved_at = Column(DateTime, nullable=True, comment="审批时间")
+    converted_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="转采购单人")
+    converted_at = Column(DateTime, nullable=True, comment="转采购单时间")
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True, comment="生成的采购单ID")
+
+
+class ReplenishmentItem(BaseModel):
+    """补货申请明细"""
+    __tablename__ = "replenishment_items"
+
+    id = Column(Integer, primary_key=True, index=True, comment="明细ID")
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
+    replenishment_order_id = Column(Integer, ForeignKey("replenishment_orders.id"), nullable=False, index=True, comment="补货申请ID")
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True, comment="产品ID")
+    quantity = Column(Integer, nullable=False, default=0, comment="补货数量")
+    notes = Column(String(500), nullable=True, comment="备注")

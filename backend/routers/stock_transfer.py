@@ -26,14 +26,18 @@ class TransferItemCreate(BaseModel):
 
 class StockTransferCreate(BaseModel):
     order_number: str
-    source_warehouse: str
-    target_warehouse: str
+    source_store_group_id: int
+    target_store_group_id: int
+    source_warehouse: Optional[str] = None
+    target_warehouse: Optional[str] = None
     notes: Optional[str] = None
     items: List[TransferItemCreate]
 
 
 class StockTransferUpdate(BaseModel):
     order_number: Optional[str] = None
+    source_store_group_id: Optional[int] = None
+    target_store_group_id: Optional[int] = None
     source_warehouse: Optional[str] = None
     target_warehouse: Optional[str] = None
     notes: Optional[str] = None
@@ -84,8 +88,13 @@ async def get_stock_transfers(
             SELECT sto.id, sto.order_number, sto.source_warehouse, sto.target_warehouse,
                    sto.total_quantity, sto.total_amount, sto.status, sto.notes,
                    sto.created_by, sto.confirmed_by, sto.confirmed_at,
-                   sto.created_at, sto.updated_at
+                   sto.created_at, sto.updated_at,
+                   sto.source_store_group_id, sto.target_store_group_id,
+                   sg1.name AS source_store_group_name,
+                   sg2.name AS target_store_group_name
             FROM stock_transfer_orders sto
+            LEFT JOIN store_groups sg1 ON sg1.id = sto.source_store_group_id AND sg1.deleted_at IS NULL
+            LEFT JOIN store_groups sg2 ON sg2.id = sto.target_store_group_id AND sg2.deleted_at IS NULL
             WHERE {where_clause}
             ORDER BY sto.created_at DESC
             LIMIT :limit OFFSET :offset
@@ -111,8 +120,8 @@ async def get_stock_transfers(
             result.append({
                 "id": row[0],
                 "order_number": row[1],
-                "source_warehouse": row[2],
-                "target_warehouse": row[3],
+                "source_warehouse": row[2] or "",
+                "target_warehouse": row[3] or "",
                 "total_quantity": int(row[4]) if row[4] else 0,
                 "total_amount": float(row[5]) if row[5] else 0,
                 "status": row[6],
@@ -124,6 +133,10 @@ async def get_stock_transfers(
                 "confirmed_at": row[10].strftime("%Y-%m-%d %H:%M:%S") if row[10] else None,
                 "created_at": row[11].strftime("%Y-%m-%d %H:%M:%S") if row[11] else "",
                 "updated_at": row[12].strftime("%Y-%m-%d %H:%M:%S") if row[12] else "",
+                "source_store_group_id": row[13],
+                "target_store_group_id": row[14],
+                "source_store_group_name": row[15] or "",
+                "target_store_group_name": row[16] or "",
             })
 
         return {"total": total, "items": result, "page": page, "page_size": page_size}
@@ -141,8 +154,13 @@ async def get_stock_transfer_detail(
         order = db.execute(text("""
             SELECT sto.id, sto.order_number, sto.source_warehouse, sto.target_warehouse,
                    sto.total_quantity, sto.total_amount, sto.status, sto.notes,
-                   sto.created_by, sto.confirmed_by, sto.confirmed_at, sto.created_at
+                   sto.created_by, sto.confirmed_by, sto.confirmed_at, sto.created_at,
+                   sto.source_store_group_id, sto.target_store_group_id,
+                   sg1.name AS source_store_group_name,
+                   sg2.name AS target_store_group_name
             FROM stock_transfer_orders sto
+            LEFT JOIN store_groups sg1 ON sg1.id = sto.source_store_group_id AND sg1.deleted_at IS NULL
+            LEFT JOIN store_groups sg2 ON sg2.id = sto.target_store_group_id AND sg2.deleted_at IS NULL
             WHERE sto.id = :id AND sto.tenant_id = :tid AND sto.deleted_at IS NULL
         """), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
 
@@ -192,8 +210,8 @@ async def get_stock_transfer_detail(
         return {
             "id": order[0],
             "order_number": order[1],
-            "source_warehouse": order[2],
-            "target_warehouse": order[3],
+            "source_warehouse": order[2] or "",
+            "target_warehouse": order[3] or "",
             "total_quantity": int(order[4]) if order[4] else 0,
             "total_amount": float(order[5]) if order[5] else 0,
             "status": order[6],
@@ -204,6 +222,10 @@ async def get_stock_transfer_detail(
             "confirmer_name": user_map.get(order[9], "") if order[9] else "",
             "confirmed_at": order[10].strftime("%Y-%m-%d %H:%M:%S") if order[10] else None,
             "created_at": order[11].strftime("%Y-%m-%d %H:%M:%S") if order[11] else "",
+            "source_store_group_id": order[12],
+            "target_store_group_id": order[13],
+            "source_store_group_name": order[14] or "",
+            "target_store_group_name": order[15] or "",
             "items": item_list,
         }
     except HTTPException:
@@ -225,12 +247,14 @@ async def create_stock_transfer(
         )
 
         db.execute(text("""
-            INSERT INTO stock_transfer_orders (tenant_id, order_number, source_warehouse,
-                target_warehouse, total_quantity, total_amount, status, notes,
+            INSERT INTO stock_transfer_orders (tenant_id, order_number, source_store_group_id,
+                target_store_group_id, source_warehouse, target_warehouse,
+                total_quantity, total_amount, status, notes,
                 created_by, created_at, updated_at)
-            VALUES (:tid, :num, :sw, :tw, :tq, :ta, 'draft', :notes, :uid, NOW(), NOW())
+            VALUES (:tid, :num, :ssg_id, :tsg_id, :sw, :tw, :tq, :ta, 'draft', :notes, :uid, NOW(), NOW())
         """), {
             "tid": current_user.tenant_id, "num": data.order_number,
+            "ssg_id": data.source_store_group_id, "tsg_id": data.target_store_group_id,
             "sw": data.source_warehouse, "tw": data.target_warehouse,
             "tq": total_qty, "ta": total_amt, "notes": data.notes,
             "uid": current_user.id,
@@ -257,8 +281,10 @@ async def create_stock_transfer(
         log_order_create(db, current_user.tenant_id, current_user.id,
                          current_user.nickname or current_user.username,
                          "stock_transfer", order_id, data.order_number,
-                         {"source_warehouse": data.source_warehouse,
-                          "target_warehouse": data.target_warehouse,
+                         {"source_store_group_id": data.source_store_group_id,
+                          "target_store_group_id": data.target_store_group_id,
+                          "source_warehouse": data.source_warehouse or "",
+                          "target_warehouse": data.target_warehouse or "",
                           "items_count": len(data.items)})
         db.commit()
 

@@ -13,6 +13,7 @@ router = APIRouter(prefix="/api/stores", tags=["stores"])
 class StoreCreate(BaseModel):
     inventory_name: str
     name: Optional[str] = None
+    ziniao_account: Optional[str] = None
     platform: str = "amazon"
     site: Optional[str] = None
     shop_abbr: str
@@ -21,11 +22,13 @@ class StoreCreate(BaseModel):
 
 class StoreUpdate(BaseModel):
     name: Optional[str] = None
+    ziniao_account: Optional[str] = None
     platform: Optional[str] = None
     site: Optional[str] = None
     inventory_name: Optional[str] = None
     shop_abbr: Optional[str] = None
     department_id: Optional[int] = None
+    group_id: Optional[int] = None
     status: Optional[str] = None
 
 
@@ -48,23 +51,23 @@ async def get_all_stores(
                 is_admin = True
 
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            store_ids = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                dept_placeholders = ",".join([f":dept_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    params[f"dept_{i}"] = did
-                where_conditions.append(f"s.department_id IN ({dept_placeholders})")
+            store_id_list = [s[0] for s in store_ids]
+            if store_id_list:
+                store_placeholders = ",".join([f":store_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"store_{i}"] = sid
+                where_conditions.append(f"s.id IN ({store_placeholders})")
             else:
                 where_conditions.append("1=0")
 
         where_clause = " AND ".join(where_conditions)
         
         query = text(f"""
-            SELECT s.id, s.name, s.platform, s.site, s.status,
+            SELECT s.id, s.name, s.ziniao_account, s.platform, s.site, s.status,
                    s.department_id, d.name as department_name, s.created_at,
                    s.group_id, sg.name as group_name,
                    s.inventory_name, s.shop_abbr
@@ -80,16 +83,17 @@ async def get_all_stores(
             stores.append({
                 "id": row[0],
                 "name": row[1],
-                "platform": row[2],
-                "site": row[3] or "",
-                "status": row[4],
-                "department_id": row[5],
-                "department_name": row[6] or "未分配",
-                "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
-                "group_id": row[8],
-                "group_name": row[9] or "",
-                "inventory_name": row[10] or "",
-                "shop_abbr": row[11] or "",
+                "ziniao_account": row[2] or "",
+                "platform": row[3],
+                "site": row[4] or "",
+                "status": row[5],
+                "department_id": row[6],
+                "department_name": row[7] or "未分配",
+                "created_at": row[8].strftime("%Y-%m-%d %H:%M:%S") if row[8] else "",
+                "group_id": row[9],
+                "group_name": row[10] or "",
+                "inventory_name": row[11] or "",
+                "shop_abbr": row[12] or "",
             })
         return {"success": True, "data": stores}
     except Exception as e:
@@ -118,16 +122,16 @@ async def get_stores(
                 is_admin = True
 
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            store_ids = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                dept_placeholders = ",".join([f":dept_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    params[f"dept_{i}"] = did
-                where_conditions.append(f"s.department_id IN ({dept_placeholders})")
+            store_id_list = [s[0] for s in store_ids]
+            if store_id_list:
+                store_placeholders = ",".join([f":store_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"store_{i}"] = sid
+                where_conditions.append(f"s.id IN ({store_placeholders})")
             else:
                 where_conditions.append("1=0")
 
@@ -152,8 +156,9 @@ async def get_stores(
         params["page_size"] = page_size
         
         query = text(f"""
-            SELECT s.id, s.name, s.platform, s.site, s.status,
-                   s.department_id, d.name as department_name, s.inventory_name, s.shop_abbr, s.created_at
+            SELECT s.id, s.name, s.ziniao_account, s.platform, s.site, s.status,
+                   s.department_id, d.name as department_name, s.inventory_name, s.shop_abbr, s.created_at,
+                   s.group_id, sg.name as group_name
             FROM stores s
             LEFT JOIN departments d ON s.department_id = d.id
             LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
@@ -167,17 +172,17 @@ async def get_stores(
             stores.append({
                 "id": row[0],
                 "name": row[1],
-                "platform": row[2],
-                "site": row[3] or "",
-                "status": row[4],
-                "department_id": row[5],
-                "department_name": row[6] or "未分配",
-                "inventory_name": row[7] or "",
-                "shop_abbr": row[8] or "",
-                "created_at": row[9].strftime("%Y-%m-%d %H:%M:%S") if row[9] else "",
-                # "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
-                # "group_id": row[8],
-                # "group_name": row[9] or "",
+                "ziniao_account": row[2] or "",
+                "platform": row[3],
+                "site": row[4] or "",
+                "status": row[5],
+                "department_id": row[6],
+                "department_name": row[7] or "未分配",
+                "inventory_name": row[8] or "",
+                "shop_abbr": row[9] or "",
+                "created_at": row[10].strftime("%Y-%m-%d %H:%M:%S") if row[10] else "",
+                "group_id": row[11],
+                "group_name": row[12] or "",
             })
         return {"success": True, "data": stores, "total": total}
     except Exception as e:
@@ -192,12 +197,13 @@ async def create_store(
 ):
     try:
         insert_sql = text("""
-            INSERT INTO stores (tenant_id, name, platform, site, inventory_name, shop_abbr, department_id)
-            VALUES (:tenant_id, :name, :platform, :site, :inventory_name, :shop_abbr, :department_id)
+            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, inventory_name, shop_abbr, department_id)
+            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :inventory_name, :shop_abbr, :department_id)
         """)
         result = db.execute(insert_sql, {
             "tenant_id": current_user.tenant_id,
             "name": store_data.name or store_data.inventory_name,
+            "ziniao_account": store_data.ziniao_account,
             "platform": store_data.platform,
             "site": store_data.site,
             "inventory_name": store_data.inventory_name,
@@ -233,6 +239,9 @@ async def update_store(
         if store_data.name is not None:
             updates.append("name = :name")
             params["name"] = store_data.name
+        if store_data.ziniao_account is not None:
+            updates.append("ziniao_account = :ziniao_account")
+            params["ziniao_account"] = store_data.ziniao_account
         if store_data.inventory_name is not None:
             updates.append("inventory_name = :inventory_name")
             params["inventory_name"] = store_data.inventory_name
@@ -248,6 +257,9 @@ async def update_store(
         if store_data.department_id is not None:
             updates.append("department_id = :department_id")
             params["department_id"] = store_data.department_id
+        if hasattr(store_data, 'group_id'):
+            updates.append("group_id = :group_id")
+            params["group_id"] = store_data.group_id
         if store_data.status is not None:
             updates.append("status = :status")
             params["status"] = store_data.status
@@ -331,3 +343,163 @@ async def batch_update_department(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"批量更新失败: {str(e)}")
+
+
+# ==================== 店铺分配人员 ====================
+
+class StoreMemberRequest(BaseModel):
+    user_ids: List[int]
+
+
+@router.get("/{store_id}/members")
+async def get_store_members(
+    store_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """获取店铺关联的人员列表"""
+    try:
+        # 验证店铺存在且属于当前租户
+        check = db.execute(
+            text("SELECT id FROM stores WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"),
+            {"id": store_id, "tid": current_user.tenant_id}
+        ).fetchone()
+        if not check:
+            raise HTTPException(status_code=404, detail="店铺不存在")
+
+        query = text("""
+            SELECT u.id, u.username, u.nickname, u.email
+            FROM users u
+            INNER JOIN user_stores us ON u.id = us.user_id
+            WHERE us.store_id = :store_id AND us.tenant_id = :tid AND u.deleted_at IS NULL
+            ORDER BY u.nickname ASC
+        """)
+        rows = db.execute(query, {"store_id": store_id, "tid": current_user.tenant_id}).fetchall()
+        members = [{"id": r[0], "username": r[1], "name": r[2] or r[1], "email": r[3]} for r in rows]
+        return {"success": True, "data": members}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取人员列表失败: {str(e)}")
+
+
+@router.post("/{store_id}/members")
+async def add_store_members(
+    store_id: int,
+    request: StoreMemberRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """为店铺添加人员"""
+    try:
+        # 验证店铺存在且属于当前租户
+        check = db.execute(
+            text("SELECT id FROM stores WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"),
+            {"id": store_id, "tid": current_user.tenant_id}
+        ).fetchone()
+        if not check:
+            raise HTTPException(status_code=404, detail="店铺不存在")
+
+        if not request.user_ids:
+            raise HTTPException(status_code=400, detail="请选择要添加的人员")
+
+        added_count = 0
+        for user_id in request.user_ids:
+            # 验证用户存在且属于当前租户
+            user_check = db.execute(
+                text("SELECT id FROM users WHERE id = :uid AND tenant_id = :tid AND deleted_at IS NULL"),
+                {"uid": user_id, "tid": current_user.tenant_id}
+            ).fetchone()
+            if not user_check:
+                continue
+
+            # 检查是否已关联
+            existing = db.execute(
+                text("SELECT id FROM user_stores WHERE user_id = :uid AND store_id = :sid"),
+                {"uid": user_id, "sid": store_id}
+            ).fetchone()
+            if existing:
+                continue
+
+            db.execute(
+                text("INSERT INTO user_stores (tenant_id, user_id, store_id) VALUES (:tid, :uid, :sid)"),
+                {"tid": current_user.tenant_id, "uid": user_id, "sid": store_id}
+            )
+            added_count += 1
+
+        db.commit()
+        return {"success": True, "message": f"成功添加 {added_count} 个人员"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"添加人员失败: {str(e)}")
+
+
+@router.delete("/{store_id}/members/{user_id}")
+async def remove_store_member(
+    store_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """移除店铺的人员"""
+    try:
+        db.execute(
+            text("DELETE FROM user_stores WHERE user_id = :uid AND store_id = :sid AND tenant_id = :tid"),
+            {"uid": user_id, "sid": store_id, "tid": current_user.tenant_id}
+        )
+        db.commit()
+        return {"success": True, "message": "已移除人员"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"移除失败: {str(e)}")
+
+
+@router.put("/{store_id}/members")
+async def set_store_members(
+    store_id: int,
+    request: StoreMemberRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """批量设置店铺的人员（先清空再添加）"""
+    try:
+        # 验证店铺存在且属于当前租户
+        check = db.execute(
+            text("SELECT id FROM stores WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"),
+            {"id": store_id, "tid": current_user.tenant_id}
+        ).fetchone()
+        if not check:
+            raise HTTPException(status_code=404, detail="店铺不存在")
+
+        # 先清空现有人员
+        db.execute(
+            text("DELETE FROM user_stores WHERE store_id = :sid AND tenant_id = :tid"),
+            {"sid": store_id, "tid": current_user.tenant_id}
+        )
+
+        # 添加新人员
+        added_count = 0
+        for user_id in request.user_ids:
+            # 验证用户存在且属于当前租户
+            user_check = db.execute(
+                text("SELECT id FROM users WHERE id = :uid AND tenant_id = :tid AND deleted_at IS NULL"),
+                {"uid": user_id, "tid": current_user.tenant_id}
+            ).fetchone()
+            if not user_check:
+                continue
+
+            db.execute(
+                text("INSERT INTO user_stores (tenant_id, user_id, store_id) VALUES (:tid, :uid, :sid)"),
+                {"tid": current_user.tenant_id, "uid": user_id, "sid": store_id}
+            )
+            added_count += 1
+
+        db.commit()
+        return {"success": True, "message": f"成功设置 {added_count} 个人员"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"设置人员失败: {str(e)}")

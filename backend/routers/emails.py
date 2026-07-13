@@ -25,6 +25,16 @@ except Exception:
 
 router = APIRouter(prefix="/emails", tags=["emails"])
 
+
+def is_admin_user(user: User, db: Session) -> bool:
+    """判断用户是否是管理员（通过 role_id）"""
+    if not user.role_id:
+        return False
+    role = db.execute(text("""
+        SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+    """), {"role_id": user.role_id}).fetchone()
+    return role and role[0] == "admin"
+
 FEISHU_WEBHOOK_URL = "https://pcn4p6l5do51.feishu.cn/base/automation/webhook/event/ScaZalvInwme5rhCQ0PckNA1nfx"
 
 SITE_NAME_MAP = {
@@ -106,18 +116,15 @@ async def get_email_messages(
     try:
         logger.info(f"用户 {current_user.username} (ID:{current_user.id}) 请求获取邮件列表")
         
-        where_conditions = []
-        params = {"limit": page_size, "offset": (page - 1) * page_size}
+        where_conditions = ["e.tenant_id = :tenant_id"]
+        params = {"tenant_id": current_user.tenant_id, "limit": page_size, "offset": (page - 1) * page_size}
 
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
             where_conditions.append("""
-                s.id IN (
-                    SELECT s2.id FROM stores s2
-                    WHERE s2.department_id IN (
-                        SELECT ud.department_id FROM user_departments ud
-                        WHERE ud.user_id = :user_id
-                    )
+                e.store_id IN (
+                    SELECT us.store_id FROM user_stores us
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
                 )
             """)
 
@@ -225,19 +232,20 @@ async def get_store_names(
 ):
     """获取所有店铺名称（去重），用于下拉选择"""
     try:
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             query = text("""
                 SELECT DISTINCT s.name FROM stores s
-                WHERE s.department_id IN (
-                    SELECT ud.department_id FROM user_departments ud
-                    WHERE ud.user_id = :user_id
+                WHERE s.tenant_id = :tenant_id
+                  AND s.id IN (
+                    SELECT us.store_id FROM user_stores us
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
                 )
                 ORDER BY s.name
             """)
-            result = db.execute(query, {"user_id": current_user.id})
+            result = db.execute(query, {"user_id": current_user.id, "tenant_id": current_user.tenant_id})
         else:
-            query = text("SELECT DISTINCT name FROM stores ORDER BY name")
-            result = db.execute(query)
+            query = text("SELECT DISTINCT name FROM stores WHERE tenant_id = :tenant_id ORDER BY name")
+            result = db.execute(query, {"tenant_id": current_user.tenant_id})
 
         names = [row[0] for row in result.fetchall() if row[0]]
         return {"success": True, "data": names}
@@ -254,14 +262,11 @@ async def get_unfollowed_count(
     """获取未跟进邮件数量（按重要程度分类）"""
     try:
         dep_filter = ""
-        dep_params = {}
-        if current_user.role != "admin":
+        dep_params = {"tenant_id": current_user.tenant_id}
+        if not is_admin_user(current_user, db):
             dep_filter = """ AND e.store_id IN (
-                SELECT s2.id FROM stores s2
-                WHERE s2.department_id IN (
-                    SELECT ud.department_id FROM user_departments ud
-                    WHERE ud.user_id = :user_id
-                )
+                SELECT us.store_id FROM user_stores us
+                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
             )"""
             dep_params["user_id"] = current_user.id
 
@@ -281,7 +286,7 @@ async def get_unfollowed_count(
                          AND e.mail_subject NOT LIKE '%商品定制%' THEN 1 ELSE 0 END) as normal,
                 COUNT(*) as total
             FROM email_messages e
-            WHERE e.follow_up_status = 0{dep_filter}
+            WHERE e.tenant_id = :tenant_id AND e.follow_up_status = 0{dep_filter}
         """)
 
         result = db.execute(query, dep_params)
@@ -318,9 +323,9 @@ async def generate_ai_reply(
                    e.language, e.site, e.buyer_mail_number
             FROM email_messages e
             LEFT JOIN stores s ON e.store_id = s.id
-            WHERE e.id = :email_id
+            WHERE e.id = :email_id AND e.tenant_id = :tenant_id
         """)
-        result = db.execute(query, {"email_id": email_id})
+        result = db.execute(query, {"email_id": email_id, "tenant_id": current_user.tenant_id})
         row = result.fetchone()
 
         if not row:
@@ -404,17 +409,19 @@ async def get_department_todos(
 ):
     """获取当前用户的待办事项（按机器人类型汇总）"""
     try:
-        if current_user.role == "admin":
+        if is_admin_user(current_user, db):
             dep_filter_review = ""
             dep_filter_email = ""
         else:
-            dep_filter_review = """ AND s.department_id IN (
-                SELECT ud.department_id FROM user_departments ud WHERE ud.user_id = :user_id
+            dep_filter_review = """ AND r.store_id IN (
+                SELECT us.store_id FROM user_stores us WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
             )"""
-            dep_filter_email = dep_filter_review
+            dep_filter_email = """ AND e.store_id IN (
+                SELECT us.store_id FROM user_stores us WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+            )"""
 
-        params = {}
-        if current_user.role != "admin":
+        params = {"tenant_id": current_user.tenant_id}
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
 
         review_query = text(f"""
@@ -434,7 +441,7 @@ async def get_department_todos(
             SELECT COUNT(*), MAX(e.reply_date)
             FROM email_messages e
             JOIN stores s ON e.store_id = s.id
-            WHERE e.follow_up_status = 0{dep_filter_email}
+            WHERE e.tenant_id = :tenant_id AND e.follow_up_status = 0{dep_filter_email}
         """)
         result = db.execute(email_query, params)
         email_row = result.fetchone()
@@ -462,13 +469,10 @@ async def get_email_detail(
 ):
     """获取邮件详情"""
     try:
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             access_filter = """ AND e.store_id IN (
-                SELECT s2.id FROM stores s2
-                WHERE s2.department_id IN (
-                    SELECT ud.department_id FROM user_departments ud
-                    WHERE ud.user_id = :user_id
-                )
+                SELECT us.store_id FROM user_stores us
+                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
             )"""
         else:
             access_filter = ""
@@ -493,11 +497,11 @@ async def get_email_detail(
                 e.reply_text_time
             FROM email_messages e
             LEFT JOIN stores s ON e.store_id = s.id
-            WHERE e.id = :email_id{access_filter}
+            WHERE e.id = :email_id AND e.tenant_id = :tenant_id{access_filter}
         """)
 
-        params = {"email_id": email_id}
-        if current_user.role != "admin":
+        params = {"email_id": email_id, "tenant_id": current_user.tenant_id}
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
 
         result = db.execute(query, params)
@@ -545,13 +549,10 @@ async def batch_update_follow_up(
         if not request.email_ids:
             raise HTTPException(status_code=400, detail="邮件ID列表不能为空")
 
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             access_filter = """ AND store_id IN (
-                SELECT s2.id FROM stores s2
-                WHERE s2.department_id IN (
-                    SELECT ud.department_id FROM user_departments ud
-                    WHERE ud.user_id = :user_id
-                )
+                SELECT us.store_id FROM user_stores us
+                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
             )"""
         else:
             access_filter = ""
@@ -560,13 +561,13 @@ async def batch_update_follow_up(
         update_query = text(f"""
             UPDATE email_messages 
             SET follow_up_status = :follow_up_status
-            WHERE id IN ({placeholders}){access_filter}
+            WHERE tenant_id = :tenant_id AND id IN ({placeholders}){access_filter}
         """)
 
-        params = {"follow_up_status": request.follow_up_status}
+        params = {"tenant_id": current_user.tenant_id, "follow_up_status": request.follow_up_status}
         for i, email_id in enumerate(request.email_ids):
             params[f"id_{i}"] = email_id
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
 
         result = db.execute(update_query, params)
@@ -593,13 +594,10 @@ async def update_follow_up(
 ):
     """更新邮件跟进状态"""
     try:
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             access_filter = """ AND store_id IN (
-                SELECT s2.id FROM stores s2
-                WHERE s2.department_id IN (
-                    SELECT ud.department_id FROM user_departments ud
-                    WHERE ud.user_id = :user_id
-                )
+                SELECT us.store_id FROM user_stores us
+                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
             )"""
         else:
             access_filter = ""
@@ -607,14 +605,15 @@ async def update_follow_up(
         update_query = text(f"""
             UPDATE email_messages 
             SET follow_up_status = :follow_up_status
-            WHERE id = :email_id{access_filter}
+            WHERE tenant_id = :tenant_id AND id = :email_id{access_filter}
         """)
         
         params = {
+            "tenant_id": current_user.tenant_id,
             "follow_up_status": request.follow_up_status,
             "email_id": email_id,
         }
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
         
         db.execute(update_query, params)
@@ -637,7 +636,7 @@ async def send_feishu_webhook(
     current_user: User
 ):
     """发送飞书webhook（复用逻辑）"""
-    if current_user.role != "admin":
+    if not is_admin_user(current_user, db):
         webhook_access_filter = """ AND s.id IN (
             SELECT s2.id FROM stores s2
             WHERE s2.department_id IN (
@@ -656,10 +655,10 @@ async def send_feishu_webhook(
             s.name AS store_name
         FROM email_messages e
         LEFT JOIN stores s ON e.store_id = s.id
-        WHERE e.id = :email_id{webhook_access_filter}
+        WHERE e.id = :email_id AND e.tenant_id = :tenant_id{webhook_access_filter}
     """)
-    params = {"email_id": email_id}
-    if current_user.role != "admin":
+    params = {"email_id": email_id, "tenant_id": current_user.tenant_id}
+    if not is_admin_user(current_user, db):
         params["user_id"] = current_user.id
     result = db.execute(query, params)
     row = result.fetchone()
@@ -703,7 +702,7 @@ async def update_need_reply(
         if request.need_reply == 1 and not request.reply_text:
             raise HTTPException(status_code=400, detail="需要回复时必须填写回复内容")
         
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             access_filter = """ AND store_id IN (
                     SELECT s2.id FROM stores s2
                     WHERE s2.department_id IN (
@@ -720,7 +719,7 @@ async def update_need_reply(
                 SET need_reply = 1,
                     reply_text = :reply_text,
                     reply_text_time = NOW()
-                WHERE id = :email_id{access_filter}
+                WHERE tenant_id = :tenant_id AND id = :email_id{access_filter}
             """)
         else:
             update_query = text(f"""
@@ -728,14 +727,15 @@ async def update_need_reply(
                 SET need_reply = 0,
                     reply_text = '',
                     reply_text_time = NULL
-                WHERE id = :email_id{access_filter}
+                WHERE tenant_id = :tenant_id AND id = :email_id{access_filter}
             """)
         
         params = {
+            "tenant_id": current_user.tenant_id,
             "reply_text": request.reply_text or "",
             "email_id": email_id,
         }
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
         
         db.execute(update_query, params)
@@ -765,13 +765,10 @@ async def re_run_robot(
     """重新运行机器人（重新发送飞书Webhook）"""
     try:
         # 获取邮件信息
-        if current_user.role != "admin":
+        if not is_admin_user(current_user, db):
             access_filter = """ AND e.store_id IN (
-                SELECT s2.id FROM stores s2
-                WHERE s2.department_id IN (
-                    SELECT ud.department_id FROM user_departments ud
-                    WHERE ud.user_id = :user_id
-                )
+                SELECT us.store_id FROM user_stores us
+                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
             )"""
         else:
             access_filter = ""
@@ -779,10 +776,10 @@ async def re_run_robot(
         query = text(f"""
             SELECT e.need_reply, e.reply_text
             FROM email_messages e
-            WHERE e.id = :email_id{access_filter}
+            WHERE e.id = :email_id AND e.tenant_id = :tenant_id{access_filter}
         """)
-        params = {"email_id": email_id}
-        if current_user.role != "admin":
+        params = {"email_id": email_id, "tenant_id": current_user.tenant_id}
+        if not is_admin_user(current_user, db):
             params["user_id"] = current_user.id
         
         result = db.execute(query, params)
@@ -804,7 +801,7 @@ async def re_run_robot(
         update_time_query = text(f"""
             UPDATE email_messages 
             SET reply_text_time = NOW()
-            WHERE id = :email_id{access_filter}
+            WHERE tenant_id = :tenant_id AND id = :email_id{access_filter}
         """)
         db.execute(update_time_query, params)
         db.commit()
