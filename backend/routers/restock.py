@@ -379,7 +379,7 @@ async def get_filter_options(
         user_store_sites = db.query(Store.site).filter(
             Store.tenant_id == current_user.tenant_id,
             Store.status == "active",
-            Store.department_id.in_(dept_ids) if dept_ids else False,
+            Store.id.in_(user_store_ids) if user_store_ids else False,
             Store.site.isnot(None),
             Store.site != ""
         ).distinct().all()
