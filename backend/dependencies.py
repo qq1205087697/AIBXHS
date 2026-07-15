@@ -109,6 +109,15 @@ async def get_user_permission_codes(current_user: User = Depends(get_current_use
     return permission_codes
 
 
+async def get_current_user_department_ids(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> List[int]:
+    """获取当前用户的部门ID列表"""
+    rows = db.execute(text("""
+        SELECT department_id FROM user_departments
+        WHERE user_id = :user_id AND deleted_at IS NULL
+    """), {"user_id": current_user.id}).fetchall()
+    return [row[0] for row in rows]
+
+
 class PermissionChecker:
     """权限检查工厂"""
     

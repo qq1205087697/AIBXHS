@@ -16,6 +16,7 @@ from models.ad_daily import (
     AdSearchTermDaily,
     AdProductDaily,
 )
+from utils.excel_reader import safe_read_excel
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def _import_ad_excel(file_content: bytes, filename: str, tenant_id: int, task_id
 
     try:
         # 读取Excel
-        df = pd.read_excel(io.BytesIO(file_content))
+        df = safe_read_excel(file_content)
         _import_status["total"] = len(df)
         _import_status["message"] = f"正在导入 {len(df)} 行数据..."
 

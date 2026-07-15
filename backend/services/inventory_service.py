@@ -3,9 +3,10 @@ import numpy as np
 from datetime import date, datetime, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text, or_, and_
+from sqlalchemy import func, text, or_, and_, select
 from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
 from database.database import engine
+from utils.excel_reader import safe_read_excel
 
 # Excel中文名 -> 数据库字段名 映射
 # 注意：采购配置字段（purchase_plan_days, purchase_lead_time, qc_days 等）不导入数据库
@@ -87,6 +88,32 @@ DEFAULT_DAILY_SALES_WEIGHTS = {
     "daily_avg_60d": 0.2,
     "daily_avg_90d": 0.2,
 }
+
+
+def _build_account_match_conditions(account_value: str):
+    """构建 account 字段匹配条件
+
+    精确匹配普通行 + 边界匹配汇总行（汇总行用 '、' 分隔多个店铺）。
+    避免使用 like('%val%') 导致 'G-UK' 误匹配 'Roaring-UK-UK'
+    （MySQL LIKE 默认不区分大小写，'%G-UK%' 会匹配 'RoarinG-UK-UK'）。
+    """
+    return [
+        InventorySnapshot.account == account_value,
+        InventorySnapshot.account.like(f"{account_value}、%"),
+        InventorySnapshot.account.like(f"%、{account_value}、%"),
+        InventorySnapshot.account.like(f"%、{account_value}"),
+    ]
+
+
+def _build_account_filter(account_values):
+    """为多个 account 值构建 or_ 过滤条件（支持 list 和 str）"""
+    conditions = []
+    if isinstance(account_values, list):
+        for a in account_values:
+            conditions.extend(_build_account_match_conditions(a))
+    elif isinstance(account_values, str):
+        conditions.extend(_build_account_match_conditions(account_values))
+    return conditions
 
 
 def _get_daily_sales_weights(db) -> dict:
@@ -227,7 +254,7 @@ def import_inventory_data(db: Session, file_path: str = None, file_content: byte
     # ========== 步骤1: 读取Excel ==========
     _log(f"开始读取Excel: {filename or file_path or '上传文件'}")
     if file_content:
-        df = pd.read_excel(io.BytesIO(file_content))
+        df = safe_read_excel(file_content)
     elif file_path:
         df = pd.read_excel(file_path)
     else:
@@ -273,17 +300,20 @@ def import_inventory_data(db: Session, file_path: str = None, file_content: byte
     except Exception:
         existing_rows = []
 
-    idx_normal = {}   # (asin, account, country) → (id, snapshot_date)
-    idx_summary = {}  # (summary_flag, asin) → (id, snapshot_date)
+    idx_normal = {}   # 普通行: (asin, account, country) → (id, snapshot_date)
+    idx_summary = {}  # 汇总行: (summary_flag, asin, country) → (id, snapshot_date)
 
     for row in existing_rows:
-        key_n = (row.asin or "", row.account or "", row.country or "")
-        key_s = (row.summary_flag or "", row.asin or "")
-        # 同一产品取最新日期的那条（ORDER BY DESC 保证第一条就是最新的）
-        if key_n not in idx_normal:
-            idx_normal[key_n] = (row.id, row.snapshot_date)
-        if key_s not in idx_summary:
-            idx_summary[key_s] = (row.id, row.snapshot_date)
+        sf = row.summary_flag or ""
+        if sf == "是":
+            # 汇总行只进 idx_summary，避免孤儿清理时用 (asin, account, country) 误判
+            key_s = (sf, row.asin or "", row.country or "")
+            if key_s not in idx_summary:
+                idx_summary[key_s] = (row.id, row.snapshot_date)
+        else:
+            key_n = (row.asin or "", row.account or "", row.country or "")
+            if key_n not in idx_normal:
+                idx_normal[key_n] = (row.id, row.snapshot_date)
 
     _log(f"现有数据索引加载完成: {len(existing_rows)} 条原始, {len(idx_normal)} 个独立产品")
 
@@ -316,7 +346,7 @@ def import_inventory_data(db: Session, file_path: str = None, file_content: byte
             row_country = str(row.get("country", ""))
             
             if row_summary_flag == "是":
-                match_key = (row_summary_flag, row_asin)
+                match_key = (row_summary_flag, row_asin, row_country)
                 existing = idx_summary.get(match_key)
             else:
                 match_key = (row_asin, row_account, row_country)
@@ -339,7 +369,7 @@ def import_inventory_data(db: Session, file_path: str = None, file_content: byte
                     else:
                         safe = str(val).replace("'", "''")
                         set_parts.append(f"{col}='{safe}'")
-                update_batch.append(f"UPDATE inventory_snapshots SET deleted_at=NULL,{','.join(set_parts)} WHERE id={existing_id}")
+                update_batch.append(f"UPDATE inventory_snapshots SET deleted_at=NULL,updated_at=NOW(),{','.join(set_parts)} WHERE id={existing_id}")
                 batch_ids.append(existing_id)
                 updated_count += 1
             else:
@@ -567,11 +597,19 @@ def import_inventory_data(db: Session, file_path: str = None, file_content: byte
 
     # ========== 步骤7: 孤儿清理（软删除） ==========
     _log("孤儿清理...")
-    orphan_ids = []
-    imported_normal_keys = {(str(r.get("asin","")), str(r.get("account","")), str(r.get("country",""))) for _, r in df.iterrows()}
+    orphan_ids = set()
+    imported_normal_keys = {(str(r.get("asin","")), str(r.get("account","")), str(r.get("country","")))
+                            for _, r in df.iterrows() if str(r.get("summary_flag","")) != "是"}
+    imported_summary_keys = {("是", str(r.get("asin","")), str(r.get("country","")))
+                             for _, r in df.iterrows() if str(r.get("summary_flag","")) == "是"}
+    # 普通行：DB 有但 Excel 没有 → 孤儿
     for key, val in idx_normal.items():
         if key not in imported_normal_keys:
-            orphan_ids.append(val[0])  # val 是 (id, snapshot_date)，取 id
+            orphan_ids.add(val[0])
+    # 汇总行：DB 有但 Excel 没有 → 孤儿
+    for key, val in idx_summary.items():
+        if key not in imported_summary_keys:
+            orphan_ids.add(val[0])
 
     if orphan_ids:
         ids_str = ",".join(str(i) for i in orphan_ids)
@@ -632,8 +670,9 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
     if progress_callback:
         progress_callback("计算中", 0, 100)
 
-    # 向量化计算：future_stock = FBA总库存 + FBA在途 + 本地仓库存
-    future_stock = fba_stock + fba_inbound + effective_local
+    # 向量化计算：future_stock = FBA总库存 + FBA在途 + 本地仓库存 - 查验货件
+    # 查验货件尚未入库 FBA，不应计入未来可用库存，否则会低估补货需求
+    future_stock = fba_stock + fba_inbound + effective_local - inspection_qty
     days_of_supply = np.where(
         (total_stock > 0) & (daily_sales > 0),
         np.minimum(total_stock / daily_sales, 365),
@@ -641,6 +680,8 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
     )
     demand = daily_sales * LEAD_TIME
     suggest_qty = np.maximum(0, demand - future_stock)
+    # 向上取整到50的倍数（0保持0）
+    suggest_qty = np.where(suggest_qty > 0, np.ceil(suggest_qty / 50) * 50, 0)
     stockout_days = np.maximum(0, LEAD_TIME - days_of_supply).astype(int)
 
     if progress_callback:
@@ -692,7 +733,7 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
     if existing_sids:
         try:
             existing_rows = db.execute(text(f"""
-                SELECT snapshot_id, summary_flag, asin, sku, account, country,
+                SELECT snapshot_id, summary_flag, asin, sku, account, country, snapshot_date,
                        future_stock, demand, suggest_qty, days_of_supply,
                        stockout_days, stockout_date_calc, risk_level, reason
                 FROM replenishment_decisions
@@ -705,6 +746,7 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
                     "sku": str(row.sku or ""),
                     "account": str(row.account or ""),
                     "country": str(row.country or ""),
+                    "snapshot_date": row.snapshot_date,
                     "future_stock": row.future_stock,
                     "demand": row.demand,
                     "suggest_qty": row.suggest_qty,
@@ -737,7 +779,9 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
         new_dos = round(days_of_supply[i], 1)
         new_sod = int(stockout_days[i])
 
-        # Diff 比较：已有记录且所有字段一致则跳过
+        # Diff 比较：已有记录且所有字段一致（含 snapshot_date）则跳过
+        # 注意：snapshot_date 必须参与比较，否则旧 dec 记录会停留在上次计算的日期，
+        # 导致 search_inventory 的 JOIN 条件 dec.snapshot_date == latest 匹配不上
         old = existing_values.get(sid)
         if old is not None:
             if (old["summary_flag"] == sf
@@ -745,6 +789,7 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
                     and old["sku"] == esc_sku
                     and old["account"] == esc_acct
                     and old["country"] == esc_ctry
+                    and old.get("snapshot_date") == target_date
                     and old["future_stock"] == new_fs
                     and old["demand"] == new_dm
                     and old["suggest_qty"] == new_sq
@@ -931,11 +976,15 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
         return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
                 "snapshot_date": None, "stockout_top10": [], "overstock_top10": []}
 
-    # 构建基础查询（排除共享库存）
+    # 构建基础查询（排除共享库存、节日产品和停售产品）
     base_query = db.query(InventorySnapshot).filter(
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None)),
+        # 排除节日产品（is_holiday != ""）
+        (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None)),
+        # 排除停售产品
+        (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None)),
     )
 
     # 用户数据隔离
@@ -959,10 +1008,8 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
             ).fetchall()
             user_stores = [s[0] for s in store_rows]
             if user_stores:
-                store_conditions = [
-                    InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-                ]
-                base_query = base_query.filter(or_(*store_conditions))
+                store_conditions = _build_account_filter(user_stores)
+                base_query = base_query.filter(or_(*store_conditions)) if store_conditions else base_query
             else:
                 return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
                         "snapshot_date": latest.isoformat(), "stockout_top10": [], "overstock_top10": []}
@@ -973,33 +1020,34 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
     # 统计
     total = base_query.count()
 
-    # 获取有效的 snapshot_ids
-    valid_snap_ids = [s.id for s in base_query.with_entities(InventorySnapshot.id).all()]
+    # 获取有效的 snapshot_ids（使用子查询，避免将 4 万条 ID 取回应用层）
+    valid_snap_ids_subquery = base_query.with_entities(InventorySnapshot.id)
 
-    red = db.query(ReplenishmentDecision).filter(
-        ReplenishmentDecision.snapshot_date == latest,
-        ReplenishmentDecision.deleted_at.is_(None),
-        ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
-        ReplenishmentDecision.risk_level == "红",
-    ).count()
-    yellow = db.query(ReplenishmentDecision).filter(
-        ReplenishmentDecision.snapshot_date == latest,
-        ReplenishmentDecision.deleted_at.is_(None),
-        ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
-        ReplenishmentDecision.risk_level == "黄",
-    ).count()
-    green = db.query(ReplenishmentDecision).filter(
-        ReplenishmentDecision.snapshot_date == latest,
-        ReplenishmentDecision.deleted_at.is_(None),
-        ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
-        ReplenishmentDecision.risk_level == "绿",
-    ).count()
+    # 用 LEFT JOIN 统计风险等级：无决策的快照计入"绿"，确保 red+yellow+green=total
+    risk_counts_rows = db.query(
+        func.coalesce(ReplenishmentDecision.risk_level, '绿'),
+        func.count(InventorySnapshot.id)
+    ).outerjoin(
+        ReplenishmentDecision,
+        and_(
+            ReplenishmentDecision.snapshot_id == InventorySnapshot.id,
+            ReplenishmentDecision.deleted_at.is_(None),
+        )
+    ).filter(
+        InventorySnapshot.id.in_(valid_snap_ids_subquery)
+    ).group_by(
+        func.coalesce(ReplenishmentDecision.risk_level, '绿')
+    ).all()
+    risk_counts = {row[0]: row[1] for row in risk_counts_rows}
+    red = risk_counts.get("红", 0)
+    yellow = risk_counts.get("黄", 0)
+    green = risk_counts.get("绿", 0)
 
     # TOP10
     stockout_ids = db.query(ReplenishmentDecision.snapshot_id).filter(
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
-        ReplenishmentDecision.snapshot_id.in_(valid_snap_ids),
+        ReplenishmentDecision.snapshot_id.in_(valid_snap_ids_subquery),
     ).order_by(ReplenishmentDecision.days_of_supply.asc()).limit(10).all()
     snap_ids = [r[0] for r in stockout_ids]
 
@@ -1025,7 +1073,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
     overstock_snaps = db.query(InventorySnapshot).filter(
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
-        InventorySnapshot.id.in_(valid_snap_ids),
+        InventorySnapshot.id.in_(valid_snap_ids_subquery),
     ).order_by(InventorySnapshot.age_12_plus.desc()).limit(10).all()
     if overstock_snaps:
         overstock_top10 = [{
@@ -1083,11 +1131,28 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     if not latest:
         return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
-    # 1. 先筛选出不包含共享库存的 snapshot_ids
+    # 1. 筛选要展示的 snapshot_ids
+    #    - 普通行（summary_flag != '共享库存'）直接显示
+    #    - 子行（summary_flag='共享库存'）只显示"孤儿子行"——即 ASIN 没有对应父汇总行（summary_flag='是'）的子行
+    #      有父汇总行的子行通过父行展开按钮加载（get_summary_children API），主列表不重复显示
     valid_snapshot_query = db.query(InventorySnapshot.id).filter(
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
-        (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None))
+        or_(
+            InventorySnapshot.summary_flag != "共享库存",
+            InventorySnapshot.summary_flag.is_(None),
+            # 孤儿子行：summary_flag='共享库存' 但该 ASIN 在最新日期没有 summary_flag='是' 的父汇总行
+            and_(
+                InventorySnapshot.summary_flag == "共享库存",
+                ~InventorySnapshot.asin.in_(
+                    db.query(InventorySnapshot.asin).filter(
+                        InventorySnapshot.snapshot_date == latest,
+                        InventorySnapshot.deleted_at.is_(None),
+                        InventorySnapshot.summary_flag == "是"
+                    )
+                )
+            )
+        )
     )
 
     # 应用用户数据隔离
@@ -1095,11 +1160,10 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
         if len(user_stores) == 0:
             # 用户有部门但没有关联店铺，返回空数据
             return {"items": [], "total": 0, "page": page, "page_size": page_size}
-        # 使用包含匹配，支持多店铺集合数据（如 "D-EU-DE、D-EU-FR"）
-        store_conditions = [
-            InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-        ]
-        valid_snapshot_query = valid_snapshot_query.filter(or_(*store_conditions))
+        # 使用精确匹配 + 汇总行边界匹配，支持多店铺集合数据（如 "D-EU-DE、D-EU-FR"）
+        store_conditions = _build_account_filter(user_stores)
+        if store_conditions:
+            valid_snapshot_query = valid_snapshot_query.filter(or_(*store_conditions))
 
     if keyword:
         kw = f"%{keyword}%"
@@ -1112,13 +1176,30 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
 
     # 节日产品筛选
     if holiday_filter and holiday_filter != "all":
-        if holiday_filter == "only_holiday":
+        if holiday_filter == "only_non_holiday":
+            # 正常产品：非节日且未停售
             valid_snapshot_query = valid_snapshot_query.filter(
-                InventorySnapshot.is_holiday == True
+                (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None))
+            ).filter(
+                (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None))
             )
-        elif holiday_filter == "only_non_holiday":
+        elif holiday_filter == "only_holiday":
+            # 所有节日产品（未停售）
             valid_snapshot_query = valid_snapshot_query.filter(
-                (InventorySnapshot.is_holiday == False) | (InventorySnapshot.is_holiday.is_(None))
+                (InventorySnapshot.is_holiday != "") & (InventorySnapshot.is_holiday.isnot(None))
+            ).filter(
+                (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None))
+            )
+        elif holiday_filter == "only_discontinued":
+            # 停售产品
+            valid_snapshot_query = valid_snapshot_query.filter(
+                InventorySnapshot.is_discontinued == True
+            )
+        elif holiday_filter.startswith("holiday_"):
+            # 按具体节日类型筛选（如 holiday_圣诞 / holiday_万圣 / holiday_跨年 / holiday_其他）
+            holiday_type = holiday_filter[len("holiday_"):]
+            valid_snapshot_query = valid_snapshot_query.filter(
+                InventorySnapshot.is_holiday == holiday_type
             )
 
     # 国家和店铺筛选逻辑：
@@ -1128,18 +1209,10 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
 
     if account:
         # account 参数是 "店铺-国家" 格式（如 "JeVenis-US"）
-        # 使用包含匹配，支持多店铺集合数据（如 "D-EU-DE、D-EU-FR"）
-        if isinstance(account, list) and len(account) > 0:
-            # 多选：account 字段包含任意一个选中的店铺
-            account_conditions = [
-                InventorySnapshot.account.like(f"%{a}%") for a in account
-            ]
+        # 使用精确匹配 + 汇总行边界匹配，避免 'G-UK' 误匹配 'Roaring-UK-UK'
+        account_conditions = _build_account_filter(account)
+        if account_conditions:
             valid_snapshot_query = valid_snapshot_query.filter(or_(*account_conditions))
-        elif isinstance(account, str):
-            # 单选：account 字段包含选中的店铺
-            valid_snapshot_query = valid_snapshot_query.filter(
-                InventorySnapshot.account.like(f"%{account}%")
-            )
     elif country:
         # 只选了国家，没选店铺：基于 country 字段筛选
         # 将国家名称转换为站点代码进行匹配
@@ -1177,35 +1250,24 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
         if country_conditions:
             valid_snapshot_query = valid_snapshot_query.filter(or_(*country_conditions))
 
-    valid_snapshot_ids = [s.id for s in valid_snapshot_query.all()]
-    if not valid_snapshot_ids:
-        return {"items": [], "total": 0, "page": page, "page_size": page_size}
+    # 改用子查询，避免把 4 万条 ID 取回应用层
+    valid_snapshot_subquery = valid_snapshot_query
 
-    # 2. 如果有风险等级筛选，进一步筛选
-    final_snapshot_ids = valid_snapshot_ids
+    # 3. 构建主查询，使用子查询筛选
+    query = db.query(InventorySnapshot, ReplenishmentDecision).outerjoin(
+        ReplenishmentDecision,
+        (ReplenishmentDecision.snapshot_id == InventorySnapshot.id) &
+        (ReplenishmentDecision.snapshot_date == latest)
+    ).filter(
+        InventorySnapshot.id.in_(valid_snapshot_subquery),
+        InventorySnapshot.deleted_at.is_(None)
+    )
+
+    # 如果有风险等级筛选，添加 WHERE 条件（outerjoin + WHERE 会自然过滤掉无匹配的行）
     if risk_level:
         risk_map = {"red": "红", "yellow": "黄", "green": "绿"}
         rls = [risk_map.get(rl, rl) for rl in ([risk_level] if isinstance(risk_level, str) else risk_level)]
-        matching_ids = [d.snapshot_id for d in db.query(ReplenishmentDecision.snapshot_id).filter(
-            ReplenishmentDecision.snapshot_date == latest,
-            ReplenishmentDecision.deleted_at.is_(None),
-            ReplenishmentDecision.snapshot_id.in_(valid_snapshot_ids),
-            ReplenishmentDecision.risk_level.in_(rls)
-        ).all()]
-        final_snapshot_ids = matching_ids if matching_ids else []
-
-    if not final_snapshot_ids:
-        return {"items": [], "total": 0, "page": page, "page_size": page_size}
-
-    # 3. 构建主查询
-    query = db.query(InventorySnapshot, ReplenishmentDecision).outerjoin(
-        ReplenishmentDecision,
-        (ReplenishmentDecision.snapshot_id == InventorySnapshot.id) & 
-        (ReplenishmentDecision.snapshot_date == latest)
-    ).filter(
-        InventorySnapshot.id.in_(final_snapshot_ids),
-        InventorySnapshot.deleted_at.is_(None)
-    )
+        query = query.filter(ReplenishmentDecision.risk_level.in_(rls))
 
     if replenishment_status:
         query = query.filter(InventorySnapshot.replenishment_status == replenishment_status)
@@ -1216,6 +1278,26 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     elif sort_field == 'suggest_qty':
         order_col = ReplenishmentDecision.suggest_qty.desc() if sort_order == 'desc' else ReplenishmentDecision.suggest_qty.asc()
         query = query.order_by(order_col, InventorySnapshot.asin)
+    elif sort_field == 'stockout_date':
+        # 断货时间前端显示取自 ReplenishmentDecision.stockout_date_calc（字符串 YYYY-MM-DD）
+        # 需用相同字段排序，并用 CASE 将无效值（NULL/'-'/'') 统一处理，避免与显示不一致
+        # 升序时无效值替换为最大值 '9999-12-31'（排到最后）
+        # 降序时无效值替换为最小值 '0001-01-01'（排到最后）
+        from sqlalchemy import case, literal_column
+        invalid = or_(
+            ReplenishmentDecision.stockout_date_calc.is_(None),
+            ReplenishmentDecision.stockout_date_calc == "",
+            ReplenishmentDecision.stockout_date_calc == "-",
+        )
+        placeholder = "'0001-01-01'" if sort_order == 'desc' else "'9999-12-31'"
+        sort_expr = case(
+            (invalid, literal_column(placeholder)),
+            else_=ReplenishmentDecision.stockout_date_calc
+        )
+        query = query.order_by(
+            sort_expr.desc() if sort_order == 'desc' else sort_expr.asc(),
+            InventorySnapshot.asin
+        )
     elif sort_field:
         col = getattr(InventorySnapshot, sort_field, None)
         if col is not None:
@@ -1240,6 +1322,10 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             "fba_pending_transfer": snap.fba_pending_transfer, "fba_in_transfer": snap.fba_in_transfer,
             "fba_inbound_processing": snap.fba_inbound_processing, "fba_inbound": snap.fba_inbound,
             "daily_sales": round(snap.daily_sales, 2) if snap.daily_sales is not None else None, "total_stock": (snap.fba_stock or 0) + (snap.fba_inbound or 0) + (snap.local_inventory or 0) - (snap.inspection_quantity or 0),
+            "sales_7d": snap.sales_7d,
+            "sales_14d": snap.sales_14d,
+            "daily_avg_7d": round(snap.daily_avg_7d, 2) if snap.daily_avg_7d else None,
+            "daily_avg_14d": round(snap.daily_avg_14d, 2) if snap.daily_avg_14d else None,
             "stockout_date": dec.stockout_date_calc if dec else (snap.stockout_date.isoformat() if snap.stockout_date else "-"),
             "age_12_plus": snap.age_12_plus,
             "risk_level": risk_map_r.get(dec.risk_level, "green") if dec else "green",
@@ -1249,7 +1335,8 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             "replenishment_reason": dec.reason if dec else "",
             "inspection_quantity": snap.inspection_quantity or 0,
             "gross_margin": snap.gross_margin,
-            "is_holiday": snap.is_holiday if snap.is_holiday is not None else False,
+            "is_holiday": snap.is_holiday or "",
+            "is_discontinued": snap.is_discontinued if snap.is_discontinued is not None else False,
         })
 
     # 汇总行的 local_inventory = 子行 local_inventory 之和
@@ -1280,14 +1367,8 @@ def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) 
     if not latest:
         return []
 
-    # 构建基础查询
-    base_filter = [
-        ReplenishmentDecision.snapshot_date == latest,
-        ReplenishmentDecision.deleted_at.is_(None),
-        (ReplenishmentDecision.summary_flag != "共享库存") | (ReplenishmentDecision.summary_flag.is_(None))
-    ]
-
-    # 用户数据隔离
+    # 用户数据隔离：先计算可见的 snapshot_ids
+    visible_snap_ids = None
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
         dept_rows = db.execute(
@@ -1295,56 +1376,69 @@ def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) 
             {"uid": user_id}
         ).fetchall()
         dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-            if not user_stores:
-                return []
-            # 获取可见的 snapshot_ids
-            snap_store_conditions = [
-                InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-            ]
-            visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
-                InventorySnapshot.snapshot_date == latest,
-                InventorySnapshot.deleted_at.is_(None),
-                or_(*snap_store_conditions)
-            ).all()]
-            if not visible_snap_ids:
-                return []
-            base_filter.append(ReplenishmentDecision.snapshot_id.in_(visible_snap_ids))
-        else:
+        if not dept_ids:
+            return []
+        store_rows = db.execute(
+            sql_text("""
+                SELECT inventory_name FROM stores
+                WHERE department_id IN :dept_ids
+                AND status = 'active'
+                AND inventory_name IS NOT NULL
+                AND inventory_name != ''
+            """),
+            {"dept_ids": tuple(dept_ids)}
+        ).fetchall()
+        user_stores = [s[0] for s in store_rows]
+        if not user_stores:
+            return []
+        # 获取可见的 snapshot_ids
+        snap_store_conditions = _build_account_filter(user_stores)
+        visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
+            InventorySnapshot.snapshot_date == latest,
+            InventorySnapshot.deleted_at.is_(None),
+            or_(*snap_store_conditions)
+        ).all()] if snap_store_conditions else []
+        if not visible_snap_ids:
             return []
 
-    risk_orders = db.query(ReplenishmentDecision.snapshot_id).filter(
-        *base_filter
-    ).order_by(ReplenishmentDecision.days_of_supply.asc()).limit(10).all()
+    # 单条 JOIN 查询合并原 3 次查询（snapshot_id 查询 + snaps 查询 + decs 查询）
+    join_query = db.query(InventorySnapshot, ReplenishmentDecision).join(
+        ReplenishmentDecision,
+        and_(
+            ReplenishmentDecision.snapshot_id == InventorySnapshot.id,
+            ReplenishmentDecision.snapshot_date == latest,
+            ReplenishmentDecision.deleted_at.is_(None),
+            (ReplenishmentDecision.summary_flag != "共享库存") | (ReplenishmentDecision.summary_flag.is_(None))
+        )
+    ).filter(
+        InventorySnapshot.deleted_at.is_(None),
+        # 排除节日产品和停售产品
+        (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None)),
+        (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None)),
+    )
 
-    if not risk_orders:
+    if visible_snap_ids is not None:
+        join_query = join_query.filter(InventorySnapshot.id.in_(visible_snap_ids))
+
+    results = join_query.order_by(ReplenishmentDecision.days_of_supply.asc()).limit(10).all()
+
+    if not results:
         return []
 
-    snap_ids = [r[0] for r in risk_orders]
-    snaps = {s.id: s for s in db.query(InventorySnapshot).filter(InventorySnapshot.id.in_(snap_ids), InventorySnapshot.deleted_at.is_(None)).all()}
-    decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(ReplenishmentDecision.snapshot_id.in_(snap_ids), ReplenishmentDecision.deleted_at.is_(None)).all()}
-
+    # 直接遍历 JOIN 结果组装数据
     result = []
-    for sid in snap_ids:
-        if sid in snaps and sid in decs:
-            s, d = snaps[sid], decs[sid]
-            result.append({
-                "asin": s.asin, "product_name": s.product_name, "account": s.account,
-                "country": s.country, "days_of_supply": d.days_of_supply,
-                "fba_stock": s.fba_stock, "daily_sales": s.daily_sales,
-                "stockout_date": d.stockout_date_calc or "-",
-            })
+    for snap, dec in results:
+        result.append({
+            "asin": snap.asin, "product_name": snap.product_name, "account": snap.account,
+            "country": snap.country, "days_of_supply": dec.days_of_supply,
+            "fba_stock": snap.fba_stock, "daily_sales": snap.daily_sales,
+            "stockout_date": dec.stockout_date_calc or "-",
+            "total_stock": (snap.fba_stock or 0) + (snap.fba_inbound or 0) + (snap.local_inventory or 0) - (snap.inspection_quantity or 0),
+            "age_0_3": snap.age_0_3, "age_3_6": snap.age_3_6,
+            "age_6_9": snap.age_6_9, "age_9_12": snap.age_9_12, "age_12_plus": snap.age_12_plus,
+            "suggest_qty": int(dec.suggest_qty) if dec.suggest_qty else 0,
+            "reason": dec.reason or "",
+        })
     return result
 
 
@@ -1357,7 +1451,10 @@ def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None)
     base_query = db.query(InventorySnapshot).filter(
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
-        (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None))
+        (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None)),
+        # 排除节日产品和停售产品
+        (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None)),
+        (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None)),
     )
 
     # 用户数据隔离
@@ -1382,10 +1479,9 @@ def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None)
             user_stores = [s[0] for s in store_rows]
             if not user_stores:
                 return []
-            store_conditions = [
-                InventorySnapshot.account.like(f"%{s}%") for s in user_stores
-            ]
-            base_query = base_query.filter(or_(*store_conditions))
+            store_conditions = _build_account_filter(user_stores)
+            if store_conditions:
+                base_query = base_query.filter(or_(*store_conditions))
         else:
             return []
 
@@ -1437,18 +1533,35 @@ def get_latest_snapshot_date(db: Session) -> str:
     return latest.isoformat() if latest else None
 
 
-def get_summary_children(db: Session, asin: str):
-    """获取汇总行的子行数据"""
+def get_summary_children(db: Session, asin: str, parent_account: str = None):
+    """获取汇总行的子行数据
+
+    Args:
+        asin: 父汇总行的 ASIN
+        parent_account: 父汇总行的 account 字段（如 "LaVenty--US、LaVenty--MX、LaVenty-US-BR"）。
+            传入时会按 account 集合过滤子行，避免同一 ASIN 有多个汇总行时子行串扰
+            （例：B07WHGXBNB 同时有北美3国汇总行 + 欧洲9国汇总行，展开北美父行只应看到北美3国子行）。
+            不传则返回该 ASIN 所有 summary_flag='共享库存' 的子行（向后兼容）。
+    """
     latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
     if not latest:
         return []
 
-    children = db.query(InventorySnapshot).filter(
+    query = db.query(InventorySnapshot).filter(
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         InventorySnapshot.asin == asin,
         InventorySnapshot.summary_flag == "共享库存"
-    ).order_by(InventorySnapshot.account, InventorySnapshot.country).all()
+    )
+
+    # 按父汇总行的 account 列表过滤子行
+    if parent_account:
+        # 父汇总行 account 形如 "A、B、C"，用顿号分割
+        parent_accounts = [a.strip() for a in str(parent_account).split("、") if a.strip()]
+        if parent_accounts:
+            query = query.filter(InventorySnapshot.account.in_(parent_accounts))
+
+    children = query.order_by(InventorySnapshot.account, InventorySnapshot.country).all()
 
     return [{
         "id": c.id,
@@ -1469,6 +1582,8 @@ def get_summary_children(db: Session, asin: str):
         "fba_inbound": c.fba_inbound,
         "total_stock": (c.fba_stock or 0) + (c.fba_inbound or 0) + (c.local_inventory or 0) - (c.inspection_quantity or 0),
         "daily_sales": round(c.daily_sales, 2) if c.daily_sales is not None else None,
+        "sales_7d": c.sales_7d,
+        "sales_14d": c.sales_14d,
         "days_of_supply": c.days_supply_total,
         "stockout_date": c.stockout_date.isoformat() if c.stockout_date else None,
         "risk_level": None,
@@ -1516,7 +1631,13 @@ def export_inventory_to_excel(items: list, fields: list = None):
         "local_inventory": "本地仓库存",
         "total_stock": "总库存",
         "gross_margin": "毛利率",
+        "is_holiday": "节日类型",
+        "is_discontinued": "停售",
         "daily_sales": "日均销量",
+        "sales_7d": "7天销量",
+        "sales_14d": "14天销量",
+        "daily_avg_7d": "7日日均销量",
+        "daily_avg_14d": "14日日均销量",
         "days_of_supply": "可售天数",
         "stockout_date": "断货时间",
         "risk_level": "风险等级",
@@ -1557,6 +1678,18 @@ def export_inventory_to_excel(items: list, fields: list = None):
             val = item.get(key, "")
             if key == "risk_level":
                 val = risk_map.get(val, val)
+            elif key == "is_holiday":
+                # 节日类型直接输出字符串值（已是中文）
+                val = val if val else ""
+            elif key == "is_discontinued":
+                # 停售标记：True → "是"，False → "否"
+                val = "是" if val else "否"
+            elif key == "gross_margin":
+                if val is not None and val != "":
+                    try:
+                        val = f"{float(val) * 100:.2f}%"
+                    except (ValueError, TypeError):
+                        pass
             cell = ws.cell(row=row_idx, column=col, value=val)
             cell.border = thin_border
             cell.alignment = Alignment(horizontal="center")

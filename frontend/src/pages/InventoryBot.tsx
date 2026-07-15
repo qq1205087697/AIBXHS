@@ -22,6 +22,7 @@ import {
   Checkbox,
   Divider,
   Pagination,
+  Dropdown,
 } from "antd";
 import type { TablePaginationConfig, ColumnsType } from "antd/es/table";
 import type { UploadProps } from "antd";
@@ -69,6 +70,10 @@ interface StockoutItem {
   days_of_supply: number;
   fba_stock: number;
   daily_sales: number;
+  sales_7d?: number;
+  sales_14d?: number;
+  daily_avg_7d?: number;
+  daily_avg_14d?: number;
   stockout_date: string;
   total_stock: number;
   suggest_qty?: number;
@@ -104,6 +109,8 @@ interface InventoryItem {
   fba_inbound: number;
   total_stock: number;
   daily_sales: number;
+  sales_7d?: number;
+  sales_14d?: number;
   days_of_supply: number;
   stockout_date: string | null;
   risk_level: string;
@@ -115,7 +122,8 @@ interface InventoryItem {
   replenishment_reason?: string;
   age_12_plus?: number;
   gross_margin?: number;
-  is_holiday?: boolean;
+  is_holiday?: string;
+  is_discontinued?: boolean;
 }
 
 interface InboundDetail {
@@ -226,13 +234,18 @@ const InventoryBot: React.FC = () => {
     { label: "总库存", value: "total_stock" },
     { label: "毛利率", value: "gross_margin" },
     { label: "日均销量", value: "daily_sales" },
+    { label: "7天销量", value: "sales_7d" },
+    { label: "14天销量", value: "sales_14d" },
+    { label: "7日日均销量", value: "daily_avg_7d" },
+    { label: "14日日均销量", value: "daily_avg_14d" },
     { label: "可售天数", value: "days_of_supply" },
     { label: "断货时间", value: "stockout_date" },
     { label: "风险等级", value: "risk_level" },
     { label: "建议补货数量", value: "suggest_qty" },
     { label: "补货原因", value: "replenishment_reason" },
     { label: "补货状态", value: "replenishment_status" },
-    { label: "节日产品", value: "is_holiday" },
+    { label: "节日类型", value: "is_holiday" },
+    { label: "停售", value: "is_discontinued" },
   ];
 
   // --- Data states ---
@@ -337,6 +350,10 @@ const InventoryBot: React.FC = () => {
       { key: "gross_margin", label: "毛利率" },
       { key: "local_inventory", label: "本地仓" },
       { key: "daily_sales", label: "日均销量" },
+      { key: "sales_7d", label: "7天销量" },
+      { key: "sales_14d", label: "14天销量" },
+      { key: "daily_avg_7d", label: "7日日均" },
+      { key: "daily_avg_14d", label: "14日日均" },
       { key: "days_of_supply", label: "可售天数" },
       { key: "stockout_date", label: "断货时间" },
       { key: "suggest_qty", label: "建议补货" },
@@ -728,7 +745,7 @@ const InventoryBot: React.FC = () => {
       return;
     }
     try {
-      const response = await inventoryApi.getSummaryChildren(record.asin);
+      const response = await inventoryApi.getSummaryChildren(record.asin, record.account);
       const data = response.data?.data || [];
       const children = (Array.isArray(data) ? data : []).map((c) => ({
         ...c,
@@ -1540,6 +1557,13 @@ const InventoryBot: React.FC = () => {
       key: "total_stock",
       width: 100,
       align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "total_stock"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
       render: (val: number, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
           return (
@@ -1557,6 +1581,13 @@ const InventoryBot: React.FC = () => {
       key: "gross_margin",
       width: 90,
       align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "gross_margin"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
       render: (val: number | undefined, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
           return <span style={{ color: "#999" }}>-</span>;
@@ -1577,6 +1608,13 @@ const InventoryBot: React.FC = () => {
       key: "local_inventory",
       width: 90,
       align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "local_inventory"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
       render: (val: number | undefined, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
           return <span style={{ color: "#999" }}>-</span>;
@@ -1606,10 +1644,89 @@ const InventoryBot: React.FC = () => {
       key: "daily_sales",
       width: 100,
       align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "daily_sales"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
       render: (val: number, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
           return <span style={{ color: "#999" }}>-</span>;
         }
+        if (val == null || val === undefined) return "-";
+        return val.toFixed(2);
+      },
+    },
+    {
+      title: "7天销量",
+      dataIndex: "sales_7d",
+      key: "sales_7d",
+      width: 100,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "sales_7d"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined) => {
+        if (val == null || val === undefined) return "-";
+        return formatNumber(val);
+      },
+    },
+    {
+      title: "14天销量",
+      dataIndex: "sales_14d",
+      key: "sales_14d",
+      width: 100,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "sales_14d"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined) => {
+        if (val == null || val === undefined) return "-";
+        return formatNumber(val);
+      },
+    },
+    {
+      title: "7日日均",
+      dataIndex: "daily_avg_7d",
+      key: "daily_avg_7d",
+      width: 100,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "daily_avg_7d"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined) => {
+        if (val == null || val === undefined) return "-";
+        return val.toFixed(2);
+      },
+    },
+    {
+      title: "14日日均",
+      dataIndex: "daily_avg_14d",
+      key: "daily_avg_14d",
+      width: 100,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "daily_avg_14d"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined) => {
         if (val == null || val === undefined) return "-";
         return val.toFixed(2);
       },
@@ -1639,6 +1756,13 @@ const InventoryBot: React.FC = () => {
       dataIndex: "stockout_date",
       key: "stockout_date",
       width: 120,
+      sorter: true,
+      sortOrder:
+        sortField === "stockout_date"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
       render: (val: string | null, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
           return <span style={{ color: "#999" }}>-</span>;
@@ -1757,14 +1881,47 @@ const InventoryBot: React.FC = () => {
             >
               在途详情
             </Button>
-            {record.is_holiday === true ? (
+            {record.is_discontinued === true ? (
               <Popconfirm
-                title="取消节日标记"
-                description={confirmMessage("取消节日标记")}
+                title="清除标记"
+                description={confirmMessage("清除停售标记")}
                 onConfirm={async () => {
                   try {
-                    await inventoryApi.markHoliday([record.id], false);
-                    messageApi.success("已取消节日标记");
+                    await inventoryApi.markProductStatus([record.id], "clear");
+                    messageApi.success("已清除标记");
+                    fetchInventoryList(
+                      pagination.current || 1,
+                      pagination.pageSize || 20,
+                      searchText,
+                      tableRiskFilter,
+                      accountFilter,
+                      countryFilter,
+                      sortField,
+                      sortOrder,
+                      holidayFilter,
+                    );
+                    fetchOverview();
+                  } catch (error: any) {
+                    messageApi.error(
+                      error?.response?.data?.detail || "操作失败",
+                    );
+                  }
+                }}
+                okText="确定"
+                cancelText="取消"
+              >
+                <Tag color="default" style={{ cursor: "pointer" }}>
+                  不做了
+                </Tag>
+              </Popconfirm>
+            ) : record.is_holiday ? (
+              <Popconfirm
+                title="清除标记"
+                description={confirmMessage("清除节日标记")}
+                onConfirm={async () => {
+                  try {
+                    await inventoryApi.markProductStatus([record.id], "clear");
+                    messageApi.success("已清除标记");
                     fetchInventoryList(
                       pagination.current || 1,
                       pagination.pageSize || 20,
@@ -1787,42 +1944,66 @@ const InventoryBot: React.FC = () => {
                 cancelText="取消"
               >
                 <Tag color="purple" style={{ cursor: "pointer" }}>
-                  节日
+                  {record.is_holiday}
                 </Tag>
               </Popconfirm>
             ) : (
-              <Popconfirm
-                title="标记为节日产品"
-                description={confirmMessage("标记为节日产品")}
-                onConfirm={async () => {
-                  try {
-                    await inventoryApi.markHoliday([record.id], true);
-                    messageApi.success("已标记为节日产品");
-                    fetchInventoryList(
-                      pagination.current || 1,
-                      pagination.pageSize || 20,
-                      searchText,
-                      tableRiskFilter,
-                      accountFilter,
-                      countryFilter,
-                      sortField,
-                      sortOrder,
-                      holidayFilter,
-                    );
-                    fetchOverview();
-                  } catch (error: any) {
-                    messageApi.error(
-                      error?.response?.data?.detail || "操作失败",
-                    );
-                  }
+              <Dropdown
+                menu={{
+                  items: [
+                    {
+                      key: "holiday",
+                      label: "标记节日",
+                      children: [
+                        { key: "圣诞", label: "圣诞" },
+                        { key: "万圣", label: "万圣" },
+                        { key: "跨年", label: "跨年" },
+                        { key: "其他", label: "其他" },
+                      ],
+                    },
+                    { key: "discontinued", label: "不做了", danger: true },
+                  ],
+                  onClick: async ({ key }) => {
+                    try {
+                      if (key === "discontinued") {
+                        await inventoryApi.markProductStatus(
+                          [record.id],
+                          "discontinued",
+                        );
+                        messageApi.success("已标记为停售");
+                      } else {
+                        await inventoryApi.markProductStatus(
+                          [record.id],
+                          "holiday",
+                          key,
+                        );
+                        messageApi.success(`已标记为${key}`);
+                      }
+                      fetchInventoryList(
+                        pagination.current || 1,
+                        pagination.pageSize || 20,
+                        searchText,
+                        tableRiskFilter,
+                        accountFilter,
+                        countryFilter,
+                        sortField,
+                        sortOrder,
+                        holidayFilter,
+                      );
+                      fetchOverview();
+                    } catch (error: any) {
+                      messageApi.error(
+                        error?.response?.data?.detail || "操作失败",
+                      );
+                    }
+                  },
                 }}
-                okText="确定"
-                cancelText="取消"
+                trigger={["click"]}
               >
                 <Button type="link" size="small">
-                  标记节日
+                  标记
                 </Button>
-              </Popconfirm>
+              </Dropdown>
             )}
           </Space>
         );
@@ -1839,6 +2020,10 @@ const InventoryBot: React.FC = () => {
     "local_inventory",
     "gross_margin",
     "daily_sales",
+    "sales_7d",
+    "sales_14d",
+    "daily_avg_7d",
+    "daily_avg_14d",
   ]);
 
   const childWrappedColumns = useMemo(() => {
@@ -1900,6 +2085,13 @@ const InventoryBot: React.FC = () => {
       dataIndex: "shipment_id",
       key: "shipment_id",
       width: 180,
+    },
+    {
+      title: "发货日期",
+      dataIndex: "ship_date",
+      key: "ship_date",
+      width: 110,
+      render: (val: string | null) => val || "-",
     },
     {
       title: "数量",
@@ -1968,21 +2160,12 @@ const InventoryBot: React.FC = () => {
           gap: 12,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flex: 1 }}>
           {snapshotDate && (
             <span style={{ color: "#888", fontSize: 13 }}>
               数据更新时间: {snapshotDate}
             </span>
           )}
-          <Upload
-            beforeUpload={handleFileUpload}
-            showUploadList={false}
-            accept=".xlsx,.xls"
-          >
-            <Button icon={<UploadIcon size={15} />} loading={importLoading}>
-              导入Excel
-            </Button>
-          </Upload>
           <Button
             type="primary"
             icon={<BarChart3 size={15} />}
@@ -1991,6 +2174,7 @@ const InventoryBot: React.FC = () => {
             style={{
               background: currentTheme.primary,
               borderColor: currentTheme.primary,
+              marginLeft: "auto",
             }}
           >
             {calcButtonLabel}
@@ -2914,7 +3098,7 @@ const InventoryBot: React.FC = () => {
             }
           />
           <Select
-            placeholder="节日筛选"
+            placeholder="产品状态"
             style={{ width: 140 }}
             value={holidayFilter}
             onChange={(value) => {
@@ -2933,9 +3117,14 @@ const InventoryBot: React.FC = () => {
               );
             }}
             options={[
-              { label: "只查看非节日", value: "only_non_holiday" },
-              { label: "只查看节日", value: "only_holiday" },
-              { label: "两者都查看", value: "all" },
+              { label: "正常产品", value: "only_non_holiday" },
+              { label: "节日产品-全部", value: "only_holiday" },
+              { label: "圣诞", value: "holiday_圣诞" },
+              { label: "万圣", value: "holiday_万圣" },
+              { label: "跨年", value: "holiday_跨年" },
+              { label: "其他", value: "holiday_其他" },
+              { label: "不做了", value: "only_discontinued" },
+              { label: "全部", value: "all" },
             ]}
           />
           <Button
@@ -3195,7 +3384,7 @@ const InventoryBot: React.FC = () => {
           loading={tableLoading}
           pagination={false}
           onChange={handleTableChange}
-          scroll={{ x: 1620 }}
+          scroll={{ x: 1620, y: "calc(100vh - 380px)" }}
           size="small"
           rowClassName={(record) => {
             let classes = [];
@@ -3229,7 +3418,7 @@ const InventoryBot: React.FC = () => {
               total={total}
               showTotal={(t) => `共 ${t} 条`}
               showSizeChanger
-              pageSizeOptions={["10", "20", "50", "100"]}
+              pageSizeOptions={["10", "20", "50", "100", "200", "500"]}
               onChange={handlePageChange}
               onShowSizeChange={handlePageChange}
             />
@@ -3373,6 +3562,9 @@ const InventoryBot: React.FC = () => {
           <div>
             <div style={{ marginBottom: 8, fontWeight: 500 }}>
               上传文件 <span style={{ color: "red" }}>*</span>
+            </div>
+            <div style={{ marginBottom: 8, fontSize: 12, color: "#fa8c16" }}>
+              上传文件为补货的库存底表
             </div>
             <Upload
               accept=".xlsx,.xls"

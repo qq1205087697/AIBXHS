@@ -150,12 +150,18 @@ export const inventoryApi = {
     apiClient.put("/restock/inspection-quantity", null, {
       params: { snapshot_id: snapshotId, inspection_quantity: quantity },
     }),
-  getSummaryChildren: (asin: string) =>
-    apiClient.get("/restock/summary-children", { params: { asin } }),
+  getSummaryChildren: (asin: string, account?: string) =>
+    apiClient.get("/restock/summary-children", { params: { asin, account } }),
   markHoliday: (snapshotIds: number[], isHoliday: boolean) =>
     apiClient.post("/restock/mark-holiday", {
       snapshot_ids: snapshotIds,
       is_holiday: isHoliday,
+    }),
+  markProductStatus: (snapshotIds: number[], action: string, holidayType?: string) =>
+    apiClient.post("/restock/mark-product-status", {
+      snapshot_ids: snapshotIds,
+      action: action,
+      holiday_type: holidayType,
     }),
 };
 

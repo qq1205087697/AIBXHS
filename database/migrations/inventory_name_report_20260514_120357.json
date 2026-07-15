@@ -1,0 +1,387 @@
+{
+  "time": "2026-05-14T12:03:57.334245",
+  "backup_file": "C:\\Users\\Administrator\\Desktop\\AI\\AIBXHS\\database\\migrations\\stores_backup_before_inv_20260514_120353.json",
+  "rollback_script": "C:\\Users\\Administrator\\Desktop\\AI\\AIBXHS\\database\\migrations\\rollback_inventory_name_20260514_120357.py",
+  "total_stores": 63,
+  "updated": 63,
+  "details": [
+    {
+      "id": 1,
+      "name": "云南金顺公司",
+      "site": "美国",
+      "inventory_name": "JeVenis-US"
+    },
+    {
+      "id": 2,
+      "name": "云南金顺公司",
+      "site": "英国",
+      "inventory_name": "JeVenis-UK"
+    },
+    {
+      "id": 3,
+      "name": "云南金顺公司",
+      "site": "德国",
+      "inventory_name": "JeVenis-DE"
+    },
+    {
+      "id": 4,
+      "name": "云南金顺公司",
+      "site": "法国",
+      "inventory_name": "JeVenis-FR"
+    },
+    {
+      "id": 5,
+      "name": "云南金顺公司",
+      "site": "意大利",
+      "inventory_name": "JeVenis-IT"
+    },
+    {
+      "id": 6,
+      "name": "云南金顺公司",
+      "site": "西班牙",
+      "inventory_name": "JeVenis-ES"
+    },
+    {
+      "id": 7,
+      "name": "云南金顺公司",
+      "site": "荷兰",
+      "inventory_name": "JeVenis-NL"
+    },
+    {
+      "id": 8,
+      "name": "云南金顺公司",
+      "site": "加拿大",
+      "inventory_name": "JeVenis-CA"
+    },
+    {
+      "id": 9,
+      "name": "云南金顺公司",
+      "site": "墨西哥",
+      "inventory_name": "JeVenis-MX"
+    },
+    {
+      "id": 10,
+      "name": "B账号账户管理",
+      "site": "美国",
+      "inventory_name": "LaVenty-USA-US"
+    },
+    {
+      "id": 11,
+      "name": "B账号账户管理",
+      "site": "英国",
+      "inventory_name": "LaVenty-UK-UK"
+    },
+    {
+      "id": 12,
+      "name": "B账号账户管理",
+      "site": "德国",
+      "inventory_name": "LaVenty-EU-DE"
+    },
+    {
+      "id": 13,
+      "name": "B账号账户管理",
+      "site": "法国",
+      "inventory_name": "LaVenty-EU-FR"
+    },
+    {
+      "id": 14,
+      "name": "B账号账户管理",
+      "site": "意大利",
+      "inventory_name": "LaVenty-EU-IT"
+    },
+    {
+      "id": 15,
+      "name": "B账号账户管理",
+      "site": "西班牙",
+      "inventory_name": "LaVenty-EU-ES"
+    },
+    {
+      "id": 16,
+      "name": "B账号账户管理",
+      "site": "荷兰",
+      "inventory_name": "LaVenty-EU-NL"
+    },
+    {
+      "id": 17,
+      "name": "B账号账户管理",
+      "site": "加拿大",
+      "inventory_name": "LaVenty-USA-CA"
+    },
+    {
+      "id": 18,
+      "name": "B账号账户管理",
+      "site": "墨西哥",
+      "inventory_name": "LaVenty-USA-MX"
+    },
+    {
+      "id": 19,
+      "name": "C账号账户管理",
+      "site": "美国",
+      "inventory_name": "Roaring-USA-US"
+    },
+    {
+      "id": 20,
+      "name": "C账号账户管理",
+      "site": "英国",
+      "inventory_name": "Roaring-UK-UK"
+    },
+    {
+      "id": 21,
+      "name": "C账号账户管理",
+      "site": "德国",
+      "inventory_name": "Roaring-EU-DE"
+    },
+    {
+      "id": 22,
+      "name": "C账号账户管理",
+      "site": "法国",
+      "inventory_name": "Roaring-EU-FR"
+    },
+    {
+      "id": 23,
+      "name": "C账号账户管理",
+      "site": "意大利",
+      "inventory_name": "Roaring-EU-IT"
+    },
+    {
+      "id": 24,
+      "name": "C账号账户管理",
+      "site": "西班牙",
+      "inventory_name": "Roaring-EU-ES"
+    },
+    {
+      "id": 25,
+      "name": "C账号账户管理",
+      "site": "荷兰",
+      "inventory_name": "Roaring-EU-NL"
+    },
+    {
+      "id": 26,
+      "name": "C账号账户管理",
+      "site": "加拿大",
+      "inventory_name": "Roaring-USA-CA"
+    },
+    {
+      "id": 27,
+      "name": "C账号账户管理",
+      "site": "墨西哥",
+      "inventory_name": "Roaring-USA-MX"
+    },
+    {
+      "id": 28,
+      "name": "D账号账户管理",
+      "site": "美国",
+      "inventory_name": "D-USA-US"
+    },
+    {
+      "id": 29,
+      "name": "D账号账户管理",
+      "site": "英国",
+      "inventory_name": "D-UK-UK"
+    },
+    {
+      "id": 30,
+      "name": "D账号账户管理",
+      "site": "德国",
+      "inventory_name": "D-EU-DE"
+    },
+    {
+      "id": 31,
+      "name": "D账号账户管理",
+      "site": "法国",
+      "inventory_name": "D-EU-FR"
+    },
+    {
+      "id": 32,
+      "name": "D账号账户管理",
+      "site": "意大利",
+      "inventory_name": "D-EU-IT"
+    },
+    {
+      "id": 33,
+      "name": "D账号账户管理",
+      "site": "西班牙",
+      "inventory_name": "D-EU-ES"
+    },
+    {
+      "id": 34,
+      "name": "D账号账户管理",
+      "site": "荷兰",
+      "inventory_name": "D-EU-NL"
+    },
+    {
+      "id": 35,
+      "name": "D账号账户管理",
+      "site": "加拿大",
+      "inventory_name": "D-USA-CA"
+    },
+    {
+      "id": 36,
+      "name": "D账号账户管理",
+      "site": "墨西哥",
+      "inventory_name": "D-USA-MX"
+    },
+    {
+      "id": 37,
+      "name": "E账号账户管理",
+      "site": "美国",
+      "inventory_name": "E-USA-US"
+    },
+    {
+      "id": 38,
+      "name": "E账号账户管理",
+      "site": "英国",
+      "inventory_name": "E-UK-UK"
+    },
+    {
+      "id": 39,
+      "name": "E账号账户管理",
+      "site": "德国",
+      "inventory_name": "E-EU-DE"
+    },
+    {
+      "id": 40,
+      "name": "E账号账户管理",
+      "site": "法国",
+      "inventory_name": "E-EU-FR"
+    },
+    {
+      "id": 41,
+      "name": "E账号账户管理",
+      "site": "意大利",
+      "inventory_name": "E-EU-IT"
+    },
+    {
+      "id": 42,
+      "name": "E账号账户管理",
+      "site": "西班牙",
+      "inventory_name": "E-EU-ES"
+    },
+    {
+      "id": 43,
+      "name": "E账号账户管理",
+      "site": "荷兰",
+      "inventory_name": "E-EU-NL"
+    },
+    {
+      "id": 44,
+      "name": "E账号账户管理",
+      "site": "加拿大",
+      "inventory_name": "E-USA-CA"
+    },
+    {
+      "id": 45,
+      "name": "E账号账户管理",
+      "site": "墨西哥",
+      "inventory_name": "E-USA-MX"
+    },
+    {
+      "id": 46,
+      "name": "F账号账户管理",
+      "site": "美国",
+      "inventory_name": "F-USA-US"
+    },
+    {
+      "id": 47,
+      "name": "F账号账户管理",
+      "site": "英国",
+      "inventory_name": "F-UK-UK"
+    },
+    {
+      "id": 48,
+      "name": "F账号账户管理",
+      "site": "德国",
+      "inventory_name": "F-EU-DE"
+    },
+    {
+      "id": 49,
+      "name": "F账号账户管理",
+      "site": "法国",
+      "inventory_name": "F-EU-FR"
+    },
+    {
+      "id": 50,
+      "name": "F账号账户管理",
+      "site": "意大利",
+      "inventory_name": "F-EU-IT"
+    },
+    {
+      "id": 51,
+      "name": "F账号账户管理",
+      "site": "西班牙",
+      "inventory_name": "F-EU-ES"
+    },
+    {
+      "id": 52,
+      "name": "F账号账户管理",
+      "site": "荷兰",
+      "inventory_name": "F-EU-NL"
+    },
+    {
+      "id": 53,
+      "name": "F账号账户管理",
+      "site": "加拿大",
+      "inventory_name": "F-USA-CA"
+    },
+    {
+      "id": 54,
+      "name": "F账号账户管理",
+      "site": "墨西哥",
+      "inventory_name": "F-USA-MX"
+    },
+    {
+      "id": 55,
+      "name": "G站点紫鸟账号",
+      "site": "美国",
+      "inventory_name": "G-US"
+    },
+    {
+      "id": 56,
+      "name": "G站点紫鸟账号",
+      "site": "英国",
+      "inventory_name": "G-UK"
+    },
+    {
+      "id": 57,
+      "name": "G站点紫鸟账号",
+      "site": "德国",
+      "inventory_name": "G-DE"
+    },
+    {
+      "id": 58,
+      "name": "G站点紫鸟账号",
+      "site": "法国",
+      "inventory_name": "G-FR"
+    },
+    {
+      "id": 59,
+      "name": "G站点紫鸟账号",
+      "site": "意大利",
+      "inventory_name": "G-IT"
+    },
+    {
+      "id": 60,
+      "name": "G站点紫鸟账号",
+      "site": "西班牙",
+      "inventory_name": "G-ES"
+    },
+    {
+      "id": 61,
+      "name": "G站点紫鸟账号",
+      "site": "荷兰",
+      "inventory_name": "G-NL"
+    },
+    {
+      "id": 62,
+      "name": "G站点紫鸟账号",
+      "site": "加拿大",
+      "inventory_name": "G-CA"
+    },
+    {
+      "id": 63,
+      "name": "G站点紫鸟账号",
+      "site": "墨西哥",
+      "inventory_name": "G-MX"
+    }
+  ]
+}
