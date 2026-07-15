@@ -456,9 +456,24 @@ export const productPageInfoApi = {
     asin_search?: string;
     sku_search?: string;
     store_filter?: string | null;
+    rating_status?: number | null;
   }) => apiClient.get("/product-page-info/", { params: params }),
   getById: (id: number) => apiClient.get(`/product-page-info/${id}`),
   getStoreOptions: () => apiClient.get("/product-page-info/stores/options"),
+  deleteCompetitor: (id: number, competitorLine: string) =>
+    apiClient.put(`/product-page-info/${id}/delete-competitor`, { competitor_line: competitorLine }),
+  submitRating: (ids: number[]) =>
+    apiClient.post("/product-page-info/submit-rating", { ids }),
+  deleteRecords: (ids: number[]) =>
+    apiClient.post("/product-page-info/delete-records", { ids }),
+  getRanking: () => apiClient.get("/product-page-info/ranking"),
+  importExcel: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post("/product-page-info/import-excel", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
 };
 
 // ========== Store Groups API ==========

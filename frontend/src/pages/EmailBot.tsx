@@ -260,7 +260,7 @@ const EmailBot: React.FC = () => {
     try {
       const response = await emailsApi.reRunRobot(selectedEmail.id)
       if (response.data.success) {
-        message.success('重新运行成功')
+        message.success('已点击重新运行回复')
         // 刷新数据
         const detailResponse = await emailsApi.getById(selectedEmail.id)
         if (detailResponse.data.success) {
@@ -577,18 +577,6 @@ const EmailBot: React.FC = () => {
               >
                 需要回复
               </Button>
-              {selectedEmail.need_reply === 1 &&
-                selectedEmail.follow_up_status === 0 &&
-                selectedEmail.reply_text_time &&
-                dayjs().diff(dayjs(selectedEmail.reply_text_time), 'hour') > 24 && (
-                <Button
-                  type="dashed"
-                  loading={reRunLoading}
-                  onClick={handleReRunRobot}
-                >
-                  重新运行机器人
-                </Button>
-              )}
               <Button key="close" onClick={() => setSelectedEmail(null)}>
                 关闭
               </Button>
@@ -657,12 +645,47 @@ const EmailBot: React.FC = () => {
                 <p style={{ margin: 0, color: '#fa8c16' }}>暂无AI回复内容</p>
               </div>
             )}
+
+            {/* 回复超时提示 + 重新运行按钮 */}
+            {selectedEmail.need_reply === 1 &&
+              selectedEmail.follow_up_status === 0 &&
+              selectedEmail.reply_text_time &&
+              dayjs().diff(dayjs(selectedEmail.reply_text_time), 'hour') >= 24 && (
+              <>
+                <Divider style={{ margin: '8px 0' }} />
+                <div style={{
+                  padding: '12px 16px',
+                  background: '#fff2f0',
+                  border: '1px solid #ffccc7',
+                  borderRadius: 8,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <AlertCircle size={18} color="#f5222d" />
+                    <span style={{ color: '#f5222d', fontWeight: 600 }}>回复超时</span>
+                    <span style={{ color: '#999', fontSize: 13 }}>
+                      提交时间已超过24小时未跟进
+                    </span>
+                  </div>
+                  <Button
+                    type="primary"
+                    danger
+                    loading={reRunLoading}
+                    onClick={handleReRunRobot}
+                  >
+                    重新运行机器人回复
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         </Modal>
       )}
 
       <Modal
-        title="填写回复备注"
+        title="填写回复"
         open={replyModalVisible}
         onCancel={() => setReplyModalVisible(false)}
         footer={null}
@@ -675,29 +698,26 @@ const EmailBot: React.FC = () => {
         >
           <Form.Item
             name="replyText"
-            label={
-              <Space>
-                <span>回复备注</span>
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<span>🤖</span>}
-                  onClick={handleOpenAiReplyModal}
-                  style={{ padding: 0 }}
-                >
-                  AI回复
-                </Button>
-              </Space>
-            }
-            rules={[{ required: true, message: '请填写回复备注' }]}
+            label="填写回复内容"
+            rules={[{ required: true, message: '请填写回复内容' }]}
           >
             <Input.TextArea
               rows={4}
-              placeholder="请填写需要回复的内容或备注..."
+              placeholder="请填写需要回复的内容..."
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
             />
           </Form.Item>
+          <div style={{ textAlign: 'right', marginBottom: 16 }}>
+            <Button
+              type="link"
+              size="small"
+              icon={<span>🤖</span>}
+              onClick={handleOpenAiReplyModal}
+            >
+              点击AI撰写
+            </Button>
+          </div>
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>
               <Button onClick={() => setReplyModalVisible(false)}>取消</Button>
