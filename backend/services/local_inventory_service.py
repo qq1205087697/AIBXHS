@@ -4,7 +4,9 @@
 import io
 import logging
 import os
+import re
 import tempfile
+import zipfile
 from datetime import date, datetime
 from typing import Optional
 
@@ -16,8 +18,10 @@ from sqlalchemy.orm import Session
 
 from models.local_inventory import LocalInventory
 from models.restock import InventorySnapshot
+from utils.excel_reader import safe_read_excel as _safe_read_excel, repair_xlsx_filter as _repair_xlsx_filter
 
 logger = logging.getLogger(__name__)
+
 
 # Excel 列名映射（支持多种常见列名）
 LOCAL_INV_FIELD_MAPPING = {
@@ -56,7 +60,7 @@ def import_local_inventory(db: Session, tenant_id: int, file_content: bytes, fil
     导入本地仓库存Excel数据
     Excel格式要求：至少包含 ASIN/SKU 和 库存数量 列
     """
-    df = pd.read_excel(io.BytesIO(file_content))
+    df = _safe_read_excel(file_content)
     total_rows = len(df)
     logger.info(f"本地仓库存Excel读取完成: {total_rows} 条")
 
@@ -196,35 +200,73 @@ def import_reduction_table(db: Session, country: str, file_content: bytes, tenan
     """
     logger.info(f"减量表导入开始, country={country}")
 
-    sku_columns = {"SKU", "sku", "Sku"}
-    purchase_columns = {"已采购", "已采购数", "采购数量"}
+    sku_columns = {"SKU", "sku", "Sku", "FNSKU", "fnsku", "MSKU", "msku"}
+    purchase_columns = {"已采购", "已采购数", "采购数量", "已订购", "已订购数", "订购数量"}
+
+    def _match_sku_col(col_name: str) -> bool:
+        """匹配 SKU 列：精确匹配或包含 SKU/FNSKU/MSKU"""
+        col_lower = str(col_name).strip().lower()
+        if col_lower in {s.lower() for s in sku_columns}:
+            return True
+        # 支持如 "D账号SKU"、"店铺SKU" 等
+        return any(kw in col_lower for kw in ["sku", "fnsku", "msku"])
 
     # 尝试读取 Excel，有些文件第一行是合并标题（如"C美国"），实际列头在第二行
-    df = pd.read_excel(io.BytesIO(file_content))
+    # 使用 _safe_read_excel 自动修复 autoFilter XML 问题
+    try:
+        df = _safe_read_excel(file_content, engine="openpyxl")
+    except ValueError as e:
+        logger.warning(f"默认读取失败({e})，尝试 data_only 模式重新读取")
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(file_content), data_only=True)
+        ws = wb.active
+        data = list(ws.iter_rows(values_only=True))
+        if not data:
+            raise ValueError("Excel 文件内容为空")
+        df = pd.DataFrame(data[1:], columns=data[0])
     total_rows = len(df)
     logger.info(f"减量表Excel读取完成: {total_rows} 条")
 
     sku_col = None
     purchase_col = None
     for col in df.columns:
-        if col.strip() in sku_columns:
+        if _match_sku_col(col):
             sku_col = col
-        if col.strip() in purchase_columns:
+        if str(col).strip() in purchase_columns:
             purchase_col = col
 
     # 如果未找到关键列，尝试跳过第一行重新读取（处理合并标题行）
     if not sku_col or not purchase_col:
         logger.warning("未在首行找到标准列名，尝试跳过第一行重新读取")
-        df2 = pd.read_excel(io.BytesIO(file_content), header=1)
-        for col in df2.columns:
-            if col.strip() in sku_columns:
-                sku_col = col
-            if col.strip() in purchase_columns:
-                purchase_col = col
-        if sku_col and purchase_col:
-            df = df2
-            total_rows = len(df)
-            logger.info(f"跳过首行后重新读取: {total_rows} 条")
+        try:
+            try:
+                df2 = _safe_read_excel(file_content, header=1, engine="openpyxl")
+            except ValueError:
+                from openpyxl import load_workbook
+                wb = load_workbook(io.BytesIO(file_content), data_only=True)
+                ws = wb.active
+                data = list(ws.iter_rows(values_only=True))
+                if len(data) >= 2:
+                    df2 = pd.DataFrame(data[2:], columns=data[1])
+                else:
+                    raise ValueError("Excel 数据行不足")
+            # 重置后从 df2 重新查找
+            df2_sku = None
+            df2_purchase = None
+            for col in df2.columns:
+                if _match_sku_col(col):
+                    df2_sku = col
+                if str(col).strip() in purchase_columns:
+                    df2_purchase = col
+            # 只要 df2 找到了至少一个关键列，就切换到 df2
+            if df2_sku or df2_purchase:
+                df = df2
+                sku_col = df2_sku
+                purchase_col = df2_purchase
+                total_rows = len(df)
+                logger.info(f"跳过首行后重新读取: {total_rows} 条, SKU列={sku_col}, 采购列={purchase_col}")
+        except Exception as e:
+            logger.warning(f"跳过首行读取失败，回退到默认表头: {e}")
 
     # 最终回退：仍找不到SKU列则使用第一列
     if not sku_col:
@@ -256,6 +298,10 @@ def import_reduction_table(db: Session, country: str, file_content: bytes, tenan
             qty = float(purchase_val) if pd.notna(purchase_val) else None
             if qty is None:
                 results.append({"sku": sku_val, "status": "失败", "reason": "已采购数量为空", "asin": "", "product_name": "", "account": "", "quantity": ""})
+                skipped += 1
+                continue
+            if qty < 0:
+                results.append({"sku": sku_val, "status": "失败", "reason": "已采购数量不能为负数", "asin": "", "product_name": "", "account": "", "quantity": str(qty)})
                 skipped += 1
                 continue
         except (ValueError, TypeError):

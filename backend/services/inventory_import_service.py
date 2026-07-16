@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pandas as pd
 import numpy as np
+from utils.excel_reader import safe_read_excel
 
 # 导入状态（内存存储）
 _import_status = {
@@ -78,7 +79,7 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         # ========== 步骤1: 读取Excel ==========
         _log(f"读取Excel: {filename or file_path or '上传文件'}")
         if file_content:
-            df = pd.read_excel(io.BytesIO(file_content))
+            df = safe_read_excel(file_content)
         elif file_path:
             df = pd.read_excel(file_path)
         else:
@@ -141,17 +142,20 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         except Exception:
             existing_rows = []
 
-        idx_normal = {}   # (asin, account, country) → (id, snapshot_date)
-        idx_summary = {}  # (summary_flag, asin) → (id, snapshot_date)
+        idx_normal = {}   # 普通行: (asin, account, country) → (id, snapshot_date)
+        idx_summary = {}  # 汇总行: (summary_flag, asin, country) → (id, snapshot_date)
 
         for row in existing_rows:
-            key_n = (row.asin or "", row.account or "", row.country or "")
-            key_s = (row.summary_flag or "", row.asin or "")
-            # 同一产品取最新日期的那条（ORDER BY DESC 保证第一条就是最新的）
-            if key_n not in idx_normal:
-                idx_normal[key_n] = (row.id, row.snapshot_date)
-            if key_s not in idx_summary:
-                idx_summary[key_s] = (row.id, row.snapshot_date)
+            sf = row.summary_flag or ""
+            if sf == "是":
+                # 汇总行只进 idx_summary，用 (summary_flag, asin, country) 三元组做唯一键
+                key_s = (sf, row.asin or "", row.country or "")
+                if key_s not in idx_summary:
+                    idx_summary[key_s] = (row.id, row.snapshot_date)
+            else:
+                key_n = (row.asin or "", row.account or "", row.country or "")
+                if key_n not in idx_normal:
+                    idx_normal[key_n] = (row.id, row.snapshot_date)
 
         _log(f"现有数据索引加载完成: {len(existing_rows)} 条原始, {len(idx_normal)} 个独立产品")
         
@@ -184,7 +188,7 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
                 row_country = str(row.get("country", ""))
                 
                 if row_summary_flag == "是":
-                    match_key = (row_summary_flag, row_asin)
+                    match_key = (row_summary_flag, row_asin, row_country)
                     existing = idx_summary.get(match_key)
                 else:
                     match_key = (row_asin, row_account, row_country)
@@ -208,7 +212,7 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
                         else:
                             safe = str(val).replace("'", "''")
                             set_parts.append(f"{col}='{safe}'")
-                    update_batch.append(f"UPDATE inventory_snapshots SET deleted_at=NULL,{','.join(set_parts)} WHERE id={existing_id}")
+                    update_batch.append(f"UPDATE inventory_snapshots SET deleted_at=NULL,updated_at=NOW(),{','.join(set_parts)} WHERE id={existing_id}")
                     batch_ids.append(existing_id)
                     updated_count += 1
                 else:
@@ -238,16 +242,17 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
             # 执行 INSERT 并获取 id
             if insert_batch:
                 sql = f"INSERT INTO inventory_snapshots ({','.join(columns)}) VALUES {','.join(insert_batch)}"
-                db.execute(text(sql))
+                result_obj = db.execute(text(sql))
+                first_id = result_obj.lastrowid
                 db.commit()
-                # 获取最后一批 INSERT 的 id
-                result = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
-                if result:
-                    last_id = result
-                    for j in range(len(batch_ids) - 1, -1, -1):
+                # lastrowid 是该 INSERT 产生的第一个自增 id，后续连续递增
+                # batch_ids 中 None 的出现顺序与 INSERT VALUES 顺序一致（从前往后）
+                if first_id:
+                    cur_id = first_id
+                    for j in range(len(batch_ids)):
                         if batch_ids[j] is None:
-                            batch_ids[j] = last_id
-                            last_id -= 1
+                            batch_ids[j] = cur_id
+                            cur_id += 1
             
             snapshot_ids.extend(batch_ids)
             
@@ -304,8 +309,14 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         
         # ========== 步骤6: 导入在途详情 (UPSERT) ==========
         if inbound_records:
+            # 防御性过滤：跳过 snapshot_id 为 None 的记录（避免 SQL "Unknown column 'None'"）
+            _before = len(inbound_records)
+            inbound_records = [r for r in inbound_records if r.get('snapshot_id') is not None]
+            if len(inbound_records) < _before:
+                _log(f"过滤掉 snapshot_id 为 None 的在途记录: {_before - len(inbound_records)} 条")
+
             _log(f"开始 UPSERT inbound_shipment_details ({len(inbound_records)} 条)...")
-            
+
             # 加载当前批次涉及的在途详情现有记录（含软删），建立索引
             all_sids = set(r['snapshot_id'] for r in inbound_records)
             ids_str = ",".join(str(sid) for sid in all_sids)
@@ -450,11 +461,19 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         
         # ========== 步骤7: 孤儿清理（软删除） ==========
         _log("孤儿清理...")
-        orphan_ids = []
-        imported_normal_keys = {(str(r.get("asin","")), str(r.get("account","")), str(r.get("country",""))) for _, r in df.iterrows()}
+        orphan_ids = set()
+        imported_normal_keys = {(str(r.get("asin","")), str(r.get("account","")), str(r.get("country","")))
+                                for _, r in df.iterrows() if str(r.get("summary_flag","")) != "是"}
+        imported_summary_keys = {("是", str(r.get("asin","")), str(r.get("country","")))
+                                 for _, r in df.iterrows() if str(r.get("summary_flag","")) == "是"}
+        # 普通行：DB 有但 Excel 没有 → 孤儿
         for key, val in idx_normal.items():
             if key not in imported_normal_keys:
-                orphan_ids.append(val[0])  # val 是 (id, snapshot_date)，取 id
+                orphan_ids.add(val[0])
+        # 汇总行：DB 有但 Excel 没有 → 孤儿
+        for key, val in idx_summary.items():
+            if key not in imported_summary_keys:
+                orphan_ids.add(val[0])
 
         if orphan_ids:
             ids_str = ",".join(str(i) for i in orphan_ids)
@@ -468,12 +487,41 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         _import_status["progress"] = 72
         
         # ========== 步骤8: 计算补货决策（UPSERT） ==========
-        _log("计算补货决策 replenishment_decisions (UPSERT)...")
-        calc_result = _calculate_replenishment_fast(db, df, snapshot_ids, today)
+        # 注意：必须调用 calculate_replenishment（非 _calculate_replenishment_fast），
+        # 因为前者会重新查库 + 重算日均销量 + 回写 daily_sales，保证与手动点击"重新计算"结果一致。
+        # 直接用 _calculate_replenishment_fast 会导致 daily_sales 不准、全绿无补货建议。
+        _log("计算补货决策 replenishment_decisions (重算日均销量 + UPSERT)...")
+        from services.inventory_service import calculate_replenishment
+
+        # 适配进度回调：将计算进度映射到 80-100 区间
+        def _calc_progress(phase: str, current: int, total: int):
+            pct = min(int(current / total * 100) if total > 0 else 0, 100)
+            _import_status["progress"] = 80 + int(pct * 0.2)
+            _import_status["step"] = f"补货计算: {phase}({pct}%)"
+
+        calc_result = calculate_replenishment(
+            db,
+            snapshot_date=today.isoformat(),
+            snapshot_ids=None,  # 不限制 snapshot_ids，计算当天全部快照
+            progress_callback=_calc_progress
+        )
         _import_status["replen_count"] = calc_result.get("total", 0)
         _log(f"replenishment_decisions 计算完成: {calc_result}")
+        _import_status["progress"] = 95
+
+        # ========== 步骤9: 触发FBA同步在途 ==========
+        _log("触发FBA同步在途...")
+        try:
+            from services.feishu_sync_service import start_sync_async as start_feishu_sync
+            sync_result = start_feishu_sync()
+            if sync_result.get("started"):
+                _log(f"FBA同步在途已启动: {sync_result.get('message', '')}")
+            else:
+                _log(f"FBA同步在途未启动: {sync_result.get('message', '')}")
+        except Exception as sync_e:
+            _log(f"FBA同步在途触发失败（不影响导入结果）: {sync_e}")
         _import_status["progress"] = 100
-        
+
         # ========== 完成 ==========
         total_time = time.time() - _t_start
         _log(f"全部完成! 总耗时 {total_time:.1f}s")

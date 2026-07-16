@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, Boolean
 from models.base import BaseModel
 
 
@@ -90,6 +90,11 @@ class InventorySnapshot(BaseModel):
     age_12_plus = Column(Float, comment="12个月以上库龄")
     gross_margin = Column(Float, comment="毛利率参考")
 
+    # 节日产品标记（存储节日类型：""/"圣诞"/"万圣"/"跨年"/"其他"）
+    is_holiday = Column(String(20), default="", comment="节日类型")
+    # 停售产品标记
+    is_discontinued = Column(Boolean, default=False, comment="停售产品标记")
+
 
 class InboundShipmentDetail(BaseModel):
     """在途货件详情表"""
@@ -138,3 +143,7 @@ class ReplenishmentDecision(BaseModel):
     stockout_date_calc = Column(String(20), comment="断货时间（计算得出）")
     risk_level = Column(String(10), comment="风险等级: 红/黄/绿")
     reason = Column(String(1000), comment="补货建议原因说明")
+
+    # 产品状态标记（与 inventory_snapshots 同步）
+    is_holiday = Column(String(20), default="", comment="节日类型")
+    is_discontinued = Column(Boolean, default=False, comment="停售产品标记")

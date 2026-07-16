@@ -138,10 +138,20 @@ def parse_record(item: dict, cutoff_timestamp: int) -> Optional[dict]:
         except:
             pass
     
+    # 发货日期
+    ship_date_timestamp = fields.get("发货日期")
+    ship_date = None
+    if ship_date_timestamp:
+        try:
+            ship_date = datetime.fromtimestamp(ship_date_timestamp / 1000).date()
+        except:
+            pass
+    
     return {
         "shipment_id": str(shipment_id),
         "transport_method": str(transport_method) if transport_method else "",
-        "estimated_arrival_date": estimated_date
+        "estimated_arrival_date": estimated_date,
+        "ship_date": ship_date
     }
 
 
@@ -192,22 +202,26 @@ def _do_sync():
             
             transport_cases = []
             eta_cases = []
+            ship_date_cases = []
             shipment_ids = []
             
             for item in batch:
                 sid = item["shipment_id"].replace("'", "''")
                 tm = item["transport_method"].replace("'", "''")
                 eta = f"'{item['estimated_arrival_date']}'" if item["estimated_arrival_date"] else "NULL"
+                sd = f"'{item['ship_date']}'" if item.get("ship_date") else "NULL"
                 
                 shipment_ids.append(f"'{sid}'")
                 transport_cases.append(f"WHEN '{sid}' THEN '{tm}'")
                 eta_cases.append(f"WHEN '{sid}' THEN {eta}")
+                ship_date_cases.append(f"WHEN '{sid}' THEN {sd}")
             
             sql = f"""
                 UPDATE inbound_shipment_details
                 SET 
                     transport_method = CASE shipment_id {chr(10).join(transport_cases)} END,
                     estimated_arrival_date = CASE shipment_id {chr(10).join(eta_cases)} END,
+                    ship_date = CASE shipment_id {chr(10).join(ship_date_cases)} END,
                     updated_at = NOW()
                 WHERE shipment_id IN ({','.join(shipment_ids)}) AND deleted_at IS NULL
             """
