@@ -331,17 +331,12 @@ async def create_user_for_tenant(
         
         # 获取角色信息
         role_id = user_data.role_id
-        role_code = None
-        if role_id:
-            role_result = db.execute(text("SELECT code FROM roles WHERE id = :role_id AND tenant_id = :tid AND deleted_at IS NULL"), {"role_id": role_id, "tid": current_user.tenant_id}).fetchone()
-            if role_result:
-                role_code = role_result[0]
         
         # 默认密码123456
         default_password = "123456"
         hashed_password = get_password_hash(default_password)
         
-        # 创建用户，使用当前用户的租户，只写入 role_id，不写入 role
+        # 创建用户，只写入 role_id
         insert_sql = text("""
             INSERT INTO users (tenant_id, username, email, password_hash, nickname, role_id)
             VALUES (:tenant_id, :username, :email, :password_hash, :nickname, :role_id)

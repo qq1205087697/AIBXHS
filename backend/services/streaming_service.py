@@ -2,10 +2,11 @@ import json
 import asyncio
 import threading
 from typing import AsyncGenerator, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from queue import Queue, Empty
 from openai import OpenAI
 from sqlalchemy.orm import Session
+from database.database import SessionLocal
 from config import get_settings
 from services.chat_service import (
     query_inventory_status, query_negative_reviews,
@@ -14,6 +15,7 @@ from services.chat_service import (
     create_purchase_order, create_inbound_order
 )
 from models.user import User
+from services.ai_concurrency import ai_call_slot
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,187 @@ class StreamingService:
             max_retries=3,
             timeout=120.0,
         ) if settings.OPENAI_API_KEY else None
+
+    def stream_chat_response_lightweight(
+        self,
+        user_id: int,
+        session_id: str,
+        user_message: str,
+        chat_type: str = "review",
+        history: list = None
+    ):
+        """
+        轻量级流式聊天响应 - 按需创建 DB 连接，用完即释放
+        不持有长连接，每次 DB 操作独立创建 session
+
+        Yields:
+            SSE格式的数据字符串
+        """
+        if not self.client:
+            yield self._format_sse("error", "OpenAI API Key 未配置")
+            return
+
+        try:
+            # 根据类型选择系统提示词
+            system_prompt = self._get_system_prompt(chat_type)
+
+            # 构建消息列表
+            messages = [{"role": "system", "content": system_prompt}]
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": user_message})
+
+            # 获取工具定义
+            tools = self._get_tools(chat_type)
+
+            if tools:
+                try:
+                    with ai_call_slot():
+                        tool_response = self.client.chat.completions.create(
+                        model=settings.OPENAI_MODEL,
+                        messages=messages,
+                        tools=tools,
+                        tool_choice="auto",
+                        timeout=120
+                    )
+
+                    assistant_message = tool_response.choices[0].message
+
+                    if assistant_message.tool_calls:
+                        for chunk in self._handle_tool_calls_lightweight(
+                            user_id, session_id, user_message,
+                            messages, assistant_message, chat_type
+                        ):
+                            yield chunk
+                        return
+                except Exception as e:
+                    logger.error(f"工具调用失败: {e}")
+                    if "429" in str(e) or "Connection error" in str(e):
+                        logger.info("工具调用因限流/连接失败，降级为普通流式回复")
+                    else:
+                        yield self._format_sse("error", f"处理请求失败: {str(e)}")
+                        return
+
+            # 直接流式生成回复
+            for chunk in self._generate_streaming_response_lightweight(
+                user_id, session_id, messages, chat_type
+            ):
+                yield chunk
+
+        except Exception as e:
+            logger.error(f"流式响应错误: {e}")
+            yield self._format_sse("error", str(e))
+
+    def _generate_streaming_response_lightweight(
+        self,
+        user_id: int,
+        session_id: str,
+        messages: list,
+        chat_type: str
+    ):
+        """轻量级流式生成 - 保存消息时临时创建 DB 连接"""
+        try:
+            yield self._format_sse("start", "")
+
+            with ai_call_slot():
+                stream = self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=messages,
+                stream=True,
+                temperature=0.7,
+                timeout=300
+            )
+
+            full_content = ""
+
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_content += content
+                    yield self._format_sse("content", content)
+
+            # 保存完整回复（短连接）
+            if full_content:
+                db = SessionLocal()
+                try:
+                    save_message(db, user_id, session_id, "assistant", full_content, chat_type=chat_type)
+                finally:
+                    db.close()
+
+            yield self._format_sse("done", "", {"session_id": session_id})
+
+        except Exception as e:
+            logger.error(f"流式生成错误: {e}")
+            yield self._format_sse("error", f"生成回复失败: {str(e)}")
+
+    def _handle_tool_calls_lightweight(
+        self,
+        user_id: int,
+        session_id: str,
+        user_message: str,
+        messages: list,
+        assistant_message,
+        chat_type: str
+    ):
+        """轻量级工具调用处理 - 每次操作独立 DB 连接"""
+        # 获取用户信息
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+            tenant_id = user.tenant_id if user else 0
+        finally:
+            db.close()
+
+        for tool_call in assistant_message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+
+            yield self._format_sse("thinking", "正在分析您的问题...")
+
+            # 执行工具调用（每次操作独立 DB 连接）
+            db = SessionLocal()
+            try:
+                if function_name == "query_inventory_status":
+                    result = self._execute_inventory_query(db, arguments, tenant_id)
+                elif function_name == "parse_date_range":
+                    result = self._execute_review_query(db, arguments, tenant_id)
+                elif function_name == "query_reviews":
+                    result = self._execute_unified_review_query(db, arguments, tenant_id)
+                elif function_name == "find_product":
+                    result = self._execute_find_product(db, arguments, tenant_id)
+                elif function_name == "create_purchase_order":
+                    result = self._execute_create_purchase_order(db, arguments, tenant_id, user_id)
+                elif function_name == "create_inbound_order":
+                    result = self._execute_create_inbound_order(db, arguments, tenant_id, user_id)
+                else:
+                    result = {"error": "未知工具"}
+            finally:
+                db.close()
+
+            yield self._format_sse("thinking", f"查询完成，正在生成回复...")
+
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": function_name,
+                        "arguments": tool_call.function.arguments
+                    }
+                }]
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result, ensure_ascii=False)
+            })
+
+            for chunk in self._generate_streaming_response_lightweight(
+                user_id, session_id, messages, chat_type
+            ):
+                yield chunk
 
     def stream_chat_response(
         self,
@@ -70,7 +253,8 @@ class StreamingService:
             if tools:
                 # 首先进行工具调用判断（非流式）
                 try:
-                    tool_response = self.client.chat.completions.create(
+                    with ai_call_slot():
+                        tool_response = self.client.chat.completions.create(
                         model=settings.OPENAI_MODEL,
                         messages=messages,
                         tools=tools,
@@ -121,7 +305,8 @@ class StreamingService:
             yield self._format_sse("start", "")
 
             # 创建流式请求
-            stream = self.client.chat.completions.create(
+            with ai_call_slot():
+                stream = self.client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=messages,
                 stream=True,
@@ -212,20 +397,20 @@ class StreamingService:
             ):
                 yield chunk
 
-    def _execute_inventory_query(self, db: Session, arguments: dict) -> dict:
+    def _execute_inventory_query(self, db: Session, arguments: dict, tenant_id: int) -> dict:
         """执行库存查询"""
         query_type = arguments.get("query_type", "all")
         risk_level = arguments.get("risk_level")
         limit = arguments.get("limit", 10)
 
         try:
-            items = query_inventory_status(db, query_type, risk_level, limit)
+            items = query_inventory_status(db, tenant_id, query_type, risk_level, limit)
             return {"items": items, "count": len(items)}
         except Exception as e:
             logger.error(f"库存查询失败: {e}")
             return {"error": str(e), "items": [], "count": 0}
 
-    def _execute_review_query(self, db: Session, arguments: dict) -> dict:
+    def _execute_review_query(self, db: Session, arguments: dict, tenant_id: int) -> dict:
         """执行差评查询"""
         start_date = arguments.get("start_date")
         end_date = arguments.get("end_date")
@@ -235,7 +420,7 @@ class StreamingService:
             start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
         try:
-            reviews = query_negative_reviews(db, start_date, end_date)
+            reviews = query_negative_reviews(db, tenant_id, start_date, end_date)
 
             # 自动分析评论
             analyzed_reviews = []
@@ -255,7 +440,7 @@ class StreamingService:
             logger.error(f"差评查询失败: {e}")
             return {"error": str(e), "reviews": [], "count": 0}
 
-    def _execute_unified_review_query(self, db: Session, arguments: dict) -> dict:
+    def _execute_unified_review_query(self, db: Session, arguments: dict, tenant_id: int) -> dict:
         """执行统一模式的差评查询"""
         start_date = arguments.get("start_date")
         end_date = arguments.get("end_date")
@@ -266,7 +451,7 @@ class StreamingService:
             start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
         try:
-            reviews = query_negative_reviews(db, start_date, end_date, asin)
+            reviews = query_negative_reviews(db, tenant_id, start_date, end_date, asin)
 
             analyzed_reviews = []
             for review in reviews[:10]:

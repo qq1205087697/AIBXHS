@@ -7,6 +7,8 @@ import threading
 
 from database.database import get_db, SessionLocal
 from models.business_settings import BusinessSettings
+from dependencies import get_current_user, PermissionChecker
+from models.user import User
 
 router = APIRouter(prefix="/api/business-settings", tags=["业务设置"])
 
@@ -53,10 +55,11 @@ async def test_route():
 
 
 @router.get("/{setting_type}", response_model=BusinessSettingResponse)
-async def get_setting(setting_type: str, db: Session = Depends(get_db)):
+async def get_setting(setting_type: str, db: Session = Depends(get_db), current_user: User = Depends(PermissionChecker("robot:inventory:settings"))):
     """获取业务设置"""
     setting = db.query(BusinessSettings).filter(
-        BusinessSettings.setting_type == setting_type
+        BusinessSettings.setting_type == setting_type,
+        BusinessSettings.tenant_id == current_user.tenant_id
     ).first()
 
     if not setting:
@@ -79,9 +82,9 @@ async def get_setting(setting_type: str, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=List[BusinessSettingResponse])
-async def list_settings(db: Session = Depends(get_db)):
+async def list_settings(db: Session = Depends(get_db), current_user: User = Depends(PermissionChecker("robot:inventory:settings"))):
     """获取所有业务设置"""
-    settings = db.query(BusinessSettings).all()
+    settings = db.query(BusinessSettings).filter(BusinessSettings.tenant_id == current_user.tenant_id).all()
 
     result = []
     for s in settings:
@@ -111,7 +114,7 @@ _recalculate_lock = threading.Lock()
 _recalculate_status = {"running": False, "message": ""}
 
 
-def _trigger_recalculation_background(setting_type: str):
+def _trigger_recalculation_background(setting_type: str, tenant_id: int):
     """后台线程触发重新计算"""
     global _recalculate_status
 
@@ -132,7 +135,7 @@ def _trigger_recalculation_background(setting_type: str):
         db = SessionLocal()
         try:
             from services.inventory_service import calculate_replenishment
-            calc_result = calculate_replenishment(db)
+            calc_result = calculate_replenishment(db, tenant_id=tenant_id)
             _recalculate_status["message"] = f"重新计算完成: {calc_result}"
             print(f"[INFO] 后台重新计算完成: {calc_result}")
         finally:
@@ -157,10 +160,12 @@ async def update_setting(
     request: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("robot:inventory:settings"))
 ):
     """更新业务设置"""
     setting = db.query(BusinessSettings).filter(
-        BusinessSettings.setting_type == setting_type
+        BusinessSettings.setting_type == setting_type,
+        BusinessSettings.tenant_id == current_user.tenant_id
     ).first()
 
     formula_config = request.get("formula_config")
@@ -172,7 +177,7 @@ async def update_setting(
         setting.is_active = is_active
     else:
         setting = BusinessSettings(
-            tenant_id=1,
+            tenant_id=current_user.tenant_id,
             setting_type=setting_type,
             setting_name="日均销量公式" if setting_type == "daily_sales" else setting_type,
             formula_config=json.dumps(formula_config, ensure_ascii=False) if formula_config else json.dumps(DEFAULT_DAILY_SALES_CONFIG.model_dump(), ensure_ascii=False),
@@ -186,7 +191,7 @@ async def update_setting(
     # 在后台触发重新计算
     recalculate_triggered = False
     if setting_type == "daily_sales":
-        background_tasks.add_task(_trigger_recalculation_background, setting_type)
+        background_tasks.add_task(_trigger_recalculation_background, setting_type, current_user.tenant_id)
         recalculate_triggered = True
 
     result = BusinessSettingResponse(
@@ -206,11 +211,13 @@ async def update_setting(
 async def reset_setting(
     setting_type: str,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("robot:inventory:settings"))
 ):
     """重置为默认配置"""
     setting = db.query(BusinessSettings).filter(
-        BusinessSettings.setting_type == setting_type
+        BusinessSettings.setting_type == setting_type,
+        BusinessSettings.tenant_id == current_user.tenant_id
     ).first()
 
     default_json = DEFAULT_DAILY_SALES_CONFIG.model_dump_json(ensure_ascii=False)
@@ -221,7 +228,7 @@ async def reset_setting(
         db.refresh(setting)
     else:
         setting = BusinessSettings(
-            tenant_id=1,
+            tenant_id=current_user.tenant_id,
             setting_type=setting_type,
             setting_name="日均销量公式" if setting_type == "daily_sales" else setting_type,
             formula_config=default_json,
@@ -234,7 +241,7 @@ async def reset_setting(
     # 在后台触发重新计算
     recalculate_triggered = False
     if setting_type == "daily_sales":
-        background_tasks.add_task(_trigger_recalculation_background, setting_type)
+        background_tasks.add_task(_trigger_recalculation_background, setting_type, current_user.tenant_id)
         recalculate_triggered = True
 
     result = BusinessSettingResponse(

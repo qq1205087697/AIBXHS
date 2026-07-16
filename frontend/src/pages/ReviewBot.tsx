@@ -544,7 +544,12 @@ const ReviewBot: React.FC = () => {
                       <span style={{ fontWeight: 'bold', color: '#000', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {item.title || item.originalText?.substring(0, 50) + (item.originalText?.length > 50 ? '...' : '')}
                       </span>
-                      <span style={{ color: '#666', fontSize: '13px' }}>({item.productName} · ASIN: {item.asin})</span>
+                      <span style={{ color: '#666', fontSize: '13px' }}>
+                        {item.productName === item.asin
+                          ? `(ASIN: ${item.asin})`
+                          : `(${item.productName} · ASIN: ${item.asin})`
+                        }
+                      </span>
                       {/* 显示退货率标签 */}
                       {(() => {
                         const rate = item.returnRate;

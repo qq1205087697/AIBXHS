@@ -862,10 +862,13 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
     }
 
 
-def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids: list = None, progress_callback=None) -> dict:
+def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids: list = None, progress_callback=None, tenant_id: int = None) -> dict:
     """公开API：计算补货决策"""
     # 查找最新快照日期
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest_q = db.query(func.max(InventorySnapshot.snapshot_date))
+    if tenant_id is not None:
+        latest_q = latest_q.filter(InventorySnapshot.tenant_id == tenant_id)
+    latest = latest_q.scalar()
 
     if snapshot_date:
         target_date = datetime.strptime(snapshot_date, "%Y-%m-%d").date()
@@ -879,6 +882,8 @@ def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids
         InventorySnapshot.snapshot_date == target_date,
         InventorySnapshot.deleted_at.is_(None)
     ]
+    if tenant_id is not None:
+        base_filter.append(InventorySnapshot.tenant_id == tenant_id)
     if snapshot_ids:
         base_filter.append(InventorySnapshot.id.in_(snapshot_ids))
     snapshots = db.query(InventorySnapshot).filter(*base_filter).all()
@@ -969,15 +974,16 @@ def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids
     return _calculate_replenishment_fast(db, df, snapshot_ids, target_date, progress_callback=progress_callback)
 
 
-def get_inventory_overview(db: Session, user_id: int = None, user_role: str = None) -> dict:
+def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> dict:
     """获取库存概览"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
                 "snapshot_date": None, "stockout_top10": [], "overstock_top10": []}
 
     # 构建基础查询（排除共享库存、节日产品和停售产品）
     base_query = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None)),
@@ -990,29 +996,23 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
     # 用户数据隔离
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-            if user_stores:
-                store_conditions = _build_account_filter(user_stores)
-                base_query = base_query.filter(or_(*store_conditions)) if store_conditions else base_query
-            else:
-                return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
-                        "snapshot_date": latest.isoformat(), "stockout_top10": [], "overstock_top10": []}
+        user_stores = [s[0] for s in user_store_rows]
+        if user_stores:
+            store_conditions = _build_account_filter(user_stores)
+            base_query = base_query.filter(or_(*store_conditions)) if store_conditions else base_query
         else:
             return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
                     "snapshot_date": latest.isoformat(), "stockout_top10": [], "overstock_top10": []}
@@ -1031,6 +1031,8 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
         ReplenishmentDecision,
         and_(
             ReplenishmentDecision.snapshot_id == InventorySnapshot.id,
+            ReplenishmentDecision.tenant_id == tenant_id,
+            ReplenishmentDecision.snapshot_date == latest,
             ReplenishmentDecision.deleted_at.is_(None),
         )
     ).filter(
@@ -1045,6 +1047,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
     # TOP10
     stockout_ids = db.query(ReplenishmentDecision.snapshot_id).filter(
+        ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
         ReplenishmentDecision.snapshot_id.in_(valid_snap_ids_subquery),
@@ -1053,8 +1056,8 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
     stockout_items = []
     if snap_ids:
-        snaps = {s.id: s for s in db.query(InventorySnapshot).filter(InventorySnapshot.id.in_(snap_ids), InventorySnapshot.deleted_at.is_(None)).all()}
-        decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(ReplenishmentDecision.snapshot_id.in_(snap_ids), ReplenishmentDecision.deleted_at.is_(None)).all()}
+        snaps = {s.id: s for s in db.query(InventorySnapshot).filter(InventorySnapshot.tenant_id == tenant_id, InventorySnapshot.id.in_(snap_ids), InventorySnapshot.deleted_at.is_(None)).all()}
+        decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(ReplenishmentDecision.tenant_id == tenant_id, ReplenishmentDecision.snapshot_id.in_(snap_ids), ReplenishmentDecision.deleted_at.is_(None)).all()}
         for sid in snap_ids:
             if sid in snaps and sid in decs:
                 s, d = snaps[sid], decs[sid]
@@ -1071,6 +1074,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
 
     overstock_top10 = []
     overstock_snaps = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         InventorySnapshot.id.in_(valid_snap_ids_subquery),
@@ -1094,7 +1098,7 @@ def get_inventory_overview(db: Session, user_id: int = None, user_role: str = No
     }
 
 
-def search_inventory(db: Session, keyword: str = None, risk_level=None,
+def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_level=None,
                      replenishment_status: str = None, account: str = None,
                      country: str = None, holiday_filter: str = None,
                      sort_field: str = None, sort_order: str = None,
@@ -1105,29 +1109,25 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     user_stores = None
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            # 使用原生 SQL 查询避免模型导入问题
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-        else:
-            # 用户不属于任何部门，返回空
+        user_stores = [s[0] for s in user_store_rows]
+        if not user_stores:
+            # 用户没有被分配任何店铺，返回空
             return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
@@ -1136,6 +1136,7 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     #    - 子行（summary_flag='共享库存'）只显示"孤儿子行"——即 ASIN 没有对应父汇总行（summary_flag='是'）的子行
     #      有父汇总行的子行通过父行展开按钮加载（get_summary_children API），主列表不重复显示
     valid_snapshot_query = db.query(InventorySnapshot.id).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         or_(
@@ -1257,8 +1258,10 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     query = db.query(InventorySnapshot, ReplenishmentDecision).outerjoin(
         ReplenishmentDecision,
         (ReplenishmentDecision.snapshot_id == InventorySnapshot.id) &
-        (ReplenishmentDecision.snapshot_date == latest)
+        (ReplenishmentDecision.snapshot_date == latest) &
+        (ReplenishmentDecision.tenant_id == tenant_id)
     ).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.id.in_(valid_snapshot_subquery),
         InventorySnapshot.deleted_at.is_(None)
     )
@@ -1346,6 +1349,7 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
             InventorySnapshot.asin,
             func.coalesce(func.sum(InventorySnapshot.local_inventory), 0)
         ).filter(
+            InventorySnapshot.tenant_id == tenant_id,
             InventorySnapshot.snapshot_date == latest,
             InventorySnapshot.deleted_at.is_(None),
             InventorySnapshot.asin.in_(summary_asins),
@@ -1361,45 +1365,53 @@ def search_inventory(db: Session, keyword: str = None, risk_level=None,
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) -> list:
+def get_stockout_top10(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> list:
     """断货风险TOP10"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     # 用户数据隔离：先计算可见的 snapshot_ids
     visible_snap_ids = None
+    # 构建基础查询
+    base_filter = [
+        ReplenishmentDecision.tenant_id == tenant_id,
+        ReplenishmentDecision.snapshot_date == latest,
+        ReplenishmentDecision.deleted_at.is_(None),
+        (ReplenishmentDecision.summary_flag != "共享库存") | (ReplenishmentDecision.summary_flag.is_(None))
+    ]
+
+    # 用户数据隔离
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
-        ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if not dept_ids:
-            return []
-        store_rows = db.execute(
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
             sql_text("""
-                SELECT inventory_name FROM stores
-                WHERE department_id IN :dept_ids
-                AND status = 'active'
-                AND inventory_name IS NOT NULL
-                AND inventory_name != ''
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
             """),
-            {"dept_ids": tuple(dept_ids)}
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        user_stores = [s[0] for s in store_rows]
+        user_stores = [s[0] for s in user_store_rows]
         if not user_stores:
             return []
         # 获取可见的 snapshot_ids
         snap_store_conditions = _build_account_filter(user_stores)
-        visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
-            InventorySnapshot.snapshot_date == latest,
-            InventorySnapshot.deleted_at.is_(None),
-            or_(*snap_store_conditions)
-        ).all()] if snap_store_conditions else []
-        if not visible_snap_ids:
-            return []
+        if snap_store_conditions:
+            visible_snap_ids = [s.id for s in db.query(InventorySnapshot.id).filter(
+                InventorySnapshot.tenant_id == tenant_id,
+                InventorySnapshot.snapshot_date == latest,
+                InventorySnapshot.deleted_at.is_(None),
+                or_(*snap_store_conditions)
+            ).all()]
+            if not visible_snap_ids:
+                return []
+            base_filter.append(ReplenishmentDecision.snapshot_id.in_(visible_snap_ids))
 
     # 单条 JOIN 查询合并原 3 次查询（snapshot_id 查询 + snaps 查询 + decs 查询）
     join_query = db.query(InventorySnapshot, ReplenishmentDecision).join(
@@ -1442,13 +1454,14 @@ def get_stockout_top10(db: Session, user_id: int = None, user_role: str = None) 
     return result
 
 
-def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None) -> list:
+def get_overstock_top10(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> list:
     """冗余库存TOP10"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     base_query = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None)),
@@ -1460,30 +1473,25 @@ def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None)
     # 用户数据隔离
     if user_id and user_role and user_role != "admin":
         from sqlalchemy import text as sql_text
-        dept_rows = db.execute(
-            sql_text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-            {"uid": user_id}
+        # 直接通过 user_stores 表获取用户被分配的店铺
+        user_store_rows = db.execute(
+            sql_text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
         ).fetchall()
-        dept_ids = [d[0] for d in dept_rows if d[0]]
-        if dept_ids:
-            store_rows = db.execute(
-                sql_text("""
-                    SELECT inventory_name FROM stores
-                    WHERE department_id IN :dept_ids
-                    AND status = 'active'
-                    AND inventory_name IS NOT NULL
-                    AND inventory_name != ''
-                """),
-                {"dept_ids": tuple(dept_ids)}
-            ).fetchall()
-            user_stores = [s[0] for s in store_rows]
-            if not user_stores:
-                return []
-            store_conditions = _build_account_filter(user_stores)
-            if store_conditions:
-                base_query = base_query.filter(or_(*store_conditions))
-        else:
+        user_stores = [s[0] for s in user_store_rows]
+        if not user_stores:
             return []
+        store_conditions = _build_account_filter(user_stores)
+        if store_conditions:
+            base_query = base_query.filter(or_(*store_conditions))
 
     items = base_query.order_by(InventorySnapshot.age_12_plus.desc()).limit(10).all()
 
@@ -1495,13 +1503,14 @@ def get_overstock_top10(db: Session, user_id: int = None, user_role: str = None)
     } for s in items]
 
 
-def get_inbound_details(db: Session, asin: str, account: str = None) -> list:
+def get_inbound_details(db: Session, tenant_id: int, asin: str, account: str = None) -> list:
     """查询在途详情"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     query = db.query(InventorySnapshot.id).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest, InventorySnapshot.asin == asin,
         InventorySnapshot.deleted_at.is_(None)
     )
@@ -1513,6 +1522,7 @@ def get_inbound_details(db: Session, asin: str, account: str = None) -> list:
         return []
 
     details = db.query(InboundShipmentDetail).filter(
+        InboundShipmentDetail.tenant_id == tenant_id,
         InboundShipmentDetail.snapshot_id.in_(snapshot_ids),
         InboundShipmentDetail.deleted_at.is_(None)
     ).all()
@@ -1527,27 +1537,29 @@ def get_inbound_details(db: Session, asin: str, account: str = None) -> list:
     } for d in details]
 
 
-def get_latest_snapshot_date(db: Session) -> str:
+def get_latest_snapshot_date(db: Session, tenant_id: int) -> str:
     """获取最新快照日期"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     return latest.isoformat() if latest else None
 
 
-def get_summary_children(db: Session, asin: str, parent_account: str = None):
+def get_summary_children(db: Session, tenant_id: int, asin: str, parent_account: str = None):
     """获取汇总行的子行数据
 
     Args:
+        tenant_id: 租户ID
         asin: 父汇总行的 ASIN
         parent_account: 父汇总行的 account 字段（如 "LaVenty--US、LaVenty--MX、LaVenty-US-BR"）。
             传入时会按 account 集合过滤子行，避免同一 ASIN 有多个汇总行时子行串扰
             （例：B07WHGXBNB 同时有北美3国汇总行 + 欧洲9国汇总行，展开北美父行只应看到北美3国子行）。
             不传则返回该 ASIN 所有 summary_flag='共享库存' 的子行（向后兼容）。
     """
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).scalar()
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return []
 
     query = db.query(InventorySnapshot).filter(
+        InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
         InventorySnapshot.asin == asin,

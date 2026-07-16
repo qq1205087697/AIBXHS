@@ -104,6 +104,11 @@ async def get_products(
     product_type: Optional[List[str]] = Query(None),
     product_attribute: Optional[str] = None,
     status: Optional[str] = None,
+    hide_zero_stock: Optional[bool] = Query(False, description="隐藏库存为0的产品"),
+    advanced_filters: Optional[str] = Query(None, description="高级筛选条件JSON"),
+    sort_by: Optional[str] = Query(None, description="排序字段，如id, created_at, name"),
+    sort_order: Optional[str] = Query(None, description="排序方向，asc或desc"),
+    exclude_finished_with_accessories: Optional[bool] = Query(False, description="过滤掉绑定了配件的成品(用于入库单产品选择)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -150,6 +155,122 @@ async def get_products(
             where_conditions.append("p.status = :status")
             params["status"] = status
 
+        if hide_zero_stock:
+            where_conditions.append("""
+                COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib
+                  WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id
+                  AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) > 0
+            """)
+        
+        # 过滤绑定了配件的成品(用于入库单产品选择)
+        # 注意：需要同时检查绑定记录和配件产品的删除状态
+        if exclude_finished_with_accessories:
+            where_conditions.append("""
+                p.id NOT IN (
+                    SELECT DISTINCT pb.finished_product_id 
+                    FROM product_bindings pb
+                    JOIN products acc ON acc.id = pb.accessory_product_id
+                    WHERE pb.deleted_at IS NULL AND acc.deleted_at IS NULL
+                )
+            """)
+
+        # 高级筛选条件
+        if advanced_filters:
+            import json
+            try:
+                adv = json.loads(advanced_filters)
+                conditions_list = adv.get("conditions", [])
+                match_mode = adv.get("match_mode", "all")
+                if conditions_list:
+                    adv_parts = []
+                    for i, cond in enumerate(conditions_list):
+                        field = cond.get("field", "")
+                        operator = cond.get("operator", "eq")
+                        value = cond.get("value", "")
+                        extra_value = cond.get("extra_value", "")  # 用于 store_group_stock 的店铺分组ID
+                        if not field or value == "":
+                            continue
+
+                        # 字段映射到SQL列/表达式
+                        field_sql_map = {
+                            "local_quantity": "COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0)",
+                            "store_group_stock": "COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.store_group_id = :store_group_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0)",
+                            "product_code": "p.product_code",
+                            "name": "p.name",
+                            "product_type": "p.product_type",
+                            "category": "p.category",
+                            "brand": "p.brand",
+                            "local_value": "(p.purchase_price * COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0))",
+                            "replenishment_quantity": "COALESCE((SELECT SUM(ri.quantity) FROM replenishment_items ri JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id WHERE ri.product_id = p.id AND ro.tenant_id = p.tenant_id AND ri.deleted_at IS NULL AND ro.deleted_at IS NULL AND ro.status IN ('pending','purchased')), 0)",
+                            "purchased_quantity": "COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0)",
+                            "platform_count": "(SELECT COUNT(*) FROM platform_products pp WHERE pp.product_id = p.id AND pp.deleted_at IS NULL)",
+                            "status": "p.status",
+                        }
+
+                        col_expr = field_sql_map.get(field, f"p.{field}")
+                        param_name = f"adv_{field}_{i}"
+
+                        # 特殊处理：store_group_stock 字段需要额外的 store_group_id 参数
+                        # 由于 SQL 中使用了固定的 :store_group_id 参数名，需要动态替换
+                        if field == "store_group_stock":
+                            if not extra_value:
+                                continue  # 如果没有选择店铺分组，跳过该条件
+                            group_param_name = f"store_group_id_{i}"
+                            # 替换 SQL 表达式中的参数名
+                            col_expr = col_expr.replace(":store_group_id", f":{group_param_name}")
+                            try:
+                                params[group_param_name] = int(extra_value)
+                            except ValueError:
+                                continue  # 如果不是有效的分组ID，跳过该条件
+
+                        # 操作符映射
+                        if operator == "eq":
+                            adv_parts.append(f"{col_expr} = :{param_name}")
+                            params[param_name] = value
+                        elif operator == "neq":
+                            adv_parts.append(f"{col_expr} <> :{param_name}")
+                            params[param_name] = value
+                        elif operator == "gt":
+                            try:
+                                params[param_name] = float(value)
+                                adv_parts.append(f"{col_expr} > :{param_name}")
+                            except ValueError:
+                                continue
+                        elif operator == "gte":
+                            try:
+                                params[param_name] = float(value)
+                                adv_parts.append(f"{col_expr} >= :{param_name}")
+                            except ValueError:
+                                continue
+                        elif operator == "lt":
+                            try:
+                                params[param_name] = float(value)
+                                adv_parts.append(f"{col_expr} < :{param_name}")
+                            except ValueError:
+                                continue
+                        elif operator == "lte":
+                            try:
+                                params[param_name] = float(value)
+                                adv_parts.append(f"{col_expr} <= :{param_name}")
+                            except ValueError:
+                                continue
+                        elif operator == "contains":
+                            adv_parts.append(f"{col_expr} LIKE :{param_name}")
+                            params[param_name] = f"%{value}%"
+                        elif operator == "not_contains":
+                            adv_parts.append(f"{col_expr} NOT LIKE :{param_name}")
+                            params[param_name] = f"%{value}%"
+
+                    if adv_parts:
+                        join_op = " AND " if match_mode == "all" else " OR "
+                        where_conditions.append(f"({join_op.join(adv_parts)})")
+            except json.JSONDecodeError as e:
+                print(f"解析高级筛选JSON失败: {e}")
+            except Exception as e:
+                print(f"处理高级筛选条件失败: {e}")
+                import traceback
+                traceback.print_exc()
+
         where_clause = " AND ".join(where_conditions)
 
         count_query = text(f"""
@@ -163,6 +284,26 @@ async def get_products(
         params["offset"] = offset
         params["limit"] = page_size
 
+        # 构建排序条件
+        order_by_clause = "ORDER BY p.created_at DESC"  # 默认排序
+        if sort_by:
+            # 允许的排序字段（防止SQL注入）
+            allowed_sort_fields = ['id', 'created_at', 'name', 'product_code', 'purchase_price', 'sale_price']
+            if sort_by in allowed_sort_fields:
+                order_direction = "ASC" if sort_order == "asc" else "DESC"
+                if sort_by == 'id':
+                    order_by_clause = f"ORDER BY p.id {order_direction}"
+                elif sort_by == 'created_at':
+                    order_by_clause = f"ORDER BY p.created_at {order_direction}"
+                elif sort_by == 'name':
+                    order_by_clause = f"ORDER BY p.name {order_direction}"
+                elif sort_by == 'product_code':
+                    order_by_clause = f"ORDER BY p.product_code {order_direction}"
+                elif sort_by == 'purchase_price':
+                    order_by_clause = f"ORDER BY p.purchase_price {order_direction} NULLS LAST"
+                elif sort_by == 'sale_price':
+                    order_by_clause = f"ORDER BY p.sale_price {order_direction} NULLS LAST"
+
         query = text(f"""
             SELECT p.id, p.product_code, p.name, p.name_en, p.product_type, p.product_attribute,
                    p.category, p.brand, p.purchase_price, p.sale_price,
@@ -170,10 +311,12 @@ async def get_products(
                    p.status, p.is_robot_monitored, p.created_at,
                    (SELECT COUNT(*) FROM platform_products pp WHERE pp.product_id = p.id AND pp.deleted_at IS NULL) as platform_count,
                    COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
-                   p.local_warehouse, p.local_inbound_date, p.local_stock_age
+                   p.local_warehouse, p.local_inbound_date, p.local_stock_age,
+                   COALESCE((SELECT SUM(ri.quantity) FROM replenishment_items ri JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id WHERE ri.product_id = p.id AND ro.tenant_id = p.tenant_id AND ri.deleted_at IS NULL AND ro.deleted_at IS NULL AND ro.status IN ('pending','purchased')), 0) as replenishment_quantity,
+                   COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity
             FROM products p
             WHERE {where_clause}
-            ORDER BY p.created_at DESC
+            {order_by_clause}
             LIMIT :limit OFFSET :offset
         """)
         result = db.execute(query, params)
@@ -215,6 +358,8 @@ async def get_products(
                 "local_inbound_date": row[21].strftime("%Y-%m-%d") if row[21] else "",
                 "local_stock_age": int(row[22]) if row[22] else None,
                 "local_value": float(local_value) if local_value is not None else None,
+                "replenishment_quantity": int(row[23]) if row[23] else 0,
+                "purchased_quantity": int(row[24]) if row[24] else 0,
             })
         return {
             "success": True,
@@ -602,6 +747,7 @@ def _process_preview_task(record_id, file_bytes, file_name, tenant_id):
             "products": products,
             "platform_products": platform_products,
             "file_name": file_name,
+            "total_count": total_count,
         }, ensure_ascii=False)
 
         # 更新记录：preview_status = success，预览数据 + 摘要 + 条数
@@ -1093,63 +1239,133 @@ def _process_import_task(record_id, products, platform_products, tenant_id, user
 
                 db.commit()
 
-        # ========== 3. 成品配件绑定关系（配件行填写绑定成品） ==========
+        # ========== 3. 成品配件绑定关系（配件行填写绑定成品） - 优化：批量处理 ==========
         binding_created = 0
         bind_errors = []
 
-        for item in products:
-            bind_info = item.get("bind_accessories")
-            if not bind_info or not isinstance(bind_info, list) or len(bind_info) == 0:
-                continue
+        if products:
+            # 3a. 收集所有需要绑定的成品编码（配件行中填写的成品编码）
+            all_finished_codes = set()
+            for item in products:
+                bind_info = item.get("bind_accessories")
+                if bind_info and isinstance(bind_info, list) and len(bind_info) > 0:
+                    for bind_item in bind_info:
+                        fin_code = bind_item.get("finished_code", "").strip()
+                        if fin_code:
+                            all_finished_codes.add(fin_code)
 
-            # 当前行是配件，绑定列填的是成品
-            accessory_code = item.get("product_code", "").strip()
-            accessory_id = product_code_to_id.get(accessory_code)
-            if not accessory_id:
-                continue
+            # 3b. 批量查询所有成品产品ID（包含本次导入和数据库中已存在的）
+            finished_code_to_id = {}
+            if all_finished_codes:
+                # 先从本次导入的product_code_to_id中查找
+                for fin_code in all_finished_codes:
+                    if fin_code in product_code_to_id:
+                        finished_code_to_id[fin_code] = product_code_to_id[fin_code]
 
-            for bind_item in bind_info:
-                fin_code = bind_item.get("finished_code", "").strip()
-                acc_qty = bind_item.get("quantity", 1)
-                if not fin_code:
+                # 再批量查询数据库中缺失的成品编码
+                missing_codes = [c for c in all_finished_codes if c not in finished_code_to_id]
+                if missing_codes:
+                    # 分批查询，避免一次性查询太多
+                    BATCH_SIZE = 500
+                    for start in range(0, len(missing_codes), BATCH_SIZE):
+                        batch_codes = tuple(missing_codes[start:start + BATCH_SIZE])
+                        if not batch_codes:
+                            continue
+                        rows = db.execute(
+                            text("SELECT product_code, id FROM products WHERE product_code IN :codes AND tenant_id = :tid AND deleted_at IS NULL"),
+                            {"codes": batch_codes, "tid": tenant_id}
+                        ).fetchall()
+                        for code, pid in rows:
+                            finished_code_to_id[code] = pid
+
+            # 3c. 批量查询现有的配件绑定关系
+            existing_bindings_map = {}  # (finished_id, accessory_id) -> binding_id
+            # 获取所有配件ID
+            all_accessory_ids = [product_code_to_id.get(item.get("product_code", "").strip()) for item in products if item.get("bind_accessories")]
+            all_accessory_ids = [aid for aid in all_accessory_ids if aid]  # 过滤掉None
+
+            if all_accessory_ids and finished_code_to_id:
+                # 分批查询现有绑定关系
+                BATCH_SIZE = 500
+                for start in range(0, len(all_accessory_ids), BATCH_SIZE):
+                    batch_ids = tuple(all_accessory_ids[start:start + BATCH_SIZE])
+                    if not batch_ids:
+                        continue
+                    rows = db.execute(
+                        text("SELECT finished_product_id, accessory_product_id, id FROM product_bindings WHERE accessory_product_id IN :ids AND deleted_at IS NULL"),
+                        {"ids": batch_ids}
+                    ).fetchall()
+                    for fid, aid, bid in rows:
+                        existing_bindings_map[(fid, aid)] = bid
+
+            # 3d. 批量构建绑定数据（避免逐条查询）
+            bindings_to_insert = []
+            bindings_to_update = []
+
+            for item in products:
+                bind_info = item.get("bind_accessories")
+                if not bind_info or not isinstance(bind_info, list) or len(bind_info) == 0:
                     continue
 
-                finished_id = product_code_to_id.get(fin_code)
-                if not finished_id:
-                    finished = db.execute(
-                        text("SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid AND deleted_at IS NULL"),
-                        {"code": fin_code, "tid": tenant_id}
-                    ).fetchone()
-                    if not finished:
+                accessory_code = item.get("product_code", "").strip()
+                accessory_id = product_code_to_id.get(accessory_code)
+                if not accessory_id:
+                    continue
+
+                for bind_item in bind_info:
+                    fin_code = bind_item.get("finished_code", "").strip()
+                    acc_qty = bind_item.get("quantity", 1)
+                    if not fin_code:
+                        continue
+
+                    finished_id = finished_code_to_id.get(fin_code)
+                    if not finished_id:
                         bind_errors.append(f"配件 '{accessory_code}' 绑定的成品 '{fin_code}' 不存在")
                         continue
-                    finished_id = finished[0]
 
-                if finished_id == accessory_id:
-                    bind_errors.append(f"产品 '{accessory_code}' 不能绑定自己")
-                    continue
+                    if finished_id == accessory_id:
+                        bind_errors.append(f"产品 '{accessory_code}' 不能绑定自己")
+                        continue
 
-                existing_binding = db.execute(
-                    text("SELECT id FROM product_bindings WHERE finished_product_id = :fid AND accessory_product_id = :aid AND deleted_at IS NULL"),
-                    {"fid": finished_id, "aid": accessory_id}
-                ).fetchone()
+                    key = (finished_id, accessory_id)
+                    existing_id = existing_bindings_map.get(key)
 
-                if existing_binding:
-                    db.execute(
-                        text("UPDATE product_bindings SET quantity = :qty, updated_at = :now WHERE id = :id"),
-                        {"qty": acc_qty, "now": datetime.now(), "id": existing_binding[0]}
-                    )
-                else:
-                    db.execute(
-                        text("""
-                            INSERT INTO product_bindings (finished_product_id, accessory_product_id, quantity, created_at, updated_at)
-                            VALUES (:fid, :aid, :qty, :now, :now)
-                        """),
-                        {"fid": finished_id, "aid": accessory_id, "qty": acc_qty, "now": datetime.now()}
-                    )
-                binding_created += 1
+                    if existing_id:
+                        bindings_to_update.append({
+                            "id": existing_id,
+                            "quantity": acc_qty,
+                            "now": datetime.now()
+                        })
+                    else:
+                        bindings_to_insert.append({
+                            "finished_id": finished_id,
+                            "accessory_id": accessory_id,
+                            "quantity": acc_qty,
+                            "now": datetime.now()
+                        })
 
-        db.commit()
+            # 3e. 批量插入新绑定关系（每1000条一批）
+            if bindings_to_insert:
+                BATCH_SIZE = 1000
+                insert_sql = text("""
+                    INSERT INTO product_bindings (finished_product_id, accessory_product_id, quantity, created_at, updated_at)
+                    VALUES (:finished_id, :accessory_id, :quantity, :now, :now)
+                """)
+                for start in range(0, len(bindings_to_insert), BATCH_SIZE):
+                    batch = bindings_to_insert[start:start + BATCH_SIZE]
+                    db.execute(insert_sql, batch)
+                    db.commit()
+                binding_created += len(bindings_to_insert)
+
+            # 3f. 批量更新现有绑定关系（每1000条一批）
+            if bindings_to_update:
+                BATCH_SIZE = 1000
+                update_sql = text("UPDATE product_bindings SET quantity = :quantity, updated_at = :now WHERE id = :id")
+                for start in range(0, len(bindings_to_update), BATCH_SIZE):
+                    batch = bindings_to_update[start:start + BATCH_SIZE]
+                    db.execute(update_sql, batch)
+                    db.commit()
+                binding_created += len(bindings_to_update)
 
         # 记录批量导入操作日志
         try:
@@ -1228,24 +1444,46 @@ def _process_import_task(record_id, products, platform_products, tenant_id, user
             db.commit()
         except Exception as import_err:
             db.rollback()
+            # 强制更新状态为failed，确保前端能看到最终状态
+            max_retry = 3
+            for attempt in range(max_retry):
+                try:
+                    db.execute(
+                        text("UPDATE import_records SET status = 'failed', error_details = :err WHERE id = :rid AND tenant_id = :tid"),
+                        {"err": f"记录保存失败: {str(import_err)}", "rid": record_id, "tid": tenant_id}
+                    )
+                    db.commit()
+                    break  # 成功则跳出循环
+                except Exception as retry_err:
+                    if attempt == max_retry - 1:
+                        # 最后一次尝试也失败，记录日志但不阻塞
+                        import logging
+                        logging.error(f"Failed to update import record status after {max_retry} attempts: {retry_err}")
+                    else:
+                        # 重新获取数据库连接
+                        db.rollback()
+                        continue
+    except Exception as e:
+        db.rollback()
+        # 强制更新状态为failed，确保前端能看到最终状态
+        max_retry = 3
+        for attempt in range(max_retry):
             try:
                 db.execute(
                     text("UPDATE import_records SET status = 'failed', error_details = :err WHERE id = :rid AND tenant_id = :tid"),
-                    {"err": f"记录保存失败: {str(import_err)}", "rid": record_id, "tid": tenant_id}
+                    {"err": f"处理失败: {str(e)}", "rid": record_id, "tid": tenant_id}
                 )
                 db.commit()
-            except:
-                pass
-    except Exception as e:
-        db.rollback()
-        try:
-            db.execute(
-                text("UPDATE import_records SET status = 'failed', error_details = :err WHERE id = :rid AND tenant_id = :tid"),
-                {"err": f"处理失败: {str(e)}", "rid": record_id, "tid": tenant_id}
-            )
-            db.commit()
-        except:
-            pass
+                break  # 成功则跳出循环
+            except Exception as retry_err:
+                if attempt == max_retry - 1:
+                    # 最后一次尝试也失败，记录日志但不阻塞
+                    import logging
+                    logging.error(f"Failed to update import record status after {max_retry} attempts: {retry_err}")
+                else:
+                    # 重新获取数据库连接
+                    db.rollback()
+                    continue
     finally:
         db.close()
 
@@ -1543,8 +1781,14 @@ async def get_import_record_preview_data(
                     products = raw.get("products", [])
                     platform_products = raw.get("platform_products", [])
                     preview_file_name = raw.get("file_name") or preview_file_name
+                    # 添加total_count字段，如果没有则计算
+                    total_count = raw.get("total_count") or (len(products) + len(platform_products))
             except:
                 pass
+
+        # 如果没有从preview_summary获取到total_count，则计算
+        if 'total_count' not in dir():
+            total_count = len(products) + len(platform_products)
 
         return {
             "success": True,
@@ -1554,6 +1798,7 @@ async def get_import_record_preview_data(
                 "products": products,
                 "platform_products": platform_products,
                 "preview_file_name": preview_file_name,
+                "total_count": total_count,
             }
         }
     except HTTPException:
@@ -2230,9 +2475,10 @@ async def create_platform_product(
             raise HTTPException(status_code=400, detail="至少需要一个店铺")
 
         # 验证并标准化平台
-        valid_platforms = {"amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "other"}
+        valid_platforms = {"amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other"}
         platform_aliases = {
             "tiktok shop": "tiktok",
+            "temu": "temu",
         }
         platform = data.platform.strip().lower()
         normalized_platform = platform_aliases.get(platform, platform)

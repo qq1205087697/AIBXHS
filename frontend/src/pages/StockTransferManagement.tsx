@@ -11,13 +11,17 @@ import {
 } from '@ant-design/icons'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { stockTransfersApi, warehousesApi } from '../api'
+import { stockTransfersApi, warehousesApi, storeGroupsApi } from '../api'
 import { useNavigate } from 'react-router-dom'
 import dayjs, { Dayjs } from 'dayjs'
 
 interface StockTransferOrder {
   id: number
   order_number: string
+  source_store_group_id: number
+  target_store_group_id: number
+  source_store_group_name: string
+  target_store_group_name: string
   source_warehouse: string
   target_warehouse: string
   total_quantity: number
@@ -48,6 +52,10 @@ interface TransferItem {
 }
 
 interface StockTransferDetail extends StockTransferOrder {
+  source_store_group_id: number
+  target_store_group_id: number
+  source_store_group_name: string
+  target_store_group_name: string
   items: TransferItem[]
 }
 
@@ -145,9 +153,11 @@ const StockTransferManagement: React.FC = () => {
   const [warehouseList, setWarehouseList] = useState<WarehouseItem[]>([])
   const [whProductsLoading, setWhProductsLoading] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const [storeGroups, setStoreGroups] = useState<any[]>([])
 
   useEffect(() => {
     fetchWarehouses()
+    fetchStoreGroups()
   }, [])
 
   useEffect(() => {
@@ -172,6 +182,17 @@ const StockTransferManagement: React.FC = () => {
       setWarehouses(allWarehouses.map((w: WarehouseItem) => w.name))
     } catch (err) {
       console.error('获取仓库列表失败', err)
+    }
+  }
+
+  const fetchStoreGroups = async () => {
+    try {
+      const res = await storeGroupsApi.getList()
+      if (res.data.success) {
+        setStoreGroups(res.data.data || [])
+      }
+    } catch (err) {
+      console.error('获取店铺分组失败', err)
     }
   }
 
@@ -240,6 +261,8 @@ const StockTransferManagement: React.FC = () => {
 
       form.setFieldsValue({
         order_number: detail.order_number,
+        source_store_group_id: detail.source_store_group_id,
+        target_store_group_id: detail.target_store_group_id,
         source_warehouse: detail.source_warehouse,
         target_warehouse: detail.target_warehouse,
         notes: detail.notes,
@@ -277,6 +300,8 @@ const StockTransferManagement: React.FC = () => {
 
       form.setFieldsValue({
         order_number: detail.order_number,
+        source_store_group_id: detail.source_store_group_id,
+        target_store_group_id: detail.target_store_group_id,
         source_warehouse: detail.source_warehouse,
         target_warehouse: detail.target_warehouse,
         notes: detail.notes,
@@ -313,16 +338,24 @@ const StockTransferManagement: React.FC = () => {
   }
 
   const handleConfirm = async (id: number) => {
-    setConfirmingId(id)
-    try {
-      await stockTransfersApi.confirm(id)
-      message.success('审批成功')
-      fetchOrders()
-    } catch (err: any) {
-      message.error(err?.response?.data?.detail || '审批失败')
-    } finally {
-      setConfirmingId(null)
-    }
+    Modal.confirm({
+      title: '确认审批',
+      content: '确定要审批此挪货订单吗？此操作将自动转移库存。',
+      okText: '确定',
+      cancelText: '取消',
+      onOk: async () => {
+        setConfirmingId(id)
+        try {
+          await stockTransfersApi.confirm(id)
+          message.success('审批成功')
+          fetchOrders()
+        } catch (err: any) {
+          message.error(err?.response?.data?.detail || '审批失败')
+        } finally {
+          setConfirmingId(null)
+        }
+      },
+    })
   }
 
   const handleBatchDelete = async () => {
@@ -504,8 +537,10 @@ const StockTransferManagement: React.FC = () => {
 
       const payload = {
         order_number: values.order_number,
-        source_warehouse: values.source_warehouse,
-        target_warehouse: values.target_warehouse,
+        source_store_group_id: values.source_store_group_id,
+        target_store_group_id: values.target_store_group_id,
+        source_warehouse: values.source_warehouse || null,
+        target_warehouse: values.target_warehouse || null,
         notes: values.notes || '',
         items: validItems.map(it => ({
           product_id: it.product_id!,
@@ -552,18 +587,32 @@ const StockTransferManagement: React.FC = () => {
       ),
     },
     {
+      title: '源店铺分组',
+      dataIndex: 'source_store_group_name',
+      key: 'source_store_group_name',
+      width: 120,
+      render: (text: string) => <Tag color="purple">{text || '-'}</Tag>,
+    },
+    {
+      title: '目标店铺分组',
+      dataIndex: 'target_store_group_name',
+      key: 'target_store_group_name',
+      width: 120,
+      render: (text: string) => <Tag color="cyan">{text || '-'}</Tag>,
+    },
+    {
       title: '源仓库',
       dataIndex: 'source_warehouse',
       key: 'source_warehouse',
-      width: 120,
-      render: (text: string) => <Tag color="blue">{text}</Tag>,
+      width: 100,
+      render: (text: string) => text ? <Tag color="blue">{text}</Tag> : '-',
     },
     {
       title: '目标仓库',
       dataIndex: 'target_warehouse',
       key: 'target_warehouse',
-      width: 120,
-      render: (text: string) => <Tag color="green">{text}</Tag>,
+      width: 100,
+      render: (text: string) => text ? <Tag color="green">{text}</Tag> : '-',
     },
     {
       title: '发起者',
@@ -825,7 +874,7 @@ const StockTransferManagement: React.FC = () => {
         }}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={viewingOrder || editingOrder ? 640 : 800}
+        width={viewingOrder || editingOrder ? 800 : 900}
         style={{ top: 20 }}
         styles={{ body: { maxHeight: 'calc(100vh - 180px)', overflow: 'auto', paddingRight: 8 } }}
       >
@@ -839,68 +888,60 @@ const StockTransferManagement: React.FC = () => {
               <Input placeholder="请输入挪货单号" disabled={true} />
             </Form.Item>
             <Form.Item
-              name="source_warehouse"
-              label="源仓库"
-              rules={viewingOrder ? [] : [{ required: true, message: '请选择源仓库' }]}
+              name="source_store_group_id"
+              label="源店铺分组"
+              rules={viewingOrder ? [] : [{ required: true, message: '请选择源店铺分组' }]}
             >
               <Select
-                placeholder="请选择源仓库"
+                placeholder="请选择源店铺分组"
                 showSearch
                 optionFilterProp="label"
+                options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+                disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
+              />
+            </Form.Item>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <Form.Item
+              name="target_store_group_id"
+              label="目标店铺分组"
+              rules={viewingOrder ? [] : [{ required: true, message: '请选择目标店铺分组' }]}
+            >
+              <Select
+                placeholder="请选择目标店铺分组"
+                showSearch
+                optionFilterProp="label"
+                options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+                disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
+              />
+            </Form.Item>
+            <Form.Item
+              name="source_warehouse"
+              label="源仓库（可选）"
+            >
+              <Select
+                placeholder="请选择源仓库（可选）"
+                showSearch
+                optionFilterProp="label"
+                allowClear
                 options={warehouseList.map(w => ({ label: w.name, value: w.name }))}
                 onChange={(val) => handleSourceWarehouseChange(val)}
                 disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
-                notFoundContent={
-                  <div style={{ padding: 8, textAlign: 'center' }}>
-                    <span style={{ display: 'block', marginBottom: 8, color: '#999' }}>暂无仓库</span>
-                    <Button
-                      type="primary"
-                      size="small"
-                      icon={<PlusOutlined />}
-                      onClick={() => {
-                        setModalOpen(false)
-                        setEditingOrder(null)
-                        setViewingOrder(null)
-                        navigate('/warehouses')
-                      }}
-                    >
-                      新增仓库
-                    </Button>
-                  </div>
-                }
               />
             </Form.Item>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Form.Item
               name="target_warehouse"
-              label="目标仓库"
-              rules={viewingOrder ? [] : [{ required: true, message: '请选择目标仓库' }]}
+              label="目标仓库（可选）"
             >
               <Select
-                placeholder="请选择目标仓库"
+                placeholder="请选择目标仓库（可选）"
                 showSearch
                 optionFilterProp="label"
+                allowClear
                 options={warehouseList.map(w => ({ label: w.name, value: w.name }))}
                 disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
-                notFoundContent={
-                  <div style={{ padding: 8, textAlign: 'center' }}>
-                    <span style={{ display: 'block', marginBottom: 8, color: '#999' }}>暂无仓库</span>
-                    <Button
-                      type="primary"
-                      size="small"
-                      icon={<PlusOutlined />}
-                      onClick={() => {
-                        setModalOpen(false)
-                        setEditingOrder(null)
-                        setViewingOrder(null)
-                        navigate('/warehouses')
-                      }}
-                    >
-                      新增仓库
-                    </Button>
-                  </div>
-                }
               />
             </Form.Item>
           </div>

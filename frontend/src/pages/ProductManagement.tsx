@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker } from 'antd'
+import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
-import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi } from '../api'
+import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -33,6 +33,8 @@ interface Product {
   local_inbound_date: string
   local_stock_age: number | null
   local_value: number | null
+  replenishment_quantity: number
+  purchased_quantity: number
 }
 
 interface PlatformProduct {
@@ -42,7 +44,6 @@ interface PlatformProduct {
   store_names: string[]
   platform_product_id: string
   asin: string
-  spu: string
   sku: string
   title: string
   title_en: string
@@ -105,6 +106,8 @@ const defaultColumns: ColumnState[] = [
   { key: 'purchase_price', title: '采购价', visible: true, width: 110, minWidth: 90 },
   { key: 'sale_price', title: '建议售价', visible: true, width: 110, minWidth: 90 },
   { key: 'local_quantity', title: '库存数量', visible: true, width: 100, minWidth: 80 },
+  { key: 'replenishment_quantity', title: '补货数量', visible: true, width: 100, minWidth: 80 },
+  { key: 'purchased_quantity', title: '已采购数量', visible: true, width: 110, minWidth: 90 },
   { key: 'local_warehouse', title: '仓库', visible: false, width: 120, minWidth: 100 },
   { key: 'local_inbound_date', title: '入库日期', visible: false, width: 130, minWidth: 110 },
   { key: 'local_stock_age', title: '库龄(天)', visible: false, width: 100, minWidth: 80 },
@@ -123,6 +126,7 @@ const platformOptions = [
   { label: 'Shopee', value: 'shopee' },
   { label: 'Lazada', value: 'lazada' },
   { label: 'TikTok', value: 'tiktok' },
+  { label: 'Temu', value: 'temu' },
   { label: '其他', value: 'other' },
 ]
 
@@ -134,6 +138,7 @@ const platformColorMap: Record<string, string> = {
   shopee: 'red',
   lazada: 'purple',
   tiktok: 'cyan',
+  temu: 'volcano',
   other: 'default',
 }
 
@@ -165,20 +170,99 @@ const ResizableTitle = (props: any) => {
   )
 }
 
+// 高级筛选条件
+interface AdvancedFilterCondition {
+  id: number
+  field: string
+  operator: string
+  value: string
+  extra_value?: string  // 用于 store_group_stock 字段的店铺分组ID
+}
+
+// 筛选字段选项
+const filterFieldOptions = [
+  { label: '库存数量', value: 'local_quantity' },
+  { label: '店铺分组库存', value: 'store_group_stock' },
+  { label: '产品编码', value: 'product_code' },
+  { label: '产品名称', value: 'name' },
+  { label: '产品类型', value: 'product_type' },
+  { label: '分类', value: 'category' },
+  { label: '品牌', value: 'brand' },
+  { label: '货值', value: 'local_value' },
+  { label: '补货数量', value: 'replenishment_quantity' },
+  { label: '已采购数量', value: 'purchased_quantity' },
+  { label: '平台数', value: 'platform_count' },
+  { label: '状态', value: 'status' },
+]
+
+// 操作符选项
+const filterOperatorOptions = [
+  { label: '等于', value: 'eq' },
+  { label: '不等于', value: 'neq' },
+  { label: '大于', value: 'gt' },
+  { label: '大于等于', value: 'gte' },
+  { label: '小于', value: 'lt' },
+  { label: '小于等于', value: 'lte' },
+  { label: '包含', value: 'contains' },
+  { label: '不包含', value: 'not_contains' },
+]
+
+
+const PRODUCT_FILTER_SESSION_KEY = 'product_management_session_filters_v1'
+const defaultAdvancedFilterConditions: AdvancedFilterCondition[] = [
+  { id: Date.now(), field: 'local_quantity', operator: 'gt', value: '0' },
+]
+
+const loadProductFilterSession = () => {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(PRODUCT_FILTER_SESSION_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    return {
+      searchText: typeof parsed.searchText === 'string' ? parsed.searchText : '',
+      productTypeFilter: Array.isArray(parsed.productTypeFilter) ? parsed.productTypeFilter : undefined,
+      productAttributeFilter: typeof parsed.productAttributeFilter === 'string' ? parsed.productAttributeFilter : undefined,
+      filters: parsed.filters && typeof parsed.filters === 'object' ? parsed.filters : { search: '' },
+      filterConditions: Array.isArray(parsed.filterConditions)
+        ? parsed.filterConditions.map((condition: any, index: number) => ({
+            id: typeof condition.id === 'number' ? condition.id : Date.now() + index,
+            field: condition.field || 'local_quantity',
+            operator: condition.operator || 'gt',
+            value: condition.value ?? '0',
+            extra_value: condition.extra_value,
+          }))
+        : defaultAdvancedFilterConditions,
+      filterMatchMode: parsed.filterMatchMode === 'any' ? 'any' : 'all',
+    }
+  } catch {
+    return null
+  }
+}
+
 const ProductManagement: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission } = useAuth()
+  const initialFilterSession = loadProductFilterSession()
   const [products, setProducts] = useState<Product[]>([])
   const [stores, setStores] = useState<Store[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form] = Form.useForm()
-  const [searchText, setSearchText] = useState('')
-  const [productTypeFilter, setProductTypeFilter] = useState<string[] | undefined>(undefined)
-  const [productAttributeFilter, setProductAttributeFilter] = useState<string | undefined>(undefined)
+  const [searchText, setSearchText] = useState(initialFilterSession?.searchText || '')
+  const [productTypeFilter, setProductTypeFilter] = useState<string[] | undefined>(initialFilterSession?.productTypeFilter)
+  const [productAttributeFilter, setProductAttributeFilter] = useState<string | undefined>(initialFilterSession?.productAttributeFilter)
+  // 高级筛选条件
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false)
+  const [filterConditions, setFilterConditions] = useState<AdvancedFilterCondition[]>(initialFilterSession?.filterConditions || defaultAdvancedFilterConditions)
+  const [filterMatchMode, setFilterMatchMode] = useState<'all' | 'any'>(initialFilterSession?.filterMatchMode || 'all')
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
-  const [filters, setFilters] = useState<Record<string, any>>({ search: '' })
+  const [filters, setFilters] = useState<Record<string, any>>(initialFilterSession?.filters || { search: '' })
   const [columnStates, setColumnStates] = useState<ColumnState[]>(defaultColumns)
   const [columnSettingOpen, setColumnSettingOpen] = useState(false)
   const [columnSettingTarget, setColumnSettingTarget] = useState<'main' | 'platform'>('main')
@@ -219,6 +303,8 @@ const ProductManagement: React.FC = () => {
   const [stockModalOpen, setStockModalOpen] = useState(false)
   const [stockModalProduct, setStockModalProduct] = useState<Product | null>(null)
   const [stockData, setStockData] = useState<any[] | null>(null)
+  const [stockPlatformData, setStockPlatformData] = useState<any[]>([])
+  const [stockGroupData, setStockGroupData] = useState<any[]>([])
   const [stockHistory, setStockHistory] = useState<any[]>([])
   const [stockLoading, setStockLoading] = useState(false)
   
@@ -228,7 +314,7 @@ const ProductManagement: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [importPreviewOpen, setImportPreviewOpen] = useState(false)
-  const [importPreviewData, setImportPreviewData] = useState<{ products: any[]; platform_products: any[]; file_name?: string }>({ products: [], platform_products: [] })
+  const [importPreviewData, setImportPreviewData] = useState<{ products: any[]; platform_products: any[]; file_name?: string; total_count?: number }>({ products: [], platform_products: [] })
   const [importPreviewRecordId, setImportPreviewRecordId] = useState<number | null>(null)
   const [importing, setImporting] = useState(false)
   const [importErrors, setImportErrors] = useState<string[]>([])
@@ -241,7 +327,9 @@ const ProductManagement: React.FC = () => {
   const [shelfEditBatchId, setShelfEditBatchId] = useState<number | null>(null)
   const [shelfEditValue, setShelfEditValue] = useState('')
   const shelfInputRef = useRef<any>(null)
-  
+
+  const [shipmentCreating, setShipmentCreating] = useState(false)
+
   // 平台商品列表的列状态
   const [ppColumnStates, setPpColumnStates] = useState<ColumnState[]>(defaultPpColumns)
 
@@ -260,6 +348,29 @@ const ProductManagement: React.FC = () => {
   const [bindingModalOpen, setBindingModalOpen] = useState(false)
   const [bindingEditingItem, setBindingEditingItem] = useState<any>(null)
   const [bindingForm] = Form.useForm()
+
+  // 配件绑定成品管理（反向查看）
+  const [accBindingDrawerOpen, setAccBindingDrawerOpen] = useState(false)
+  const [accBindingProduct, setAccBindingProduct] = useState<Product | null>(null)
+  const [accBindingList, setAccBindingList] = useState<any[]>([])
+  const [accBindingLoading, setAccBindingLoading] = useState(false)
+  const [accBindingModalOpen, setAccBindingModalOpen] = useState(false)
+  const [accBindingEditingItem, setAccBindingEditingItem] = useState<any>(null)
+  const [accBindingForm] = Form.useForm()
+
+  // 全量产品列表（用于绑定选择，支持懒加载）
+  const [allAccessories, setAllAccessories] = useState<Product[]>([])
+  const [allFinishedProducts, setAllFinishedProducts] = useState<Product[]>([])
+  const [accPage, setAccPage] = useState(1) // 配件当前页码
+  const [accTotal, setAccTotal] = useState(0) // 配件总数
+  const [accLoadingMore, setAccLoadingMore] = useState(false) // 配件加载更多中
+  const [finishedPage, setFinishedPage] = useState(1) // 成品当前页码
+  const [finishedTotal, setFinishedTotal] = useState(0) // 成品总数
+  const [finishedLoadingMore, setFinishedLoadingMore] = useState(false) // 成品加载更多中
+  const [accSearchText, setAccSearchText] = useState('') // 配件搜索关键词
+  const [finishedSearchText, setFinishedSearchText] = useState('') // 成品搜索关键词
+  const accSearchTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 配件搜索防抖
+  const finishedSearchTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 成品搜索防抖
 
   const statusOptions = [
   { label: '启用', value: 'active' },
@@ -291,16 +402,49 @@ const productAttributeLabelMap: Record<string, string> = {
 
   useEffect(() => {
     fetchData()
-  }, [pagination.current, pagination.pageSize, filters])
+  }, [pagination.current, pagination.pageSize, filters, filterConditions, filterMatchMode])
+
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    window.sessionStorage.setItem(
+      PRODUCT_FILTER_SESSION_KEY,
+      JSON.stringify({
+        searchText,
+        productTypeFilter,
+        productAttributeFilter,
+        filters,
+        filterConditions,
+        filterMatchMode,
+      })
+    )
+  }, [searchText, productTypeFilter, productAttributeFilter, filters, filterConditions, filterMatchMode])
+
 
   const fetchData = async () => {
     setLoading(true)
     try {
+      // 将高级筛选条件转换为API参数
+      const advFilters: Record<string, any> = {}
+      if (filterConditions.length > 0) {
+        advFilters.advanced_filters = JSON.stringify({
+          conditions: filterConditions.map(c => ({
+            field: c.field,
+            operator: c.operator,
+            value: c.value,
+            extra_value: c.extra_value,  // 用于 store_group_stock 的店铺分组ID
+          })),
+          match_mode: filterMatchMode,
+        })
+      }
       const [productsRes, storesRes, groupsRes] = await Promise.all([
         productsApi.getList({
           page: pagination.current,
           page_size: pagination.pageSize,
           ...filters,
+          ...advFilters,
         }),
         storesApi.getList({ page: 1, page_size: 1000 }),
         storeGroupsApi.getList(),
@@ -348,6 +492,24 @@ const productAttributeLabelMap: Record<string, string> = {
     setProductAttributeFilter(value)
     setFilters(prev => ({ ...prev, product_attribute: value }))
     setPagination((prev) => ({ ...prev, current: 1 }))
+  }
+
+  // 高级筛选操作
+  const addFilterCondition = () => {
+    setFilterConditions(prev => [
+      ...prev,
+      { id: Date.now(), field: 'local_quantity', operator: 'gt', value: '0' },
+    ])
+  }
+
+  const removeFilterCondition = (id: number) => {
+    setFilterConditions(prev => prev.filter(c => c.id !== id))
+  }
+
+  const updateFilterCondition = (id: number, key: keyof AdvancedFilterCondition, value: string) => {
+    setFilterConditions(prev =>
+      prev.map(c => c.id === id ? { ...c, [key]: value } : c)
+    )
   }
 
   const handleCreate = () => {
@@ -563,6 +725,7 @@ const productAttributeLabelMap: Record<string, string> = {
           products,
           platform_products,
           file_name: d.preview_file_name || `产品导入_${new Date().toISOString().slice(0, 10)}.xlsx`,
+          total_count: d.total_count || (products.length + platform_products.length),
         })
         setImportPreviewOpen(true)
         if (fromDetail) {
@@ -612,7 +775,6 @@ const productAttributeLabelMap: Record<string, string> = {
       platform: item.platform,
       platform_product_id: item.platform_product_id,
       asin: item.asin,
-      spu: item.spu,
       sku: item.sku,
       title: item.title,
       title_en: item.title_en,
@@ -682,6 +844,10 @@ const productAttributeLabelMap: Record<string, string> = {
         inventoryBatchesApi.getProductHistory(product.id),
       ])
       if (batchRes.data.success) setStockData(batchRes.data.data)
+      if (batchRes.data.platform_stock) setStockPlatformData(batchRes.data.platform_stock)
+      else setStockPlatformData([])
+      if (batchRes.data.group_stock) setStockGroupData(batchRes.data.group_stock)
+      else setStockGroupData([])
       if (historyRes.data.success) setStockHistory(historyRes.data.data)
     } catch (e) {
       message.error('获取库存信息失败')
@@ -846,7 +1012,7 @@ const productAttributeLabelMap: Record<string, string> = {
     }
     setImporting(true)
     try {
-      const total = importPreviewData.products.length + importPreviewData.platform_products.length
+      const total = importPreviewData.total_count || (importPreviewData.products.length + importPreviewData.platform_products.length)
       // 传 record_id 让后端从 DB 读完整数据执行导入（前端数据可能被分页截断）
       const submitRes = await productsApi.batchImport({
         products: [],
@@ -896,6 +1062,62 @@ const productAttributeLabelMap: Record<string, string> = {
   const handleCountClick = () => {
     setCountResult(null)
     setCountModalOpen(true)
+  }
+
+  const handleBatchCreateShipment = () => {
+    const selectedProducts = products.filter(p => selectedRowKeys.includes(p.id))
+    if (selectedProducts.length === 0) {
+      message.warning('请先选择要操作的商品')
+      return
+    }
+
+    // 从筛选条件中获取店铺分组
+    const storeGroupCondition = filterConditions.find(c => c.field === 'store_group_stock' && c.extra_value)
+    const storeGroupId = storeGroupCondition ? Number(storeGroupCondition.extra_value) : undefined
+    const storeGroup = groups.find(g => g.id === storeGroupId)
+    const storeGroupName = storeGroup?.name
+
+    Modal.confirm({
+      title: '批量生成发货单',
+      content: (
+        <div>
+          <div>将根据选中的 <b>{selectedProducts.length}</b> 个商品生成发货单</div>
+          {storeGroupName && <div>店铺分组：<b>{storeGroupName}</b></div>}
+        </div>
+      ),
+      okText: '生成',
+      cancelText: '取消',
+      onOk: async () => {
+        setShipmentCreating(true)
+        try {
+          const orderNumber = `FH${dayjs().format('YYYYMMDDHHmmss')}`
+          const items = selectedProducts.map(p => ({
+            product_id: p.id,
+            product_code: p.product_code,
+            product_name: p.name,
+            stock_quantity: p.local_quantity || 0,
+          }))
+
+          const res = await shipmentsApi.create({
+            order_number: orderNumber,
+            store_group_id: storeGroupId,
+            store_group_name: storeGroupName,
+            items,
+          })
+
+          if (res.data.success) {
+            message.success(`发货单创建成功，共 ${items.length} 个商品`)
+            setSelectedRowKeys([])
+          } else {
+            message.error(res.data.detail || '创建发货单失败')
+          }
+        } catch (err: any) {
+          message.error(err?.response?.data?.detail || '创建发货单失败')
+        } finally {
+          setShipmentCreating(false)
+        }
+      },
+    })
   }
 
   const handleCountFileUpload = () => {
@@ -1027,10 +1249,65 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
-  const handleBindingCreate = () => {
+  const handleBindingCreate = async () => {
     setBindingEditingItem(null)
     bindingForm.resetFields()
+    // 加载全量配件列表（不受筛选限制）
+    await loadAllAccessories()
     setBindingModalOpen(true)
+  }
+
+  const loadAllAccessories = async (page: number = 1, append: boolean = false, search: string = '') => {
+    try {
+      if (append) {
+        setAccLoadingMore(true)
+      }
+      // 查询配件，按id正序排序，支持搜索
+      const res = await productsApi.getList({
+        page: page,
+        page_size: 100,
+        product_type: 'accessory',
+        sort_by: 'id',
+        sort_order: 'asc',
+        search: search || undefined
+      })
+      if (res.data.success) {
+        const newProducts = res.data.data || []
+        if (append) {
+          // 滚动加载更多，追加数据
+          setAllAccessories(prev => [...prev, ...newProducts])
+        } else {
+          // 首次加载或搜索，替换数据
+          setAllAccessories(newProducts)
+        }
+        setAccTotal(res.data.total || 0)
+        setAccPage(page)
+      }
+    } catch (e) {
+      message.error('加载配件列表失败')
+    } finally {
+      setAccLoadingMore(false)
+    }
+  }
+
+  // 加载更多配件（使用当前搜索关键词）
+  const loadMoreAccessories = async () => {
+    if (accLoadingMore) return
+    const nextPage = accPage + 1
+    const loadedCount = allAccessories.length
+    if (loadedCount >= accTotal) return
+    await loadAllAccessories(nextPage, true, accSearchText)
+  }
+
+  // 配件搜索（防抖）
+  const handleAccSearch = (value: string) => {
+    setAccSearchText(value)
+    if (accSearchTimeoutRef.current) {
+      clearTimeout(accSearchTimeoutRef.current)
+    }
+    accSearchTimeoutRef.current = setTimeout(() => {
+      loadAllAccessories(1, false, value)
+    }, 500)
   }
 
   const handleBindingEdit = (binding: any) => {
@@ -1080,6 +1357,134 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  // ========== 配件绑定成品（反向查看） ==========
+
+  const openAccBindingDrawer = async (product: Product) => {
+    setAccBindingProduct(product)
+    setAccBindingDrawerOpen(true)
+    await fetchAccBindings(product.id)
+  }
+
+  const fetchAccBindings = async (productId: number) => {
+    setAccBindingLoading(true)
+    try {
+      const res = await productBindingsApi.getByAccessory(productId)
+      if (res.data.success) {
+        setAccBindingList(res.data.data || [])
+      }
+    } catch (e) {
+      message.error('获取绑定成品失败')
+    } finally {
+      setAccBindingLoading(false)
+    }
+  }
+
+  const handleAccBindingCreate = async () => {
+    setAccBindingEditingItem(null)
+    accBindingForm.resetFields()
+    // 加载全量成品列表（不受筛选限制）
+    await loadAllFinishedProducts()
+    setAccBindingModalOpen(true)
+  }
+
+  const loadAllFinishedProducts = async (page: number = 1, append: boolean = false, search: string = '') => {
+    try {
+      if (append) {
+        setFinishedLoadingMore(true)
+      }
+      // 查询成品，按id正序排序，支持搜索
+      const res = await productsApi.getList({
+        page: page,
+        page_size: 100,
+        product_type: 'finished',
+        sort_by: 'id',
+        sort_order: 'asc',
+        search: search || undefined
+      })
+      if (res.data.success) {
+        const newProducts = res.data.data || []
+        if (append) {
+          setAllFinishedProducts(prev => [...prev, ...newProducts])
+        } else {
+          setAllFinishedProducts(newProducts)
+        }
+        setFinishedTotal(res.data.total || 0)
+        setFinishedPage(page)
+      }
+    } catch (e) {
+      message.error('加载成品列表失败')
+    } finally {
+      setFinishedLoadingMore(false)
+    }
+  }
+
+  // 加载更多成品（使用当前搜索关键词）
+  const loadMoreFinishedProducts = async () => {
+    if (finishedLoadingMore) return
+    const nextPage = finishedPage + 1
+    const loadedCount = allFinishedProducts.length
+    if (loadedCount >= finishedTotal) return
+    await loadAllFinishedProducts(nextPage, true, finishedSearchText)
+  }
+
+  // 成品搜索（防抖）
+  const handleFinishedSearch = (value: string) => {
+    setFinishedSearchText(value)
+    if (finishedSearchTimeoutRef.current) {
+      clearTimeout(finishedSearchTimeoutRef.current)
+    }
+    finishedSearchTimeoutRef.current = setTimeout(() => {
+      loadAllFinishedProducts(1, false, value)
+    }, 500)
+  }
+
+  const handleAccBindingEdit = (binding: any) => {
+    setAccBindingEditingItem(binding)
+    accBindingForm.setFieldsValue({
+      finished_product_id: binding.finished_product_id,
+      quantity: binding.quantity,
+    })
+    setAccBindingModalOpen(true)
+  }
+
+  const handleAccBindingSubmit = async () => {
+    if (!accBindingProduct) return
+    try {
+      const values = await accBindingForm.validateFields()
+      if (accBindingEditingItem) {
+        await productBindingsApi.update(accBindingEditingItem.id, {
+          finished_product_id: values.finished_product_id,
+          accessory_product_id: accBindingProduct.id,
+          quantity: values.quantity,
+        })
+        message.success('绑定更新成功')
+      } else {
+        await productBindingsApi.create({
+          finished_product_id: values.finished_product_id,
+          accessory_product_id: accBindingProduct.id,
+          quantity: values.quantity,
+        })
+        message.success('绑定创建成功')
+      }
+      setAccBindingModalOpen(false)
+      fetchAccBindings(accBindingProduct.id)
+    } catch (e: any) {
+      if (e.errorFields) return
+      const errorMsg = e.response?.data?.detail || e.message || '操作失败'
+      message.error(errorMsg)
+    }
+  }
+
+  const handleAccBindingDelete = async (bindingId: number) => {
+    try {
+      await productBindingsApi.delete(bindingId)
+      message.success('绑定已删除')
+      if (accBindingProduct) fetchAccBindings(accBindingProduct.id)
+    } catch (e) {
+      message.error('删除失败')
+    }
+  }
+
   const handleShelfEditStart = (batchId: number, currentValue: string) => {
     setShelfEditBatchId(batchId)
     setShelfEditValue(currentValue || '')
@@ -1096,6 +1501,8 @@ const productAttributeLabelMap: Record<string, string> = {
       if (stockModalProduct) {
         const batchRes = await inventoryBatchesApi.getProductBatches(stockModalProduct.id)
         if (batchRes.data.success) setStockData(batchRes.data.data)
+        if (batchRes.data.platform_stock) setStockPlatformData(batchRes.data.platform_stock)
+        if (batchRes.data.group_stock) setStockGroupData(batchRes.data.group_stock)
       }
     } catch (e: any) {
       message.error('更新货架号失败')
@@ -1304,6 +1711,10 @@ const productAttributeLabelMap: Record<string, string> = {
           )
         } else if (col.key === 'local_value') {
           column.render = (value: number | null) => value != null ? `¥${value.toFixed(2)}` : '-'
+        } else if (col.key === 'replenishment_quantity') {
+          column.render = (qty: number) => qty > 0 ? <Tag color="orange">{qty}</Tag> : <span style={{ color: '#999' }}>0</span>
+        } else if (col.key === 'purchased_quantity') {
+          column.render = (qty: number) => qty > 0 ? <Tag color="blue">{qty}</Tag> : <span style={{ color: '#999' }}>0</span>
         } else if (col.key === 'local_stock_age') {
           column.render = (days: number | null) => {
             if (days == null) return '-'
@@ -1362,6 +1773,15 @@ const productAttributeLabelMap: Record<string, string> = {
               label: '绑定配件',
               icon: <SettingOutlined />,
               onClick: () => openBindingDrawer(record),
+            })
+          }
+
+          if (record.product_type?.includes('accessory')) {
+            dropdownItems.push({
+              key: 'acc_binding',
+              label: '绑定成品',
+              icon: <SettingOutlined />,
+              onClick: () => openAccBindingDrawer(record),
             })
           }
         }
@@ -1484,6 +1904,17 @@ const productAttributeLabelMap: Record<string, string> = {
                           setBatchBindOpen(true)
                         },
                       } : null,
+                      hasPermission('shipment:create') ? {
+                        key: 'shipment',
+                        label: '批量生成发货单',
+                        onClick: () => {
+                          if (selectedRowKeys.length === 0) {
+                            message.warning('请先选择要操作的商品')
+                            return
+                          }
+                          handleBatchCreateShipment()
+                        },
+                      } : null,
                     ].filter(Boolean) as any,
                   }}
                 >
@@ -1497,6 +1928,117 @@ const productAttributeLabelMap: Record<string, string> = {
               </div>
               <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
                 <Button onClick={() => setImportRecordModalOpen(true)}>导入记录</Button>
+                <Popover
+                  open={filterPanelOpen}
+                  onOpenChange={(open) => setFilterPanelOpen(open)}
+                  trigger="click"
+                  placement="bottomRight"
+                  content={
+                    <div style={{ width: 600 }}>
+                      {/* 顶部：符合以下 + 所有/任一 */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                        <span>符合以下</span>
+                        <Select
+                          value={filterMatchMode}
+                          onChange={(v) => setFilterMatchMode(v)}
+                          options={[
+                            { label: '所有', value: 'all' },
+                            { label: '任一', value: 'any' },
+                          ]}
+                          style={{ width: 70 }}
+                        />
+                        <span>条件</span>
+                      </div>
+
+                      {/* 条件列表 */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 300, overflowY: 'auto' }}>
+                        {filterConditions.map((condition) => (
+                          <div key={condition.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <Select
+                              value={condition.field}
+                              onChange={(v) => updateFilterCondition(condition.id, 'field', v)}
+                              options={filterFieldOptions}
+                              style={{ width: 150 }}
+                              size="middle"
+                            />
+                            {condition.field === 'store_group_stock' ? (
+                              <>
+                                <Select
+                                  value={condition.extra_value || ''}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'extra_value', v || '')}
+                                  placeholder="选择分组"
+                                  style={{ width: 140 }}
+                                  size="middle"
+                                  allowClear
+                                  options={groups.map(g => ({ label: g.name, value: String(g.id) }))}
+                                />
+                                <Select
+                                  value={condition.operator}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'operator', v)}
+                                  options={filterOperatorOptions}
+                                  style={{ width: 100 }}
+                                  size="middle"
+                                />
+                                <InputNumber
+                                  value={condition.value ? parseFloat(condition.value) : undefined}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'value', String(v || 0))}
+                                  placeholder="库存数量"
+                                  style={{ flex: 1 }}
+                                  size="middle"
+                                  min={0}
+                                />
+                              </>
+                            ) : (
+                              <>
+                                <Select
+                                  value={condition.operator}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'operator', v)}
+                                  options={filterOperatorOptions}
+                                  style={{ width: 100 }}
+                                  size="middle"
+                                />
+                                <Input
+                                  value={condition.value}
+                                  onChange={(e) => updateFilterCondition(condition.id, 'value', e.target.value)}
+                                  placeholder="输入值"
+                                  style={{ flex: 1 }}
+                                  size="middle"
+                                  allowClear
+                                />
+                              </>
+                            )}
+                            <Button
+                              type="text"
+                              danger
+                              icon={<DeleteOutlined />}
+                              onClick={() => removeFilterCondition(condition.id)}
+                              size="small"
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* 底部按钮 */}
+                      <div style={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center', marginTop: 8 }}>
+                        <Button
+                          type="link"
+                          icon={<PlusOutlined />}
+                          onClick={addFilterCondition}
+                          style={{ padding: 0 }}
+                        >
+                          添加条件
+                        </Button>
+                      </div>
+                    </div>
+                  }
+                >
+                  <Button
+                    icon={<FilterOutlined style={{ marginRight: 4 }} />}
+                    style={filterConditions.length > 0 ? { color: '#1890ff', borderColor: '#1890ff' } : undefined}
+                  >
+                    筛选{filterConditions.length > 0 ? `(${filterConditions.length})` : ''}
+                  </Button>
+                </Popover>
                 <Button type="text" icon={<SettingOutlined />} onClick={() => {
                   setColumnSettingTarget('main')
                   setColumnSettingOpen(true)
@@ -1812,6 +2354,28 @@ const productAttributeLabelMap: Record<string, string> = {
                    importRecordDetail.status === 'pending' ? '待处理' : importRecordDetail.status}
                 </Tag>
               </Descriptions.Item>
+
+              {/* 总体进度条 */}
+              {importRecordDetail.status === 'processing' && (
+                <Descriptions.Item label="导入进度" span={2}>
+                  <div style={{ marginBottom: 8 }}>
+                    <Progress
+                      percent={(() => {
+                        const total = (importRecordDetail.product_total ?? 0) + (importRecordDetail.platform_total ?? 0)
+                        const success = (importRecordDetail.product_success ?? 0) + (importRecordDetail.platform_success ?? 0)
+                        if (total === 0) return 0
+                        return Math.round((success / total) * 100)
+                      })()}
+                      status="active"
+                      strokeColor={{ from: '#108ee9', to: '#87d068' }}
+                      style={{ marginTop: 4 }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 12, color: '#666' }}>
+                    已完成 {(importRecordDetail.product_success ?? 0) + (importRecordDetail.platform_success ?? 0)} / {(importRecordDetail.product_total ?? 0) + (importRecordDetail.platform_total ?? 0)} 条
+                  </div>
+                </Descriptions.Item>
+              )}
 
               {/* 产品统计 */}
               <Descriptions.Item label={<span><strong>产品</strong>（共{importRecordDetail.product_total ?? 0}条）</span>}>
@@ -2149,15 +2713,12 @@ const productAttributeLabelMap: Record<string, string> = {
             </div>
           </Form.Item>
 
-          <Form.Item name="platform_product_id" label="平台商品ID">
-            <Input placeholder="平台侧的商品ID" />
-          </Form.Item>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <Form.Item name="platform_product_id" label="平台商品ID">
+              <Input placeholder="平台侧的商品ID" />
+            </Form.Item>
             <Form.Item name="asin" label="ASIN">
               <Input placeholder="ASIN" />
-            </Form.Item>
-            <Form.Item name="spu" label="SPU">
-              <Input placeholder="SPU" />
             </Form.Item>
             <Form.Item name="sku" label="SKU">
               <Input placeholder="SKU" />
@@ -2331,6 +2892,44 @@ const productAttributeLabelMap: Record<string, string> = {
                 </div>
               </Card>
             </div>
+            <Divider orientation="left">各平台库存</Divider>
+            {stockPlatformData.length > 0 ? (
+              <Table
+                dataSource={stockPlatformData}
+                rowKey="platform"
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: '平台', dataIndex: 'platform', key: 'platform', width: 150,
+                    render: (v: string) => {
+                      const colorMap: Record<string, string> = { amazon: 'orange', ebay: 'blue', walmart: 'yellow', shopify: 'green', shopee: 'red', lazada: 'purple', tiktok: 'cyan', temu: 'volcano', other: 'default' }
+                      const labelMap: Record<string, string> = { amazon: 'Amazon', ebay: 'eBay', walmart: 'Walmart', shopify: 'Shopify', shopee: 'Shopee', lazada: 'Lazada', tiktok: 'TikTok', temu: 'Temu', other: '其他' }
+                      return <Tag color={colorMap[v] || 'default'}>{labelMap[v] || v}</Tag>
+                    }
+                  },
+                  { title: '库存数量', dataIndex: 'quantity', key: 'quantity', width: 120,
+                    render: (v: number) => <Tag color="blue">{v}</Tag>
+                  },
+                  { title: '店铺分组', key: 'groups', width: 300,
+                    render: (_: any, record: any) => {
+                      const platformGroups = stockGroupData.filter((g: any) => g.platform === record.platform)
+                      if (platformGroups.length === 0) return <span style={{ color: '#999' }}>-</span>
+                      return (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                          {platformGroups.map((g: any) => (
+                            <Tag key={g.group_id || 'ungrouped'} color="cyan">
+                              {g.group_name || '未分组'}: {g.quantity}
+                            </Tag>
+                          ))}
+                        </div>
+                      )
+                    }
+                  },
+                ]}
+              />
+            ) : (
+              <div style={{ color: '#999', padding: '16px 0', textAlign: 'center' }}>暂无库存</div>
+            )}
             <Divider orientation="left">库存批次明细</Divider>
             <Table
               dataSource={stockData}
@@ -2379,8 +2978,6 @@ const productAttributeLabelMap: Record<string, string> = {
                   }
                 },
                 { title: '入库日期', dataIndex: 'inbound_date', key: 'inbound_date', width: 180 },
-                { title: '生产日期', dataIndex: 'production_date', key: 'production_date', width: 120 },
-                { title: '过期日期', dataIndex: 'expiry_date', key: 'expiry_date', width: 120 },
                 { title: '库龄(天)', dataIndex: 'stock_age', key: 'stock_age', width: 120,
                   render: (days: number) => {
                     let color = 'default'
@@ -2519,7 +3116,7 @@ const productAttributeLabelMap: Record<string, string> = {
       >
         {importPreviewData.products.length > 0 && (
           <>
-            <Divider orientation="left" plain>产品 ({importPreviewData.products.length} 条)</Divider>
+            <Divider orientation="left" plain>产品 (共 {importPreviewData.products.length} 条)</Divider>
             <Table
               dataSource={importPreviewData.products}
               rowKey={(_, idx) => `product-${idx}`}
@@ -2539,7 +3136,7 @@ const productAttributeLabelMap: Record<string, string> = {
         )}
         {importPreviewData.platform_products.length > 0 && (
           <>
-            <Divider orientation="left" plain style={{ marginTop: importPreviewData.products.length > 0 ? 24 : 0 }}>平台商品 ({importPreviewData.platform_products.length} 条)</Divider>
+            <Divider orientation="left" plain style={{ marginTop: importPreviewData.products.length > 0 ? 24 : 0 }}>平台商品 (共 {importPreviewData.platform_products.length} 条)</Divider>
             <Table
               dataSource={importPreviewData.platform_products}
               rowKey={(_, idx) => `platform-${idx}`}
@@ -2548,6 +3145,7 @@ const productAttributeLabelMap: Record<string, string> = {
               pagination={{ pageSize: 50, showSizeChanger: false, showQuickJumper: true, showTotal: (t) => `共 ${t} 条`, size: 'small' }}
               columns={[
                 { title: '产品编码', dataIndex: 'product_code', width: 120 },
+                { title: '品名', dataIndex: 'product_name', width: 150, render: (v: string) => v || '-' },
                 { title: '平台', dataIndex: 'platform', width: 100 },
                 { title: '店铺', dataIndex: 'store_with_site_raw', width: 180, render: (v: string) => v || '-' },
                 { title: 'SKU', dataIndex: 'sku', width: 120, render: (v: string) => v || '-' },
@@ -2757,7 +3355,6 @@ const productAttributeLabelMap: Record<string, string> = {
           size="small"
           pagination={false}
           columns={[
-            { title: '配件ID', dataIndex: 'accessory_product_id', width: 80 },
             { title: '配件名称', dataIndex: 'accessory_name', width: 200 },
             { title: '配件编码', dataIndex: 'accessory_code', width: 130 },
             { title: '数量', dataIndex: 'quantity', width: 80,
@@ -2785,7 +3382,16 @@ const productAttributeLabelMap: Record<string, string> = {
         title={bindingEditingItem ? '编辑绑定' : '新增绑定'}
         open={bindingModalOpen}
         onOk={handleBindingSubmit}
-        onCancel={() => { bindingForm.resetFields(); setBindingEditingItem(null); setBindingModalOpen(false) }}
+        onCancel={() => {
+          bindingForm.resetFields()
+          setBindingEditingItem(null)
+          setBindingModalOpen(false)
+          // 清空搜索状态
+          setAccSearchText('')
+          if (accSearchTimeoutRef.current) {
+            clearTimeout(accSearchTimeoutRef.current)
+          }
+        }}
         width={500}
       >
         <Form form={bindingForm} layout="vertical">
@@ -2798,11 +3404,27 @@ const productAttributeLabelMap: Record<string, string> = {
               placeholder="请选择配件产品"
               showSearch
               disabled={!!bindingEditingItem}
-              filterOption={(input, option) =>
-                (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-              }
-              options={products
-                .filter(p => p.product_type?.includes('accessory') && p.id !== bindingProduct?.id)
+              filterOption={false}
+              onSearch={handleAccSearch}
+              onPopupScroll={(e) => {
+                const target = e.target as HTMLDivElement
+                // 滚动到底部时加载更多
+                if (target.scrollTop + target.clientHeight === target.scrollHeight) {
+                  loadMoreAccessories()
+                }
+              }}
+              dropdownRender={(menu) => (
+                <>
+                  {menu}
+                  {accLoadingMore && (
+                    <div style={{ padding: '8px', textAlign: 'center' }}>
+                      <Spin size="small" />
+                    </div>
+                  )}
+                </>
+              )}
+              options={allAccessories
+                .filter(p => p.id !== bindingProduct?.id)
                 .map(p => ({
                   label: `[${p.product_code}] ${p.name}`,
                   value: p.id,
@@ -2819,6 +3441,112 @@ const productAttributeLabelMap: Record<string, string> = {
           </Form.Item>
         </Form>
       </Modal>
+
+      {/* 配件绑定成品管理（反向查看） */}
+      <Drawer
+        title={`绑定成品 - ${accBindingProduct?.name || ''}`}
+        open={accBindingDrawerOpen}
+        onClose={() => setAccBindingDrawerOpen(false)}
+        width={700}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAccBindingCreate}>
+            新增绑定
+          </Button>
+        }
+      >
+        <Table
+          dataSource={accBindingList}
+          rowKey="id"
+          loading={accBindingLoading}
+          size="small"
+          pagination={false}
+          columns={[
+            { title: '成品名称', dataIndex: 'finished_name', width: 200 },
+            { title: '成品编码', dataIndex: 'finished_code', width: 130 },
+            { title: '数量', dataIndex: 'quantity', width: 80,
+              render: (qty: number) => <Tag color="blue">{qty}</Tag>
+            },
+            {
+              title: '操作',
+              key: 'actions',
+              width: 150,
+              render: (_: any, record: any) => (
+                <Space>
+                  <Button size="small" icon={<EditOutlined />} onClick={() => handleAccBindingEdit(record)} />
+                  <Popconfirm title="确定删除?" onConfirm={() => handleAccBindingDelete(record.id)}>
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                </Space>
+              ),
+            },
+          ]}
+          locale={{ emptyText: '暂无绑定成品，点击右上角"新增绑定"添加' }}
+        />
+      </Drawer>
+
+      <Modal
+        title={accBindingEditingItem ? '编辑绑定' : '新增绑定'}
+        open={accBindingModalOpen}
+        onOk={handleAccBindingSubmit}
+        onCancel={() => {
+          accBindingForm.resetFields()
+          setAccBindingEditingItem(null)
+          setAccBindingModalOpen(false)
+          // 清空搜索状态
+          setFinishedSearchText('')
+          if (finishedSearchTimeoutRef.current) {
+            clearTimeout(finishedSearchTimeoutRef.current)
+          }
+        }}
+        width={500}
+      >
+        <Form form={accBindingForm} layout="vertical">
+          <Form.Item
+            name="finished_product_id"
+            label="成品产品"
+            rules={[{ required: true, message: '请选择成品产品' }]}
+          >
+            <Select
+              placeholder="请选择成品产品"
+              showSearch
+              disabled={!!accBindingEditingItem}
+              filterOption={false}
+              onSearch={handleFinishedSearch}
+              onPopupScroll={(e) => {
+                const target = e.target as HTMLDivElement
+                if (target.scrollTop + target.clientHeight === target.scrollHeight) {
+                  loadMoreFinishedProducts()
+                }
+              }}
+              dropdownRender={(menu) => (
+                <>
+                  {menu}
+                  {finishedLoadingMore && (
+                    <div style={{ padding: '8px', textAlign: 'center' }}>
+                      <Spin size="small" />
+                    </div>
+                  )}
+                </>
+              )}
+              options={allFinishedProducts
+                .filter(p => p.id !== accBindingProduct?.id)
+                .map(p => ({
+                  label: `[${p.product_code}] ${p.name}`,
+                  value: p.id,
+                }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="quantity"
+            label="配件数量"
+            rules={[{ required: true, message: '请输入配件数量' }]}
+            initialValue={1}
+          >
+            <InputNumber min={1} style={{ width: '100%' }} placeholder="请输入出库时自动扣除的配件数量" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
     </div>
   )
 }

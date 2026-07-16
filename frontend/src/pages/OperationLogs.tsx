@@ -31,6 +31,8 @@ const moduleLabels: Record<string, string> = {
   purchase: '采购管理',
   product: '产品管理',
   stock_transfer: '挪货管理',
+  replenishment: '补货管理',
+  shipment: '发货管理',
 }
 
 const actionLabels: Record<string, string> = {
@@ -49,6 +51,8 @@ const moduleColorMap: Record<string, string> = {
   purchase: 'purple',
   product: 'green',
   stock_transfer: 'magenta',
+  replenishment: 'volcano',
+  shipment: 'cyan',
 }
 
 const actionColorMap: Record<string, string> = {
@@ -151,6 +155,25 @@ const fieldLabels: Record<string, Record<string, string>> = {
     remark: '备注',
     items_count: '商品项数',
   },
+  replenishment: {
+    order_number: '补货单号',
+    单号: '单号',
+    platform: '所属平台',
+    所属平台: '所属平台',
+    items_count: '明细数量',
+    明细数量: '明细数量',
+    status: '状态',
+    notes: '备注',
+  },
+  shipment: {
+    order_number: '发货单号',
+    store_group_id: '店铺分组ID',
+    store_group_name: '店铺分组',
+    total_quantity: '总数量',
+    status: '状态',
+    notes: '备注',
+    items_count: '商品项数',
+  },
   inventory: {
     warehouse: '仓库',
     product_id: '产品ID',
@@ -199,6 +222,8 @@ const moduleOptions = [
   { label: '采购管理', value: 'purchase' },
   { label: '产品管理', value: 'product' },
   { label: '挪货管理', value: 'stock_transfer' },
+  { label: '补货管理', value: 'replenishment' },
+  { label: '发货管理', value: 'shipment' },
 ]
 
 const actionOptions = [

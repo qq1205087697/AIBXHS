@@ -55,7 +55,7 @@ LOCAL_INV_FIELD_MAPPING = {
 }
 
 
-def import_local_inventory(db: Session, file_content: bytes, filename: str = None) -> dict:
+def import_local_inventory(db: Session, tenant_id: int, file_content: bytes, filename: str = None) -> dict:
     """
     导入本地仓库存Excel数据
     Excel格式要求：至少包含 ASIN/SKU 和 库存数量 列
@@ -81,11 +81,11 @@ def import_local_inventory(db: Session, file_content: bytes, filename: str = Non
             df[col] = df[col].fillna("").astype(str)
 
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0)
-    df["tenant_id"] = 1
+    df["tenant_id"] = tenant_id
     df["batch_date"] = today
 
     # 清理旧数据
-    db.execute(text("DELETE FROM local_inventories WHERE tenant_id = 1"))
+    db.execute(text("DELETE FROM local_inventories WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id})
     db.commit()
     logger.info("本地仓旧数据清理完成")
 
@@ -115,11 +115,11 @@ def import_local_inventory(db: Session, file_content: bytes, filename: str = Non
     }
 
 
-def get_local_inventory_summary(db: Session) -> dict:
+def get_local_inventory_summary(db: Session, tenant_id: int) -> dict:
     """获取本地仓库存汇总"""
-    total_sku = db.query(func.count(LocalInventory.id)).filter(LocalInventory.tenant_id == 1).scalar() or 0
-    total_qty = db.query(func.sum(LocalInventory.quantity)).filter(LocalInventory.tenant_id == 1).scalar() or 0
-    latest_batch = db.query(func.max(LocalInventory.batch_date)).filter(LocalInventory.tenant_id == 1).scalar()
+    total_sku = db.query(func.count(LocalInventory.id)).filter(LocalInventory.tenant_id == tenant_id).scalar() or 0
+    total_qty = db.query(func.sum(LocalInventory.quantity)).filter(LocalInventory.tenant_id == tenant_id).scalar() or 0
+    latest_batch = db.query(func.max(LocalInventory.batch_date)).filter(LocalInventory.tenant_id == tenant_id).scalar()
 
     return {
         "total_sku": total_sku,
@@ -128,9 +128,9 @@ def get_local_inventory_summary(db: Session) -> dict:
     }
 
 
-def get_local_inventory_list(db: Session, keyword: str = None, page: int = 1, page_size: int = 20) -> dict:
+def get_local_inventory_list(db: Session, tenant_id: int, keyword: str = None, page: int = 1, page_size: int = 20) -> dict:
     """查询本地仓库存列表"""
-    query = db.query(LocalInventory).filter(LocalInventory.tenant_id == 1)
+    query = db.query(LocalInventory).filter(LocalInventory.tenant_id == tenant_id)
 
     if keyword:
         kw = f"%{keyword}%"
@@ -161,10 +161,10 @@ def get_local_inventory_list(db: Session, keyword: str = None, page: int = 1, pa
     }
 
 
-def get_local_inventory_by_asin(db: Session, asin: str, account: str = None) -> float:
+def get_local_inventory_by_asin(db: Session, tenant_id: int, asin: str, account: str = None) -> float:
     """根据ASIN查询本地仓库存数量"""
     query = db.query(func.sum(LocalInventory.quantity)).filter(
-        LocalInventory.tenant_id == 1,
+        LocalInventory.tenant_id == tenant_id,
         LocalInventory.asin == asin,
     )
     if account:
@@ -173,10 +173,10 @@ def get_local_inventory_by_asin(db: Session, asin: str, account: str = None) -> 
     return float(result) if result else 0
 
 
-def get_local_inventory_map(db: Session) -> dict:
+def get_local_inventory_map(db: Session, tenant_id: int) -> dict:
     """获取所有本地仓库存映射 {(asin, account): quantity}"""
     items = db.query(LocalInventory.asin, LocalInventory.account, LocalInventory.quantity).filter(
-        LocalInventory.tenant_id == 1
+        LocalInventory.tenant_id == tenant_id
     ).all()
 
     inv_map = {}
@@ -186,14 +186,14 @@ def get_local_inventory_map(db: Session) -> dict:
     return inv_map
 
 
-def clear_local_inventory(db: Session) -> dict:
+def clear_local_inventory(db: Session, tenant_id: int) -> dict:
     """清空本地仓库存数据"""
-    result = db.execute(text("DELETE FROM local_inventories WHERE tenant_id = 1"))
+    result = db.execute(text("DELETE FROM local_inventories WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id})
     db.commit()
     return {"deleted_count": result.rowcount}
 
 
-def import_reduction_table(db: Session, country: str, file_content: bytes) -> dict:
+def import_reduction_table(db: Session, country: str, file_content: bytes, tenant_id: int) -> dict:
     """
     导入已采购数据（减量表）
     根据Excel中的SKU匹配库存快照FNSKU，将已采购数量写入local_inventories表

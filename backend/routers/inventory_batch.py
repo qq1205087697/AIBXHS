@@ -21,8 +21,68 @@ async def get_product_batches(
 ):
     try:
         summary = get_product_stock_summary(db, current_user.tenant_id, product_id)
-        # 为了兼容性，保留原格式，但是前端会直接使用 batches
-        return {"success": True, "data": summary["batches"]}
+
+        # 查询该产品在各平台的库存件数（通过platform_products关联stores表获取平台信息）
+        # 修复: 使用 SUM(DISTINCT ib.current_quantity) 避免因多条platform_products导致的重复计算
+        platform_rows = db.execute(text("""
+            SELECT s.platform, SUM(DISTINCT ib.current_quantity) as quantity
+            FROM inventory_batches ib
+            LEFT JOIN platform_products pp ON pp.product_id = ib.product_id AND pp.deleted_at IS NULL
+            LEFT JOIN stores s ON JSON_CONTAINS(pp.store_id, CAST(s.id AS CHAR), '$') AND s.deleted_at IS NULL
+            WHERE ib.product_id = :pid
+              AND ib.tenant_id = :tid
+              AND ib.current_quantity > 0
+              AND ib.status = 'active'
+              AND ib.deleted_at IS NULL
+              AND s.platform IS NOT NULL
+            GROUP BY s.platform
+            HAVING SUM(DISTINCT ib.current_quantity) > 0
+            ORDER BY s.platform
+        """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
+
+        platform_stock = []
+        for row in platform_rows:
+            platform_stock.append({
+                "platform": row[0] or "",
+                "quantity": int(row[1]),
+            })
+
+        # 查询该产品在各平台各店铺分组的库存件数（通过platform_products获取平台信息）
+        # 修复: 使用 SUM(DISTINCT ib.current_quantity) 避免因多条platform_products导致的重复计算
+        group_rows = db.execute(text("""
+            SELECT
+                sg.id as group_id,
+                sg.name as group_name,
+                pp.platform,
+                SUM(DISTINCT ib.current_quantity) as group_quantity
+            FROM inventory_batches ib
+            LEFT JOIN store_groups sg ON sg.id = ib.store_group_id AND sg.deleted_at IS NULL
+            LEFT JOIN platform_products pp ON pp.product_id = ib.product_id AND pp.deleted_at IS NULL AND pp.platform IS NOT NULL
+            WHERE ib.product_id = :pid
+              AND ib.tenant_id = :tid
+              AND ib.current_quantity > 0
+              AND ib.status = 'active'
+              AND ib.deleted_at IS NULL
+            GROUP BY sg.id, sg.name, pp.platform
+            HAVING SUM(DISTINCT ib.current_quantity) > 0
+            ORDER BY pp.platform, sg.name
+        """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
+
+        group_stock = []
+        for row in group_rows:
+            group_stock.append({
+                "group_id": row[0],
+                "group_name": row[1] or "未分组",
+                "platform": row[2] or "",
+                "quantity": int(row[3]),
+            })
+
+        return {
+            "success": True,
+            "data": summary["batches"],
+            "platform_stock": platform_stock,
+            "group_stock": group_stock,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取库存批次失败: {str(e)}")
 
@@ -55,6 +115,47 @@ async def get_product_stock_history(
                 ORDER BY io.created_at DESC
                 LIMIT 100
             """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
+
+        # 查询组装扣减记录（配件被组装消耗的记录）
+        # 通过inventory_batches表查询：batch_type='purchase'的批次，如果initial_quantity > current_quantity，说明有扣减
+        assembly_deduction_rows = []
+        try:
+            # 查询该配件的采购入库批次，计算被扣减的数量
+            accessory_batches = db.execute(text("""
+                SELECT ib.id, ib.batch_number, ib.initial_quantity, ib.current_quantity,
+                       ib.inbound_order_id, ib.warehouse, ib.created_at,
+                       (ib.initial_quantity - ib.current_quantity) as deducted_qty
+                FROM inventory_batches ib
+                WHERE ib.product_id = :pid AND ib.tenant_id = :tid
+                  AND ib.batch_type = 'purchase' AND ib.deleted_at IS NULL
+                  AND ib.initial_quantity > ib.current_quantity
+                ORDER BY ib.created_at DESC
+            """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
+
+            for ab in accessory_batches:
+                deducted_qty = ab[7]
+                if deducted_qty > 0:
+                    # 查找同一入库单中的组装批次，获取组装时间和成品信息
+                    assembly_batch = db.execute(text("""
+                        SELECT ib.batch_number, ib.notes, ib.created_at
+                        FROM inventory_batches ib
+                        WHERE ib.inbound_order_id = :oid AND ib.batch_type = 'assembly' AND ib.deleted_at IS NULL
+                        ORDER BY ib.created_at DESC LIMIT 1
+                    """), {"oid": ab[4]}).fetchone()
+
+                    if assembly_batch:
+                        assembly_deduction_rows.append({
+                            "batch_number": ab[1],
+                            "deducted_qty": deducted_qty,
+                            "warehouse": ab[5] or "",
+                            "created_at": ab[6],
+                            "assembly_batch": assembly_batch[0],
+                            "assembly_notes": assembly_batch[1] or "",
+                            "assembly_time": assembly_batch[2],
+                            "inbound_order_id": ab[4]
+                        })
+        except Exception as e:
+            print(f"查询组装扣减记录失败: {e}")
 
         try:
             outbound_rows = db.execute(text("""
@@ -171,6 +272,27 @@ async def get_product_stock_history(
                 "type": row[8],
                 "sub_type": sub_type,
                 "batch_details": batch_details,
+            })
+
+        # 添加组装扣减记录
+        for deduction in assembly_deduction_rows:
+            # 获取入库单号
+            inbound_order = db.execute(text("""
+                SELECT order_number FROM inbound_orders WHERE id = :id
+            """), {"id": deduction["inbound_order_id"]}).fetchone()
+            order_number = inbound_order[0] if inbound_order else f"入库单#{deduction['inbound_order_id']}"
+            
+            records.append({
+                "order_number": f"{order_number} (组装扣减)",
+                "date": deduction["assembly_time"].strftime("%Y-%m-%d") if deduction["assembly_time"] else "",
+                "quantity": -deduction["deducted_qty"],
+                "warehouse": deduction["warehouse"],
+                "batch_number": deduction["batch_number"],
+                "created_at": deduction["assembly_time"].strftime("%Y-%m-%d %H:%M:%S") if deduction["assembly_time"] else "",
+                "type": "assembly_deduction",
+                "sub_type": "组装扣减",
+                "assembly_batch": deduction["assembly_batch"],
+                "assembly_notes": deduction["assembly_notes"],
             })
 
         records.sort(key=lambda x: x["created_at"], reverse=True)

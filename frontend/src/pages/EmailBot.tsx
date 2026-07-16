@@ -37,7 +37,7 @@ const EmailBot: React.FC = () => {
 
   const [buyerMailSearch, setBuyerMailSearch] = useState('')
   const [storeNameSearch, setStoreNameSearch] = useState('')
-  const [followUpFilter, setFollowUpFilter] = useState<string>('0')
+  const [followUpFilter, setFollowUpFilter] = useState<number | undefined>(0)
   const [mailSubjectFilter, setMailSubjectFilter] = useState<string>('')
   const [replyModalVisible, setReplyModalVisible] = useState(false)
   const [replyText, setReplyText] = useState('')
@@ -90,7 +90,7 @@ const EmailBot: React.FC = () => {
         page_size: pageSize,
         buyer_mail_number_search: buyerMailSearch || undefined,
         store_name_search: storeNameSearch || undefined,
-        follow_up_status: followUpFilter || undefined,
+        follow_up_status: followUpFilter,
         mail_subject: mailSubjectFilter || undefined,
         sort_by: 'reply_date',
         sort_order: 'desc',
@@ -125,7 +125,7 @@ const EmailBot: React.FC = () => {
     setCurrentPage(1)
   }
 
-  const handleFollowUpFilterChange = (value: string) => {
+  const handleFollowUpFilterChange = (value: number | undefined) => {
     setFollowUpFilter(value)
     setCurrentPage(1)
   }
@@ -175,7 +175,7 @@ const EmailBot: React.FC = () => {
   const handleResetSearch = () => {
     setBuyerMailSearch('')
     setStoreNameSearch('')
-    setFollowUpFilter('')
+    setFollowUpFilter(undefined)
     setMailSubjectFilter('')
     setCurrentPage(1)
   }
@@ -412,8 +412,8 @@ const EmailBot: React.FC = () => {
                     allowClear
                     style={{ width: '100%' }}
                   >
-                    <Select.Option value="0">未跟进</Select.Option>
-                    <Select.Option value="1">已跟进</Select.Option>
+                    <Select.Option value={0}>未跟进</Select.Option>
+                    <Select.Option value={1}>已跟进</Select.Option>
                   </Select>
                 </Col>
                 <Col xs={24} sm={12} md={5}>

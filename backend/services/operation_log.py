@@ -25,6 +25,8 @@ MODULE_LABELS = {
     "purchase": "采购",
     "stock_transfer": "挪货",
     "product": "产品",
+    "replenishment": "补货",
+    "shipment": "发货",
 }
 
 ACTION_LABELS = {
