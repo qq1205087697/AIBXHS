@@ -230,7 +230,7 @@ async def get_stockout_top10(
     try:
         from services.inventory_service import get_stockout_top10
 
-        result = get_stockout_top10(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=current_user.role)
+        result = get_stockout_top10(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=get_user_role_code(current_user, db))
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -252,7 +252,7 @@ async def get_overstock_top10(
     try:
         from services.inventory_service import get_overstock_top10
 
-        result = get_overstock_top10(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=current_user.role)
+        result = get_overstock_top10(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=get_user_role_code(current_user, db))
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -266,7 +266,8 @@ async def get_overstock_top10(
 async def get_inbound_details(
     asin: str = Query(..., description="ASIN（必填）"),
     account: Optional[str] = Query(None, description="店铺账号"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """
     查询指定ASIN的在途货件详情
@@ -435,12 +436,12 @@ async def export_inventory(
 
     # 获取全部数据（不分页，最多5000条）
     result = search_inventory(
-        db, keyword=keyword, risk_level=risk_level,
+        db, tenant_id=current_user.tenant_id, keyword=keyword, risk_level=risk_level,
         replenishment_status=replenishment_status,
         account=account, country=country,
         sort_field=sort_field, sort_order=sort_order,
         page=1, page_size=5000,
-        user_id=current_user.id, user_role=current_user.role
+        user_id=current_user.id, user_role=get_user_role_code(current_user, db)
     )
 
     items = result["items"]
@@ -513,6 +514,7 @@ async def update_inspection_quantity(
 
     snap = db.query(InventorySnapshot).filter(
         InventorySnapshot.id == snapshot_id,
+        InventorySnapshot.tenant_id == current_user.tenant_id,
         InventorySnapshot.deleted_at.is_(None)
     ).first()
     if not snap:
@@ -529,6 +531,7 @@ async def update_inspection_quantity(
             db,
             snapshot_date=snap.snapshot_date.isoformat() if snap.snapshot_date else None,
             snapshot_ids=[snapshot_id],
+            tenant_id=current_user.tenant_id,
         )
         logger.info(f"查验数量更新后重算补货决策 snapshot_id={snapshot_id}: {calc_result}")
     except Exception as calc_e:
@@ -549,7 +552,7 @@ async def get_summary_children(
     """获取汇总行的子行（共享库存）数据"""
     try:
         from services.inventory_service import get_summary_children as get_children
-        children = get_children(db, asin=asin, parent_account=account)
+        children = get_children(db, tenant_id=current_user.tenant_id, asin=asin, parent_account=account)
         return {"success": True, "data": children}
     except Exception as e:
         logger.error(f"获取汇总行子行数据失败: {e}", exc_info=True)
@@ -585,6 +588,7 @@ async def mark_holiday(
     # 查询这些快照，找出汇总行
     snapshots = db.query(InventorySnapshot).filter(
         InventorySnapshot.id.in_(snapshot_ids),
+        InventorySnapshot.tenant_id == current_user.tenant_id,
         InventorySnapshot.deleted_at.is_(None)
     ).all()
 
@@ -595,6 +599,7 @@ async def mark_holiday(
             children = db.query(InventorySnapshot).filter(
                 InventorySnapshot.summary_flag == "共享库存",
                 InventorySnapshot.asin == snap.asin,
+                InventorySnapshot.tenant_id == current_user.tenant_id,
                 InventorySnapshot.deleted_at.is_(None)
             ).all()
             for child in children:
@@ -603,6 +608,7 @@ async def mark_holiday(
     # 批量更新
     db.query(InventorySnapshot).filter(
         InventorySnapshot.id.in_(list(all_ids)),
+        InventorySnapshot.tenant_id == current_user.tenant_id,
         InventorySnapshot.deleted_at.is_(None)
     ).update({InventorySnapshot.is_holiday: holiday_value}, synchronize_session=False)
 
@@ -661,6 +667,7 @@ async def mark_product_status(
     # 查询这些快照，找出汇总行
     snapshots = db.query(InventorySnapshot).filter(
         InventorySnapshot.id.in_(snapshot_ids),
+        InventorySnapshot.tenant_id == current_user.tenant_id,
         InventorySnapshot.deleted_at.is_(None)
     ).all()
 
@@ -671,6 +678,7 @@ async def mark_product_status(
             children = db.query(InventorySnapshot).filter(
                 InventorySnapshot.summary_flag == "共享库存",
                 InventorySnapshot.asin == snap.asin,
+                InventorySnapshot.tenant_id == current_user.tenant_id,
                 InventorySnapshot.deleted_at.is_(None)
             ).all()
             for child in children:
@@ -681,6 +689,7 @@ async def mark_product_status(
     # 更新 inventory_snapshots 表
     db.query(InventorySnapshot).filter(
         InventorySnapshot.id.in_(all_ids_list),
+        InventorySnapshot.tenant_id == current_user.tenant_id,
         InventorySnapshot.deleted_at.is_(None)
     ).update({
         InventorySnapshot.is_holiday: new_holiday,
@@ -690,6 +699,7 @@ async def mark_product_status(
     # 更新 replenishment_decisions 表（通过 snapshot_id 关联）
     db.query(ReplenishmentDecision).filter(
         ReplenishmentDecision.snapshot_id.in_(all_ids_list),
+        ReplenishmentDecision.tenant_id == current_user.tenant_id,
         ReplenishmentDecision.deleted_at.is_(None)
     ).update({
         ReplenishmentDecision.is_holiday: new_holiday,
