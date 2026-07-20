@@ -646,7 +646,7 @@ def import_inventory_data(db: Session, file_path: str = None, file_content: byte
     }
 
 
-def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: list, target_date: date, progress_callback=None) -> dict:
+def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: list, target_date: date, progress_callback=None, tenant_id: int = 1) -> dict:
     """批量补货计算 - DataFrame向量化（含本地仓库存）"""
 
     # 准备计算数据
@@ -801,7 +801,7 @@ def _calculate_replenishment_fast(db: Session, df: pd.DataFrame, snapshot_ids: l
                 continue
 
         write_batches.append(
-            f"(1,{sid},'{sf}','{esc_asin}','{esc_sku}','{esc_acct}','{esc_ctry}',"
+            f"({tenant_id},{sid},'{sf}','{esc_asin}','{esc_sku}','{esc_acct}','{esc_ctry}',"
             f"'{target_date}',{new_fs},{new_dm},0,{new_sq},"
             f"{new_dos},{new_sod},"
             f"'{stockout_date_str}','{risk_levels[i]}','{esc_reason}')"
@@ -971,7 +971,7 @@ def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids
 
     # 软删除由 UPSERT 自动处理，无需手动 DELETE
 
-    return _calculate_replenishment_fast(db, df, snapshot_ids, target_date, progress_callback=progress_callback)
+    return _calculate_replenishment_fast(db, df, snapshot_ids, target_date, progress_callback=progress_callback, tenant_id=tenant_id or 1)
 
 
 def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> dict:

@@ -42,7 +42,8 @@ def get_user_role_code(user: User, db: Session) -> str:
 async def import_inventory(
     file: Optional[UploadFile] = File(None),
     file_path: Optional[str] = Query(None, description="Excel文件路径（与file二选一）"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """
     导入补货建议Excel文件（后台异步执行）
@@ -55,11 +56,11 @@ async def import_inventory(
         # 优先使用上传的文件，其次使用文件路径
         if file:
             content = await file.read()
-            result = start_import_async(file_content=content, filename=file.filename)
+            result = start_import_async(file_content=content, filename=file.filename, tenant_id=current_user.tenant_id)
         elif file_path:
             if not os.path.exists(file_path):
                 raise HTTPException(status_code=400, detail=f"文件不存在: {file_path}")
-            result = start_import_async(file_path=file_path)
+            result = start_import_async(file_path=file_path, tenant_id=current_user.tenant_id)
         else:
             raise HTTPException(status_code=400, detail="请提供 file 或 file_path 参数")
 
@@ -95,6 +96,7 @@ async def get_import_status(
 async def calculate_replenishment_async(
     snapshot_date: Optional[str] = Query(None, description="快照日期，格式YYYY-MM-DD，默认最新"),
     snapshot_ids: Optional[str] = Query(None, description="快照ID列表，逗号分隔，不传则全量计算"),
+    current_user: User = Depends(get_current_user),
 ):
     """
     触发补货决策计算（后台异步执行）
@@ -107,7 +109,7 @@ async def calculate_replenishment_async(
         if snapshot_ids:
             ids_list = [int(x.strip()) for x in snapshot_ids.split(",") if x.strip()]
 
-        result = start_calculation_async(snapshot_date=snapshot_date, snapshot_ids=ids_list)
+        result = start_calculation_async(snapshot_date=snapshot_date, snapshot_ids=ids_list, tenant_id=current_user.tenant_id)
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -116,9 +118,12 @@ async def calculate_replenishment_async(
 
 
 @router.get("/calculate/status/{task_id}")
-async def get_calculation_status(task_id: str):
+async def get_calculation_status(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
     """
-    获取补货计算任务状态
+    获取计算任务状态
     用于轮询计算进度
     """
     try:
