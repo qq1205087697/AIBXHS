@@ -1,45 +1,23 @@
-from database.database import SessionLocal
-from models.product_page_info import ProductPageInfo
-from models.user import User
-from routers.product_page_info import calc_total_score, calc_star_rating_score, calc_competitor_price_score
+import requests
 
-db = SessionLocal()
-
-# 查询admin用户的tenant_id
-admin = db.query(User).filter(User.username == "admin").first()
-print(f"Admin tenant_id: {admin.tenant_id if admin else 'None'}")
-
-# 查询已评分记录
-rated = db.query(ProductPageInfo).filter(ProductPageInfo.rating_status == 1).all()
-print(f"已评分记录总数: {len(rated)}")
-
-if admin:
-    tenant_rated = db.query(ProductPageInfo).filter(
-        ProductPageInfo.rating_status == 1,
-        ProductPageInfo.tenant_id == admin.tenant_id
-    ).limit(3).all()
-    print(f"Admin tenant已评分记录数: {len(tenant_rated)}")
-    
-    if tenant_rated:
-        print("\n计算前3条的总分:")
-        for item in tenant_rated:
-            star_score = calc_star_rating_score(item.star_rating)
-            _, competitor_score = calc_competitor_price_score(item.price, item.competitor_price)
-            has_ad_val = item.has_ad if item.has_ad is not None else False
-            has_aplus_val = item.has_aplus if item.has_aplus is not None else 0
-            has_video_val = item.has_video if item.has_video is not None else False
-            
-            total = calc_total_score(
-                item.title_rating,
-                item.description_rating,
-                item.keywords_rating,
-                item.image_rating,
-                star_score,
-                has_ad_val,
-                has_aplus_val,
-                has_video_val,
-                competitor_score,
-            )
-            print(f"  SKU: {item.sku}, total_score: {total}, star_rating: {item.star_rating}")
-
-db.close()
+# 登录
+r = requests.post("http://localhost:8002/api/auth/login", json={"username": "k", "password": "k123456"})
+print(f"Login: {r.status_code}")
+if r.status_code != 200:
+    r = requests.post("http://localhost:8002/api/auth/login", data={"username": "k", "password": "k123456"})
+    print(f"Form Login: {r.status_code}")
+if r.status_code == 200:
+    token = r.json().get("access_token")
+    headers = {"Authorization": f"Bearer {token}"}
+    r2 = requests.get("http://localhost:8002/api/product-page-info/ranking", headers=headers)
+    print(f"Ranking: {r2.status_code}")
+    data = r2.json()
+    top10 = data.get("data", {}).get("top10", [])
+    bottom10 = data.get("data", {}).get("bottom10", [])
+    print(f"Top10 count: {len(top10)}, Bottom10 count: {len(bottom10)}")
+    if top10:
+        print(f"First top: {top10[0]}")
+    if bottom10:
+        print(f"First bottom: {bottom10[0]}")
+else:
+    print(f"Login failed: {r.text[:200]}")

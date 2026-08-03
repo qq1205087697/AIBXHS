@@ -32,7 +32,7 @@ class ProductPageInfo(BaseModel):
     image_rating = Column(String(20), nullable=True, comment="图片评分")
 
     # 其他字段
-    has_ad = Column(Boolean, default=False, comment="是否有广告")
+    has_ad = Column(Integer, default=0, comment="广告数量")
     has_aplus = Column(Integer, default=0, comment="A+页面等级 0=无 1=有 2=高级")
     has_video = Column(Boolean, default=False, comment="是否有视频")
     rating_status = Column(Integer, default=0, comment="评分状态 0=未评分 1=已评分")

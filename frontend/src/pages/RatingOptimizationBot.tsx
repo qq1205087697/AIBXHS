@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Card, Button, Input, Select, Space, Tag, message, Modal, Descriptions, Spin, Row, Col, Pagination, Radio, Checkbox, Dropdown } from 'antd'
+import { Card, Button, Input, Select, Space, Tag, message, Modal, Descriptions, Spin, Row, Col, Pagination, Radio, Checkbox, Dropdown, Upload as AntUpload } from 'antd'
 import {
   Search,
   RefreshCw,
@@ -30,12 +30,13 @@ interface RatingItem {
   competitor_price?: string | null
   competitor_price_rank: number
   competitor_price_score: number
-  has_ad: boolean
+  has_ad: number | null
   has_aplus: number
   has_video: boolean
   rating_status?: number
   total_score: number
   traffic_keywords?: string | null
+  updated_at?: string | null
 }
 
 interface RatingDetail extends RatingItem {
@@ -70,6 +71,12 @@ const RatingOptimizationBot: React.FC = () => {
   const [selectedRecord, setSelectedRecord] = useState<RatingDetail | null>(null)
   const [detailTab, setDetailTab] = useState<'product' | 'score'>('product')
 
+  // 编辑基础信息
+  const [editVisible, setEditVisible] = useState(false)
+  const [editForm, setEditForm] = useState({ title: '', product_description: '', keywords: '', bullet_points: '', image_count: '' })
+  const [editField, setEditField] = useState<string>('title')
+  const [editDirty, setEditDirty] = useState(false)
+
   // 批量选择
   const [selectedIds, setSelectedIds] = useState<number[]>([])
 
@@ -90,21 +97,20 @@ const RatingOptimizationBot: React.FC = () => {
   }
 
   useEffect(() => {
-    fetchData()
-    fetchStoreList()
+    fetchData(true)
   }, [currentPage, pageSize, ratingStatusFilter])
 
-  const fetchData = async (forceRefresh = false) => {
-    // 生成缓存键
-    const cacheKey = `${ratingStatusFilter}-${currentPage}-${pageSize}`
+  useEffect(() => {
+    fetchStoreList()
+  }, [])
 
-    // 检查缓存，非强制刷新时先显示缓存数据
+  const fetchData = async (forceRefresh = false) => {
+    const cacheKey = `${ratingStatusFilter}-${asinSearch}-${skuSearch}-${storeFilter}-${currentPage}-${pageSize}`
+
     if (!forceRefresh && dataCache.current.has(cacheKey)) {
       const cached = dataCache.current.get(cacheKey)!
       setData(cached.data)
       setTotal(cached.total)
-      // 后台静默刷新，不显示loading
-      refreshData(cacheKey)
       return
     }
 
@@ -113,6 +119,7 @@ const RatingOptimizationBot: React.FC = () => {
       let ratingStatusValue: number | undefined = undefined
       if (ratingStatusFilter === 'rated') ratingStatusValue = 1
       else if (ratingStatusFilter === 'unrated') ratingStatusValue = 0
+      else if (ratingStatusFilter === 'low_score') ratingStatusValue = 1
 
       const res = await productPageInfoApi.getList({
         page: currentPage,
@@ -121,11 +128,11 @@ const RatingOptimizationBot: React.FC = () => {
         sku_search: skuSearch || undefined,
         store_filter: storeFilter || undefined,
         rating_status: ratingStatusValue,
+        low_score: ratingStatusFilter === 'low_score' ? true : undefined,
       })
       if (res.data.success) {
         setData(res.data.data)
         setTotal(res.data.total)
-        // 更新缓存
         dataCache.current.set(cacheKey, { data: res.data.data, total: res.data.total })
       }
       setLoading(false)
@@ -133,31 +140,6 @@ const RatingOptimizationBot: React.FC = () => {
       console.error('获取评分数据失败:', error)
       setLoading(false)
       message.error('获取评分数据失败')
-    }
-  }
-
-  // 后台静默刷新数据
-  const refreshData = async (cacheKey: string) => {
-    try {
-      let ratingStatusValue: number | undefined = undefined
-      if (ratingStatusFilter === 'rated') ratingStatusValue = 1
-      else if (ratingStatusFilter === 'unrated') ratingStatusValue = 0
-
-      const res = await productPageInfoApi.getList({
-        page: currentPage,
-        page_size: pageSize,
-        asin_search: asinSearch || undefined,
-        sku_search: skuSearch || undefined,
-        store_filter: storeFilter || undefined,
-        rating_status: ratingStatusValue,
-      })
-      if (res.data.success) {
-        setData(res.data.data)
-        setTotal(res.data.total)
-        dataCache.current.set(cacheKey, { data: res.data.data, total: res.data.total })
-      }
-    } catch (error) {
-      console.error('后台刷新数据失败:', error)
     }
   }
 
@@ -174,16 +156,12 @@ const RatingOptimizationBot: React.FC = () => {
 
   const fetchRanking = async () => {
     try {
-      console.log('[DEBUG] 调用排行榜API...')
       const res = await productPageInfoApi.getRanking()
-      console.log('[DEBUG] 排行榜响应:', res.data)
       if (res.data.success) {
         setRankingData(res.data.data)
-        console.log('[DEBUG] top10:', res.data.data.top10)
-        console.log('[DEBUG] bottom10:', res.data.data.bottom10)
       }
     } catch (error) {
-      console.error('[DEBUG] 获取排行榜失败:', error)
+      console.error('获取排行榜失败:', error)
     }
   }
 
@@ -203,6 +181,7 @@ const RatingOptimizationBot: React.FC = () => {
   // 导入Excel
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importing, setImporting] = useState(false)
+  const [lastImportIds, setLastImportIds] = useState<number[]>([])
 
   const handleImportClick = () => {
     fileInputRef.current?.click()
@@ -222,6 +201,7 @@ const RatingOptimizationBot: React.FC = () => {
       const res = await productPageInfoApi.importExcel(file)
       if (res.data.success) {
         message.success(res.data.message)
+        setLastImportIds(res.data.data?.import_ids || [])
         dataCache.current.clear()
         fetchData(true)
       } else {
@@ -235,6 +215,30 @@ const RatingOptimizationBot: React.FC = () => {
       // 清空file input，允许重复选择同一文件
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
+  }
+
+  // 取消导入
+  const handleCancelImport = async () => {
+    if (lastImportIds.length === 0) return
+    Modal.confirm({
+      title: '确认取消导入',
+      content: `将删除最近导入的 ${lastImportIds.length} 条记录，是否继续？`,
+      onOk: async () => {
+        try {
+          const res = await productPageInfoApi.cancelImport(lastImportIds)
+          if (res.data.success) {
+            message.success(res.data.message)
+            setLastImportIds([])
+            dataCache.current.clear()
+            fetchData(true)
+          } else {
+            message.error(res.data.message || '取消导入失败')
+          }
+        } catch (error) {
+          message.error('取消导入失败')
+        }
+      },
+    })
   }
 
   const handleViewDetail = async (record: RatingItem) => {
@@ -441,6 +445,7 @@ const RatingOptimizationBot: React.FC = () => {
             >
               <Radio.Button value="all">全部</Radio.Button>
               <Radio.Button value="rated">已评分</Radio.Button>
+              <Radio.Button value="low_score">低分</Radio.Button>
               <Radio.Button value="unrated">未评分</Radio.Button>
             </Radio.Group>
             <Button type="primary" icon={<Search size={14} />} onClick={handleSearch}>
@@ -458,6 +463,14 @@ const RatingOptimizationBot: React.FC = () => {
           >
             导入表格
           </Button>
+          {lastImportIds.length > 0 && (
+            <Button
+              danger
+              onClick={handleCancelImport}
+            >
+              取消导入
+            </Button>
+          )}
         </div>
         <input
           ref={fileInputRef}
@@ -607,20 +620,19 @@ const RatingOptimizationBot: React.FC = () => {
                       }}
                       onClick={(e) => e.stopPropagation()}
                     />
-                    {/* 第一行：SKU + 价格 */}
+                    {/* 第一行：SKU */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, marginLeft: 24 }}>
                       <span style={{ fontSize: 13, color: '#666' }}>SKU: {item.sku || '-'}</span>
-                      <span style={{ fontSize: 15, fontWeight: 600, color: '#52c41a' }}>{item.price || '-'}</span>
                     </div>
                     {/* 第二行：ASIN + 店铺 + 评分 */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginLeft: 24 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, marginLeft: 24 }}>
                       <span style={{ color: '#1890ff' }}>{item.asin || '-'}</span>
                       <span style={{ color: '#888' }}>{item.store || '-'}</span>
                       <Tag
                         color={item.total_score >= 80 ? 'green' : item.total_score >= 60 ? 'orange' : 'red'}
-                        style={{ margin: 0 }}
+                        style={{ margin: 0, fontSize: 14, fontWeight: 600, padding: '2px 8px' }}
                       >
-                        {item.total_score}
+                        {item.total_score}分
                       </Tag>
                     </div>
                   </Card>
@@ -667,20 +679,19 @@ const RatingOptimizationBot: React.FC = () => {
                     }}
                     onClick={(e) => e.stopPropagation()}
                   />
-                  {/* 第一行：SKU + 价格 */}
+                  {/* 第一行：SKU */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, marginLeft: 24 }}>
                     <span style={{ fontSize: 13, color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 80 }}>SKU: {item.sku || '-'}</span>
-                    <span style={{ fontSize: 15, fontWeight: 600, color: '#52c41a' }}>{item.price || '-'}</span>
                   </div>
                   {/* 第二行：ASIN + 店铺 + 评分 */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginLeft: 24 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, marginLeft: 24 }}>
                     <span style={{ color: '#1890ff' }}>{item.asin}</span>
                     <span style={{ color: '#888' }}>{item.store || '-'}</span>
                     <Tag
                       color={item.total_score >= 80 ? 'green' : item.total_score >= 60 ? 'orange' : 'red'}
-                      style={{ margin: 0 }}
+                      style={{ margin: 0, fontSize: 14, fontWeight: 600, padding: '2px 8px' }}
                     >
-                      {item.total_score}
+                      {item.total_score}分
                     </Tag>
                   </div>
                 </Card>
@@ -720,7 +731,16 @@ const RatingOptimizationBot: React.FC = () => {
 
       {/* 查看详情弹窗 */}
       <Modal
-        title="产品页面详情"
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 40 }}>
+            <span>产品页面详情</span>
+            {selectedRecord?.updated_at && (
+              <span style={{ fontSize: 12, color: '#999', fontWeight: 'normal' }}>
+                最近更新：{new Date(selectedRecord.updated_at).toLocaleString('zh-CN')}
+              </span>
+            )}
+          </div>
+        }
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
         footer={[
@@ -744,6 +764,22 @@ const RatingOptimizationBot: React.FC = () => {
               >
                 评分详情
               </Button>
+              <Button
+                onClick={() => {
+                  setEditForm({
+                    title: selectedRecord.title || '',
+                    product_description: selectedRecord.product_description || '',
+                    keywords: selectedRecord.keywords || '',
+                    bullet_points: selectedRecord.bullet_points || '',
+                    image_count: selectedRecord.image_count?.toString() || '',
+                  })
+                  setEditField('title')
+                  setEditDirty(false)
+                  setEditVisible(true)
+                }}
+              >
+                编辑基础信息
+              </Button>
             </Space>
 
             {/* 产品信息详情 */}
@@ -759,6 +795,8 @@ const RatingOptimizationBot: React.FC = () => {
                       urlPrefix = 'https://www.amazon.de/dp/'
                     } else if (store.includes('UK')) {
                       urlPrefix = 'https://www.amazon.co.uk/dp/'
+                    } else if (store.includes('CA')) {
+                      urlPrefix = 'https://www.amazon.ca/dp/'
                     }
                     const asinUrl = selectedRecord.asin && urlPrefix ? `${urlPrefix}${selectedRecord.asin}` : ''
                     return asinUrl ? (
@@ -791,8 +829,17 @@ const RatingOptimizationBot: React.FC = () => {
                   </div>
                 </Descriptions.Item>
                 <Descriptions.Item label="五点描述" span={2}>
-                  <div style={{ whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto' }}>
-                    {selectedRecord.bullet_points || '字段为空'}
+                  <div style={{ maxHeight: 200, overflow: 'auto' }}>
+                    {selectedRecord.bullet_points ? (
+                      selectedRecord.bullet_points.split('\n').map((line, idx) => (
+                        <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', marginBottom: 4 }}>
+                          <span style={{ color: '#000', marginRight: 6, fontSize: 14, lineHeight: '20px' }}>●</span>
+                          <span style={{ whiteSpace: 'pre-wrap' }}>{line}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <span>字段为空</span>
+                    )}
                   </div>
                 </Descriptions.Item>
               </Descriptions>
@@ -803,7 +850,7 @@ const RatingOptimizationBot: React.FC = () => {
               <>
                 {/* 评分标准提示 */}
                 <div style={{ marginBottom: 12, padding: '8px 12px', background: '#e6f7ff', borderRadius: 4, border: '1px solid #91d5ff', fontSize: 12, color: '#096dd9' }}>
-                  评分标准：标题、描述、关键词、图片均为星拓反查流量词中前五流量词对比评分，广告与视频均为含有即得分，A+区分普通和高级，价格按排名得分
+                  评分标准：标题、描述、关键词、图片均为星拓反查流量词中前五流量词对比评分，广告按数量得分（{'≥3'}为10分，2为8分，1为6分），视频为含有即得分，A+区分普通和高级，价格按排名得分
                 </div>
                 {/* 检测空白字段 */}
                 {(() => {
@@ -866,7 +913,7 @@ const RatingOptimizationBot: React.FC = () => {
                 </Descriptions.Item>
                 <Descriptions.Item label="广告" span={1}>
                   <Tag color="blue">
-                    {selectedRecord.has_ad ? '10/10' : '0/10'}
+                    {selectedRecord.has_ad !== null && selectedRecord.has_ad >= 3 ? '10/10' : selectedRecord.has_ad === 2 ? '8/10' : selectedRecord.has_ad === 1 ? '6/10' : '0/10'}
                   </Tag>
                 </Descriptions.Item>
                 <Descriptions.Item label="A+页面" span={1}>
@@ -902,6 +949,8 @@ const RatingOptimizationBot: React.FC = () => {
                             urlPrefix = 'https://www.amazon.de/dp/'
                           } else if (store.includes('UK')) {
                             urlPrefix = 'https://www.amazon.co.uk/dp/'
+                          } else if (store.includes('CA')) {
+                            urlPrefix = 'https://www.amazon.ca/dp/'
                           }
                           const asinUrl = asinPart && urlPrefix ? `${urlPrefix}${asinPart}` : ''
                           return (
@@ -935,10 +984,173 @@ const RatingOptimizationBot: React.FC = () => {
                   </Space>
                 </Descriptions.Item>
               </Descriptions>
+
+                {/* 产品建议 */}
+                {(() => {
+                  const suggestions: string[] = []
+                  const titleScore = selectedRecord.title_rating ? parseFloat(selectedRecord.title_rating) : 0
+                  const descScore = selectedRecord.description_rating ? parseFloat(selectedRecord.description_rating) : 0
+                  const keywordsScore = selectedRecord.keywords_rating ? parseFloat(selectedRecord.keywords_rating) : 0
+                  const imageScore = selectedRecord.image_rating ? parseFloat(selectedRecord.image_rating) : 0
+                  const starRating = selectedRecord.star_rating ?? 0
+                  const hasAd = selectedRecord.has_ad ?? 0
+                  const hasAplus = selectedRecord.has_aplus ?? 0
+                  const hasVideo = selectedRecord.has_video
+
+                  if (titleScore < 9) suggestions.push('标题加入参考流量词')
+                  if (descScore < 6) suggestions.push('描述加入参考流量词')
+                  if (keywordsScore < 6) suggestions.push('关键词加入参考流量词')
+                  if (imageScore < 12) suggestions.push('添加图片')
+                  if (starRating === 0) suggestions.push('上直评')
+                  else if (starRating < 3) suggestions.push('更换SKU重新创建链接')
+                  if (hasAd < 8) suggestions.push('新开广告')
+                  if (hasAplus === 0) suggestions.push('上传A+')
+                  else if (hasAplus === 5) suggestions.push('上传高级A+')
+                  if (!hasVideo) suggestions.push('上传视频')
+
+                  if (suggestions.length === 0) return null
+                  return (
+                    <div style={{ marginTop: 12, padding: '10px 12px', background: '#fff7e6', borderRadius: 4, border: '1px solid #ffd591' }}>
+                      <div style={{ fontWeight: 500, color: '#fa8c16', marginBottom: 6 }}>产品建议</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {suggestions.map((s, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'flex-start' }}>
+                            <span style={{ color: '#fa8c16', marginRight: 6, fontSize: 14, lineHeight: '20px' }}>●</span>
+                            <span style={{ color: '#595959', fontSize: 13 }}>{s}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
               </>
             )}
           </>
         )}
+      </Modal>
+
+      {/* 编辑基础信息弹窗 */}
+      <Modal
+        title="编辑基础信息"
+        open={editVisible}
+        onCancel={() => setEditVisible(false)}
+        footer={[
+          <Button key="cancel" onClick={() => setEditVisible(false)}>取消</Button>,
+          <Button key="submit" type="primary" disabled={!editDirty} onClick={() => {
+            if (!selectedRecord) return
+            const fieldLabelMap: Record<string, string> = {
+              title: '标题',
+              product_description: '产品描述',
+              keywords: '关键词',
+              bullet_points: '五点描述',
+              image: '图片',
+            }
+            const fieldValue = editForm[editField as keyof typeof editForm] as string
+            const confirmModal = Modal.confirm({
+              title: '确认提交',
+              content: (
+                <div>
+                  <div>提交后是否需要重新提交评分？</div>
+                  <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>点击"是"，提交修改请求以及重新评分；点击"否"仅提交修改请求</div>
+                </div>
+              ),
+              footer: (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <Button onClick={() => confirmModal.destroy()}>取消提交</Button>
+                  <Button type="primary" onClick={async () => {
+                    confirmModal.destroy()
+                    try {
+                      const res = await productPageInfoApi.submitEdit({
+                        item_id: selectedRecord.id,
+                        store: selectedRecord.store_original || selectedRecord.store || '',
+                        field_type: fieldLabelMap[editField] || editField,
+                        sku: selectedRecord.sku || '',
+                        content: fieldValue,
+                        reset_rating: false,
+                      })
+                      if (res.data.success) {
+                        message.success('提交成功')
+                        setEditVisible(false)
+                      } else {
+                        message.error(res.data.message || '提交失败')
+                      }
+                    } catch (error: any) {
+                      console.error('提交失败:', error)
+                      message.error(error?.response?.data?.message || error?.message || '提交失败')
+                    }
+                  }}>否</Button>
+                  <Button type="primary" danger onClick={async () => {
+                    confirmModal.destroy()
+                    try {
+                      const res = await productPageInfoApi.submitEdit({
+                        item_id: selectedRecord.id,
+                        store: selectedRecord.store_original || selectedRecord.store || '',
+                        field_type: fieldLabelMap[editField] || editField,
+                        sku: selectedRecord.sku || '',
+                        content: fieldValue,
+                        reset_rating: true,
+                      })
+                      if (res.data.success) {
+                        message.success('提交成功')
+                        setEditVisible(false)
+                        dataCache.current.clear()
+                        fetchData(true)
+                      } else {
+                        message.error(res.data.message || '提交失败')
+                      }
+                    } catch (error: any) {
+                      console.error('提交失败:', error)
+                      message.error(error?.response?.data?.message || error?.message || '提交失败')
+                    }
+                  }}>是</Button>
+                </div>
+              ),
+            })
+          }}>提交</Button>,
+        ]}
+        width={640}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div>
+            <div style={{ marginBottom: 6 }}>选择字段</div>
+            <Select
+              value={editField}
+              onChange={(val) => setEditField(val)}
+              style={{ width: '100%' }}
+              options={[
+                { label: '标题', value: 'title' },
+                { label: '产品描述', value: 'product_description' },
+                { label: '关键词', value: 'keywords' },
+                { label: '五点描述', value: 'bullet_points' },
+                { label: '图片（待开发）', value: 'image', disabled: true },
+              ]}
+            />
+          </div>
+          <div>
+            {editField === 'image' ? (
+              <AntUpload
+                listType="picture-card"
+                beforeUpload={() => false}
+                maxCount={1}
+              >
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 20 }}>+</div>
+                  <div style={{ fontSize: 12 }}>上传图片</div>
+                </div>
+              </AntUpload>
+            ) : (
+              <Input.TextArea
+                value={editForm[editField as keyof typeof editForm] as string}
+                onChange={(e) => {
+                  setEditForm({ ...editForm, [editField]: e.target.value })
+                  setEditDirty(true)
+                }}
+                rows={6}
+                placeholder={`请输入${editField === 'title' ? '标题' : editField === 'product_description' ? '产品描述' : editField === 'keywords' ? '关键词' : '五点描述'}`}
+              />
+            )}
+          </div>
+        </div>
       </Modal>
     </div>
   )

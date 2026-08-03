@@ -221,7 +221,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     {
       key: '/rating-optimization',
       icon: <Star size={20} />,
-      label: '评分机器人',
+      label: '页面优化机器人',
     },
     ...(hasPermission('product:view')
       ? [{
@@ -318,7 +318,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/business-settings': '业务设置',
       '/review': '差评机器人',
       '/email': '邮件机器人',
-      '/rating-optimization': '评分机器人',
+      '/rating-optimization': '页面优化机器人',
       '/org': '组织管理',
       '/permissions': '权限管理',
       '/stores': '店铺管理',

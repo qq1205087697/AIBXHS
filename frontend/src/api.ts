@@ -457,6 +457,7 @@ export const productPageInfoApi = {
     sku_search?: string;
     store_filter?: string | null;
     rating_status?: number | null;
+    low_score?: boolean | null;
   }) => apiClient.get("/product-page-info/", { params: params }),
   getById: (id: number) => apiClient.get(`/product-page-info/${id}`),
   getStoreOptions: () => apiClient.get("/product-page-info/stores/options"),
@@ -474,6 +475,12 @@ export const productPageInfoApi = {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },
+  cancelImport: (importIds: number[]) =>
+    apiClient.post("/product-page-info/cancel-import", { import_ids: importIds }),
+  submitEdit: (data: { item_id: number; store: string; field_type: string; sku: string; content: string; reset_rating: boolean }) =>
+    apiClient.post("/product-page-info/submit-edit", data),
+  updateRatingStatus: (id: number, ratingStatus: number) =>
+    apiClient.put(`/product-page-info/${id}/rating-status`, { rating_status: ratingStatus }),
 };
 
 // ========== Store Groups API ==========

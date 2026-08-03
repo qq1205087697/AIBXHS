@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, UploadFile, File
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from pydantic import BaseModel
@@ -11,6 +11,9 @@ import httpx
 import asyncio
 import openpyxl
 import io
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/product-page-info", tags=["product-page-info"])
 
@@ -110,7 +113,7 @@ def calc_total_score(
     keywords_rating: Optional[str],
     image_rating: Optional[str],
     star_rating_score: Optional[int],
-    has_ad: bool,
+    has_ad: Optional[int],
     has_aplus: int,
     has_video: bool,
     competitor_price_score: int = 0,
@@ -123,7 +126,7 @@ def calc_total_score(
     - 关键词评分：10分
     - 图片评分：15分
     - 星级评分：10分
-    - has_ad：10分（0=0，1=10）
+    - has_ad：10分（>=3=10，2=8，1=6，0/空=0）
     - has_aplus：10分（0=0，1=5，2=10）
     - has_video：5分（0=0，1=5）
     - 竞品价格：15分（排名1=15，2=12，3=8，4=4，5+=0）
@@ -154,8 +157,15 @@ def calc_total_score(
     if star_rating_score is not None:
         total += star_rating_score
 
-    # has_ad（满分10）
-    total += 10 if has_ad else 0
+    # has_ad（满分10，按广告数量计分）
+    if has_ad is not None and has_ad >= 3:
+        total += 10
+    elif has_ad is not None and has_ad == 2:
+        total += 8
+    elif has_ad is not None and has_ad == 1:
+        total += 6
+    else:
+        total += 0
 
     # has_aplus（满分10）
     if has_aplus == 2:
@@ -215,6 +225,7 @@ async def get_product_page_info_list(
     sku_search: Optional[str] = Query(None),
     store_filter: Optional[str] = Query(None),
     rating_status: Optional[int] = Query(None, description="评分状态筛选：0=未评分，1=已评分"),
+    low_score: Optional[bool] = Query(None, description="低分筛选：已评分且总分<60"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -231,7 +242,91 @@ async def get_product_page_info_list(
     if sku_search:
         query = query.filter(ProductPageInfo.sku.ilike(f"%{sku_search}%"))
     if store_filter:
-        query = query.filter(ProductPageInfo.store.ilike(f"%{store_filter}%"))
+        # 先查找该 shop_abbr 对应的所有 inventory_name
+        matching_stores = db.query(Store.inventory_name).filter(
+            Store.tenant_id == current_user.tenant_id,
+            Store.shop_abbr == store_filter
+        ).all()
+        matching_names = [s[0] for s in matching_stores if s[0]]
+        if matching_names:
+            query = query.filter(ProductPageInfo.store.in_(matching_names))
+        else:
+            # 没有匹配的店铺，回退到模糊搜索
+            query = query.filter(ProductPageInfo.store.ilike(f"%{store_filter}%"))
+
+    if low_score:
+        # 低分筛选：先查所有已评分记录，计算总分后过滤
+        all_rated = query.filter(ProductPageInfo.rating_status == 1).all()
+
+        # 查询stores表映射
+        store_rows = db.query(Store.inventory_name, Store.shop_abbr, Store.site).filter(
+            Store.tenant_id == current_user.tenant_id,
+            Store.inventory_name.isnot(None)
+        ).all()
+        store_abbr_map = {}
+        for r in store_rows:
+            if r.inventory_name:
+                parts = [p for p in [r.shop_abbr, r.site] if p]
+                store_abbr_map[r.inventory_name] = "-".join(parts) if parts else r.inventory_name
+
+        filtered = []
+        for item in all_rated:
+            has_aplus_val = 0
+            if isinstance(item.has_aplus, int):
+                has_aplus_val = item.has_aplus
+            elif isinstance(item.has_aplus, bool):
+                has_aplus_val = 1 if item.has_aplus else 0
+            has_ad_val = int(item.has_ad) if item.has_ad is not None else None
+            has_video_val = bool(item.has_video) if item.has_video is not None else False
+            star_score = calc_star_rating_score(item.star_rating)
+            _, competitor_score = calc_competitor_price_score(item.price, item.competitor_price)
+            total_score = calc_total_score(
+                item.title_rating, item.description_rating, item.keywords_rating, item.image_rating,
+                star_score, has_ad_val, has_aplus_val, has_video_val, competitor_score,
+            )
+            if total_score < 60:
+                display_store = store_abbr_map.get(item.store, item.store) if item.store else item.store
+                filtered.append((item, total_score, display_store, has_ad_val, has_aplus_val, has_video_val, star_score, competitor_score))
+
+        # 按updated_at降序排序
+        filtered.sort(key=lambda x: x[0].updated_at if x[0].updated_at else None, reverse=True)
+
+        total = len(filtered)
+        paged = filtered[(page - 1) * page_size : page * page_size]
+
+        result = []
+        for item, total_score, display_store, has_ad_val, has_aplus_val, has_video_val, star_score, competitor_score in paged:
+            competitor_rank, competitor_score2 = calc_competitor_price_score(item.price, item.competitor_price)
+            result.append({
+                "id": item.id,
+                "tenant_id": item.tenant_id,
+                "asin": item.asin,
+                "sku": item.sku,
+                "store": display_store,
+                "store_original": item.store,
+                "title": item.title,
+                "keywords": item.keywords,
+                "product_description": item.product_description,
+                "bullet_points": item.bullet_points,
+                "price": item.price,
+                "image_count": item.image_count,
+                "title_rating": item.title_rating,
+                "description_rating": item.description_rating,
+                "keywords_rating": item.keywords_rating,
+                "image_rating": item.image_rating,
+                "star_rating": item.star_rating,
+                "star_rating_score": star_score,
+                "competitor_price": item.competitor_price,
+                "competitor_price_rank": competitor_rank,
+                "competitor_price_score": competitor_score2,
+                "has_ad": has_ad_val,
+                "has_aplus": has_aplus_val,
+                "has_video": has_video_val,
+                "rating_status": item.rating_status or 0,
+                "total_score": total_score,
+            })
+
+        return {"success": True, "data": result, "total": total}
 
     total = query.count()
     items = (
@@ -242,12 +337,16 @@ async def get_product_page_info_list(
     )
 
     result = []
-    # 查询stores表，建立 inventory_name -> shop_abbr 映射
-    store_rows = db.query(Store.inventory_name, Store.shop_abbr).filter(
+    # 查询stores表，建立 inventory_name -> "shop_abbr-site" 映射
+    store_rows = db.query(Store.inventory_name, Store.shop_abbr, Store.site).filter(
         Store.tenant_id == current_user.tenant_id,
         Store.inventory_name.isnot(None)
     ).all()
-    store_abbr_map = {r.inventory_name: r.shop_abbr for r in store_rows if r.inventory_name}
+    store_abbr_map = {}
+    for r in store_rows:
+        if r.inventory_name:
+            parts = [p for p in [r.shop_abbr, r.site] if p]
+            store_abbr_map[r.inventory_name] = "-".join(parts) if parts else r.inventory_name
 
     for item in items:
         # 处理 has_aplus：数据库中可能是 None/Boolean/Integer
@@ -258,7 +357,7 @@ async def get_product_page_info_list(
             has_aplus_val = 1 if item.has_aplus else 0
 
         # 处理 has_ad/has_video 为 None 的情况
-        has_ad_val = bool(item.has_ad) if item.has_ad is not None else False
+        has_ad_val = int(item.has_ad) if item.has_ad is not None else None
         has_video_val = bool(item.has_video) if item.has_video is not None else False
 
         star_score = calc_star_rating_score(item.star_rating)
@@ -329,14 +428,18 @@ async def get_ranking(
     stores = db.query(Store).filter(
         Store.tenant_id == current_user.tenant_id
     ).all()
-    store_map = {s.inventory_name: s.shop_abbr for s in stores if s.inventory_name}
+    store_map = {}
+    for s in stores:
+        if s.inventory_name:
+            parts = [p for p in [s.shop_abbr, s.site] if p]
+            store_map[s.inventory_name] = "-".join(parts) if parts else s.inventory_name
 
     # 计算每个记录的总分
     scored_items = []
     for item in rated_items:
         star_score = calc_star_rating_score(item.star_rating)
         competitor_rank, competitor_score = calc_competitor_price_score(item.price, item.competitor_price)
-        has_ad_val = item.has_ad if item.has_ad is not None else False
+        has_ad_val = int(item.has_ad) if item.has_ad is not None else 0
         has_aplus_val = item.has_aplus if item.has_aplus is not None else 0
         has_video_val = item.has_video if item.has_video is not None else False
 
@@ -397,7 +500,7 @@ async def get_product_page_info_detail(
     elif isinstance(item.has_aplus, bool):
         has_aplus_val = 1 if item.has_aplus else 0
 
-    has_ad_val = bool(item.has_ad) if item.has_ad is not None else False
+    has_ad_val = int(item.has_ad) if item.has_ad is not None else None
     has_video_val = bool(item.has_video) if item.has_video is not None else False
 
     star_score = calc_star_rating_score(item.star_rating)
@@ -415,11 +518,15 @@ async def get_product_page_info_detail(
     )
 
     # 店铺名映射
-    store_rows = db.query(Store.inventory_name, Store.shop_abbr).filter(
+    store_rows = db.query(Store.inventory_name, Store.shop_abbr, Store.site).filter(
         Store.tenant_id == current_user.tenant_id,
         Store.inventory_name.isnot(None)
     ).all()
-    store_abbr_map = {r.inventory_name: r.shop_abbr for r in store_rows if r.inventory_name}
+    store_abbr_map = {}
+    for r in store_rows:
+        if r.inventory_name:
+            parts = [p for p in [r.shop_abbr, r.site] if p]
+            store_abbr_map[r.inventory_name] = "-".join(parts) if parts else r.inventory_name
     display_store = store_abbr_map.get(item.store, item.store) if item.store else item.store
 
     return {
@@ -451,6 +558,7 @@ async def get_product_page_info_detail(
             "has_video": has_video_val,
             "total_score": total_score,
             "traffic_keywords": item.traffic_keywords,
+            "updated_at": item.updated_at.strftime('%Y-%m-%d %H:%M:%S') if item.updated_at else None,
         },
     }
 
@@ -467,20 +575,30 @@ async def get_store_options(
     store_names = list(dict.fromkeys([s[0].strip() for s in stores if s[0]]))
 
     # 查询映射
-    store_rows = db.query(Store.inventory_name, Store.shop_abbr).filter(
+    store_rows = db.query(Store.inventory_name, Store.shop_abbr, Store.site).filter(
         Store.tenant_id == current_user.tenant_id,
         Store.inventory_name.isnot(None)
     ).all()
-    store_abbr_map = {r.inventory_name.strip(): r.shop_abbr for r in store_rows if r.inventory_name}
+    store_abbr_map = {}
+    for r in store_rows:
+        if r.inventory_name:
+            parts = [p for p in [r.shop_abbr, r.site] if p]
+            store_abbr_map[r.inventory_name.strip()] = "-".join(parts) if parts else r.inventory_name
 
-    # 去重（基于label）
-    seen_labels = set()
+    # 按 shop_abbr 去重，只保留在 product_page_info 中有记录的
+    # 建立 shop_abbr -> inventory_names 映射
+    abbr_to_names = {}
+    for r in store_rows:
+        if r.inventory_name and r.shop_abbr:
+            abbr_to_names.setdefault(r.shop_abbr, []).append(r.inventory_name.strip())
+
+    # 只保留在 store_names 中有匹配的 shop_abbr
+    seen_abbrs = set()
     options = []
-    for s in store_names:
-        label = store_abbr_map.get(s, s)
-        if label not in seen_labels:
-            seen_labels.add(label)
-            options.append({"label": label, "value": s})
+    for abbr, names in abbr_to_names.items():
+        if abbr not in seen_abbrs and any(n in store_names for n in names):
+            seen_abbrs.add(abbr)
+            options.append({"label": abbr, "value": abbr})
     return {"success": True, "data": options}
 
 
@@ -734,14 +852,17 @@ async def import_excel(
                 msg += f"，已跳过 {duplicate_count} 条重复数据"
             return {"success": False, "message": msg}
 
-        # 批量插入，每500条提交一次
-        batch_size = 500
+        # 批量插入，全部插入后再统一提交，支持事务回滚
         added_count = 0
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            db.bulk_insert_mappings(ProductPageInfo, batch)
-            db.commit()
-            added_count += len(batch)
+        new_ids = []
+        for record in records:
+            item = ProductPageInfo(**record)
+            db.add(item)
+            db.flush()  # flush获取id但不提交
+            new_ids.append(item.id)
+            added_count += 1
+
+        db.commit()
 
         msg = f"成功导入 {added_count} 条数据"
         if duplicate_count > 0:
@@ -752,7 +873,7 @@ async def import_excel(
         return {
             "success": True,
             "message": msg,
-            "data": {"added": added_count, "skipped": skipped_count, "duplicate": duplicate_count}
+            "data": {"added": added_count, "skipped": skipped_count, "duplicate": duplicate_count, "import_ids": new_ids}
         }
     except Exception as e:
         db.rollback()
@@ -760,3 +881,105 @@ async def import_excel(
         import traceback
         traceback.print_exc()
         return {"success": False, "message": f"导入失败: {str(e)}"}
+
+
+@router.post("/cancel-import")
+async def cancel_import(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """取消最近一次导入，删除本次导入的所有记录"""
+    body = await request.json()
+    import_ids = body.get("import_ids", [])
+    if not import_ids:
+        return {"success": False, "message": "没有可取消的导入记录"}
+
+    try:
+        deleted = db.query(ProductPageInfo).filter(
+            ProductPageInfo.id.in_(import_ids),
+            ProductPageInfo.tenant_id == current_user.tenant_id
+        ).delete(synchronize_session=False)
+        db.commit()
+        return {"success": True, "message": f"已取消导入，删除 {deleted} 条记录"}
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "message": f"取消导入失败: {str(e)}"}
+
+
+@router.post("/submit-edit")
+async def submit_edit(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """提交编辑基础信息 - 发送飞书webhook并可选更新评分状态"""
+    body = await request.json()
+    item_id = body.get("item_id")
+    store = body.get("store", "")
+    field_type = body.get("field_type", "")
+    sku = body.get("sku", "")
+    content = body.get("content", "")
+    reset_rating = body.get("reset_rating", False)
+
+    if not item_id:
+        return {"success": False, "message": "缺少item_id参数"}
+
+    # 验证记录存在且属于当前租户
+    item = db.query(ProductPageInfo).filter(
+        ProductPageInfo.id == item_id,
+        ProductPageInfo.tenant_id == current_user.tenant_id,
+    ).first()
+
+    if not item:
+        return {"success": False, "message": "记录不存在"}
+
+    # 发送飞书webhook
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                "https://pcn4p6l5do51.feishu.cn/base/automation/webhook/event/AnnPaHjm1wTDvohfMnDc4A2Wnlg",
+                json={
+                    "店铺": store,
+                    "选择填写类型": field_type,
+                    "SKU": sku,
+                    "填写文本": content,
+                },
+                timeout=10,
+            )
+    except Exception as e:
+        logger.error(f"飞书webhook发送失败: {e}")
+        return {"success": False, "message": f"飞书通知发送失败: {str(e)}"}
+
+    # 如果需要重新评分，更新评分状态
+    if reset_rating:
+        item.rating_status = 0
+        db.commit()
+
+    return {"success": True, "message": "提交成功"}
+
+
+@router.put("/{item_id}/rating-status")
+async def update_rating_status(
+    item_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """更新评分状态"""
+    body = await request.json()
+    rating_status = body.get("rating_status")
+    if rating_status is None:
+        return {"success": False, "message": "缺少rating_status参数"}
+
+    item = db.query(ProductPageInfo).filter(
+        ProductPageInfo.id == item_id,
+        ProductPageInfo.tenant_id == current_user.tenant_id,
+    ).first()
+
+    if not item:
+        return {"success": False, "message": "记录不存在"}
+
+    item.rating_status = rating_status
+    db.commit()
+    return {"success": True, "message": "评分状态已更新"}

@@ -34,6 +34,7 @@ class Store(BaseModel):
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True, index=True, comment="所属部门ID")
     inventory_name = Column(String(100), nullable=True, index=True, comment="库存数据中的店铺名别名")
     shop_abbr = Column(String(255), nullable=True, comment="店铺简称")
+    group_id = Column(Integer, nullable=True, comment="店铺组ID")
 
     # 关联关系
     tenant = relationship("Tenant", back_populates="stores")

@@ -8,7 +8,7 @@ export default defineConfig({
     allowedHosts: ['.trycloudflare.com'],
     proxy: {
       '/api': {
-        target: 'http://localhost:8003',
+        target: 'http://localhost:8002',
         changeOrigin: true,
       }
     }
