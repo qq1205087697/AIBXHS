@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker, message, Popconfirm, Space, Tag, Divider, Dropdown, Menu, Pagination, Row, Col } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, CheckOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, MinusCircleOutlined, AppstoreOutlined, LinkOutlined, RightOutlined, CloseCircleOutlined } from '@ant-design/icons'
+import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker, message, Popconfirm, Space, Tag, Divider, Dropdown, Menu, Pagination, Row, Col, AutoComplete } from 'antd'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, CheckOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, MinusCircleOutlined, AppstoreOutlined, LinkOutlined, RightOutlined, CloseCircleOutlined, ShoppingOutlined, ExportOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { purchaseOrdersApi, productsApi, warehousesApi, productBindingsApi, storeGroupsApi } from '../api'
+import { purchaseOrdersApi, productsApi, warehousesApi, productBindingsApi, storeGroupsApi, suppliersApi } from '../api'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
 import type { MenuProps } from 'antd'
+import { useResponsive } from '../hooks/useResponsive'
 const { RangePicker } = DatePicker
 const { TextArea } = Input
 
@@ -42,6 +43,10 @@ interface PurchaseOrderItem {
   total_price: number
   notes: string
   supplier?: string
+  product_type?: string
+  parent_product_id?: number | null
+  store_group_id?: number | null
+  store_group_name?: string
 }
 
 interface Product {
@@ -49,6 +54,7 @@ interface Product {
   name: string
   product_code: string
   purchase_price: number | null
+  product_type?: string
 }
 
 interface FormItemState {
@@ -56,10 +62,23 @@ interface FormItemState {
     product_id: number | null
     quantity: number
     unit_price: number
-    parentKey?: string  // 配件行关联的成品行key
+    parentKey?: string  // 配件行关联的成品行key（编辑模式使用）
+    parent_product_id?: number | null  // 关联成品ID（查看/后端返回使用）
     base_quantity_per_product?: number  // 每1个成品需要的配件基础数量
     supplier?: string  // 供应商
     notes?: string  // 备注
+    store_group_id?: number | null  // 店铺分组（明细级）
+    store_group_name?: string  // 店铺分组名称（查看模式使用）
+}
+
+interface StoreGroupBreakdown {
+    store_group_id?: number | null
+    store_group_name?: string
+    quantity: number
+}
+
+interface MergedViewItem extends FormItemState {
+    storeGroups: StoreGroupBreakdown[]
 }
 
 interface WarehouseItem {
@@ -73,7 +92,7 @@ const statusLabelMap: Record<string, string> = {
   draft: '草稿',
   pending: '待审批',
   approved: '已审批',
-  ordered: '已下单',
+  purchased: '已采购',
   partial_received: '部分收货',
   pending_reshipment: '待补发',
   completed: '已完成',
@@ -110,7 +129,7 @@ const statusColorMap: Record<string, string> = {
   draft: 'default',
   pending: 'processing',
   approved: 'blue',
-  ordered: 'cyan',
+  purchased: 'geekblue',
   partial_received: 'orange',
   pending_reshipment: 'purple',
   completed: 'success',
@@ -120,9 +139,8 @@ const statusColorMap: Record<string, string> = {
 const statusFilterOptions = [
   { label: '全部', value: '' },
   { label: '草稿', value: 'draft' },
-  { label: '待审批', value: 'pending' },
   { label: '已审批', value: 'approved' },
-  { label: '已下单', value: 'ordered' },
+  { label: '已采购', value: 'purchased' },
   { label: '部分收货', value: 'partial_received' },
   { label: '待补发', value: 'pending_reshipment' },
   { label: '已完成', value: 'completed' },
@@ -139,16 +157,19 @@ const createEmptyFormItem = (): FormItemState => ({
   unit_price: 0,
   supplier: '',
   notes: '',
+  store_group_id: undefined,
 })
 
 const PurchaseManagement: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission, isAdmin } = useAuth()
   const navigate = useNavigate()
+  const res = useResponsive()
   const [orders, setOrders] = useState<PurchaseOrder[]>([])
   const [productList, setProductList] = useState<Product[]>([])
   const [warehouseList, setWarehouseList] = useState<WarehouseItem[]>([])
   const [storeGroups, setStoreGroups] = useState<any[]>([]) // 店铺分组列表
+  const [supplierOptions, setSupplierOptions] = useState<{value: string; label: string}[]>([]) // 供应商选项
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingOrder, setEditingOrder] = useState<PurchaseOrder | null>(null)
@@ -174,13 +195,157 @@ const PurchaseManagement: React.FC = () => {
   const [stockDetailModalOpen, setStockDetailModalOpen] = useState(false)
   const [stockDetailOrder, setStockDetailOrder] = useState<PurchaseOrder | null>(null)
   const [expandedAccessories, setExpandedAccessories] = useState<Set<string>>(new Set())
+  // 查看模式下树形表格展开行
+  const [expandedViewRows, setExpandedViewRows] = useState<Set<string>>(new Set())
+  // 商品明细搜索和分页
+  const [itemSearchText, setItemSearchText] = useState('')
+  const [itemPagination, setItemPagination] = useState({ current: 1, pageSize: 10 })
+  // 入库详情分页
+  const [stockDetailPagination, setStockDetailPagination] = useState({ current: 1, pageSize: 10 })
+
+  // 判断产品类型是否为配件（无 parent_product_id 时的兜底判断）
+  const isAccessoryByProductType = useCallback((productId: number | null) => {
+    if (!productId) return false
+    const product = productList.find(p => p.id === productId)
+    if (!product?.product_type) return false
+    const types = String(product.product_type).split(',').filter(Boolean)
+    return types.includes('accessory')
+  }, [productList])
+
+  // 判断明细行是否为配件：优先依据 parent_product_id/parentKey，其次依据产品类型
+  const isAccessoryItem = useCallback((item: FormItemState) => {
+    return !!item.parentKey || !!item.parent_product_id || isAccessoryByProductType(item.product_id)
+  }, [isAccessoryByProductType])
+
+  // 判断明细行是否为成品行（可作为展开根节点）
+  const isFinishedTopItem = useCallback((item: FormItemState) => {
+    return !item.parentKey && !item.parent_product_id && !isAccessoryByProductType(item.product_id)
+  }, [isAccessoryByProductType])
+
+  // 判断明细行是否匹配搜索关键字
+  const matchesSearch = useCallback((item: any, searchLower: string) => {
+    if (!searchLower) return true
+    const product = productList.find(p => p.id === item.product_id)
+    return (
+      (product?.product_code?.toLowerCase().includes(searchLower)) ||
+      (product?.name?.toLowerCase().includes(searchLower)) ||
+      (item.supplier?.toLowerCase().includes(searchLower)) ||
+      (item.storeGroups || []).some((g: any) => g.group_name?.toLowerCase().includes(searchLower) || g.store_group_name?.toLowerCase().includes(searchLower))
+    )
+  }, [productList])
+
+  // 渲染带省略号与悬停提示的产品名称
+  const renderProductName = useCallback((product?: Product) => {
+    if (!product?.name) return '-'
+    return (
+      <div
+        title={product.name}
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          maxWidth: '100%',
+        }}
+      >
+        {product.name}
+      </div>
+    )
+  }, [])
+
+  // 按（产品ID + 父产品ID）合并相同产品的数量与分组
+  const mergeItemsByGroup = useCallback((items: FormItemState[]): MergedViewItem[] => {
+    const map = new Map<string, MergedViewItem>()
+    for (const item of items) {
+      const key = `${item.product_id}_${item.parent_product_id || ''}`
+      const existing = map.get(key)
+      if (existing) {
+        existing.quantity += item.quantity
+        const group = existing.storeGroups.find(g => g.store_group_id === item.store_group_id)
+        if (group) {
+          group.quantity += item.quantity
+        } else {
+          existing.storeGroups.push({
+            store_group_id: item.store_group_id,
+            store_group_name: item.store_group_name,
+            quantity: item.quantity,
+          })
+        }
+      } else {
+        map.set(key, {
+          ...item,
+          storeGroups: [{
+            store_group_id: item.store_group_id,
+            store_group_name: item.store_group_name,
+            quantity: item.quantity,
+          }],
+        })
+      }
+    }
+    return Array.from(map.values())
+  }, [])
+
+  // 构建查看模式下的合并树：成品/独立商品为顶层，配件作为子节点
+  const buildMergedViewTree = useCallback((items: FormItemState[], searchLower: string): MergedViewItem[] => {
+    const merged = mergeItemsByGroup(items)
+    const topRows = merged.filter(item => !item.parent_product_id && !isAccessoryByProductType(item.product_id))
+    const childRows = merged.filter(item => item.parent_product_id || isAccessoryByProductType(item.product_id))
+
+    const childMap = new Map<number, MergedViewItem[]>()
+    const standaloneAccessories: MergedViewItem[] = []
+    for (const child of childRows) {
+      if (child.parent_product_id) {
+        if (!childMap.has(child.parent_product_id)) {
+          childMap.set(child.parent_product_id, [])
+        }
+        childMap.get(child.parent_product_id)!.push(child)
+      } else {
+        standaloneAccessories.push(child)
+      }
+    }
+
+    const tree = topRows.map(item => ({
+      ...item,
+      accessories: item.product_id ? (childMap.get(item.product_id) || []) : [],
+    }))
+
+    tree.push(...standaloneAccessories.map(item => ({ ...item, accessories: [] })))
+
+    if (!searchLower) return tree
+
+    return tree
+      .filter(item => matchesSearch(item, searchLower) || item.accessories.some(child => matchesSearch(child, searchLower)))
+      .map(item => ({
+        ...item,
+        accessories: item.accessories.filter(child => matchesSearch(child, searchLower)),
+      }))
+  }, [mergeItemsByGroup, isAccessoryByProductType, matchesSearch])
 
   useEffect(() => {
     fetchData()
     fetchProducts()
     fetchWarehouses()
     fetchStoreGroups()
+    fetchSuppliers()
   }, [pagination.current, pagination.pageSize, filters])
+
+  // 查看模式下搜索配件时自动展开对应成品行
+  useEffect(() => {
+    const searchLower = itemSearchText.trim().toLowerCase()
+    if (!searchLower) {
+      setExpandedViewRows(new Set())
+      return
+    }
+    const keysToExpand = new Set<string>()
+    formItems.forEach(item => {
+      if (item.parentKey || item.parent_product_id) return
+      const hasMatchingChild = formItems.some(child =>
+        ((item.key && child.parentKey === item.key) || (item.product_id && child.parent_product_id === item.product_id)) &&
+        matchesSearch(child, searchLower)
+      )
+      if (hasMatchingChild) keysToExpand.add(item.key)
+    })
+    setExpandedViewRows(keysToExpand)
+  }, [itemSearchText, formItems, matchesSearch])
 
   const fetchData = async () => {
     setLoading(true)
@@ -205,7 +370,13 @@ const PurchaseManagement: React.FC = () => {
     try {
       const res = await productsApi.getList({ page: 1, page_size: 500 })
       if (res.data.success) {
-        setProductList(res.data.data || [])
+        // 合并后台返回的产品与当前已有的产品（避免订单内配件等产品被分页过滤掉）
+        setProductList(prev => {
+          const fetched = res.data.data || []
+          const merged = new Map<number, Product>(prev.map(p => [p.id, p]))
+          fetched.forEach((p: Product) => merged.set(p.id, p))
+          return Array.from(merged.values())
+        })
       }
     } catch {
       message.error('获取产品列表失败')
@@ -232,6 +403,18 @@ const PurchaseManagement: React.FC = () => {
       }
     } catch (e) {
       console.error('加载店铺分组失败', e)
+    }
+  }
+
+  const fetchSuppliers = async () => {
+    try {
+      const res = await suppliersApi.listAll()
+      if (res.data.success) {
+        const list = (res.data.data || []).map((s: any) => ({ value: s.name, label: s.name }))
+        setSupplierOptions(list)
+      }
+    } catch (e) {
+      console.error('加载供应商列表失败', e)
     }
   }
 
@@ -324,6 +507,9 @@ const PurchaseManagement: React.FC = () => {
   const handleView = async (order: PurchaseOrder) => {
     setViewingOrder(order)
     setEditingOrder(null)
+    // 重置商品明细搜索和分页
+    setItemSearchText('')
+    setItemPagination({ current: 1, pageSize: 10 })
     form.setFieldsValue({
       order_number: order.order_number,
       store_group_id: (order as any).store_group_id || undefined,
@@ -337,6 +523,7 @@ const PurchaseManagement: React.FC = () => {
         name: item.product_name || '',
         product_code: item.product_code || '',
         purchase_price: item.unit_price || null,
+        product_type: item.product_type || '',
       }))
       setProductList(orderProducts)
       const items = order.items.map((item: any) => ({
@@ -346,6 +533,9 @@ const PurchaseManagement: React.FC = () => {
         unit_price: item.unit_price,
         supplier: item.supplier || '',
         notes: item.notes || '',
+        parent_product_id: item.parent_product_id || null,
+        store_group_id: item.store_group_id || undefined,
+        store_group_name: item.store_group_name || '',
       }))
       setFormItems(items)
     } else {
@@ -372,6 +562,7 @@ const PurchaseManagement: React.FC = () => {
         name: item.product_name || '',
         product_code: item.product_code || '',
         purchase_price: item.unit_price || null,
+        product_type: item.product_type || '',
       }))
       setProductList(orderProducts)
       const items = order.items.map((item: any) => ({
@@ -381,6 +572,9 @@ const PurchaseManagement: React.FC = () => {
         unit_price: item.unit_price,
         supplier: item.supplier || '',
         notes: item.notes || '',
+        parent_product_id: item.parent_product_id || null,
+        store_group_id: item.store_group_id || undefined,
+        store_group_name: item.store_group_name || '',
       }))
       setFormItems(items)
     } else {
@@ -409,6 +603,8 @@ const PurchaseManagement: React.FC = () => {
         unit_price: item.unit_price,
         supplier: item.supplier || '',
         notes: item.notes || '',
+        parent_product_id: item.parent_product_id || (item.parentKey ? formItems.find(i => i.key === item.parentKey)?.product_id || null : null),
+        store_group_id: item.store_group_id ?? null,
       }))
 
       if (editingOrder) {
@@ -481,6 +677,24 @@ const PurchaseManagement: React.FC = () => {
     })
   }
 
+  const handleMarkAsPurchased = async (id: number) => {
+    Modal.confirm({
+      title: '标记为已采购',
+      content: '确定要将此采购订单标记为已采购吗？',
+      okText: '确定',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await purchaseOrdersApi.update(id, { status: 'purchased' })
+          message.success('已标记为已采购')
+          fetchData()
+        } catch {
+          message.error('操作失败')
+        }
+      },
+    })
+  }
+
   const handleDelete = async (id: number) => {
     Modal.confirm({
       title: '确认删除',
@@ -498,6 +712,34 @@ const PurchaseManagement: React.FC = () => {
         }
       },
     })
+  }
+
+  const handleExport = async (ids: number[]) => {
+    if (ids.length === 0) {
+      message.warning('请选择要导出的采购单')
+      return
+    }
+    try {
+      const res = await purchaseOrdersApi.exportOrders(ids)
+      const blob = new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `采购单导出_${new Date().toISOString().slice(0, 10)}.xlsx`
+      link.click()
+      window.URL.revokeObjectURL(url)
+      message.success('导出成功')
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '导出失败')
+    }
+  }
+
+  const handleBatchExport = () => {
+    handleExport(selectedRowKeys.map(Number))
+  }
+
+  const handleSingleExport = (orderId: number) => {
+    handleExport([orderId])
   }
 
   const handleBatchDelete = async () => {
@@ -548,18 +790,58 @@ const PurchaseManagement: React.FC = () => {
       onOk: async () => {
         try {
           const promises = orders
-            .filter(order => 
-              selectedRowKeys.includes(order.id) && 
+            .filter(order =>
+              selectedRowKeys.includes(order.id) &&
               (order.status === 'draft' || order.status === 'pending')
             )
             .map(order => purchaseOrdersApi.update(order.id, { status: 'approved' }))
-          
+
           await Promise.all(promises)
           message.success('批量审批成功')
           setSelectedRowKeys([])
           fetchData()
         } catch {
           message.error('批量审批失败，请稍后重试')
+        }
+      }
+    })
+  }
+
+  const handleBatchMarkAsPurchased = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要标记的订单')
+      return
+    }
+    const availableCount = orders.filter(
+      order => selectedRowKeys.includes(order.id) &&
+               order.status === 'approved'
+    ).length
+
+    if (availableCount === 0) {
+      message.warning('选中的订单中没有可标记为已采购的订单（需为已审批状态）')
+      return
+    }
+
+    Modal.confirm({
+      title: '批量标记为已采购',
+      content: `确定要将选中的 ${availableCount} 条采购订单标记为已采购吗？`,
+      okText: '确定',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const promises = orders
+            .filter(order =>
+              selectedRowKeys.includes(order.id) &&
+              order.status === 'approved'
+            )
+            .map(order => purchaseOrdersApi.update(order.id, { status: 'purchased' }))
+
+          await Promise.all(promises)
+          message.success('批量标记成功')
+          setSelectedRowKeys([])
+          fetchData()
+        } catch {
+          message.error('批量标记失败，请稍后重试')
         }
       }
     })
@@ -579,6 +861,30 @@ const PurchaseManagement: React.FC = () => {
           onClick: handleBatchApprove,
         }
       : null,
+    hasPermission('purchase:edit')
+      ? {
+          key: 'mark-purchased',
+          label: (
+            <span>
+              <ShoppingOutlined style={{ marginRight: 8 }} />
+              批量标记已采购
+            </span>
+          ),
+          disabled: selectedRowKeys.length === 0,
+          onClick: handleBatchMarkAsPurchased,
+        }
+      : null,
+    {
+      key: 'export',
+      label: (
+        <span>
+          <ExportOutlined style={{ marginRight: 8 }} />
+          批量导出
+        </span>
+      ),
+      disabled: selectedRowKeys.length === 0,
+      onClick: handleBatchExport,
+    },
     hasPermission('purchase:delete')
       ? {
           key: 'delete',
@@ -614,12 +920,11 @@ const PurchaseManagement: React.FC = () => {
           const accessoryItems: FormItemState[] = []
           for (const acc of accessories) {
             if (existingAccessoryKeys.has(acc.accessory_product_id)) continue
-            const accessoryProduct = productList.find((p) => p.id === acc.accessory_product_id)
             accessoryItems.push({
               key: generateItemKey(),
               product_id: acc.accessory_product_id,
               quantity: parentQty * (acc.quantity || 1),
-              unit_price: (accessoryProduct && accessoryProduct.purchase_price != null) ? accessoryProduct.purchase_price : (acc.unit_price || 0),
+              unit_price: acc.unit_price || 0,
               parentKey: parentKey,
               base_quantity_per_product: acc.quantity || 1,
             })
@@ -630,6 +935,24 @@ const PurchaseManagement: React.FC = () => {
           newItems.splice(parentIndex + 1, 0, ...accessoryItems)
           return newItems
         })
+
+        // 将配件产品信息添加到 productList 中，确保显示时能找到产品信息
+        setProductList((prev) => {
+          const newProducts = [...prev]
+          for (const acc of accessories) {
+            // 检查是否已存在该配件产品
+            if (!newProducts.some((p) => p.id === acc.accessory_product_id)) {
+              newProducts.push({
+                id: acc.accessory_product_id,
+                name: acc.accessory_name || '',
+                product_code: acc.accessory_code || '',
+                purchase_price: acc.unit_price || null,
+              })
+            }
+          }
+          return newProducts
+        })
+
         setExpandedAccessories((prev) => new Set(prev).add(parentKey))
       }
     } catch (e) {
@@ -674,6 +997,15 @@ const PurchaseManagement: React.FC = () => {
         }
         return updatedItem
       })
+
+      // 切换产品时，删除该成品行之前的配件行
+      if (field === 'product_id' && value) {
+        const oldItem = prev.find((item) => item.key === key)
+        if (oldItem && oldItem.product_id && oldItem.product_id !== value) {
+          updated = updated.filter((item) => item.parentKey !== key)
+        }
+      }
+
       if (field === 'quantity') {
         const changedItem = updated.find((item) => item.key === key)
         if (changedItem && !changedItem.parentKey) {
@@ -866,13 +1198,6 @@ const PurchaseManagement: React.FC = () => {
       ),
     },
     {
-      title: '店铺分组',
-      dataIndex: 'store_group_name',
-      key: 'store_group_name',
-      width: 120,
-      render: (name: string) => name || '-',
-    },
-    {
       title: '总金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
@@ -892,7 +1217,11 @@ const PurchaseManagement: React.FC = () => {
         return (
           <span
             style={{ color: isComplete ? '#52c41a' : '#1890ff', cursor: 'pointer', fontWeight: 500, textDecoration: 'underline' }}
-            onClick={() => { setStockDetailOrder(record); setStockDetailModalOpen(true) }}
+            onClick={() => { 
+              setStockDetailOrder(record)
+              setStockDetailModalOpen(true)
+              setStockDetailPagination({ current: 1, pageSize: 10 })
+            }}
           >
             {received}/{ordered}
           </span>
@@ -956,6 +1285,12 @@ const PurchaseManagement: React.FC = () => {
             case 'cancel-approval':
               handleCancelApproval(record.id)
               break
+            case 'mark-purchased':
+              handleMarkAsPurchased(record.id)
+              break
+            case 'export':
+              handleSingleExport(record.id)
+              break
           }
         }
 
@@ -985,6 +1320,19 @@ const PurchaseManagement: React.FC = () => {
           })
         }
 
+        // 标记为已采购：已审批状态可操作
+        if (hasPermission('purchase:edit') && record.status === 'approved') {
+          menuItems.push({
+            key: 'mark-purchased',
+            label: (
+              <span>
+                <ShoppingOutlined style={{ marginRight: 8 }} />
+                标记已采购
+              </span>
+            ),
+          })
+        }
+
         if (hasPermission('purchase:delete')) {
           menuItems.push({
             key: 'delete',
@@ -995,6 +1343,19 @@ const PurchaseManagement: React.FC = () => {
               </span>
             ),
             style: { color: '#ff4d4f' },
+          })
+        }
+
+        // 导出选项
+        if (hasPermission('purchase:view')) {
+          menuItems.push({
+            key: 'export',
+            label: (
+              <span>
+                <DownloadOutlined style={{ marginRight: 8 }} />
+                导出
+              </span>
+            ),
           })
         }
 
@@ -1048,7 +1409,7 @@ const PurchaseManagement: React.FC = () => {
   }, 0)
 
   return (
-    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ padding: res.cardPadding, height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Card
         loading={loading}
         title={
@@ -1057,36 +1418,28 @@ const PurchaseManagement: React.FC = () => {
               placeholder="搜索采购单号..."
               prefix={<SearchOutlined />}
               allowClear
-              style={{ width: 280 }}
+              style={{ width: res.isMobile ? '100%' : 280 }}
               value={searchText}
               onChange={(e) => handleSearch(e.target.value)}
             />
             <Select
               placeholder="状态"
               allowClear
-              style={{ width: 140 }}
+              style={{ width: res.isMobile ? '100%' : 140 }}
               value={statusFilter}
               onChange={handleStatusFilter}
               options={statusFilterOptions}
-            />
-            <Select
-              placeholder="店铺分组"
-              allowClear
-              style={{ width: 160 }}
-              value={groupFilter}
-              onChange={handleGroupFilter}
-              options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
             />
             <RangePicker
               placeholder={['开始日期', '结束日期']}
               value={dateRange}
               onChange={handleDateRangeChange}
-              style={{ width: 300 }}
+              style={{ width: res.isMobile ? '100%' : 300 }}
             />
           </Space>
         }
         extra={
-          <Space>
+          <Space wrap>
             {hasPermission('purchase:create') && (
               <>
                 <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>
@@ -1150,17 +1503,19 @@ const PurchaseManagement: React.FC = () => {
         onCancel={() => setModalOpen(false)}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={800}
+        width={res.modalWidth}
         style={{ top: 20 }}
         styles={{ body: {
           maxHeight: 'calc(100vh - 180px)',
-          overflow: 'auto',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
           paddingRight: 8,
         } }}
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" style={{ flexShrink: 0 }}>
           <Row gutter={16}>
-            <Col span={8}>
+            <Col xs={24} sm={8}>
               <Form.Item
                 name="order_number"
                 label="采购单号"
@@ -1168,20 +1523,22 @@ const PurchaseManagement: React.FC = () => {
                 <Input placeholder="请输入采购单号" disabled />
               </Form.Item>
             </Col>
-            <Col span={8}>
-              <Form.Item
-                name="store_group_id"
-                label="店铺分组"
-                rules={[{ required: true, message: '请选择店铺分组' }]}
-              >
-                <Select
-                  placeholder="请选择店铺分组"
-                  options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
-                  disabled={!!viewingOrder}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
+            {!viewingOrder && (
+              <Col xs={24} sm={8}>
+                <Form.Item
+                  name="store_group_id"
+                  label="店铺分组"
+                >
+                  <Select
+                    placeholder="请选择店铺分组（默认）"
+                    allowClear
+                    options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+                    disabled={!!viewingOrder}
+                  />
+                </Form.Item>
+              </Col>
+            )}
+            <Col xs={24} sm={8}>
               <Form.Item
                 name="warehouse"
                 label="收货仓库"
@@ -1216,127 +1573,313 @@ const PurchaseManagement: React.FC = () => {
           </Form.Item>
         </Form>
 
-        <Divider orientation="left">采购商品明细</Divider>
+        <Divider orientation="left" style={{ flexShrink: 0 }}>采购商品明细</Divider>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {(() => {
-          const finishedItems = formItems.filter(item => !item.parentKey)
-          const accessoryMap = new Map<string, FormItemState[]>()
-          formItems.forEach(item => {
-            if (item.parentKey) {
-              if (!accessoryMap.has(item.parentKey)) {
-                accessoryMap.set(item.parentKey, [])
-              }
-              accessoryMap.get(item.parentKey)!.push(item)
-            }
-          })
-
-          const renderItem = (item: FormItemState, isAccessory: boolean = false) => {
-            const hasAccessories = accessoryMap.has(item.key) && accessoryMap.get(item.key)!.length > 0
-            const isExpanded = expandedAccessories.has(item.key)
-
-            return (
-              <div key={item.key}>
-                <div style={{
-                  marginBottom: isAccessory ? 0 : 16,
-                  padding: 16,
-                  borderRadius: 8,
-                  background: isAccessory ? '#faf7f0' : '#ffffff',
-                  border: isAccessory ? '1px dashed #d9d9d9' : '1px solid #e8e8e8',
-                  marginLeft: isAccessory ? 40 : 0,
-                  boxShadow: isAccessory ? 'none' : '0 1px 2px rgba(0,0,0,0.06)',
-                }}>
-                  {/* Header */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {isAccessory ? (
-                        <Tag icon={<LinkOutlined />} color="orange" style={{ fontSize: 12 }}>配件</Tag>
-                      ) : hasAccessories ? (
-                        <Tag icon={<AppstoreOutlined />} color="blue" style={{ fontSize: 12 }}>成品</Tag>
-                      ) : (
-                        <Tag icon={<AppstoreOutlined />} color="default" style={{ fontSize: 12 }}>商品</Tag>
-                      )}
-                      {hasAccessories && !isAccessory && (
-                        <Button type="text" size="small"
-                          icon={isExpanded ? <DownOutlined /> : <RightOutlined />}
-                          onClick={() => toggleAccessoryExpansion(item.key)}
-                          style={{ padding: '0 4px', height: 22, fontSize: 12 }}>
-                          <Tag color="blue" style={{ fontSize: 11, marginRight: 0 }}>
-                            {accessoryMap.get(item.key)!.length}个配件
+        {/* 查看模式下使用表格显示 */}
+        {viewingOrder ? (
+          <>
+            <div style={{ marginBottom: 12, flexShrink: 0 }}>
+              <Input
+                placeholder="搜索商品编码/名称/供应商..."
+                prefix={<SearchOutlined />}
+                value={itemSearchText}
+                onChange={(e) => {
+                  setItemSearchText(e.target.value)
+                  setItemPagination(prev => ({ ...prev, current: 1 }))
+                }}
+                allowClear
+                style={{ width: res.isMobile ? '100%' : 280 }}
+              />
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+            <Table
+              dataSource={buildMergedViewTree(formItems, itemSearchText.trim().toLowerCase())}
+              rowKey="key"
+              childrenColumnName="accessories"
+              scroll={{ x: res.isMobile ? true : false }}
+              pagination={{
+                current: itemPagination.current,
+                pageSize: itemPagination.pageSize,
+                onChange: (page, pageSize) => setItemPagination({ current: page, pageSize: pageSize || 10 }),
+                showSizeChanger: true,
+                pageSizeOptions: ['10', '20', '50'],
+                showTotal: (total) => `共 ${total} 条`,
+              }}
+              size="small"
+              expandedRowKeys={Array.from(expandedViewRows)}
+              onExpand={(expanded, record) => {
+                setExpandedViewRows(prev => {
+                  const next = new Set(prev)
+                  if (expanded) {
+                    next.add(record.key)
+                  } else {
+                    next.delete(record.key)
+                  }
+                  return next
+                })
+              }}
+              columns={[
+                {
+                  title: '类型',
+                  key: 'type',
+                  width: 80,
+                  align: 'center',
+                  render: (_: any, record: FormItemState) => {
+                    if (isAccessoryItem(record)) {
+                      return <Tag color="orange" style={{ fontSize: 11, marginRight: 0 }}>配件</Tag>
+                    }
+                    if (isFinishedTopItem(record)) {
+                      return <Tag color="blue" style={{ fontSize: 11, marginRight: 0 }}>成品</Tag>
+                    }
+                    return <Tag style={{ fontSize: 11, marginRight: 0 }}>商品</Tag>
+                  }
+                },
+                {
+                  title: '商品编码',
+                  dataIndex: 'product_id',
+                  key: 'product_code',
+                  width: 120,
+                  render: (val: number) => {
+                    const product = productList.find(p => p.id === val)
+                    return product?.product_code || '-'
+                  }
+                },
+                {
+                  title: '商品名称',
+                  key: 'product_name',
+                  width: 180,
+                  ellipsis: true,
+                  render: (_: any, record: FormItemState) => {
+                    const product = productList.find(p => p.id === record.product_id)
+                    return renderProductName(product)
+                  }
+                },
+                {
+                  title: '分组数量',
+                  key: 'storeGroups',
+                  width: 160,
+                  render: (_: any, record: MergedViewItem) => {
+                    if (!record.storeGroups || record.storeGroups.length === 0) return '-'
+                    return (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                        {record.storeGroups.map((g, idx) => (
+                          <Tag key={idx} color="purple" style={{ fontSize: 11, marginRight: 0 }}>
+                            {g.store_group_name || '未分组'}:{g.quantity}
                           </Tag>
-                        </Button>
-                      )}
-                    </div>
-                    {!viewingOrder && (
+                        ))}
+                      </div>
+                    )
+                  }
+                },
+                {
+                  title: '数量',
+                  dataIndex: 'quantity',
+                  key: 'quantity',
+                  width: 80,
+                  align: 'center',
+                },
+                {
+                  title: '单价',
+                  dataIndex: 'unit_price',
+                  key: 'unit_price',
+                  width: 100,
+                  align: 'right',
+                  render: (val: number) => val ? `¥${val.toFixed(2)}` : '-'
+                },
+                {
+                  title: '合计',
+                  key: 'total',
+                  width: 100,
+                  align: 'right',
+                  render: (_: any, record: FormItemState) => {
+                    const total = (record.quantity || 0) * (record.unit_price || 0)
+                    return `¥${total.toFixed(2)}`
+                  }
+                },
+                {
+                  title: '供应商',
+                  dataIndex: 'supplier',
+                  key: 'supplier',
+                  width: 120,
+                  render: (val: string) => val || '-'
+                },
+                {
+                  title: '备注',
+                  dataIndex: 'notes',
+                  key: 'notes',
+                  width: 150,
+                  render: (val: string) => val || '-'
+                },
+              ]}
+            />
+            </div>
+            <div style={{ marginTop: 12, textAlign: 'right', fontWeight: 600, flexShrink: 0 }}>
+              合计金额：<span style={{ color: currentTheme.primary }}>¥{formItemTotalAmount.toFixed(2)}</span>
+            </div>
+          </>
+        ) : (
+          /* 编辑模式下使用卡片布局 */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, overflow: 'auto', minHeight: 0 }}>
+          {(() => {
+            // 分离成品和配件：parentKey 是编辑时用的，parent_product_id 是后端返回的
+            const finishedItems = formItems.filter(isFinishedTopItem)
+            const standaloneAccessories = formItems.filter(item => isAccessoryItem(item) && !item.parentKey && !item.parent_product_id)
+            const accessoryMap = new Map<string, FormItemState[]>()
+            const accessoryMapByProductId = new Map<number, FormItemState[]>()
+            formItems.forEach(item => {
+              if (item.parentKey) {
+                if (!accessoryMap.has(item.parentKey)) {
+                  accessoryMap.set(item.parentKey, [])
+                }
+                accessoryMap.get(item.parentKey)!.push(item)
+              }
+              if (item.parent_product_id) {
+                if (!accessoryMapByProductId.has(item.parent_product_id)) {
+                  accessoryMapByProductId.set(item.parent_product_id, [])
+                }
+                accessoryMapByProductId.get(item.parent_product_id)!.push(item)
+              }
+            })
+
+            const renderItem = (item: FormItemState, isAccessory: boolean = false) => {
+              const product = productList.find(p => p.id === item.product_id)
+              const itemIsAccessory = isAccessory || isAccessoryItem(item)
+              const accessoriesByKey = accessoryMap.has(item.key) ? accessoryMap.get(item.key)! : []
+              const accessoriesByProductId = item.product_id && accessoryMapByProductId.has(item.product_id) ? accessoryMapByProductId.get(item.product_id)! : []
+              const hasAccessories = !itemIsAccessory && (accessoriesByKey.length > 0 || accessoriesByProductId.length > 0)
+              const isExpanded = expandedAccessories.has(item.key)
+
+              return (
+                <div key={item.key}>
+                  <div style={{
+                    marginBottom: itemIsAccessory ? 0 : 16,
+                    padding: 16,
+                    borderRadius: 8,
+                    background: itemIsAccessory ? '#faf7f0' : '#ffffff',
+                    border: itemIsAccessory ? '1px dashed #d9d9d9' : '1px solid #e8e8e8',
+                    marginLeft: itemIsAccessory ? 40 : 0,
+                    boxShadow: itemIsAccessory ? 'none' : '0 1px 2px rgba(0,0,0,0.06)',
+                  }}>
+                    {/* Header */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {itemIsAccessory ? (
+                          <Tag icon={<LinkOutlined />} color="orange" style={{ fontSize: 12 }}>配件</Tag>
+                        ) : (
+                          <Tag icon={<AppstoreOutlined />} color="blue" style={{ fontSize: 12 }}>成品</Tag>
+                        )}
+                        {hasAccessories && (
+                          <Button type="text" size="small"
+                            icon={isExpanded ? <DownOutlined /> : <RightOutlined />}
+                            onClick={() => toggleAccessoryExpansion(item.key)}
+                            style={{ padding: '0 4px', height: 22, fontSize: 12 }}>
+                            <Tag color="blue" style={{ fontSize: 11, marginRight: 0 }}>
+                              {(accessoriesByKey.length || accessoriesByProductId.length)}个配件
+                            </Tag>
+                          </Button>
+                        )}
+                      </div>
                       <Button danger type="text" size="small" icon={<DeleteOutlined />}
                         onClick={() => handleRemoveFormItem(item.key)}
-                        disabled={formItems.filter(i => !i.parentKey).length <= 1 && !item.parentKey} />
-                    )}
-                  </div>
+                        disabled={formItems.filter(isFinishedTopItem).length <= 1 && isFinishedTopItem(item)} />
+                    </div>
 
-                  {/* Form fields */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    <div style={{ minWidth: 0 }}> {/* 添加 minWidth: 0 防止内容溢出 */}
-                      <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>商品</div>
-                      <Select placeholder="请选择商品" showSearch loading={productsLoading}
-                        value={item.product_id}
-                        onChange={(val) => handleFormItemChange(item.key, 'product_id', val)}
-                        filterOption={(input, option) => (option?.label as string)?.toLowerCase().includes(input.toLowerCase())}
-                        options={productOptions}
-                        style={{ width: '100%' }}
-                        disabled={!!viewingOrder} />
+                    {/* Form fields */}
+                    <div style={{ display: 'grid', gridTemplateColumns: res.isMobile ? '1fr' : '2fr 1.5fr 1fr', gap: 12, marginBottom: 12 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>商品</div>
+                        {itemIsAccessory ? (
+                          <Input
+                            value={product ? `${product.product_code ? `[${product.product_code}] ` : ''}${product.name}` : `产品#${item.product_id}`}
+                            disabled
+                            style={{ width: '100%' }}
+                          />
+                        ) : (
+                          <Select placeholder="请选择商品" showSearch loading={productsLoading}
+                            value={item.product_id}
+                            onChange={(val) => handleFormItemChange(item.key, 'product_id', val)}
+                            filterOption={(input, option) => (option?.label as string)?.toLowerCase().includes(input.toLowerCase())}
+                            options={productOptions}
+                            style={{ width: '100%' }} />
+                        )}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>供应商</div>
+                        <AutoComplete
+                          options={supplierOptions}
+                          placeholder="请输入/选择供应商"
+                          value={item.supplier || ''}
+                          onChange={(val) => handleFormItemChange(item.key, 'supplier', val)}
+                          filterOption={(input, option) => (option?.label as string)?.toLowerCase().includes(input.toLowerCase())}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>店铺分组</div>
+                        <Select
+                          placeholder="分组"
+                          allowClear
+                          value={item.store_group_id}
+                          onChange={(val) => handleFormItemChange(item.key, 'store_group_id', val)}
+                          options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
                     </div>
-                    <div style={{ minWidth: 0 }}> {/* 添加 minWidth: 0 防止内容溢出 */}
-                      <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>供应商</div>
-                      <Input placeholder="请输入供应商"
-                        value={item.supplier || ''}
-                        onChange={(e) => handleFormItemChange(item.key, 'supplier', e.target.value)}
-                        style={{ width: '100%' }}
-                        disabled={!!viewingOrder} />
-                    </div>
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 12 }}>
-                    <div>
-                      <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>数量</div>
-                      <InputNumber min={1} value={item.quantity}
-                        onChange={(val) => handleFormItemChange(item.key, 'quantity', val || 1)}
-                        style={{ width: '100%' }} placeholder="数量"
-                        disabled={!!viewingOrder} />
-                    </div>
-                    <div>
-                      <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>单价</div>
-                      <InputNumber min={0} precision={2} prefix="¥" value={item.unit_price}
-                        onChange={(val) => handleFormItemChange(item.key, 'unit_price', val || 0)}
-                        style={{ width: '100%' }} placeholder="单价"
-                        disabled={!!viewingOrder} />
-                    </div>
-                    <div>
-                      <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>备注</div>
-                      <Input placeholder="请输入备注"
-                        value={item.notes || ''}
-                        onChange={(e) => handleFormItemChange(item.key, 'notes', e.target.value)}
-                        style={{ width: '100%' }}
-                        disabled={!!viewingOrder} />
+                    <div style={{ display: 'grid', gridTemplateColumns: res.isMobile ? '1fr' : '1fr 1fr 2fr', gap: 12 }}>
+                      <div>
+                        <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>数量</div>
+                        <InputNumber min={1} value={item.quantity}
+                          onChange={(val) => handleFormItemChange(item.key, 'quantity', val || 1)}
+                          style={{ width: '100%' }} placeholder="数量" />
+                      </div>
+                      <div>
+                        <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>单价</div>
+                        <InputNumber min={0} precision={2} prefix="¥" value={item.unit_price}
+                          onChange={(val) => handleFormItemChange(item.key, 'unit_price', val || 0)}
+                          style={{ width: '100%' }} placeholder="单价" />
+                      </div>
+                      <div>
+                        <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>备注</div>
+                        <Input placeholder="请输入备注"
+                          value={item.notes || ''}
+                          onChange={(e) => handleFormItemChange(item.key, 'notes', e.target.value)}
+                          style={{ width: '100%' }} />
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            )
-          }
+              )
+            }
 
-          return finishedItems.map((item) => (
-            <React.Fragment key={item.key}>
-              {renderItem(item, false)}
-              {accessoryMap.has(item.key) && expandedAccessories.has(item.key) &&
-                accessoryMap.get(item.key)!.map((accessory) => renderItem(accessory, true))
-              }
-            </React.Fragment>
-          ))
-        })()}
-        </div>
+            return (
+              <>
+                {finishedItems.map((item) => {
+                  const childAccessories = accessoryMap.has(item.key)
+                    ? accessoryMap.get(item.key)!
+                    : (item.product_id && accessoryMapByProductId.has(item.product_id) ? accessoryMapByProductId.get(item.product_id)! : [])
+                  return (
+                    <React.Fragment key={item.key}>
+                      {renderItem(item, false)}
+                      {childAccessories.length > 0 && expandedAccessories.has(item.key) &&
+                        childAccessories.map((accessory) => renderItem(accessory, true))
+                      }
+                    </React.Fragment>
+                  )
+                })}
+                {standaloneAccessories.map((item) => (
+                  <React.Fragment key={item.key}>
+                    {renderItem(item, true)}
+                  </React.Fragment>
+                ))}
+              </>
+            )
+          })()}
+          </div>
+        )}
 
         {!viewingOrder && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexShrink: 0 }}>
             <Button type="dashed" icon={<PlusOutlined />} onClick={handleAddFormItem}>
               添加商品
             </Button>
@@ -1354,13 +1897,14 @@ const PurchaseManagement: React.FC = () => {
         onCancel={() => setPreviewModalOpen(false)}
         okText="确认导入"
         cancelText="取消"
-        width={900}
+        width={res.isMobile ? '95vw' : 900}
       >
         <Table
           dataSource={previewItems}
-          rowKey={(record, index) => String(index)}
+          rowKey={(record) => String(record.product_id || record.key || Math.random())}
           pagination={false}
           size="small"
+          scroll={{ x: res.isMobile ? true : false }}
           expandable={{
             expandedRowRender: (record: any, index: number) => {
               const bindings = record.bindings || []
@@ -1472,67 +2016,82 @@ const PurchaseManagement: React.FC = () => {
         open={stockDetailModalOpen}
         onCancel={() => setStockDetailModalOpen(false)}
         footer={null}
-        width={700}
+        width={res.isMobile ? '95vw' : 900}
       >
         {stockDetailOrder && (
-          <Table
-            dataSource={[
-              ...stockDetailOrder.items.map((item: any) => ({
-                ...item,
-                pending: item.quantity - item.received_quantity,
-                isSummary: false,
-              })),
-              {
-                id: '__summary__',
-                product_name: '合计',
-                product_code: '',
-                quantity: stockDetailOrder.items.reduce((s: number, item: any) => s + (item.quantity || 0), 0),
-                received_quantity: stockDetailOrder.items.reduce((s: number, item: any) => s + (item.received_quantity || 0), 0),
-                pending: stockDetailOrder.items.reduce((s: number, item: any) => s + (item.quantity || 0), 0) - stockDetailOrder.items.reduce((s: number, item: any) => s + (item.received_quantity || 0), 0),
-                isSummary: true,
-              },
-            ]}
-            rowKey="id"
-            pagination={false}
-            size="small"
-            rowClassName={(record) => record.isSummary ? 'summary-row' : ''}
-            columns={[
-              { title: '产品', dataIndex: 'product_name', key: 'product_name', ellipsis: true,
-                render: (name: string, record: any) => (
-                  <div style={{ fontWeight: record.isSummary ? 700 : 400 }}>
-                    <div>{name}</div>
-                    {record.product_code && <div style={{ fontSize: 11, color: '#999' }}>{record.product_code}</div>}
-                  </div>
-                ),
-              },
-              { title: '采购量', dataIndex: 'quantity', key: 'quantity', width: 80, align: 'center' as const,
-                render: (v: number, record: any) => <span style={{ fontWeight: record.isSummary ? 700 : 400 }}>{v}</span>,
-              },
-              { title: '已入库', dataIndex: 'received_quantity', key: 'received_quantity', width: 80, align: 'center' as const,
-                render: (v: number, record: any) => <span style={{ color: v > 0 ? '#52c41a' : '#999', fontWeight: record.isSummary ? 700 : 400 }}>{v}</span>,
-              },
-              { title: '待入库', dataIndex: 'pending', key: 'pending', width: 80, align: 'center' as const,
-                render: (v: number, record: any) => <span style={{ color: v > 0 ? '#fa8c16' : '#52c41a', fontWeight: record.isSummary ? 700 : (v > 0 ? 500 : 400) }}>{v}</span>,
-              },
-              {
-                title: '进度',
-                key: 'progress',
-                width: 120,
-                render: (_: any, record: any) => {
-                  if (record.isSummary) return null
-                  const pct = record.quantity > 0 ? Math.round((record.received_quantity / record.quantity) * 100) : 100
-                  return (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <div style={{ flex: 1, height: 8, background: '#f0f0f0', borderRadius: 4, overflow: 'hidden' }}>
-                        <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? '#52c41a' : '#1890ff', borderRadius: 4, transition: 'width 0.3s' }} />
+          <>
+            <Table
+              dataSource={(() => {
+                const allItems = stockDetailOrder.items.map((item: any) => ({
+                  ...item,
+                  pending: item.quantity - item.received_quantity,
+                }))
+                const start = (stockDetailPagination.current - 1) * stockDetailPagination.pageSize
+                return allItems.slice(start, start + stockDetailPagination.pageSize)
+              })()}
+              rowKey="id"
+              pagination={{
+                current: stockDetailPagination.current,
+                pageSize: stockDetailPagination.pageSize,
+                total: stockDetailOrder.items.length,
+                showSizeChanger: true,
+                pageSizeOptions: ['10', '20', '50'],
+                showTotal: (total) => `共 ${total} 条`,
+                onChange: (page, pageSize) => setStockDetailPagination({ current: page, pageSize: pageSize || 10 }),
+              }}
+              size="small"
+              scroll={{ y: 350 }}
+              sticky
+              columns={[
+                { title: '产品', dataIndex: 'product_name', key: 'product_name', ellipsis: true,
+                  render: (name: string, record: any) => {
+                    const types = record.product_type ? (Array.isArray(record.product_type) ? record.product_type : record.product_type.split(',')) : []
+                    const isFinished = types.includes('finished')
+                    const isAccessory = types.includes('accessory')
+                    return (
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          {isFinished && <Tag color="blue" style={{ fontSize: 11, marginRight: 0 }}>成品</Tag>}
+                          {isAccessory && <Tag color="orange" style={{ fontSize: 11, marginRight: 0 }}>配件</Tag>}
+                          {!isFinished && !isAccessory && <Tag style={{ fontSize: 11, marginRight: 0 }}>商品</Tag>}
+                          <span>{name}</span>
+                        </div>
+                        {record.product_code && <div style={{ fontSize: 11, color: '#999' }}>{record.product_code}</div>}
                       </div>
-                      <span style={{ fontSize: 11, color: '#999', minWidth: 32 }}>{pct}%</span>
-                    </div>
-                  )
+                    )
+                  },
                 },
-              },
-            ]}
-          />
+                { title: '采购量', dataIndex: 'quantity', key: 'quantity', width: 80, align: 'center' as const },
+                { title: '已入库', dataIndex: 'received_quantity', key: 'received_quantity', width: 80, align: 'center' as const,
+                  render: (v: number) => <span style={{ color: v > 0 ? '#52c41a' : '#999' }}>{v}</span>,
+                },
+                { title: '待入库', dataIndex: 'pending', key: 'pending', width: 80, align: 'center' as const,
+                  render: (v: number) => <span style={{ color: v > 0 ? '#fa8c16' : '#52c41a' }}>{v}</span>,
+                },
+                {
+                  title: '进度',
+                  key: 'progress',
+                  width: 120,
+                  render: (_: any, record: any) => {
+                    const pct = record.quantity > 0 ? Math.round((record.received_quantity / record.quantity) * 100) : 100
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ flex: 1, height: 8, background: '#f0f0f0', borderRadius: 4, overflow: 'hidden' }}>
+                          <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? '#52c41a' : '#1890ff', borderRadius: 4, transition: 'width 0.3s' }} />
+                        </div>
+                        <span style={{ fontSize: 11, color: '#999', minWidth: 32 }}>{pct}%</span>
+                      </div>
+                    )
+                  },
+                },
+              ]}
+            />
+            <div style={{ marginTop: 12, padding: '12px 16px', background: '#fafafa', borderRadius: 4, display: 'flex', justifyContent: 'space-around' }}>
+              <span>合计采购量：<b>{stockDetailOrder.items.reduce((s: number, item: any) => s + (item.quantity || 0), 0)}</b></span>
+              <span>已入库：<b style={{ color: '#52c41a' }}>{stockDetailOrder.items.reduce((s: number, item: any) => s + (item.received_quantity || 0), 0)}</b></span>
+              <span>待入库：<b style={{ color: '#fa8c16' }}>{stockDetailOrder.items.reduce((s: number, item: any) => s + (item.quantity || 0), 0) - stockDetailOrder.items.reduce((s: number, item: any) => s + (item.received_quantity || 0), 0)}</b></span>
+            </div>
+          </>
         )}
       </Modal>
 

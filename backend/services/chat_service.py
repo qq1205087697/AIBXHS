@@ -90,6 +90,41 @@ INVENTORY_TOOLS = [
                 "required": ["query_type"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_replenishment_order",
+            "description": "创建补货单。当用户确认要补货时调用，可直接使用query_inventory_status返回的商品product_id和建议数量。单号自动生成，不要问用户要单号！",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "product_id": {
+                                    "type": "integer",
+                                    "description": "产品ID，可通过query_inventory_status工具获取"
+                                },
+                                "quantity": {
+                                    "type": "integer",
+                                    "description": "补货数量，优先使用query_inventory_status返回的suggest_qty"
+                                }
+                            },
+                            "required": ["product_id", "quantity"]
+                        },
+                        "description": "补货明细列表"
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "备注信息（可选）"
+                    }
+                },
+                "required": ["items"]
+            }
+        }
     }
 ]
 
@@ -201,6 +236,41 @@ UNIFIED_TOOLS = [
                             "required": ["product_id", "quantity"]
                         },
                         "description": "采购明细列表"
+                    }
+                },
+                "required": ["items"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_replenishment_order",
+            "description": "创建补货单。当用户确认要补货时调用，可直接使用query_inventory_status返回的商品product_id和建议数量。单号自动生成，不要问用户要单号！",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "product_id": {
+                                    "type": "integer",
+                                    "description": "产品ID，可通过query_inventory_status工具获取"
+                                },
+                                "quantity": {
+                                    "type": "integer",
+                                    "description": "补货数量，优先使用query_inventory_status返回的suggest_qty"
+                                }
+                            },
+                            "required": ["product_id", "quantity"]
+                        },
+                        "description": "补货明细列表"
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "备注信息（可选）"
                     }
                 },
                 "required": ["items"]
@@ -328,7 +398,7 @@ UNIFIED_TOOLS = [
 ]
 
 
-def query_inventory_status(db: Session, tenant_id: int, query_type: str, risk_level: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+def query_inventory_status(db: Session, tenant_id: int, query_type: str, risk_level: str = None, limit: int = 10, user_id: int = None, user_role: str = None) -> List[Dict[str, Any]]:
     """查询库存状态"""
     try:
         from models.restock import InventorySnapshot, ReplenishmentDecision
@@ -349,6 +419,28 @@ def query_inventory_status(db: Session, tenant_id: int, query_type: str, risk_le
             (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None))
         )
 
+        # 用户数据隔离：非管理员只能看分配的店铺数据
+        if user_id and user_role and user_role != "admin":
+            from sqlalchemy import text as sql_text, or_ as sql_or
+            user_store_rows = db.execute(
+                sql_text("""
+                    SELECT s.inventory_name
+                    FROM user_stores us
+                    JOIN stores s ON us.store_id = s.id
+                    WHERE us.user_id = :uid AND us.tenant_id = :tid
+                    AND s.status = 'active'
+                    AND s.inventory_name IS NOT NULL
+                    AND s.inventory_name != ''
+                """),
+                {"uid": user_id, "tid": tenant_id}
+            ).fetchall()
+            user_stores = [s[0] for s in user_store_rows]
+            if user_stores:
+                store_conditions = [InventorySnapshot.account.like(f"%{s}%") for s in user_stores]
+                query = query.filter(sql_or(*store_conditions))
+            else:
+                return []
+
         # 根据查询类型筛选
         if query_type == "stockout_risk":
             query = query.filter(ReplenishmentDecision.risk_level == "红")
@@ -365,9 +457,45 @@ def query_inventory_status(db: Session, tenant_id: int, query_type: str, risk_le
 
         results = query.limit(limit).all()
 
+        # 预加载产品ID映射（通过ASIN匹配products表，同时支持SKU兜底）
+        from models.product import Product
+        all_asins = [str(snap.asin).strip() for snap, _ in results if snap and snap.asin]
+        all_skus = [str(snap.sku).strip() for snap, _ in results if snap and snap.sku]
+        product_id_map = {}
+        if all_asins:
+            prod_rows = db.query(Product.asin, Product.id, Product.name).filter(
+                Product.tenant_id == tenant_id,
+                Product.asin.in_(all_asins)
+            ).all()
+            for asin, pid, pname in prod_rows:
+                key = str(asin).strip().upper()
+                product_id_map[key] = {"id": pid, "product_code": asin, "name": pname}
+            logger.info(f"[CHAT] ASIN 匹配: 库存ASIN数={len(all_asins)}, 匹配到产品数={len(product_id_map)}")
+
+        # SKU兜底：通过 platform_products 匹配
+        sku_product_id_map = {}
+        if all_skus:
+            sku_rows = db.execute(text("""
+                SELECT pp.sku, pp.product_id, p.name
+                FROM platform_products pp
+                JOIN products p ON p.id = pp.product_id
+                WHERE pp.tenant_id = :tid AND pp.deleted_at IS NULL
+                  AND pp.sku IN :skus
+            """), {"tid": tenant_id, "skus": tuple(all_skus) if len(all_skus) > 1 else (all_skus[0], all_skus[0])}).fetchall()
+            for sku, pid, pname in sku_rows:
+                sku_product_id_map[str(sku).strip().upper()] = {"id": pid, "product_code": sku, "name": pname}
+            logger.info(f"[CHAT] SKU 兜底匹配: 库存SKU数={len(all_skus)}, 匹配到产品数={len(sku_product_id_map)}")
+
         items = []
         for snap, dec in results:
+            asin_key = str(snap.asin).strip().upper() if snap.asin else ""
+            sku_key = str(snap.sku).strip().upper() if snap.sku else ""
+            prod_info = product_id_map.get(asin_key) if asin_key else None
+            if not prod_info and sku_key:
+                prod_info = sku_product_id_map.get(sku_key)
             items.append({
+                "product_id": prod_info["id"] if prod_info else None,
+                "product_code": prod_info["product_code"] if prod_info else "",
                 "asin": snap.asin or "",
                 "sku": snap.sku or "",
                 "product_name": snap.product_name or snap.asin or "未知商品",
@@ -845,8 +973,11 @@ def batch_analyze_reviews(db: Session, review_ids: List[int], tenant_id: Optiona
     return results
 
 
-def save_message(db: Session, user_id: int, session_id: str, role: str, content: str, function_name: Optional[str] = None, chat_type: str = "review"):
-    message = ConversationHistory(user_id=user_id, session_id=session_id, role=role, content=content, function_name=function_name, chat_type=chat_type)
+def save_message(db: Session, user_id: int, session_id: str, role: str, content: str, function_name: Optional[str] = None, chat_type: str = "review", metadata: Optional[Dict[str, Any]] = None):
+    message = ConversationHistory(
+        user_id=user_id, session_id=session_id, role=role, content=content,
+        function_name=function_name, chat_type=chat_type, meta=metadata
+    )
     db.add(message)
     db.commit()
     db.refresh(message)
@@ -855,7 +986,32 @@ def save_message(db: Session, user_id: int, session_id: str, role: str, content:
 
 def get_conversation_history(db: Session, user_id: int, session_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     messages = db.query(ConversationHistory).filter(ConversationHistory.user_id == user_id, ConversationHistory.session_id == session_id).order_by(ConversationHistory.created_at).limit(limit).all()
-    return [{"role": m.role, "content": m.content} for m in messages if m.role in ["system", "user", "assistant"]]
+    return [
+        {"role": m.role, "content": m.content, "metadata": m.meta}
+        for m in messages if m.role in ["system", "user", "assistant"]
+    ]
+
+
+def get_last_replenishment_candidates(db: Session, user_id: int, session_id: str) -> List[Dict[str, Any]]:
+    """从历史消息元数据中恢复最近的补货候选列表"""
+    message = db.query(ConversationHistory).filter(
+        ConversationHistory.user_id == user_id,
+        ConversationHistory.session_id == session_id,
+        ConversationHistory.role == "assistant",
+        ConversationHistory.meta.isnot(None)
+    ).order_by(ConversationHistory.created_at.desc()).first()
+
+    if message and message.meta:
+        return message.meta.get("replenishment_candidates", []) or []
+    return []
+
+
+def get_replenishment_candidates(db: Session, user_id: int, session_id: str) -> List[Dict[str, Any]]:
+    """优先从内存 session 获取候选列表，否则从历史消息 metadata 恢复"""
+    candidates = SESSION_REPLENISHMENT_CANDIDATES.get(session_id) or []
+    if candidates:
+        return candidates
+    return get_last_replenishment_candidates(db, user_id, session_id)
 
 
 def query_reviews_unified(db: Session, tenant_id: int, start_date: str, end_date: str, asin: Optional[str] = None, chat_type: str = "unified") -> List[Dict[str, Any]]:
@@ -1042,7 +1198,19 @@ def create_replenishment_order(db: Session, tenant_id: int, user_id: int,
         if not items:
             return {"success": False, "message": "补货单商品不能为空"}
 
-        order_number = f"RO{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        # 如果未指定店铺分组，自动从用户分配的店铺获取
+        if store_group_id is None:
+            user_store_group = db.execute(text("""
+                SELECT s.group_id
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid AND s.group_id IS NOT NULL
+                LIMIT 1
+            """), {"uid": user_id, "tid": tenant_id}).fetchone()
+            if user_store_group:
+                store_group_id = user_store_group[0]
+
+        order_number = f"RO{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         db.execute(text("""
             INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
                 created_by, created_at, updated_at)
@@ -1059,7 +1227,33 @@ def create_replenishment_order(db: Session, tenant_id: int, user_id: int,
         })
         order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
 
+        # 查询所有产品的配件绑定关系
+        product_ids = [item.get("product_id") for item in items if item.get("product_id")]
+        bindings_map = {}
+        if product_ids:
+            pids_tuple = tuple(product_ids) if len(product_ids) > 1 else (product_ids[0], product_ids[0])
+            bindings = db.execute(text(f"""
+                SELECT pb.finished_product_id, pb.accessory_product_id, pb.quantity
+                FROM product_bindings pb
+                JOIN products p ON p.id = pb.accessory_product_id AND p.deleted_at IS NULL
+                WHERE pb.finished_product_id IN :fids AND pb.deleted_at IS NULL
+            """), {"fids": pids_tuple}).fetchall()
+            for b in bindings:
+                finished_id = b[0]
+                if finished_id not in bindings_map:
+                    bindings_map[finished_id] = []
+                bindings_map[finished_id].append({
+                    "accessory_product_id": b[1],
+                    "quantity": b[2]
+                })
+
+        # 插入补货单明细，含配件的成品同时插入成品和配件
+        inserted_count = 0
         for item in items:
+            product_id = item.get("product_id")
+            quantity = item.get("quantity", 1)
+
+            # 先插入成品条目（保留原产品）
             db.execute(text("""
                 INSERT INTO replenishment_items (tenant_id, replenishment_order_id, product_id, quantity,
                     notes, created_at, updated_at)
@@ -1068,19 +1262,41 @@ def create_replenishment_order(db: Session, tenant_id: int, user_id: int,
             """), {
                 "tenant_id": tenant_id,
                 "replenishment_order_id": order_id,
-                "product_id": item.get("product_id"),
-                "quantity": item.get("quantity"),
+                "product_id": product_id,
+                "quantity": quantity,
                 "notes": item.get("notes"),
                 "created_at": datetime.now(),
                 "updated_at": datetime.now(),
             })
+            inserted_count += 1
+
+            # 如果是含配件的成品，同时插入配件条目
+            if product_id in bindings_map:
+                for accessory in bindings_map[product_id]:
+                    accessory_qty = quantity * accessory["quantity"]
+                    db.execute(text("""
+                        INSERT INTO replenishment_items (tenant_id, replenishment_order_id, product_id, quantity,
+                            parent_product_id, notes, created_at, updated_at)
+                        VALUES (:tenant_id, :replenishment_order_id, :product_id, :quantity,
+                            :parent_product_id, :notes, :created_at, :updated_at)
+                    """), {
+                        "tenant_id": tenant_id,
+                        "replenishment_order_id": order_id,
+                        "product_id": accessory["accessory_product_id"],
+                        "quantity": accessory_qty,
+                        "parent_product_id": product_id,  # 记录来源成品ID
+                        "notes": item.get("notes"),
+                        "created_at": datetime.now(),
+                        "updated_at": datetime.now(),
+                    })
+                    inserted_count += 1
 
         db.commit()
         return {
             "success": True,
             "id": order_id,
             "order_number": order_number,
-            "items_count": len(items or []),
+            "items_count": inserted_count,
         }
     except Exception as e:
         db.rollback()
@@ -1355,25 +1571,21 @@ def create_replenishment_from_named_items(db: Session, tenant_id: int, user_id: 
 
 
 def try_execute_ai_order_intent(db: Session, tenant_id: int, user_id: int, user_message: str) -> Optional[str]:
+    """兜底：仅处理用户明确给出商品名称+数量的直接创建请求，不再拦截补货咨询。"""
     # 检查是否包含订单创建关键词
     if not any(keyword in user_message for keyword in [ZH_BU, ZH_REPLENISH, ZH_PURCHASE, ZH_PURCHASE_ORDER, ZH_INBOUND, ZH_CREATE, ZH_GENERATE, ZH_ORDER]):
         return None
 
-    # 检查是否是询问类意图（询问补货数量、断货风险等）
-    query_keywords = ["要补多少", "应该补多少", "补多少货", "补多少", "断货风险", "风险", "库存情况", "库存状态"]
+    # 询问类意图交给主AI流程处理
+    query_keywords = ["要补多少", "应该补多少", "补多少货", "补多少", "断货风险", "风险", "库存情况", "库存状态", "哪些商品", "推荐补货"]
     if any(keyword in user_message for keyword in query_keywords):
-        logger.info(f"[CHAT] 检测到询问类意图: {user_message}, 让AI助手查询库存")
         return None
 
-    # 如果用户没有提供数量，可能是在询问，不是直接创建
-    # 检查是否包含数量信息
+    # 必须有数量才在此处理（明确的直接创建请求）
     import re
     has_quantity = re.search(r'\d+\s*(件|个|箱|套|包)', user_message)
     if not has_quantity:
-        # 如果没有数量，但有"补货"关键词，可能是在询问
-        if ZH_REPLENISH in user_message or ZH_BU in user_message:
-            logger.info(f"[CHAT] 用户提到补货但未提供数量，让AI助手推荐补货数量")
-            return None
+        return None
 
     intent_result = classify_order_intent_with_ai(user_message)
     intent = intent_result.get("intent")
@@ -1392,9 +1604,16 @@ def try_execute_ai_order_intent(db: Session, tenant_id: int, user_id: int, user_
 
 
 def extract_replenishment_selection(user_message: str) -> List[int]:
-    """解析用户输入的 123 / 1,2,3 / 1 2 3 等序号组合"""
+    """解析用户输入的 123 / 1,2,3 / 1 2 3 / 前N个 等序号组合"""
     import re
     text_message = user_message.strip()
+
+    # 支持"前N个"语义，如"前8个" => [1,2,3,4,5,6,7,8]
+    top_n_match = re.search(r'前\s*(\d+)\s*个', text_message)
+    if top_n_match:
+        n = int(top_n_match.group(1))
+        return list(range(1, n + 1))
+
     compact_match = re.fullmatch(r"[0-9]{1,20}", text_message)
     if compact_match and len(text_message) > 1:
         return [int(ch) for ch in text_message if ch.isdigit()]
@@ -1411,7 +1630,7 @@ def extract_replenishment_selection(user_message: str) -> List[int]:
 
 def try_create_named_replenishment_from_session(db: Session, tenant_id: int, user_id: int, session_id: str, user_message: str) -> Optional[str]:
     """Create replenishment order from cached candidates using product-name + quantity."""
-    candidates = SESSION_REPLENISHMENT_CANDIDATES.get(session_id) or []
+    candidates = get_replenishment_candidates(db, user_id, session_id)
     if not candidates:
         return None
 
@@ -1435,13 +1654,18 @@ def try_create_named_replenishment_from_session(db: Session, tenant_id: int, use
         name_index = lowered_message.find(lowered_name)
         tail_text = user_message[name_index + len(product_name): name_index + len(product_name) + 30]
         qty_match = re.search(r"(\d+)\s*(?:件|个|箱|套|包)?", tail_text)
-        if not qty_match:
+
+        product_id = candidate.get("product_id")
+        if not product_id:
             continue
 
-        quantity = int(qty_match.group(1))
-        product_id = candidate.get("product_id")
-        if not product_id or quantity <= 0:
-            continue
+        # 用户指定了数量用用户的；没指定用建议数量；都没有则兜底50
+        if qty_match:
+            quantity = int(qty_match.group(1))
+        else:
+            quantity = int(candidate.get("suggest_qty") or 0)
+        if quantity <= 0:
+            quantity = 50
 
         matched_items.append({
             "product_id": product_id,
@@ -1478,61 +1702,215 @@ def try_create_named_replenishment_from_session(db: Session, tenant_id: int, use
 
 
 def try_create_replenishment_from_session(db: Session, tenant_id: int, user_id: int, session_id: str, user_message: str) -> Optional[str]:
-    """根据用户选择序号，从会话候选列表创建补货单"""
-    candidates = SESSION_REPLENISHMENT_CANDIDATES.get(session_id) or []
+    """根据用户选择序号，从会话候选列表创建补货单 - 先调用AI理解上下文"""
+    candidates = get_replenishment_candidates(db, user_id, session_id)
+    logger.info(f"[CHAT] try_create_replenishment_from_session: session_id={session_id}, candidates={len(candidates)}, message={user_message}")
     if not candidates:
         return None
 
-    if not any(keyword in user_message for keyword in ["补货", "生成", "创建", "下单"]):
+    if not any(keyword in user_message for keyword in ["补货", "补", "生成", "创建", "下单"]):
         return None
 
-    selected_indexes = extract_replenishment_selection(user_message)
-    if not selected_indexes:
+    # 检查是否有选择意图（序号、"前N个"、"全部"等；支持中文数字）
+    import re
+
+    def _cn_to_arabic(cn: str) -> Optional[int]:
+        mapping = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+                   "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+        if not cn:
+            return None
+        # 简单处理：十、十一、十二... 二十等
+        total = 0
+        last = 1
+        for ch in cn:
+            val = mapping.get(ch)
+            if val is None:
+                continue
+            if val == 10:
+                if total == 0:
+                    total = 10
+                else:
+                    total = (total or 1) * 10
+            else:
+                total += val
+        return total if total > 0 else None
+
+    CN_NUMBERS = r'[一二两三四五六七八九十]+'
+    has_selection = (
+        re.search(r'前\s*\d+\s*个', user_message)
+        or re.search(r'前\s*' + CN_NUMBERS + r'\s*个', user_message)
+        or re.search(r'前\s*' + CN_NUMBERS, user_message)
+        or re.search(r'\d+\s*全部', user_message)
+        or re.search(r'^\s*[\d,\s]+\s*$', user_message.strip())
+        or re.search(r'第?\d+', user_message)
+        or re.search(r'第' + CN_NUMBERS, user_message)
+    )
+    # 没有具体选择时，如果用户明确说"帮我下补货单"/"创建补货单"/"全部补货"等，视为选择全部
+    select_all = not has_selection and any(kw in user_message for kw in ["帮我下补货单", "帮我补货", "创建补货单", "生成补货单", "全部补货", "都补", "都创建", "下单补货", "补货单", "直接补货", "帮我下单"])
+    logger.info(f"[CHAT] has_selection={has_selection}, select_all={select_all}")
+    if not has_selection and not select_all:
         return None
 
+    # 简单意图直接本地解析，不走AI：前N个/第N个/全部
     chosen_items = []
-    seen = set()
-    for index in selected_indexes:
-        if index in seen:
-            continue
-        seen.add(index)
-        if 1 <= index <= len(candidates):
-            chosen = candidates[index - 1]
-            suggest_qty = int(chosen.get("suggest_qty") or 0)
-            product_id = chosen.get("product_id")
-            if product_id and suggest_qty > 0:
+    matched_by_rule = False
+
+    # 前N个（支持中文/阿拉伯数字）
+    front_match = re.search(r'前\s*(\d+)\s*个', user_message) or re.search(r'前\s*(' + CN_NUMBERS + r')\s*个', user_message) or re.search(r'前\s*(\d+)', user_message) or re.search(r'前\s*(' + CN_NUMBERS + r')', user_message)
+    if front_match:
+        num_str = front_match.group(1)
+        n = int(num_str) if num_str.isdigit() else _cn_to_arabic(num_str)
+        if n and n > 0:
+            for c in candidates[:n]:
+                if c.get("product_id"):
+                    qty = int(c.get("suggest_qty") or 0)
+                    if qty <= 0:
+                        qty = 50
+                    chosen_items.append({
+                        "product_id": c["product_id"],
+                        "quantity": qty,
+                        "notes": "AI助手根据上下文创建补货",
+                        "product_name": c.get("product_name", ""),
+                        "suggest_qty": qty,
+                    })
+            matched_by_rule = True
+
+    # 全部
+    if not matched_by_rule and (select_all or "全部" in user_message or "都" in user_message):
+        for c in candidates:
+            if c.get("product_id"):
+                qty = int(c.get("suggest_qty") or 0)
+                if qty <= 0:
+                    qty = 50
                 chosen_items.append({
-                    "product_id": product_id,
-                    "quantity": suggest_qty,
-                    "notes": f"AI????????????????? {index}????? {chosen.get('risk_level', '-')}",
-                    "product_name": chosen.get("product_name", ""),
-                    "suggest_qty": suggest_qty,
+                    "product_id": c["product_id"],
+                    "quantity": qty,
+                    "notes": "AI助手根据上下文创建补货",
+                    "product_name": c.get("product_name", ""),
+                    "suggest_qty": qty,
                 })
+        matched_by_rule = True
 
-    if not chosen_items:
-        return "没有可创建的补货商品，请确认选中的条目是否存在建议补货数量。"
+    if matched_by_rule:
+        if not chosen_items:
+            return "无法确定要补货的商品，请明确指定商品名称或序号。"
+        result = create_replenishment_order(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            store_group_id=None,
+            notes="AI助手自动创建补货单",
+            items=chosen_items,
+        )
+        if not result.get("success"):
+            return f"创建失败：{result.get('message', '未知错误')}"
+        item_lines = "\n".join([
+            f"- {item['product_name']}：{item['suggest_qty']} 件" for item in chosen_items
+        ])
+        return (
+            f"补货单已创建成功！\n\n"
+            f"订单详情\n- 单号：{result.get('order_number')}\n- ID：{result.get('id')}\n- 商品数：{result.get('items_count', 0)}\n\n"
+            f"商品清单\n{item_lines}\n\n"
+            "请在系统中查看并确认此补货单，审批后可转采购单。"
+        )
 
-    result = create_replenishment_order(
-        db=db,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        store_group_id=None,
-        notes="AI助手自动创建补货单",
-        items=chosen_items,
-    )
+    # 复杂情况才调用AI理解上下文
+    history = get_conversation_history(db, user_id, session_id, limit=10)
 
-    if not result.get("success"):
-        return f"创建失败：{result.get('message', '未知错误')}"
-
-    item_lines = "\n".join([
-        f"- {item['product_name']}：{item['suggest_qty']} 件" for item in chosen_items
+    # 构建候选列表描述
+    candidate_list = "\n".join([
+        f"{idx + 1}. {c.get('product_name', '')} (product_id={c.get('product_id')}, 建议补货={c.get('suggest_qty', 0)}件, 可售天数={c.get('days_of_supply', 0)})"
+        for idx, c in enumerate(candidates)
     ])
-    return (
-        f"补货单已创建成功！\n\n"
-        f"订单详情\n- 单号：{result.get('order_number')}\n- ID：{result.get('id')}\n- 商品数：{result.get('items_count', 0)}\n\n"
-        f"商品清单\n{item_lines}\n\n"
-        "请在系统中查看并确认此补货单，审批后可转采购单。"
-    )
+
+    ai_prompt = f"""你是补货单创建助手。根据对话历史和用户当前消息，确定用户想要补货的商品。
+
+【当前补货候选列表】
+{candidate_list}
+
+【用户当前消息】
+{user_message}
+
+【任务】
+分析用户消息，结合对话上下文（特别是之前AI推荐的商品列表），确定用户想要补货哪些商品。
+- 用户可能说"前8个"、"前四个"、"1,2,3"、"全部"、"123"、"第3个"等
+- 如果用户说"帮我下补货单"、"创建补货单"、"全部补货"但没有指定具体序号，意味着选择【全部】候选商品
+- 请根据对话历史中AI实际推荐的商品顺序来匹配
+- 返回JSON格式：{{"items": [{{"product_id": 123, "quantity": 50, "product_name": "商品名"}}]}}
+
+只返回JSON，不要其他内容。如果无法确定，返回 {{"items": []}}"""
+
+    try:
+        with ai_call_slot():
+            response = client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": ai_prompt},
+                    *history,
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0,
+                timeout=60,
+            )
+        ai_reply = response.choices[0].message.content or ""
+        logger.info(f"[CHAT] AI补货意图解析: {ai_reply}")
+
+        # 解析JSON
+        import json as json_module
+        # 提取JSON部分
+        json_match = re.search(r'\{[\s\S]*\}', ai_reply)
+        if not json_match:
+            return None
+        parsed = json_module.loads(json_match.group())
+        ai_items = parsed.get("items", [])
+
+        if not ai_items:
+            return None
+
+        chosen_items = []
+        for item in ai_items:
+            product_id = item.get("product_id")
+            quantity = int(item.get("quantity") or 0)
+            product_name = item.get("product_name") or ""
+            if product_id and quantity > 0:
+                # 验证product_id在候选列表中
+                valid = any(c.get("product_id") == product_id for c in candidates)
+                if valid:
+                    chosen_items.append({
+                        "product_id": product_id,
+                        "quantity": quantity,
+                        "notes": "AI助手根据上下文创建补货",
+                        "product_name": product_name,
+                        "suggest_qty": quantity,
+                    })
+
+        if not chosen_items:
+            return "无法确定要补货的商品，请明确指定商品名称或序号。"
+
+        result = create_replenishment_order(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            store_group_id=None,
+            notes="AI助手自动创建补货单",
+            items=chosen_items,
+        )
+
+        if not result.get("success"):
+            return f"创建失败：{result.get('message', '未知错误')}"
+
+        item_lines = "\n".join([
+            f"- {item['product_name']}：{item['suggest_qty']} 件" for item in chosen_items
+        ])
+        return (
+            f"补货单已创建成功！\n\n"
+            f"订单详情\n- 单号：{result.get('order_number')}\n- ID：{result.get('id')}\n- 商品数：{result.get('items_count', 0)}\n\n"
+            f"商品清单\n{item_lines}\n\n"
+            "请在系统中查看并确认此补货单，审批后可转采购单。"
+        )
+    except Exception as e:
+        logger.error(f"[CHAT] AI补货意图解析失败: {e}")
+        return None
 
 
 
@@ -1676,47 +2054,56 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
     history = get_conversation_history(db, user_id, session_id, limit=10)
     current_date = datetime.now().strftime("%Y-%m-%d")
 
-    ai_order_intent_reply = try_execute_ai_order_intent(db, tenant_id, user_id, user_message)
-    if ai_order_intent_reply:
-        save_message(db, user_id, session_id, "assistant", ai_order_intent_reply, function_name="create_replenishment_order", chat_type=chat_type)
-        return ai_order_intent_reply
+    # 1) 先尝试明确的序号快捷创建（如"123""前5个""全部"）
+    replenishment_reply = try_create_replenishment_from_session(db, tenant_id, user_id, session_id, user_message)
+    if replenishment_reply:
+        save_message(db, user_id, session_id, "assistant", replenishment_reply, function_name="create_replenishment_order", chat_type=chat_type)
+        return replenishment_reply
 
+    # 2) 再尝试候选列表中按商品名匹配创建（如"yew haw补50件"）
     named_replenishment_reply = try_create_named_replenishment_from_session(db, tenant_id, user_id, session_id, user_message)
     if named_replenishment_reply:
         save_message(db, user_id, session_id, "assistant", named_replenishment_reply, function_name="create_replenishment_order", chat_type=chat_type)
         return named_replenishment_reply
 
-    replenishment_reply = try_create_replenishment_from_session(db, tenant_id, user_id, session_id, user_message)
-    if replenishment_reply:
-        save_message(db, user_id, session_id, "assistant", replenishment_reply, function_name="create_replenishment_order", chat_type=chat_type)
-        return replenishment_reply
+    # 3) 最后作为兜底：用户明确给出商品名+数量的直接创建请求
+    ai_order_intent_reply = try_execute_ai_order_intent(db, tenant_id, user_id, user_message)
+    if ai_order_intent_reply:
+        save_message(db, user_id, session_id, "assistant", ai_order_intent_reply, function_name="create_replenishment_order", chat_type=chat_type)
+        return ai_order_intent_reply
 
     # 根据对话类型选择不同的提示词和工具
     if chat_type == "unified":
         system_prompt = f"""你是跨境电商AI助手。当前日期: {current_date}。
 
 【核心规则】
-1. 创建采购/入库单前，**必须**先调用 find_product 找到产品ID！
-2. 单号自动生成，不需要用户提供。
-3. 【判断逻辑】：
-   - 如果用户已提供产品信息和数量：直接调用工具创建，不要啰嗦
-   - 如果信息缺失：清楚告诉用户需要补充什么必填项，哪些是可选的
+1. 单号自动生成，不需要用户提供。
+2. 能调用工具直接完成的，不要啰嗦，直接执行。
+3. 用户确认补货时，优先创建【补货单】，不是采购单/入库单。
 
-【采购单必填/可选】
-✅ 必须先通过 find_product 找到产品 ID
-必填：商品、数量
-可选：供应商、仓库、预计到货日期、备注
+【工具使用流程】
+- 用户问"哪些商品有断货风险""需要补货""库存怎么样" → 调用 query_inventory_status
+- 用户问"帮我补货""创建补货单""这五个帮我补" → 直接调用 create_replenishment_order
+- 用户明确说"采购""入库"时，才创建采购单/入库单，且必须先调用 find_product 找到产品ID
+- 用户问差评相关 → 调用 query_reviews
 
-【入库单必填/可选】
-✅ 必须先通过 find_product 找到产品 ID
-必填：商品、数量
-可选：入库类型(默认采购)、仓库、经办人、入库日期、备注
+【补货单规则】
+- 调用 create_replenishment_order 时，使用 query_inventory_status 返回的 product_id 和 suggest_qty
+- 如果用户没有指定数量，直接用 suggest_qty；如果用户指定了数量，按用户指定的数量
+- 如果用户只回复序号（如"123""前5个""全部"），结合上一轮 query_inventory_status 的结果创建补货单
+- 创建成功后告诉用户补货单号、商品和数量
+- 严禁在没调用 create_replenishment_order 工具的情况下说"已生成补货单""已创建"等；没创建就是没创建
+
+【采购单/入库单规则】
+- 创建前必须先调用 find_product 找到产品ID
+- 必填：商品、数量
 
 【可用工具】
-- find_product: 查找产品（先做这个！）
+- query_inventory_status: 查库存/断货风险/补货建议
+- create_replenishment_order: 创建补货单（用户确认补货时优先使用）
+- find_product: 查找产品（采购/入库前使用）
 - create_purchase_order: 创建采购单
 - create_inbound_order: 创建入库单
-- query_inventory_status: 查库存
 - query_reviews: 查差评
 """
         tools = UNIFIED_TOOLS
@@ -1726,12 +2113,15 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
 你的能力：
 - 查询库存状态、断货风险商品、补货建议
 - 分析库存健康度，给出补货优先级建议
+- 根据用户确认直接创建补货单
 
 重要规则：
 - 使用商品的【真实名称】来引用产品，不要只使用ASIN
 - 回复要简洁专业，突出关键数据和建议
 - 优先展示风险等级和建议补货数量
 - 对于库存数据，用表格或列表形式清晰展示
+- 当用户说"帮我补货""创建补货单""这N个帮我补"等确认语句时，直接调用 create_replenishment_order 创建补货单，不要问用户要单号
+- 创建补货单时使用 query_inventory_status 返回的 product_id 和 suggest_qty
 """
         tools = INVENTORY_TOOLS
     else:
@@ -1767,7 +2157,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
             # 先收集所有find_product工具调用的结果
             all_found_products = []
             has_find_product = False
-            is_query_intent = any(keyword in user_message for keyword in ["要补多少", "应该补多少", "补多少货", "补多少", "断货风险", "风险"])
+            is_query_intent = any(keyword in user_message for keyword in ["要补多少", "应该补多少", "补多少货", "补多少", "补货多少", "推荐补货", "补货建议", "断货风险", "风险", "需要补货"])
 
             for tool_call in assistant_message.tool_calls:
                 logger.info(f"[CHAT] 工具调用: {tool_call.function.name}, 参数: {tool_call.function.arguments}")
@@ -1779,7 +2169,8 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                     limit = args.get("limit", 10)
 
                     logger.info(f"[CHAT] 库存查询: type={query_type}, risk={risk_level}, limit={limit}")
-                    inventory_items = query_inventory_status(db, tenant_id, query_type, risk_level, limit)
+                    user_role = user.role_ref.code if user and user.role_ref else None
+                    inventory_items = query_inventory_status(db, tenant_id, query_type, risk_level, limit, user_id=user.id, user_role=user_role)
                     logger.info(f"[CHAT] 查询到 {len(inventory_items)} 条库存数据")
 
                     # 构建给AI的数据
@@ -1804,11 +2195,13 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                         final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
                     final_reply = final_response.choices[0].message.content or "无回复内容"
 
+                    # 存储候选列表（只要有product_id就加入，不依赖suggest_qty）
                     replenishment_candidates = [
                         item for item in inventory_items
-                        if item.get("suggest_qty", 0) > 0 and item.get("product_id")
+                        if item.get("product_id")
                     ][:9]
                     SESSION_REPLENISHMENT_CANDIDATES[session_id] = replenishment_candidates
+                    logger.info(f"[CHAT] 存储了 {len(replenishment_candidates)} 个补货候选商品到 session={session_id}")
 
                     if replenishment_candidates:
                         candidate_lines = "\n".join([
@@ -1817,13 +2210,14 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                         ])
                         final_reply = (
                             f"{final_reply}\n\n是否创建补货单？以下产品建议补货：\n{candidate_lines}"
-                            "\n\n回复序号确认，如 `123全部` 或 `1,2,3部分`。"
-                            "不回复则取消创建补货单。"
+                            "\n\n回复序号确认（如 `123` 或 `前5个`），或直接说`帮我补货`。"
                         )
-                    else:
-                        SESSION_REPLENISHMENT_CANDIDATES.pop(session_id, None)
 
-                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                    save_message(
+                        db, user_id, session_id, "assistant", final_reply,
+                        chat_type=chat_type,
+                        metadata={"replenishment_candidates": replenishment_candidates} if replenishment_candidates else None
+                    )
                     return final_reply
 
                 # 处理统一模式的差评查询
@@ -1947,6 +2341,290 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                     else:
                         logger.info(f"[CHAT] 未找到产品: {search_keyword}")
 
+                # 处理创建采购单
+                if tool_call.function.name == "create_purchase_order":
+                    ai_order_intent_reply = try_execute_ai_order_intent(db, tenant_id, user_id, user_message)
+                    if ai_order_intent_reply:
+                        save_message(db, user_id, session_id, "assistant", ai_order_intent_reply, function_name="create_replenishment_order", chat_type=chat_type)
+                        return ai_order_intent_reply
+
+                    if any(keyword in user_message for keyword in ["帮", "帮忙", "帮帮我", "求助"]):
+                        final_reply = "您好！我可以帮您查询产品、分析库存、创建补货单、入库单、采购单等。请告诉我您需要什么帮助。"
+                        save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                        return final_reply
+
+                    args = json.loads(tool_call.function.arguments)
+                    order_number = args.get("order_number")
+                    supplier = args.get("supplier")
+                    warehouse = args.get("warehouse")
+                    expected_date = args.get("expected_date")
+                    notes = args.get("notes")
+                    items = args.get("items", [])
+
+                    logger.info(f"[CHAT] 创建采购单: {order_number}, items={len(items)}")
+                    
+                    result = create_purchase_order(
+                        db, tenant_id, user_id,
+                        order_number, supplier, warehouse,
+                        expected_date, notes, items
+                    )
+                    logger.info(f"[CHAT] 采购单创建结果: {result}")
+
+                    if result.get("success"):
+                        final_reply = f"""采购单创建成功！
+
+采购单信息：
+- 单号：{result.get('order_number')}
+- ID：{result.get('id')}
+- 总金额：{result.get('total_amount', 0)}
+- 商品数量：{result.get('items_count', 0)}
+
+采购单已保存为草稿状态，您可以在系统中进一步编辑或提交审批。"""
+                    else:
+                        final_reply = f"创建采购单失败：{result.get('message', '未知错误')}"
+
+                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                    return final_reply
+
+                # 处理创建补货单
+                if tool_call.function.name == "create_replenishment_order":
+                    args = json.loads(tool_call.function.arguments)
+                    notes = args.get("notes")
+                    items = args.get("items", [])
+
+                    # 必须有候选列表，防止AI凭空生成product_id
+                    candidates = get_replenishment_candidates(db, user_id, session_id)
+                    logger.info(f"[CHAT] create_replenishment_order: candidates={len(candidates)}, ai_items={len(items)}")
+                    if not candidates:
+                        final_reply = (
+                            "请先让我查询哪些商品需要补货，您可以说『哪些商品有断货风险』或『推荐补货建议』。\n"
+                            "我会列出需要补货的商品清单，然后您再确认创建补货单。"
+                        )
+                        save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                        return final_reply
+
+                    # 判断用户是否在消息里明确指定了数量
+                    import re
+                    user_specified_qty = bool(re.search(r"\d+\s*(件|个|箱|套|包)", user_message))
+
+                    candidate_id_map = {c.get("product_id"): c for c in candidates if c.get("product_id")}
+                    normalized_items = []
+                    for item in items:
+                        product_id = item.get("product_id")
+                        ai_quantity = int(item.get("quantity") or 0)
+                        product_name = item.get("product_name") or ""
+
+                        # 只允许候选列表中的商品
+                        candidate = candidate_id_map.get(product_id) if product_id else None
+                        if not candidate:
+                            # AI没给product_id时，尝试按序号/名称匹配候选
+                            if not product_id and candidates:
+                                if product_name and product_name.isdigit():
+                                    idx = int(product_name) - 1
+                                    if 0 <= idx < len(candidates):
+                                        candidate = candidates[idx]
+                                else:
+                                    target = (product_name or "").lower()
+                                    for c in candidates:
+                                        c_name = (c.get("product_name") or "").lower()
+                                        if target and (target in c_name or c_name in target):
+                                            candidate = c
+                                            break
+
+                        if not candidate:
+                            logger.warning(f"[CHAT] 跳过不在候选列表的商品: product_id={product_id}, name={product_name}")
+                            continue
+
+                        product_id = candidate.get("product_id")
+                        product_name = candidate.get("product_name") or product_name or "未知商品"
+
+                        # 数量：用户没明确指定时用候选的建议数量，否则信任AI解析的数量
+                        suggest_qty = int(candidate.get("suggest_qty") or 0)
+                        if user_specified_qty and ai_quantity > 0:
+                            quantity = ai_quantity
+                        else:
+                            quantity = suggest_qty if suggest_qty > 0 else (ai_quantity if ai_quantity > 0 else 50)
+
+                        normalized_items.append({
+                            "product_id": product_id,
+                            "quantity": quantity,
+                            "product_name": product_name,
+                            "suggest_qty": quantity,
+                            "notes": "AI助手自动创建补货",
+                        })
+
+                    logger.info(f"[CHAT] 创建补货单: items={len(normalized_items)}")
+                    if not normalized_items:
+                        final_reply = "没有找到可以补货的商品，请先在对话中查询库存或告诉我具体商品。"
+                        save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                        return final_reply
+
+                    result = create_replenishment_order(
+                        db=db,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        store_group_id=None,
+                        notes=notes or "AI助手自动创建补货单",
+                        items=normalized_items,
+                    )
+                    logger.info(f"[CHAT] 补货单创建结果: {result}")
+
+                    if result.get("success"):
+                        item_lines = "\n".join([
+                            f"- {item.get('product_name') or '未知商品'}：{item['quantity']} 件" for item in normalized_items
+                        ])
+                        final_reply = (
+                            f"补货单创建成功！\n\n"
+                            f"订单详情\n- 单号：{result.get('order_number')}\n- ID：{result.get('id')}\n- 商品数：{len(normalized_items)}\n\n"
+                            f"商品清单\n{item_lines}\n\n"
+                            "请在补货管理页面查看并确认此补货单，审批后可转采购单。"
+                        )
+                    else:
+                        final_reply = f"创建补货单失败：{result.get('message', '未知错误')}"
+
+                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                    return final_reply
+
+                # 处理创建入库单
+                if tool_call.function.name == "create_inbound_order":
+                    args = json.loads(tool_call.function.arguments)
+                    order_number = args.get("order_number")
+                    inbound_type = args.get("inbound_type", "purchase")
+                    purchase_order_id = args.get("purchase_order_id")
+                    warehouse = args.get("warehouse")
+                    handler = args.get("handler")
+                    inbound_date = args.get("inbound_date")
+                    notes = args.get("notes")
+                    items = args.get("items", [])
+
+                    logger.info(f"[CHAT] 创建入库单: {order_number}, items={len(items)}")
+                    
+                    result = create_inbound_order(
+                        db, tenant_id, user_id,
+                        order_number, inbound_type, purchase_order_id,
+                        warehouse, handler, inbound_date, notes, items
+                    )
+                    logger.info(f"[CHAT] 入库单创建结果: {result}")
+
+                    if result.get("success"):
+                        final_reply = f"""入库单创建成功！
+
+入库单信息：
+- 单号：{result.get('order_number')}
+- ID：{result.get('id')}
+- 入库类型：{inbound_type}
+- 总数量：{result.get('total_quantity', 0)}
+- 商品数量：{result.get('items_count', 0)}
+
+入库单已保存为草稿状态，您可以在系统中进一步编辑或确认入库。"""
+                    else:
+                        final_reply = f"创建入库单失败：{result.get('message', '未知错误')}"
+
+                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                    return final_reply
+
+                # 处理日期解析（差评查询）
+                if tool_call.function.name == "parse_date_range":
+                    args = json.loads(tool_call.function.arguments)
+                    start_date = args.get("start_date")
+                    end_date = args.get("end_date")
+
+                    if not start_date or not end_date:
+                        end_date = datetime.now().strftime("%Y-%m-%d")
+                        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                    
+                    logger.info(f"[CHAT] 查询日期: {start_date} ~ {end_date}")
+                    reviews = query_negative_reviews(db, tenant_id, start_date, end_date)
+                    logger.info(f"[CHAT] 查询到 {len(reviews)} 条差评")
+
+                    reviews_for_ai = []
+                    unanalyzed_reviews = []
+                    for review in reviews:
+                        product_name = review.get("product_name", review["asin"])
+                        analysis = get_review_analysis(db, review["id"], tenant_id)
+                        if analysis:
+                            reviews_for_ai.append({
+                                "product_name": product_name,
+                                "rating": review["rating"],
+                                "title": review.get("title", "") or "",
+                                "content_preview": review["content"][:150] + ("..." if len(review["content"]) > 150 else ""),
+                                "translation_preview": (review.get("translated_content") or "")[:150],
+                                "key_issues": analysis["key_points"] if analysis else [],
+                                "summary": analysis["summary"] if analysis else ""
+                            })
+                        else:
+                            unanalyzed_reviews.append(review)
+
+                    analyzed_count = 0
+                    if unanalyzed_reviews:
+                        to_analyze = unanalyzed_reviews[:5]
+                        logger.info(f"[CHAT] 并发分析 {len(to_analyze)} 条未分析差评")
+                        from concurrent.futures import ThreadPoolExecutor, as_completed
+                        analysis_results = {}
+                        def _analyze_one_pd(rev):
+                            try:
+                                return rev["id"], analyze_and_save_single_review(db, rev)
+                            except Exception as e:
+                                logger.error(f"分析评论{rev['id']}失败: {e}")
+                                return rev["id"], None
+
+                        with ThreadPoolExecutor(max_workers=min(5, len(to_analyze))) as executor:
+                            futures = {executor.submit(_analyze_one_pd, rev): rev for rev in to_analyze}
+                            for future in as_completed(futures):
+                                rev_id, result = future.result()
+                                analysis_results[rev_id] = result
+
+                        analyzed_count = sum(1 for v in analysis_results.values() if v)
+                        for rev in to_analyze:
+                            product_name = rev.get("product_name", rev["asin"])
+                            analysis = analysis_results.get(rev["id"])
+                            reviews_for_ai.append({
+                                "product_name": product_name,
+                                "rating": rev["rating"],
+                                "title": rev.get("title", "") or "",
+                                "content_preview": rev["content"][:150] + ("..." if len(rev["content"]) > 150 else ""),
+                                "translation_preview": (rev.get("translated_content") or "")[:150],
+                                "key_issues": analysis["key_points"] if analysis else [],
+                                "summary": analysis["summary"] if analysis else ""
+                            })
+                        for rev in unanalyzed_reviews[5:]:
+                            product_name = rev.get("product_name", rev["asin"])
+                            reviews_for_ai.append({
+                                "product_name": product_name,
+                                "rating": rev["rating"],
+                                "title": rev.get("title", "") or "",
+                                "content_preview": rev["content"][:150] + ("..." if len(rev["content"]) > 150 else ""),
+                                "translation_preview": (rev.get("translated_content") or "")[:150],
+                                "key_issues": [],
+                                "summary": ""
+                            })
+
+                    analysis_prompt = f"""当前日期: {current_date}
+
+你有以下差评数据（共{len(reviews_for_ai)}条）：
+
+{json.dumps(reviews_for_ai, ensure_ascii=False, indent=1)}
+
+【严格规则 - 违反将扣分】：
+1. 回复中必须使用"商品名称"字段来指代产品
+2. 禁止使用任何数字ID、ASIN编号
+3. 正确示例："【Party Bags】质量差，塑料感重"
+4. 错误示例："562号产品质量差" 或 "B0XXX质量差"
+
+请基于以上数据进行专业的差评分析，给出改进建议。
+"""
+
+                    final_messages = [{"role": "system", "content": analysis_prompt}]
+                    final_messages.extend(history)
+                    final_messages.append({"role": "user", "content": user_message})
+
+                    with ai_call_slot():
+                        final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
+                    final_reply = final_response.choices[0].message.content or "抱歉，无法处理"
+                    
+                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                    return final_reply
+
             # 循环结束后，统一处理所有找到的产品
             if has_find_product and all_found_products:
                 # 去重（同一产品可能被多次搜索到）
@@ -2040,30 +2718,30 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                     logger.info(f"[CHAT] 转换后得到 {len(inventory_items)} 条库存数据")
 
                     if inventory_items:
-                        # 计算推荐补货数量并保存候选列表
+                        # 保存候选列表（只要有product_id就加入）
                         replenishment_candidates = []
                         for item in inventory_items:
                             days_of_supply = item.get("days_of_supply", 0)
                             suggest_qty = item.get("suggest_qty", 0)
-                            if suggest_qty > 0:
-                                # 从产品列表中找到匹配的产品ID
-                                matched_product = None
+                            product_id = item.get("product_id")
+
+                            # 如果库存数据已有product_id，直接用；否则从产品列表匹配
+                            if not product_id:
                                 for p in products:
-                                    # 通过名称匹配
                                     if p["name"] and item.get("product_name") and (p["name"] in item["product_name"] or item["product_name"] in p["name"]):
-                                        matched_product = p
+                                        product_id = p["id"]
                                         break
-                                    # 通过SKU匹配
                                     if p.get("platform_skus"):
                                         for s in p["platform_skus"]:
                                             if s.get("sku") == item.get("sku"):
-                                                matched_product = p
+                                                product_id = p["id"]
                                                 break
 
+                            if product_id:
                                 replenishment_candidates.append({
-                                    "product_id": matched_product["id"] if matched_product else None,
+                                    "product_id": product_id,
                                     "product_name": item.get("product_name"),
-                                    "product_code": matched_product.get("product_code") if matched_product else item.get("sku"),
+                                    "product_code": item.get("product_code", item.get("sku", "")),
                                     "sku": item.get("sku"),
                                     "days_of_supply": days_of_supply,
                                     "suggest_qty": suggest_qty,
@@ -2072,7 +2750,6 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                                 })
 
                         logger.info(f"[CHAT] 找到 {len(replenishment_candidates)} 个需要补货的商品")
-
                         SESSION_REPLENISHMENT_CANDIDATES[session_id] = replenishment_candidates
 
                         # 构建推荐回复
@@ -2089,7 +2766,11 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                             f"或直接回复商品名称和数量如 `Love Island气球 50件, 红色蝴蝶结车厘子包 30件`。"
                         )
 
-                        save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                        save_message(
+                            db, user_id, session_id, "assistant", final_reply,
+                            chat_type=chat_type,
+                            metadata={"replenishment_candidates": replenishment_candidates} if replenishment_candidates else None
+                        )
                         return final_reply
                     else:
                         # 没有找到匹配的库存数据
@@ -2137,12 +2818,68 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                         }]
                         
                         if is_replenishment:
+                            # 检查是否有候选列表，有则创建补货单
+                            candidates = get_replenishment_candidates(db, user_id, session_id)
+                            if candidates:
+                                logger.info(f"[CHAT] 补货意图+有数量+有候选列表({len(candidates)}个)，直接创建补货单")
+                                # 从对话历史中解析AI推荐的数量
+                                history_text = ""
+                                for h in history:
+                                    history_text += h.get("content", "") + "\n"
+                                chosen_items = []
+                                for c in candidates:
+                                    if not c.get("product_id"):
+                                        continue
+                                    suggest_qty = int(c.get("suggest_qty") or 0)
+                                    if suggest_qty <= 0:
+                                        prod_name = c.get("product_name", "")
+                                        import re as re_mod2
+                                        pattern = re_mod2.escape(prod_name) + r'[^0-9]*(\d+)\s*件'
+                                        m = re_mod2.search(pattern, history_text)
+                                        if m:
+                                            suggest_qty = int(m.group(1))
+                                        else:
+                                            daily_sales = float(c.get("daily_sales") or 0)
+                                            suggest_qty = max(int(daily_sales * 30), 50)
+                                    if suggest_qty > 0:
+                                        chosen_items.append({
+                                            "product_id": c.get("product_id"),
+                                            "quantity": suggest_qty,
+                                            "notes": "AI助手自动创建补货",
+                                            "product_name": c.get("product_name", ""),
+                                            "suggest_qty": suggest_qty,
+                                        })
+                                if chosen_items:
+                                    result = create_replenishment_order(
+                                        db=db,
+                                        tenant_id=tenant_id,
+                                        user_id=user_id,
+                                        store_group_id=None,
+                                        notes="AI助手自动创建补货单",
+                                        items=chosen_items,
+                                    )
+                                    if result.get("success"):
+                                        item_lines = "\n".join([
+                                            f"- {item['product_name']}：{item['suggest_qty']} 件" for item in chosen_items
+                                        ])
+                                        final_reply = (
+                                            f"补货单已创建成功！\n\n"
+                                            f"订单详情\n- 单号：{result.get('order_number')}\n- ID：{result.get('id')}\n- 商品数：{result.get('items_count', 0)}\n\n"
+                                            f"商品清单\n{item_lines}\n\n"
+                                            "请在系统中查看并确认此补货单，审批后可转采购单。"
+                                        )
+                                    else:
+                                        final_reply = f"创建补货单失败：{result.get('message', '未知错误')}"
+                                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                                    return final_reply
+                            # 没有候选列表，提示用户
                             final_reply = (
-                                "\u8bc6\u522b\u5230\u4f60\u662f\u8981\u521b\u5efa\u8865\u8d27\u5355\uff0c\u4e0d\u4f1a\u518d\u81ea\u52a8\u521b\u5efa\u91c7\u8d2d\u5355\u3002\n\n"
-                                f"\u5df2\u5339\u914d\u5230\u5546\u54c1\uff1a{product['name']}\uff0c\u6570\u91cf\uff1a{quantity}\u3002\n"
-                                "\u8bf7\u5148\u5728\u540c\u4e00\u4f1a\u8bdd\u91cc\u8ba9 AI \u5217\u51fa\u9700\u8981\u8865\u8d27\u7684\u5546\u54c1\uff0c\u518d\u56de\u590d\u5546\u54c1\u548c\u6570\u91cf\uff1b"
-                                "\u6216\u8005\u76f4\u63a5\u8bf4“\u54ea\u4e9b\u5546\u54c1\u9700\u8981\u8865\u8d27”\u3002"
+                                "请先让我查询哪些商品需要补货，您可以说『哪些商品有断货风险』或『推荐补货建议』。\n"
+                                "我会列出需要补货的商品清单，然后您再确认创建补货单。"
                             )
+                            save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                            return final_reply
+
                         elif is_purchase or (not is_purchase and not is_inbound):
                             # 创建采购单
                             logger.info(f"[CHAT] 准备创建采购单，仓库：{warehouse}，单价：{unit_price}")
@@ -2200,8 +2937,72 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                             else:
                                 final_reply = f"创建失败：{result.get('message')}"
                     else:
-                        # 没有数量，告诉用户需要补充
-                        final_reply = f"""已找到产品！
+                        # 没有数量
+                        # 如果是补货意图且有候选列表，直接创建补货单
+                        if is_replenishment:
+                            candidates = get_replenishment_candidates(db, user_id, session_id)
+                            if candidates:
+                                logger.info(f"[CHAT] 补货意图+无数量+有候选列表({len(candidates)}个)，直接创建补货单")
+                                # 从对话历史中解析AI推荐的数量
+                                history_text = ""
+                                for h in history:
+                                    history_text += h.get("content", "") + "\n"
+                                chosen_items = []
+                                for c in candidates:
+                                    if not c.get("product_id"):
+                                        continue
+                                    suggest_qty = int(c.get("suggest_qty") or 0)
+                                    # 如果suggest_qty为0，尝试从历史中匹配AI推荐的数量
+                                    if suggest_qty <= 0:
+                                        prod_name = c.get("product_name", "")
+                                        import re as re_mod
+                                        # 匹配 "商品名 ... 50件" 或 "商品名：50" 等模式
+                                        pattern = re_mod.escape(prod_name) + r'[^0-9]*(\d+)\s*件'
+                                        m = re_mod.search(pattern, history_text)
+                                        if m:
+                                            suggest_qty = int(m.group(1))
+                                        else:
+                                            # 默认按30天销量计算
+                                            daily_sales = float(c.get("daily_sales") or 0)
+                                            suggest_qty = max(int(daily_sales * 30), 50)
+                                    if suggest_qty > 0:
+                                        chosen_items.append({
+                                            "product_id": c.get("product_id"),
+                                            "quantity": suggest_qty,
+                                            "notes": "AI助手自动创建补货",
+                                            "product_name": c.get("product_name", ""),
+                                            "suggest_qty": suggest_qty,
+                                        })
+                                if chosen_items:
+                                    result = create_replenishment_order(
+                                        db=db,
+                                        tenant_id=tenant_id,
+                                        user_id=user_id,
+                                        store_group_id=None,
+                                        notes="AI助手自动创建补货单",
+                                        items=chosen_items,
+                                    )
+                                    if result.get("success"):
+                                        item_lines = "\n".join([
+                                            f"- {item['product_name']}：{item['suggest_qty']} 件" for item in chosen_items
+                                        ])
+                                        final_reply = (
+                                            f"补货单已创建成功！\n\n"
+                                            f"订单详情\n- 单号：{result.get('order_number')}\n- ID：{result.get('id')}\n- 商品数：{result.get('items_count', 0)}\n\n"
+                                            f"商品清单\n{item_lines}\n\n"
+                                            "请在系统中查看并确认此补货单，审批后可转采购单。"
+                                        )
+                                    else:
+                                        final_reply = f"创建补货单失败：{result.get('message', '未知错误')}"
+                                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                                    return final_reply
+                            # 没有候选列表，提示用户
+                            final_reply = (
+                                "请先让我查询哪些商品需要补货，您可以说『哪些商品有断货风险』或『推荐补货建议』。\n"
+                                "我会列出需要补货的商品清单，然后您再确认创建补货单。"
+                            )
+                        else:
+                            final_reply = f"""已找到产品！
 产品：{products[0]['name']} (SKU: {products[0]['product_code']})
 
 但需要补充数量信息！
@@ -2210,240 +3011,13 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
 ✅ 可选：供应商、仓库、预计到货日期、备注
 
 请告诉我需要采购或入库的数量。"""
-            else:
-                final_reply = f"未找到与 {search_keyword} 相关的产品，请确认产品编码或 SKU 正确。"
-                
-                save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
-                return final_reply
-
-                # 处理创建采购单
-                if tool_call.function.name == "create_purchase_order":
-                    ai_order_intent_reply = try_execute_ai_order_intent(db, tenant_id, user_id, user_message)
-                    if ai_order_intent_reply:
-                        save_message(db, user_id, session_id, "assistant", ai_order_intent_reply, function_name="create_replenishment_order", chat_type=chat_type)
-                        return ai_order_intent_reply
-
-                    if any(keyword in user_message for keyword in ["帮", "帮忙", "帮帮我", "求助"]):
-                        final_reply = "您好！我可以帮您查询产品、分析库存、创建补货单、入库单、采购单等。请告诉我您需要什么帮助。"
                         save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
                         return final_reply
-
-                    args = json.loads(tool_call.function.arguments)
-                    order_number = args.get("order_number")
-                    supplier = args.get("supplier")
-                    warehouse = args.get("warehouse")
-                    expected_date = args.get("expected_date")
-                    notes = args.get("notes")
-                    items = args.get("items", [])
-
-                    logger.info(f"[CHAT] 创建采购单: {order_number}, items={len(items)}")
-                    
-                    result = create_purchase_order(
-                        db, tenant_id, user_id,
-                        order_number, supplier, warehouse,
-                        expected_date, notes, items
-                    )
-                    logger.info(f"[CHAT] 采购单创建结果: {result}")
-
-                    if result.get("success"):
-                        final_reply = f"""采购单创建成功！
-
-采购单信息：
-- 单号：{result.get('order_number')}
-- ID：{result.get('id')}
-- 总金额：{result.get('total_amount', 0)}
-- 商品数量：{result.get('items_count', 0)}
-
-采购单已保存为草稿状态，您可以在系统中进一步编辑或提交审批。"""
-                    else:
-                        final_reply = f"创建采购单失败：{result.get('message', '未知错误')}"
-
-                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
-                    return final_reply
-
-                # 处理创建入库单
-                if tool_call.function.name == "create_inbound_order":
-                    args = json.loads(tool_call.function.arguments)
-                    order_number = args.get("order_number")
-                    inbound_type = args.get("inbound_type", "purchase")
-                    purchase_order_id = args.get("purchase_order_id")
-                    warehouse = args.get("warehouse")
-                    handler = args.get("handler")
-                    inbound_date = args.get("inbound_date")
-                    notes = args.get("notes")
-                    items = args.get("items", [])
-
-                    logger.info(f"[CHAT] 创建入库单: {order_number}, items={len(items)}")
-                    
-                    result = create_inbound_order(
-                        db, tenant_id, user_id,
-                        order_number, inbound_type, purchase_order_id,
-                        warehouse, handler, inbound_date, notes, items
-                    )
-                    logger.info(f"[CHAT] 入库单创建结果: {result}")
-
-                    if result.get("success"):
-                        final_reply = f"""入库单创建成功！
-
-入库单信息：
-- 单号：{result.get('order_number')}
-- ID：{result.get('id')}
-- 入库类型：{inbound_type}
-- 总数量：{result.get('total_quantity', 0)}
-- 商品数量：{result.get('items_count', 0)}
-
-入库单已保存为草稿状态，您可以在系统中进一步编辑或确认入库。"""
-                    else:
-                        final_reply = f"创建入库单失败：{result.get('message', '未知错误')}"
-
-                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
-                    return final_reply
-
-                # 处理日期解析（差评查询）
-                if tool_call.function.name == "parse_date_range":
-                    args = json.loads(tool_call.function.arguments)
-                    # 添加健壮性检查
-                    start_date = args.get("start_date")
-                    end_date = args.get("end_date")
-
-                    # 如果AI没有正确返回日期，重新调用AI要求明确日期
-                    if not start_date or not end_date:
-                        logger.warning(f"[CHAT] AI未正确返回日期，重新要求明确日期")
-                        # 保存当前消息
-                        save_message(db, user_id, session_id, "assistant", assistant_message.content or "", chat_type=chat_type)
-                        # 重新发送明确要求
-                        clarify_prompt = """请务必调用parse_date_range工具，并明确返回：
-- start_date: YYYY-MM-DD格式的开始日期
-- end_date: YYYY-MM-DD格式的结束日期
-- date_description: 日期描述
-
-请确保正确调用工具，不要用自然语言回复。"""
-                        
-                        messages.append({"role": "assistant", "content": assistant_message.content or ""})
-                        messages.append({"role": "user", "content": clarify_prompt})
-                        
-                        # 重新调用AI
-                        with ai_call_slot():
-                            response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
-                        assistant_message = response.choices[0].message
-                        
-                        # 检查第二次调用是否有工具响应
-                        if assistant_message.tool_calls:
-                            for tool_call_2 in assistant_message.tool_calls:
-                                if tool_call_2.function.name == "parse_date_range":
-                                    args_2 = json.loads(tool_call_2.function.arguments)
-                                    start_date = args_2.get("start_date")
-                                    end_date = args_2.get("end_date")
-                                    break
-                    
-                    # 如果第二次调用还是没有日期，使用默认日期
-                    if not start_date or not end_date:
-                        logger.warning(f"[CHAT] AI仍然未正确返回日期，使用默认日期")
-                        end_date = datetime.now().strftime("%Y-%m-%d")
-                        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-                    
-                    logger.info(f"[CHAT] 查询日期: {start_date} ~ {end_date}")
-                    reviews = query_negative_reviews(db, tenant_id, start_date, end_date)
-                    logger.info(f"[CHAT] 查询到 {len(reviews)} 条差评")
-
-                    # 分离已分析和未分析的差评
-                    reviews_for_ai = []
-                    unanalyzed_reviews = []
-                    for review in reviews:
-                        product_name = review.get("product_name", review["asin"])
-                        analysis = get_review_analysis(db, review["id"], tenant_id)
-                        if analysis:
-                            reviews_for_ai.append({
-                                "product_name": product_name,
-                                "rating": review["rating"],
-                                "title": review.get("title", "") or "",
-                                "content_preview": review["content"][:150] + ("..." if len(review["content"]) > 150 else ""),
-                                "translation_preview": (review.get("translated_content") or "")[:150],
-                                "key_issues": analysis["key_points"] if analysis else [],
-                                "summary": analysis["summary"] if analysis else ""
-                            })
-                        else:
-                            unanalyzed_reviews.append(review)
-
-                    # 并发分析未分析的差评（最多5条，线程池并发）
-                    analyzed_count = 0
-                    if unanalyzed_reviews:
-                        to_analyze = unanalyzed_reviews[:5]
-                        logger.info(f"[CHAT] 并发分析 {len(to_analyze)} 条未分析差评（共 {len(unanalyzed_reviews)} 条未分析）")
-                        from concurrent.futures import ThreadPoolExecutor, as_completed
-                        analysis_results = {}
-                        def _analyze_one(rev):
-                            try:
-                                return rev["id"], analyze_and_save_single_review(db, rev)
-                            except Exception as e:
-                                logger.error(f"分析评论{rev['id']}失败: {e}")
-                                return rev["id"], None
-
-                        with ThreadPoolExecutor(max_workers=min(5, len(to_analyze))) as executor:
-                            futures = {executor.submit(_analyze_one, rev): rev for rev in to_analyze}
-                            for future in as_completed(futures):
-                                rev_id, result = future.result()
-                                analysis_results[rev_id] = result
-
-                        analyzed_count = sum(1 for v in analysis_results.values() if v)
-                        # 将分析结果合并到 reviews_for_ai
-                        for rev in to_analyze:
-                            product_name = rev.get("product_name", rev["asin"])
-                            analysis = analysis_results.get(rev["id"])
-                            reviews_for_ai.append({
-                                "product_name": product_name,
-                                "rating": rev["rating"],
-                                "title": rev.get("title", "") or "",
-                                "content_preview": rev["content"][:150] + ("..." if len(rev["content"]) > 150 else ""),
-                                "translation_preview": (rev.get("translated_content") or "")[:150],
-                                "key_issues": analysis["key_points"] if analysis else [],
-                                "summary": analysis["summary"] if analysis else ""
-                            })
-                        # 未分析的剩余差评也加入列表（无分析结果）
-                        for rev in unanalyzed_reviews[5:]:
-                            product_name = rev.get("product_name", rev["asin"])
-                            reviews_for_ai.append({
-                                "product_name": product_name,
-                                "rating": rev["rating"],
-                                "title": rev.get("title", "") or "",
-                                "content_preview": rev["content"][:150] + ("..." if len(rev["content"]) > 150 else ""),
-                                "translation_preview": (rev.get("translated_content") or "")[:150],
-                                "key_issues": [],
-                                "summary": ""
-                            })
-                        logger.info(f"[CHAT] 并发分析完成，新分析 {analyzed_count} 条")
-                    else:
-                        logger.info(f"[CHAT] 全部 {len(reviews_for_ai)} 条差评已有分析结果")
-
-                    logger.info(f"[CHAT] 新分析了 {analyzed_count} 条评论并保存到数据库")
-                    logger.debug(f"[AI] 准备发送的数据样例: {json.dumps(reviews_for_ai[:2], ensure_ascii=False)}")
-
-                    # 构建更严格的提示词
-                    analysis_prompt = f"""当前日期: {current_date}
-
-你有以下差评数据（共{len(reviews_for_ai)}条）：
-
-{json.dumps(reviews_for_ai, ensure_ascii=False, indent=1)}
-
-【严格规则 - 违反将扣分】：
-1. 回复中必须使用"商品名称"字段来指代产品
-2. 禁止使用任何数字ID、ASIN编号
-3. 正确示例："【Party Bags】质量差，塑料感重"
-4. 错误示例："562号产品质量差" 或 "B0XXX质量差"
-
-请基于以上数据进行专业的差评分析，给出改进建议。
-"""
-
-                    final_messages = [{"role": "system", "content": analysis_prompt}]
-                    final_messages.extend(history)
-                    final_messages.append({"role": "user", "content": user_message})
-
-                    with ai_call_slot():
-                        final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
-                    final_reply = final_response.choices[0].message.content or "抱歉，无法处理"
-                    
-                    save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
-                    return final_reply
+            elif has_find_product and not all_found_products:
+                # 有 find_product 调用但没找到产品
+                final_reply = "未找到相关产品，请确认产品编码或 SKU 正确。"
+                save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                return final_reply
         else:
             reply = assistant_message.content or "请说明想查看的日期范围"
             save_message(db, user_id, session_id, "assistant", reply, chat_type=chat_type)

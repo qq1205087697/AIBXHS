@@ -143,6 +143,21 @@ async def get_dashboard_stats(db: Session = Depends(get_db), current_user: User 
         except Exception as e:
             print(f"查询采购单状态统计失败: {e}")
 
+        # 统计补货单待审批数量
+        pending_replenishment_count = 0
+        try:
+            pending_replenishment_row = db.execute(text("""
+                SELECT COUNT(*) as cnt
+                FROM replenishment_orders
+                WHERE deleted_at IS NULL
+                  AND tenant_id = :tenant_id
+                  AND status = 'pending'
+            """), {"tenant_id": current_user.tenant_id}).fetchone()
+            if pending_replenishment_row:
+                pending_replenishment_count = int(pending_replenishment_row[0])
+        except Exception as e:
+            print(f"查询补货单待审批数量失败: {e}")
+
         return {
             "success": True,
             "data": {
@@ -156,6 +171,8 @@ async def get_dashboard_stats(db: Session = Depends(get_db), current_user: User 
                 "overduePurchaseOrders": overdue_purchase_orders,
                 # 采购单各状态数量
                 "purchaseOrderStatusCounts": po_status_counts,
+                # 补货单待审批数量
+                "pendingReplenishmentCount": pending_replenishment_count,
             }
         }
         

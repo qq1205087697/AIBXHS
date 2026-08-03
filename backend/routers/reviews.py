@@ -127,9 +127,9 @@ async def get_reviews(
         else:
             order_by_clause = "r.review_date DESC"
         
-        # Need store join for department filtering (reuse is_admin from above)
-        store_join = "LEFT JOIN stores s ON r.store_id = s.id" if not is_admin else ""
-        
+        # No longer need store join for department filtering - direct store_id filter
+        store_join = ""
+
         count_query = text(f"""
             SELECT COUNT(DISTINCT r.id)
             FROM reviews r
@@ -371,17 +371,18 @@ async def get_review_stats(db: Session = Depends(get_db), current_user: User = D
                 is_admin = True
         
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            # 直接通过 user_stores 表获取用户被分配的店铺
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    params[f"d_{i}"] = did
-                dept_filter = f"AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
-                store_join = "LEFT JOIN stores s ON reviews.store_id = s.id"
+            store_id_list = [s[0] for s in user_stores]
+            if store_id_list:
+                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"s_{i}"] = sid
+                dept_filter = f"AND reviews.store_id IN ({placeholders})"
+                store_join = ""
             else:
                 dept_filter = "AND 1=0"
 
@@ -447,18 +448,19 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
                 is_admin = True
         
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            # 直接通过 user_stores 表获取用户被分配的店铺
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    params[f"d_{i}"] = did
-                dept_filter = f" AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
+            store_id_list = [s[0] for s in user_stores]
+            if store_id_list:
+                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"s_{i}"] = sid
+                dept_filter = f" AND r.store_id IN ({placeholders})"
             else:
-                # 用户没有分配任何部门，不显示任何数据
+                # 用户没有分配任何店铺，不显示任何数据
                 raise HTTPException(status_code=404, detail=f"差评 {review_id} 不存在")
         
         query = text(f"""
@@ -481,7 +483,6 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
         ) p ON r.asin = p.asin
-            LEFT JOIN stores s ON r.store_id = s.id
             WHERE r.id = :review_id
               AND r.tenant_id = :tenant_id
             {dept_filter}
@@ -672,23 +673,23 @@ async def update_review_status(review_id: str, status_data: Dict[str, str], db: 
                 is_admin = True
         
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            # 直接通过 user_stores 表获取用户被分配的店铺
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    check_params[f"d_{i}"] = did
-                check_where += f" AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
+            store_id_list = [s[0] for s in user_stores]
+            if store_id_list:
+                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    check_params[f"s_{i}"] = sid
+                check_where += f" AND r.store_id IN ({placeholders})"
             else:
-                # 用户没有分配任何部门，不允许操作
+                # 用户没有分配任何店铺，不允许操作
                 raise HTTPException(status_code=404, detail=f"差评 {review_id} 不存在")
-        
+
         check_query = text(f"""
             SELECT r.id FROM reviews r
-            LEFT JOIN stores s ON r.store_id = s.id
             WHERE {check_where}
         """)
         result = db.execute(check_query, check_params)
@@ -738,21 +739,22 @@ async def get_new_reviews_count(db: Session = Depends(get_db), current_user: Use
                 is_admin = True
         
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            # 直接通过 user_stores 表获取用户被分配的店铺
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    params[f"d_{i}"] = did
-                dept_filter = f"AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
-                store_join = "LEFT JOIN stores s ON reviews.store_id = s.id"
+            store_id_list = [s[0] for s in user_stores]
+            if store_id_list:
+                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"s_{i}"] = sid
+                dept_filter = f"AND reviews.store_id IN ({placeholders})"
+                store_join = ""
             else:
-                # 用户没有分配任何部门，不显示任何数据
+                # 用户没有分配任何店铺，不显示任何数据
                 dept_filter = "AND 1=0"
-        
+
         query = text(f"""
             SELECT COUNT(*)
             FROM reviews
@@ -795,24 +797,24 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
                 is_admin = True
         
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            # 直接通过 user_stores 表获取用户被分配的店铺
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    check_params[f"d_{i}"] = did
-                check_where += f" AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
+            store_id_list = [s[0] for s in user_stores]
+            if store_id_list:
+                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    check_params[f"s_{i}"] = sid
+                check_where += f" AND r.store_id IN ({placeholders})"
             else:
-                # 用户没有分配任何部门，不允许操作
+                # 用户没有分配任何店铺，不允许操作
                 return {"success": True, "message": "重要性等级更新成功"}
-        
+
         # 验证用户是否有权限操作该差评
         check_query = text(f"""
             SELECT r.id FROM reviews r
-            LEFT JOIN stores s ON r.store_id = s.id
             WHERE {check_where}
         """)
         result = db.execute(check_query, check_params)
@@ -870,18 +872,18 @@ async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks
                 is_admin = True
 
         if not is_admin:
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+            # 直接通过 user_stores 表获取用户被分配的店铺
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if not dept_id_list:
-                raise HTTPException(status_code=403, detail="用户未分配部门，无权访问")
-            placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
-            for i, did in enumerate(dept_id_list):
-                validate_params[f"d_{i}"] = did
-            access_join = " LEFT JOIN stores s ON r.store_id = s.id "
-            access_where += f" AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
+            store_id_list = [s[0] for s in user_stores]
+            if not store_id_list:
+                raise HTTPException(status_code=403, detail="用户未分配店铺，无权访问")
+            placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+            for i, sid in enumerate(store_id_list):
+                validate_params[f"s_{i}"] = sid
+            access_where += f" AND r.store_id IN ({placeholders})"
 
         id_placeholders = ",".join([f":rid_{i}" for i in range(len(int_review_ids))])
         for i, rid in enumerate(int_review_ids):

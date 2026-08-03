@@ -18,6 +18,7 @@ import ReplenishmentManagement from './pages/ReplenishmentManagement'
 import OperationLogs from './pages/OperationLogs'
 import StockTransferManagement from './pages/StockTransferManagement'
 import ShipmentManagement from './pages/ShipmentManagement'
+import SupplierManagement from './pages/SupplierManagement'
 import WarehouseManagement from './pages/WarehouseManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
@@ -205,6 +206,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <ShipmentManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/suppliers"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <SupplierManagement />
             </MainLayout>
           </ProtectedRoute>
         }

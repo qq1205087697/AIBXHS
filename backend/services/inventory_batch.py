@@ -112,17 +112,15 @@ def deduce_inventory_fifo(
     参数:
         store_group_id: 如果指定，则只扣除该店铺分组下的库存批次
     """
-    # 如果指定了store_group_id，需要通过关联查询筛选批次
+    # 如果指定了store_group_id，直接用批次表的store_group_id筛选
     if store_group_id:
         rows = db.execute(text("""
-            SELECT ib.id, ib.batch_number, ib.current_quantity, ib.locked_quantity, ib.unit_price, ib.warehouse, ib.inbound_date
-            FROM inventory_batches ib
-            LEFT JOIN inbound_orders io ON ib.inbound_order_id = io.id
-            LEFT JOIN purchase_orders po ON io.purchase_order_id = po.id
-            WHERE ib.tenant_id = :tenant_id AND ib.product_id = :product_id
-              AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL
-              AND po.store_group_id = :store_group_id
-            ORDER BY ib.inbound_date ASC, ib.id ASC
+            SELECT id, batch_number, current_quantity, locked_quantity, unit_price, warehouse, inbound_date
+            FROM inventory_batches
+            WHERE tenant_id = :tenant_id AND product_id = :product_id
+              AND status = 'active' AND current_quantity > 0 AND deleted_at IS NULL
+              AND store_group_id = :store_group_id
+            ORDER BY inbound_date ASC, id ASC
         """), {"tenant_id": tenant_id, "product_id": product_id, "store_group_id": store_group_id}).fetchall()
     else:
         # 未指定店铺分组，扣除所有批次（原有逻辑）
@@ -178,16 +176,14 @@ def deduce_inventory_from_specific_batch(
     参数:
         store_group_id: 如果指定，则验证该批次是否属于该店铺分组
     """
-    # 如果指定了store_group_id，需要验证批次是否属于该分组
+    # 如果指定了store_group_id，直接用批次表的store_group_id验证
     if store_group_id:
         row = db.execute(text("""
-            SELECT ib.id, ib.batch_number, ib.current_quantity, ib.locked_quantity, ib.unit_price, ib.warehouse, ib.inbound_date
-            FROM inventory_batches ib
-            LEFT JOIN inbound_orders io ON ib.inbound_order_id = io.id
-            LEFT JOIN purchase_orders po ON io.purchase_order_id = po.id
-            WHERE ib.tenant_id = :tenant_id AND ib.product_id = :product_id AND ib.id = :batch_id
-              AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL
-              AND po.store_group_id = :store_group_id
+            SELECT id, batch_number, current_quantity, locked_quantity, unit_price, warehouse, inbound_date
+            FROM inventory_batches
+            WHERE tenant_id = :tenant_id AND product_id = :product_id AND id = :batch_id
+              AND status = 'active' AND current_quantity > 0 AND deleted_at IS NULL
+              AND store_group_id = :store_group_id
         """), {"tenant_id": tenant_id, "product_id": product_id, "batch_id": specified_batch_id, "store_group_id": store_group_id}).fetchone()
     else:
         # 未指定店铺分组，直接查询批次（原有逻辑）

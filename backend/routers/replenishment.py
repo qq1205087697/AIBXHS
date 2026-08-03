@@ -22,6 +22,16 @@ from services.operation_log import log_order_create
 router = APIRouter(prefix="/api/replenishment-orders", tags=["replenishment_orders"])
 
 
+def is_admin_user(user: User, db: Session) -> bool:
+    """判断用户是否是管理员（通过 role_id）"""
+    if not user.role_id:
+        return False
+    role = db.execute(text("""
+        SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+    """), {"role_id": user.role_id}).fetchone()
+    return role and role[0] == "admin"
+
+
 # ============ Excel 模板/解析辅助函数（内联，不修改 excel_helper.py） ============
 
 def set_auto_column_width(worksheet):
@@ -73,6 +83,7 @@ def set_required_header_style(worksheet):
 def create_replenishment_excel_template() -> io.BytesIO:
     """创建补货申请Excel模板"""
     data = {
+        "店铺分组": ["", "华东组", "华南组"],
         "产品编码/SKU": ["", "1001", "SKU-001"],
         "补货数量": [0, 50, 100],
         "备注": ["", "样例备注1", "样例备注2"]
@@ -98,11 +109,13 @@ def create_replenishment_excel_template() -> io.BytesIO:
 
 
 def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List[dict]:
-    """解析补货申请Excel，匹配产品返回预览数据"""
+    """解析补货申请Excel，匹配产品返回预览数据。按店铺分组聚合，每组返回一个对象。"""
     df = pd.read_excel(io.BytesIO(file_bytes))
     df.columns = df.columns.str.strip()
 
     col_mapping = {
+        "店铺分组": "store_group",
+        "店铺分组（选填）": "store_group",
         "产品编码/SKU": "sku",
         "产品编码/SKU（必填）": "sku",
         "*产品编码/SKU": "sku",
@@ -144,6 +157,12 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
     """), {"tid": tenant_id}).fetchall()
     platform_sku_map = {str(s[0]).strip().lower(): s[1] for s in platform_skus if s[0]}
 
+    # 查询店铺分组列表，用于名称→ID映射
+    store_groups = db.execute(text("""
+        SELECT id, name FROM store_groups WHERE tenant_id = :tid AND deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchall()
+    group_name_to_id = {str(g[1]).strip().lower(): (g[0], g[1]) for g in store_groups}
+
     items = []
     for idx, row in df.iterrows():
         sku = str(row["sku"]).strip() if pd.notna(row["sku"]) else ""
@@ -176,12 +195,28 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
 
         notes = str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
 
+        # 解析店铺分组
+        store_group_name = ""
+        store_group_id = None
+        if "store_group" in df.columns:
+            sg_val = str(row["store_group"]).strip() if pd.notna(row.get("store_group")) else ""
+            if sg_val and sg_val != "nan":
+                store_group_name = sg_val
+                matched = group_name_to_id.get(sg_val.lower())
+                if matched:
+                    store_group_id = matched[0]
+                    store_group_name = matched[1]  # 使用数据库中的准确名称
+                else:
+                    raise ValueError(f"第 {idx + 2} 行: 店铺分组 '{sg_val}' 不存在")
+
         items.append({
             "product_id": product_id,
             "product_code": sku,
             "product_name": product_name,
             "quantity": quantity,
             "notes": notes,
+            "store_group_id": store_group_id,
+            "store_group_name": store_group_name,
         })
 
     # 查询这些产品绑定的配件（成品→配件）
@@ -204,7 +239,19 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
     for item in items:
         item["bindings"] = bindings_map.get(item["product_id"], [])
 
-    return items
+    # 按店铺分组聚合：相同分组的明细放在一起
+    grouped = {}
+    for item in items:
+        gkey = item["store_group_name"] or "未分组"
+        if gkey not in grouped:
+            grouped[gkey] = {
+                "store_group_id": item["store_group_id"],
+                "store_group_name": item["store_group_name"],
+                "items": [],
+            }
+        grouped[gkey]["items"].append(item)
+
+    return list(grouped.values())
 
 
 # ============ Pydantic Schema ============
@@ -239,6 +286,20 @@ class ReplenishmentOrderUpdate(BaseModel):
 class BatchConvertRequest(BaseModel):
     ids: List[int]
     notes: Optional[str] = None
+
+
+class BatchApproveRequest(BaseModel):
+    ids: List[int]
+
+
+class BatchImportGroup(BaseModel):
+    store_group_id: Optional[int] = None
+    store_group_name: Optional[str] = None
+    items: List[ReplenishmentItemCreate]
+
+
+class BatchImportRequest(BaseModel):
+    groups: List[BatchImportGroup]
 
 
 def ensure_parent_product_id_column(db: Session):
@@ -385,8 +446,8 @@ async def create_replenishment_order(
                 raise HTTPException(status_code=400, detail=f"店铺分组ID {data.store_group_id} 不存在")
             store_group_name = group[1]
 
-        # 自动生成单号：RP + 时间戳
-        order_number = data.order_number or f"RP{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        # 自动生成单号：RO + 时间戳
+        order_number = data.order_number or f"RO{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 
         db.execute(text("""
             INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
@@ -483,7 +544,7 @@ async def batch_convert_to_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(PermissionChecker("replenishment:convert"))
 ):
-    """批量将补货申请转为采购单，同店铺分组的补货单合并为同一张采购单"""
+    """批量将补货申请转为一张采购单，保留每个明细的店铺分组"""
     try:
         ensure_parent_product_id_column(db)
         if not data.ids:
@@ -491,7 +552,7 @@ async def batch_convert_to_purchase_order(
 
         logger.info(f"开始批量转采购单，补货单IDs: {data.ids}")
 
-        # 1. 查询所有选中的补货单（状态必须是 pending 且未关联采购单）
+        # 1. 查询所有选中的补货单（状态必须是 approved 且未关联采购单）
         ids_placeholders = ', '.join(f':id{i}' for i in range(len(data.ids)))
         order_params = {f'id{i}': data.ids[i] for i in range(len(data.ids))}
         order_params["tenant_id"] = current_user.tenant_id
@@ -508,17 +569,58 @@ async def batch_convert_to_purchase_order(
         if not orders:
             raise HTTPException(status_code=400, detail="未找到可转换的补货申请（需为已审批且未关联采购单）")
 
-        # 2. 店铺分组分组
-        group_groups = {}  # store_group_id -> [(id, order_number, group_name), ...]
-        for o in orders:
-            group_id = o[2] or 0
-            group_name = o[3] or "未分组"
-            if group_id not in group_groups:
-                group_groups[group_id] = []
-            group_groups[group_id].append((o[0], o[1], group_name))
+        order_id_to_group = {o[0]: (o[2], o[3]) for o in orders}
+        order_ids = [o[0] for o in orders]
 
-        group_summary = ', '.join(f'{k or "未分组"}: {len(v)}条' for k, v in group_groups.items())
-        logger.info(f"按店铺分组分组: {group_summary}")
+        # 2. 查询所有补货单明细，保留店铺分组
+        oi_placeholders = ', '.join(f':oid{i}' for i in range(len(order_ids)))
+        item_params = {f'oid{i}': order_ids[i] for i in range(len(order_ids))}
+
+        items = db.execute(text(f"""
+            SELECT ri.replenishment_order_id, ri.product_id, ri.parent_product_id, ri.quantity
+            FROM replenishment_items ri
+            WHERE ri.replenishment_order_id IN ({oi_placeholders}) AND ri.deleted_at IS NULL
+        """), item_params).fetchall()
+
+        if not items:
+            raise HTTPException(status_code=400, detail="选中的补货单没有明细")
+
+        # 按（产品、父产品、店铺分组）汇总数量
+        product_agg = {}
+        for item in items:
+            order_id = item[0]
+            pid = item[1]
+            parent_product_id = item[2]
+            qty = int(item[3])
+            group_id, group_name = order_id_to_group.get(order_id, (None, None))
+            agg_key = (pid, parent_product_id, group_id)
+            if agg_key in product_agg:
+                product_agg[agg_key]["quantity"] += qty
+            else:
+                product_agg[agg_key] = {
+                    "product_id": pid,
+                    "parent_product_id": parent_product_id,
+                    "store_group_id": group_id,
+                    "store_group_name": group_name or "未分组",
+                    "quantity": qty,
+                }
+
+        # 查询产品采购价
+        all_pids = list({agg["product_id"] for agg in product_agg.values()})
+        price_map = {}
+        if all_pids:
+            pid_placeholders = ', '.join(f':pid{i}' for i in range(len(all_pids)))
+            pid_params = {f'pid{i}': all_pids[i] for i in range(len(all_pids))}
+            price_rows = db.execute(text(f"""
+                SELECT id, purchase_price FROM products WHERE id IN ({pid_placeholders})
+            """), pid_params).fetchall()
+            for pr in price_rows:
+                price_map[pr[0]] = float(pr[1]) if pr[1] else 0.0
+
+        total_amount = sum(
+            agg["quantity"] * price_map.get(agg["product_id"], 0.0)
+            for agg in product_agg.values()
+        )
 
         # 自动选择最新创建的活跃仓库
         warehouse = None
@@ -530,129 +632,73 @@ async def batch_convert_to_purchase_order(
         if latest_wh:
             warehouse = latest_wh[0]
 
-        # 3. 按店铺分组分组创建采购单
-        created_po_numbers = []
+        # 3. 创建一张采购单
         now = datetime.now()
-        po_seq = 0
+        po_number = f"PO{now.strftime('%Y%m%d%H%M%S')}01"
+        db.execute(text("""
+            INSERT INTO purchase_orders (tenant_id, order_number, warehouse, store_group_id,
+                total_amount, status, notes, created_by, created_at, updated_at)
+            VALUES (:tenant_id, :order_number, :warehouse, NULL,
+                :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
+        """), {
+            "tenant_id": current_user.tenant_id,
+            "order_number": po_number,
+            "warehouse": warehouse,
+            "total_amount": total_amount,
+            "notes": data.notes,
+            "created_by": current_user.id,
+            "created_at": now,
+            "updated_at": now,
+        })
+        po_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
 
-        for store_group_id, group_orders in group_groups.items():
-            group_order_ids = [o[0] for o in group_orders]
-            group_name = group_orders[0][2] if group_orders else "未分组"
+        logger.info(f"采购单已创建，ID: {po_id}，单号: {po_number}")
 
-            # 查询该组补货单的明细
-            oi_placeholders = ', '.join(f':oid{i}' for i in range(len(group_order_ids)))
-            item_params = {f'oid{i}': group_order_ids[i] for i in range(len(group_order_ids))}
-
-            items = db.execute(text(f"""
-                SELECT ri.product_id, ri.parent_product_id, ri.quantity
-                FROM replenishment_items ri
-                WHERE ri.replenishment_order_id IN ({oi_placeholders}) AND ri.deleted_at IS NULL
-            """), item_params).fetchall()
-
-            if not items:
-                continue
-
-            # 按产品ID汇总数量
-            product_agg = {}
-            for item in items:
-                pid = item[0]
-                parent_product_id = item[1]
-                qty = int(item[2])
-                agg_key = (pid, parent_product_id)
-                if agg_key in product_agg:
-                    product_agg[agg_key]["quantity"] += qty
-                else:
-                    product_agg[agg_key] = {
-                        "product_id": pid,
-                        "parent_product_id": parent_product_id,
-                        "quantity": qty,
-                    }
-
-            # 查询产品采购价
-            all_pids = list({agg["product_id"] for agg in product_agg.values()})
-            price_map = {}
-            if all_pids:
-                pid_placeholders = ', '.join(f':pid{i}' for i in range(len(all_pids)))
-                pid_params = {f'pid{i}': all_pids[i] for i in range(len(all_pids))}
-                price_rows = db.execute(text(f"""
-                    SELECT id, purchase_price FROM products WHERE id IN ({pid_placeholders})
-                """), pid_params).fetchall()
-                for pr in price_rows:
-                    price_map[pr[0]] = float(pr[1]) if pr[1] else 0.0
-
-            total_amount = sum(
-                agg["quantity"] * price_map.get(agg["product_id"], 0.0)
-                for agg in product_agg.values()
-            )
-
-            # 创建采购单（供应商等字段已移至明细表）
-            po_seq += 1
-            po_number = f"PO{now.strftime('%Y%m%d%H%M%S')}{po_seq:02d}"
+        # 创建采购单明细，保留店铺分组
+        for agg in product_agg.values():
+            pid = agg["product_id"]
+            parent_product_id = agg["parent_product_id"]
+            unit_price = price_map.get(pid, 0.0)
+            total_price = agg["quantity"] * unit_price
             db.execute(text("""
-                INSERT INTO purchase_orders (tenant_id, order_number, warehouse, store_group_id,
-                    total_amount, status, notes, created_by, created_at, updated_at)
-                VALUES (:tenant_id, :order_number, :warehouse, :store_group_id,
-                    :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
+                INSERT INTO purchase_order_items (purchase_order_id, product_id, parent_product_id, store_group_id, quantity, unit_price,
+                    total_price, supplier, notes, created_at, updated_at)
+                VALUES (:purchase_order_id, :product_id, :parent_product_id, :store_group_id, :quantity, :unit_price, :total_price, :supplier, :notes, :created_at, :updated_at)
             """), {
-                "tenant_id": current_user.tenant_id,
-                "order_number": po_number,
-                "warehouse": warehouse,
-                "store_group_id": store_group_id if store_group_id != 0 else None,
-                "total_amount": total_amount,
-                "notes": data.notes,
-                "created_by": current_user.id,
+                "purchase_order_id": po_id,
+                "product_id": pid,
+                "parent_product_id": parent_product_id,
+                "store_group_id": agg["store_group_id"],
+                "quantity": agg["quantity"],
+                "unit_price": unit_price,
+                "total_price": total_price,
+                "supplier": "",
+                "notes": "",
                 "created_at": now,
                 "updated_at": now,
             })
-            po_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
 
-            logger.info(f"采购单已创建，ID: {po_id}，单号: {po_number}，店铺分组: {group_name}")
-
-            # 创建采购单明细（供应商字段设置为空，后续在采购单页面编辑）
-            for agg in product_agg.values():
-                pid = agg["product_id"]
-                unit_price = price_map.get(pid, 0.0)
-                total_price = agg["quantity"] * unit_price
-                db.execute(text("""
-                    INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price,
-                        total_price, supplier, notes, created_at, updated_at)
-                    VALUES (:purchase_order_id, :product_id, :quantity, :unit_price, :total_price, :supplier, :notes, :created_at, :updated_at)
-                """), {
-                    "purchase_order_id": po_id,
-                    "product_id": pid,
-                    "quantity": agg["quantity"],
-                    "unit_price": unit_price,
-                    "total_price": total_price,
-                    "supplier": "",  # 供应商字段设置为空，后续在采购单页面编辑
-                    "notes": "",  # 备注
-                    "created_at": now,
-                    "updated_at": now,
-                })
-
-            # 更新补货单关联采购单ID
-            for order_id, _, _ in group_orders:
-                db.execute(text("""
-                    UPDATE replenishment_orders
-                    SET purchase_order_id = :po_id, updated_at = :updated_at
-                    WHERE id = :id
-                """), {
-                    "po_id": po_id,
-                    "updated_at": now,
-                    "id": order_id,
-                })
-
-            created_po_numbers.append(po_number)
-            logger.info(f"已关联 {len(group_orders)} 条补货单到采购单 {po_number}")
+        # 更新补货单关联采购单ID
+        for order_id in order_ids:
+            db.execute(text("""
+                UPDATE replenishment_orders
+                SET purchase_order_id = :po_id, updated_at = :updated_at
+                WHERE id = :id
+            """), {
+                "po_id": po_id,
+                "updated_at": now,
+                "id": order_id,
+            })
 
         db.commit()
 
         return {
             "success": True,
-            "message": f"已将 {len(orders)} 条补货申请转为 {len(created_po_numbers)} 张采购单",
+            "message": f"已将 {len(orders)} 条补货申请转为 1 张采购单",
             "data": {
-                "purchase_order_numbers": created_po_numbers,
+                "purchase_order_numbers": [po_number],
                 "converted_count": len(orders),
-                "po_count": len(created_po_numbers),
+                "po_count": 1,
             }
         }
     except HTTPException:
@@ -852,6 +898,148 @@ async def batch_delete_replenishment_orders(
         raise HTTPException(status_code=500, detail=f"批量删除失败: {str(e)}")
 
 
+@router.post("/batch-import")
+async def batch_import_replenishment_orders(
+    data: BatchImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("replenishment:create"))
+):
+    """批量导入补货单：按店铺分组创建多张补货单"""
+    try:
+        ensure_parent_product_id_column(db)
+        if not data.groups:
+            raise HTTPException(status_code=400, detail="无导入数据")
+
+        now = datetime.now()
+        created_orders = []
+
+        for group in data.groups:
+            if not group.items:
+                continue
+
+            # 验证 store_group_id
+            store_group_name = group.store_group_name or ""
+            if group.store_group_id:
+                sg = db.execute(text("""
+                    SELECT name FROM store_groups
+                    WHERE id = :gid AND tenant_id = :tid AND deleted_at IS NULL
+                """), {"gid": group.store_group_id, "tid": current_user.tenant_id}).fetchone()
+                if sg:
+                    store_group_name = sg[0]
+
+            order_number = f"RO{now.strftime('%Y%m%d%H%M%S%f')}_{len(created_orders) + 1}"
+
+            db.execute(text("""
+                INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
+                    created_by, created_at, updated_at)
+                VALUES (:tenant_id, :order_number, :store_group_id, 'pending', :notes,
+                    :created_by, :created_at, :updated_at)
+            """), {
+                "tenant_id": current_user.tenant_id,
+                "order_number": order_number,
+                "store_group_id": group.store_group_id,
+                "notes": "",
+                "created_by": current_user.id,
+                "created_at": now,
+                "updated_at": now,
+            })
+            order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+
+            for item in group.items:
+                db.execute(text("""
+                    INSERT INTO replenishment_items (tenant_id, replenishment_order_id, product_id, parent_product_id, quantity,
+                        notes, created_at, updated_at)
+                    VALUES (:tenant_id, :replenishment_order_id, :product_id, :parent_product_id, :quantity,
+                        :notes, :created_at, :updated_at)
+                """), {
+                    "tenant_id": current_user.tenant_id,
+                    "replenishment_order_id": order_id,
+                    "product_id": item.product_id,
+                    "parent_product_id": item.parent_product_id,
+                    "quantity": item.quantity,
+                    "notes": item.notes,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+
+            log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                             "replenishment", order_id, order_number,
+                             {"操作": "导入", "店铺分组": store_group_name, "明细数量": len(group.items)})
+
+            created_orders.append({
+                "id": order_id,
+                "order_number": order_number,
+                "store_group_id": group.store_group_id,
+                "store_group_name": store_group_name,
+                "item_count": len(group.items),
+            })
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": f"成功导入 {len(created_orders)} 张补货单",
+            "data": created_orders,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"批量导入补货单失败: {str(e)}")
+
+
+@router.post("/batch-approve")
+async def batch_approve_replenishment_orders(
+    data: BatchApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("replenishment:approve"))
+):
+    """批量审批补货单"""
+    try:
+        if not data.ids:
+            raise HTTPException(status_code=400, detail="请选择要审批的补货单")
+
+        ids_placeholders = ', '.join(f':id{i}' for i in range(len(data.ids)))
+        params = {f'id{i}': data.ids[i] for i in range(len(data.ids))}
+        params["tenant_id"] = current_user.tenant_id
+
+        rows = db.execute(text(f"""
+            SELECT id, order_number, status FROM replenishment_orders
+            WHERE id IN ({ids_placeholders}) AND tenant_id = :tenant_id AND deleted_at IS NULL
+        """), params).fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=400, detail="未找到可审批的补货单")
+
+        invalid = [row[1] for row in rows if row[2] != "pending"]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"以下补货单不是待审批状态，无法审批: {', '.join(invalid)}")
+
+        now = datetime.now()
+        for row in rows:
+            db.execute(text("""
+                UPDATE replenishment_orders
+                SET status = 'approved', approved_by = :approved_by, approved_at = :approved_at, updated_at = :updated_at
+                WHERE id = :id
+            """), {
+                "id": row[0],
+                "approved_by": current_user.id,
+                "approved_at": now,
+                "updated_at": now,
+            })
+            log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                             "replenishment", row[0], row[1],
+                             {"操作": "审批", "状态": "pending → approved"})
+
+        db.commit()
+        return {"success": True, "message": f"成功审批 {len(rows)} 条补货单"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"批量审批补货单失败: {str(e)}")
+
+
 @router.post("/{order_id}/approve")
 async def approve_replenishment_order(
     order_id: int,
@@ -903,7 +1091,8 @@ async def cancel_replenishment_approval(
     """管理员取消补货单审批"""
     try:
         # 检查用户是否是管理员
-        await check_permission("admin", current_user, db)
+        if not is_admin_user(current_user, db):
+            raise HTTPException(status_code=403, detail="只有管理员可以取消审批")
 
         row = db.execute(text("""
             SELECT id, order_number, status FROM replenishment_orders

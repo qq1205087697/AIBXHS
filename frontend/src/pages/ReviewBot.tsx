@@ -16,6 +16,7 @@ import { reviewsApi } from '../api'
 import dayjs, { Dayjs } from 'dayjs'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
+import { useResponsive } from '../hooks/useResponsive'
 const { RangePicker } = DatePicker
 
 interface ReviewItem {
@@ -40,6 +41,7 @@ interface ReviewItem {
 const ReviewBot: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission } = useAuth()
+  const res = useResponsive()
   const [selectedReview, setSelectedReview] = useState<ReviewItem | null>(null)
   const [reviews, setReviews] = useState<ReviewItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -477,7 +479,7 @@ const ReviewBot: React.FC = () => {
 
         <Card
           title={
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 600 }}>差评列表</span>
               <Checkbox
                 checked={selectedIds.length === reviews.length && reviews.length > 0}
@@ -491,7 +493,7 @@ const ReviewBot: React.FC = () => {
           }
           loading={loading}
           extra={
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {hasPermission('robot:review:analyze') && (
                 <Button
                   disabled={!hasSelected}
@@ -627,9 +629,9 @@ const ReviewBot: React.FC = () => {
           footer={[
             <Button key="close" onClick={() => setSelectedReview(null)}>关闭</Button>,
             hasPermission('robot:review:manage') && selectedReview?.status !== 'resolved' && (
-              <Button 
-                key="resolve" 
-                type="primary" 
+              <Button
+                key="resolve"
+                type="primary"
                 onClick={handleMarkAsResolved}
                 style={{ backgroundColor: currentTheme.primary, borderColor: currentTheme.primary }}
               >
@@ -637,7 +639,7 @@ const ReviewBot: React.FC = () => {
               </Button>
             ),
           ]}
-          width={800}
+          width={res.isMobile ? '95vw' : 800}
           styles={{ body: { maxHeight: '60vh', overflowY: 'auto', padding: '16px 24px' } }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -771,6 +773,7 @@ const ReviewBot: React.FC = () => {
         confirmLoading={analyzing}
         okText="确认"
         cancelText="取消"
+        width={res.isMobile ? '95vw' : 520}
       >
         {batchAction === 'analyze' ? (
           <div>

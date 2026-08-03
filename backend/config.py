@@ -35,7 +35,22 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
-    
+
+    # 火山引擎 TOS 对象存储配置
+    # 获取方式：
+    # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建
+    #    https://console.volcengine.com/iam/keymanage/
+    # 2. Endpoint/Region/Bucket: 在 TOS 控制台创建桶后获取
+    #    https://console.volcengine.com/tos
+    TOS_ACCESS_KEY: str = ""
+    TOS_SECRET_KEY: str = ""
+    TOS_ENDPOINT: str = ""            # 如: tos-cn-beijing.volces.com
+    TOS_REGION: str = ""              # 如: cn-beijing
+    TOS_BUCKET: str = ""              # 桶名称
+    TOS_PREFIX: str = "uploads/"      # 对象前缀（目录）
+    # 桶访问域名（用于拼接公网访问URL，若为空则使用 https://{bucket}.{endpoint} 形式）
+    TOS_CUSTOM_DOMAIN: str = ""
+
     # JWT配置
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"
