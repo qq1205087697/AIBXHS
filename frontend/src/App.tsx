@@ -8,6 +8,7 @@ import InventoryBot from "./pages/InventoryBot";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
+import DataAlertBot from "./pages/DataAlertBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
 import ProductManagement from "./pages/ProductManagement";
@@ -23,6 +24,8 @@ import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import { AuthProvider } from './contexts/AuthContext'
+
 
 function AppRoutes() {
   return (
@@ -109,8 +112,18 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      <Route
-        path="/org"
+      <Route 
+        path="/data-alert" 
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <DataAlertBot />
+            </MainLayout>
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/org" 
         element={
           <ProtectedRoute>
             <MainLayout>

@@ -45,13 +45,13 @@ root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings
 from config import get_settings
 
 settings = get_settings()
@@ -85,6 +85,9 @@ app.include_router(store_groups.router)
 app.include_router(products.router)
 app.include_router(tenants.router)
 app.include_router(emails.router, prefix="/api")
+app.include_router(data_warnings.router, prefix="/api")
+app.include_router(product_sales.router, prefix="/api")
+app.include_router(threshold_settings.router, prefix="/api")
 app.include_router(local_inventory.router, prefix="/api")
 app.include_router(business_settings.router)
 app.include_router(store_mapping.router, prefix="/api")
@@ -192,23 +195,25 @@ async def shutdown_event():
     """应用关闭事件"""
     logger.info("服务已关闭")
 
-@app.get("/")
-async def root():
-    static_dir = os.path.join(os.path.dirname(__file__), "static")
-    index_path = os.path.join(static_dir, "index.html")
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+
+@app.middleware("http")
+async def serve_static_middleware(request: Request, call_next):
+    path = request.url.path
     
-    if os.path.exists(index_path):
+    if path.startswith("/api/") or path.startswith("/docs") or path.startswith("/redoc"):
+        return await call_next(request)
+    
+    file_path = os.path.join(static_dir, path.lstrip("/"))
+    
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.isfile(index_path):
         return FileResponse(index_path)
     
-    return {
-        "message": "欢迎使用宝鑫华盛AI助手API",
-        "docs": "/docs",
-        "health": "/api/health"
-    }
-
-static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.exists(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    return await call_next(request)
 
 if __name__ == "__main__":
     import uvicorn

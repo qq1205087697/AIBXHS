@@ -243,6 +243,7 @@ export const reviewsApi = {
 // ========== Departments API ==========
 export const departmentsApi = {
   getList: () => apiClient.get("/departments/"),
+  getRegions: () => apiClient.get("/departments/regions/list"),
   create: (data: { name: string; description?: string }) =>
     apiClient.post("/departments/", data),
   update: (id: number, data: { name?: string; description?: string }) =>
