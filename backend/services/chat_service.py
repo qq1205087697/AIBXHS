@@ -15,7 +15,7 @@ import models.review  # noqa
 
 from models.conversation import ConversationHistory
 from models.review import Review, ReviewAnalysis, Sentiment
-import openai
+from openai import OpenAI
 from config import get_settings
 from services.ai_concurrency import ai_call_slot
 
