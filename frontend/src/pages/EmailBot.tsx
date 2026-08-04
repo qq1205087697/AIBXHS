@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Card, Row, Col, List, Button, Tag, Divider, Space, Avatar, Modal, Pagination, message, Input, Form, Select, Statistic, Checkbox, Dropdown } from 'antd'
+import { Card, Row, Col, List, Button, Tag, Divider, Space, Avatar, Modal, Pagination, message, Input, Form, Select, Statistic, Checkbox, Dropdown, Empty } from 'antd'
 import type { MenuProps } from 'antd'
 import { Mail, Eye, Search, FileEdit, FileText, XCircle, Repeat, Truck, HelpCircle, Palette, MessageCircle, AlertCircle, ChevronDown } from 'lucide-react'
 import { emailsApi } from '../api'
 import dayjs from 'dayjs'
+import { useAuth } from '../contexts/AuthContext'
 
 interface EmailItem {
   id: string
@@ -26,6 +27,7 @@ interface EmailItem {
 }
 
 const EmailBot: React.FC = () => {
+  const { hasPermission } = useAuth()
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null)
   const [emails, setEmails] = useState<EmailItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -35,7 +37,7 @@ const EmailBot: React.FC = () => {
 
   const [buyerMailSearch, setBuyerMailSearch] = useState('')
   const [storeNameSearch, setStoreNameSearch] = useState('')
-  const [followUpFilter, setFollowUpFilter] = useState<string>('0')
+  const [followUpFilter, setFollowUpFilter] = useState<number | undefined>(0)
   const [mailSubjectFilter, setMailSubjectFilter] = useState<string>('')
   const [replyModalVisible, setReplyModalVisible] = useState(false)
   const [replyText, setReplyText] = useState('')
@@ -47,6 +49,7 @@ const EmailBot: React.FC = () => {
   const [aiReplyGenerating, setAiReplyGenerating] = useState(false)
   const [aiReplyResult, setAiReplyResult] = useState<{ reply_text: string; reply_text_chinese: string } | null>(null)
   const [aiReplyForm] = Form.useForm()
+  const [reRunLoading, setReRunLoading] = useState(false)
 
   const fetchStoreNames = useCallback(async () => {
     try {
@@ -87,7 +90,7 @@ const EmailBot: React.FC = () => {
         page_size: pageSize,
         buyer_mail_number_search: buyerMailSearch || undefined,
         store_name_search: storeNameSearch || undefined,
-        follow_up_status: followUpFilter || undefined,
+        follow_up_status: followUpFilter,
         mail_subject: mailSubjectFilter || undefined,
         sort_by: 'reply_date',
         sort_order: 'desc',
@@ -122,7 +125,7 @@ const EmailBot: React.FC = () => {
     setCurrentPage(1)
   }
 
-  const handleFollowUpFilterChange = (value: string) => {
+  const handleFollowUpFilterChange = (value: number | undefined) => {
     setFollowUpFilter(value)
     setCurrentPage(1)
   }
@@ -172,7 +175,7 @@ const EmailBot: React.FC = () => {
   const handleResetSearch = () => {
     setBuyerMailSearch('')
     setStoreNameSearch('')
-    setFollowUpFilter('')
+    setFollowUpFilter(undefined)
     setMailSubjectFilter('')
     setCurrentPage(1)
   }
@@ -253,6 +256,27 @@ const EmailBot: React.FC = () => {
     }
   }
 
+  const handleReRunRobot = async () => {
+    if (!selectedEmail) return
+    setReRunLoading(true)
+    try {
+      const response = await emailsApi.reRunRobot(selectedEmail.id)
+      if (response.data.success) {
+        message.success('重新运行成功')
+        // 刷新数据
+        const detailResponse = await emailsApi.getById(selectedEmail.id)
+        if (detailResponse.data.success) {
+          setSelectedEmail(detailResponse.data.data)
+        }
+      }
+    } catch (error) {
+      console.error('重新运行失败:', error)
+      message.error('重新运行失败，请重试')
+    } finally {
+      setReRunLoading(false)
+    }
+  }
+
   const handleSelectAll = () => {
     setSelectedIds(emails.map(e => e.id))
   }
@@ -327,6 +351,16 @@ const EmailBot: React.FC = () => {
     return null
   }
 
+  if (!hasPermission('robot:email:view')) {
+    return (
+      <div style={{ padding: 24, display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
+        <Empty
+          description="您没有查看邮件机器人的权限"
+        />
+      </div>
+    )
+  }
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '24px' }}>
@@ -378,8 +412,8 @@ const EmailBot: React.FC = () => {
                     allowClear
                     style={{ width: '100%' }}
                   >
-                    <Select.Option value="0">未跟进</Select.Option>
-                    <Select.Option value="1">已跟进</Select.Option>
+                    <Select.Option value={0}>未跟进</Select.Option>
+                    <Select.Option value={1}>已跟进</Select.Option>
                   </Select>
                 </Col>
                 <Col xs={24} sm={12} md={5}>
@@ -416,26 +450,28 @@ const EmailBot: React.FC = () => {
               >
                 全选 ({selectedIds.length})
               </Checkbox>
-              <Dropdown
-                menu={{
-                  items: [
-                    {
-                      key: 'followed',
-                      label: '标记为已跟进',
-                      onClick: () => handleBatchFollowUp(1),
-                      disabled: selectedIds.length === 0,
-                    },
-                  ],
-                }}
-                disabled={selectedIds.length === 0}
-              >
-                <Button disabled={selectedIds.length === 0}>
-                  <Space>
-                    变更状态
-                    <ChevronDown size={14} />
-                  </Space>
-                </Button>
-              </Dropdown>
+              {hasPermission('robot:email:manage') && (
+                <Dropdown
+                  menu={{
+                    items: [
+                      {
+                        key: 'followed',
+                        label: '标记为已跟进',
+                        onClick: () => handleBatchFollowUp(1),
+                        disabled: selectedIds.length === 0,
+                      },
+                    ],
+                  }}
+                  disabled={selectedIds.length === 0}
+                >
+                  <Button disabled={selectedIds.length === 0}>
+                    <Space>
+                      变更状态
+                      <ChevronDown size={14} />
+                    </Space>
+                  </Button>
+                </Dropdown>
+              )}
             </div>
           }
           loading={loading}
@@ -541,6 +577,7 @@ const EmailBot: React.FC = () => {
           onCancel={() => setSelectedEmail(null)}
           footer={[
             <Space key="actions">
+            {hasPermission('robot:email:manage') && (
               <Button
                 type="primary"
                 onClick={() => handleConfirmFollowUp(selectedEmail)}
@@ -548,6 +585,8 @@ const EmailBot: React.FC = () => {
               >
                 确认跟进
               </Button>
+            )}
+            {hasPermission('robot:email:manage') && (
               <Button
                 type="default"
                 onClick={handleOpenNeedReply}
@@ -555,6 +594,19 @@ const EmailBot: React.FC = () => {
               >
                 需要回复
               </Button>
+            )}
+              {selectedEmail.need_reply === 1 &&
+                selectedEmail.follow_up_status === 0 &&
+                selectedEmail.reply_text_time &&
+                dayjs().diff(dayjs(selectedEmail.reply_text_time), 'hour') > 24 && (
+                <Button
+                  type="dashed"
+                  loading={reRunLoading}
+                  onClick={handleReRunRobot}
+                >
+                  重新运行机器人
+                </Button>
+              )}
               <Button key="close" onClick={() => setSelectedEmail(null)}>
                 关闭
               </Button>
@@ -644,15 +696,17 @@ const EmailBot: React.FC = () => {
             label={
               <Space>
                 <span>回复备注</span>
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<span>🤖</span>}
-                  onClick={handleOpenAiReplyModal}
-                  style={{ padding: 0 }}
-                >
-                  AI回复
-                </Button>
+                {hasPermission('robot:email:reply') && (
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<span>🤖</span>}
+                    onClick={handleOpenAiReplyModal}
+                    style={{ padding: 0 }}
+                  >
+                    AI回复
+                  </Button>
+                )}
               </Space>
             }
             rules={[{ required: true, message: '请填写回复备注' }]}

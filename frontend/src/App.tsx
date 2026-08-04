@@ -1,85 +1,115 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import ProtectedRoute from "./components/ProtectedRoute";
+import MainLayout from "./components/Layout/MainLayout";
+import Home from "./pages/Home";
+import ChatBot from "./pages/ChatBot";
+import Dashboard from "./pages/Dashboard";
+import InventoryBot from "./pages/InventoryBot";
+import BusinessSettings from "./pages/BusinessSettings";
+import ReviewBot from "./pages/ReviewBot";
+import EmailBot from "./pages/EmailBot";
+import OrgManagement from "./pages/OrgManagement";
+import StoreManagement from "./pages/StoreManagement";
+import ProductManagement from "./pages/ProductManagement";
+import InboundManagement from './pages/InboundManagement'
+import OutboundManagement from './pages/OutboundManagement'
+import PurchaseManagement from './pages/PurchaseManagement'
+import ReplenishmentManagement from './pages/ReplenishmentManagement'
+import OperationLogs from './pages/OperationLogs'
+import StockTransferManagement from './pages/StockTransferManagement'
+import ShipmentManagement from './pages/ShipmentManagement'
+import WarehouseManagement from './pages/WarehouseManagement'
+import TenantManagement from "./pages/TenantManagement";
+import PermissionManagement from './pages/PermissionManagement'
+import Login from "./pages/Login";
+import Register from "./pages/Register";
 import { AuthProvider } from './contexts/AuthContext'
-import ProtectedRoute from './components/ProtectedRoute'
-import MainLayout from './components/Layout/MainLayout'
-import Home from './pages/Home'
-import ChatBot from './pages/ChatBot'
-import Dashboard from './pages/Dashboard'
-import InventoryBot from './pages/InventoryBot'
-import ReviewBot from './pages/ReviewBot'
-import EmailBot from './pages/EmailBot';
-import DataAlertBot from './pages/DataAlertBot';
-import OrgManagement from './pages/OrgManagement'
-import StoreManagement from './pages/StoreManagement'
-import ProductManagement from './pages/ProductManagement'
-import TenantManagement from './pages/TenantManagement'
-import Login from './pages/Login'
-import Register from './pages/Register'
+
 
 function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
-      <Route 
-        path="/" 
+      <Route
+        path="/"
         element={
           <ProtectedRoute>
             <MainLayout>
               <Dashboard />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/todo" 
+      <Route
+        path="/todo"
         element={
           <ProtectedRoute>
             <MainLayout>
               <Home />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/chat" 
+      <Route
+        path="/chat"
         element={
           <ProtectedRoute>
             <MainLayout>
               <ChatBot />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/inventory" 
+      <Route
+        path="/dashboard"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <Dashboard />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/inventory"
         element={
           <ProtectedRoute>
             <MainLayout>
               <InventoryBot />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/review" 
+      <Route
+        path="/business-settings"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <BusinessSettings />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/review"
         element={
           <ProtectedRoute>
             <MainLayout>
               <ReviewBot />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/email" 
+      <Route
+        path="/email"
         element={
           <ProtectedRoute>
             <MainLayout>
               <EmailBot />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
       <Route 
         path="/data-alert" 
@@ -99,17 +129,17 @@ function AppRoutes() {
               <OrgManagement />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/stores" 
+      <Route
+        path="/stores"
         element={
           <ProtectedRoute>
             <MainLayout>
               <StoreManagement />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
       <Route
         path="/products"
@@ -117,6 +147,86 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <ProductManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/inbound"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <InboundManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/outbound"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <OutboundManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/purchase"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <PurchaseManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/replenishment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ReplenishmentManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/operation-logs"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <OperationLogs />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/stock-transfer"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <StockTransferManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/shipment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ShipmentManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/warehouses"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <WarehouseManagement />
             </MainLayout>
           </ProtectedRoute>
         }
@@ -131,18 +241,26 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      <Route
+        path="/permissions"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <PermissionManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
     </Routes>
-  )
+  );
 }
 
 function App() {
   return (
-    <AuthProvider>
-      <Router>
-        <AppRoutes />
-      </Router>
-    </AuthProvider>
-  )
+    <Router>
+      <AppRoutes />
+    </Router>
+  );
 }
 
-export default App
+export default App;

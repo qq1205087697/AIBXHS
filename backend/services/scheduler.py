@@ -55,6 +55,16 @@ def init_scheduler():
         replace_existing=True
     )
 
+    scheduler.add_job(
+        check_overdue_purchase_orders_job,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        id="overdue_purchase_check",
+        name="检查超期未入库采购单",
+        replace_existing=True
+    )
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
 
@@ -72,7 +82,7 @@ def send_daily_report_job():
 
 
 def analyze_unanalyzed_reviews_job():
-    """每天早上7点：检测未分析的差评并进行AI分析"""
+    """每天早上7点：检测未分析的差评并进行AI分析（并发处理）"""
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
@@ -97,7 +107,7 @@ def analyze_unanalyzed_reviews_job():
             logger.info("没有未分析的差评")
             return
 
-        logger.info(f"发现 {len(unanalyzed)} 条未分析的差评，开始AI分析...")
+        logger.info(f"发现 {len(unanalyzed)} 条未分析的差评，开始并发AI分析...")
 
         from config import get_settings
         settings = get_settings()
@@ -109,24 +119,25 @@ def analyze_unanalyzed_reviews_job():
 
         client = OpenAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_API_BASE)
 
-        success_count = 0
-        for row in unanalyzed:
-            review_id = row[0]
-            tenant_id = row[1]
-            title = row[2] or ""
-            content = row[3] or ""
-            translated_content = row[4] or ""
-            rating = row[5]
-            asin = row[6] or ""
-
+        def analyze_single_review(row):
+            """分析单条差评（线程安全：每个线程使用独立db session）"""
+            thread_db = SessionLocal()
             try:
+                review_id = row[0]
+                tenant_id = row[1]
+                title = row[2] or ""
+                content = row[3] or ""
+                translated_content = row[4] or ""
+                rating = row[5]
+                asin = row[6] or ""
+
                 if not translated_content:
                     try:
                         from services.translate_service import translate_review
                         _, translated_content = translate_review(title, content)
-                        db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
+                        thread_db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
                                    {"tc": translated_content, "rid": review_id})
-                        db.commit()
+                        thread_db.commit()
                     except Exception as te:
                         logger.error(f"翻译失败 review_id={review_id}: {te}")
 
@@ -162,37 +173,55 @@ def analyze_unanalyzed_reviews_job():
                 except json.JSONDecodeError:
                     ar = {"sentiment": "negative", "sentiment_score": 3, "key_points": [], "topics": [], "suggestions": [], "summary": rc[:200]}
 
-                # 保存AI分析结果
-                db.execute(text("""
+                # 保存AI分析结果（使用ON DUPLICATE KEY UPDATE避免并发重复插入）
+                thread_db.execute(text("""
                     INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response)
                     VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw)
+                    ON DUPLICATE KEY UPDATE 
+                        sentiment = VALUES(sentiment),
+                        sentiment_score = VALUES(sentiment_score),
+                        key_points = VALUES(key_points),
+                        topics = VALUES(topics),
+                        suggestions = VALUES(suggestions),
+                        summary = VALUES(summary),
+                        raw_response = VALUES(raw_response)
                 """), {
                     "tid": tenant_id, "rid": review_id, "model": settings.OPENAI_MODEL,
                     "sentiment": ar.get("sentiment", "negative"), "score": ar.get("sentiment_score", 3),
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
                     "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc
                 })
-                
+
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
                 if importance_level not in ["high", "medium", "low"]:
                     importance_level = "low"
-                
-                # 先检查importance_level列是否存在
-                col_check = db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
+
+                col_check = thread_db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
                 if col_check.fetchone():
-                    db.execute(text("""
+                    thread_db.execute(text("""
                         UPDATE reviews SET importance_level = :level WHERE id = :rid
                     """), {"level": importance_level, "rid": review_id})
-                    logger.info(f"评论 {review_id} 重要性等级: {importance_level}")
-                
-                db.commit()
-                success_count += 1
-                logger.info(f"评论 {review_id} AI分析完成")
 
+                thread_db.commit()
+                logger.info(f"评论 {review_id} AI分析完成，重要性: {importance_level}")
+                return review_id, True
             except Exception as e:
-                logger.error(f"分析评论 {review_id} 失败: {e}")
-                db.rollback()
+                logger.error(f"分析评论 {row[0]} 失败: {e}")
+                thread_db.rollback()
+                return row[0], False
+            finally:
+                thread_db.close()
+
+        # 并发分析，5个线程同时处理
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        success_count = 0
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(analyze_single_review, row): row for row in unanalyzed}
+            for future in as_completed(futures):
+                _, success = future.result()
+                if success:
+                    success_count += 1
 
         logger.info(f"每日AI分析完成：成功 {success_count}/{len(unanalyzed)} 条")
 
@@ -371,8 +400,18 @@ def push_daily_review_notifications_job():
 
             for member in members:
                 user_id = member[0]
+                exists = db.execute(text("""
+                    SELECT COUNT(*) FROM notifications
+                    WHERE tenant_id = :tenant_id AND user_id = :uid AND title = :title
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+                """), {"tenant_id": tenant_id, "uid": user_id, "title": title}).scalar()
+                if exists > 0:
+                    logger.info(f"  用户 ID={user_id} 已在5分钟内收到相同通知，跳过")
+                    continue
                 logger.info(f"  准备推送给用户 ID={user_id}")
                 notification_rows.append({
+                    "tenant_id": tenant_id,
+                    "tenant_id": tenant_id,
                     "uid": user_id,
                     "title": title,
                     "content": content
@@ -382,7 +421,7 @@ def push_daily_review_notifications_job():
             try:
                 db.execute(text("""
                     INSERT INTO notifications (tenant_id, user_id, type, title, content, link)
-                    VALUES (1, :uid, 'warning', :title, :content, '/review')
+                    VALUES (:tenant_id, :uid, 'warning', :title, :content, '/review')
                 """), notification_rows)
                 notification_count = len(notification_rows)
                 logger.info(f"✅ 批量写入 {notification_count} 条通知")
@@ -394,6 +433,186 @@ def push_daily_review_notifications_job():
 
     except Exception as e:
         logger.error(f"每日通知推送任务失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        db.rollback()
+    finally:
+        db.close()
+
+
+def check_overdue_purchase_orders_job():
+    """每天早上9点：检查已审批超14天仍未完成入库的采购单，通知相关人员"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    from datetime import datetime, date, timedelta
+
+    logger.info("========== 开始检查超期未入库采购单 ==========")
+
+    db = SessionLocal()
+    try:
+        today = date.today()
+        cutoff_date = today - timedelta(days=14)
+
+        # 查询已审批超过14天但状态未完成的采购单
+        overdue_orders = db.execute(text("""
+            SELECT po.id, po.order_number, po.tenant_id, po.status, po.approved_at,
+                   po.created_by, po.approved_by, po.total_amount
+            FROM purchase_orders po
+            WHERE po.deleted_at IS NULL
+              AND po.approved_at IS NOT NULL
+              AND DATE(po.approved_at) <= :cutoff_date
+              AND po.status NOT IN ('completed', 'cancelled')
+            ORDER BY po.tenant_id, po.approved_at ASC
+        """), {"cutoff_date": cutoff_date}).fetchall()
+
+        if not overdue_orders:
+            logger.info("没有超期未入库的采购单")
+            logger.info("========== 检查结束 ==========")
+            return
+
+        logger.info(f"发现 {len(overdue_orders)} 个超期未入库的采购单")
+
+        notification_rows = []
+        for order in overdue_orders:
+            order_id = order[0]
+            order_number = order[1]
+            tenant_id = order[2]
+            status = order[3]
+            approved_at = order[4]
+            created_by = order[5]
+            approved_by = order[6]
+            total_amount = float(order[7]) if order[7] else 0
+
+            # 计算已过天数
+            days_passed = (today - approved_at.date()).days if approved_at else 0
+
+            # 检查今天是否已发送过该订单的通知
+            existing = db.execute(text("""
+                SELECT COUNT(*) FROM notifications
+                WHERE type = 'warning'
+                  AND title LIKE :title_pattern
+                  AND DATE(created_at) = :today
+            """), {
+                "title_pattern": f"%超期未入库提醒%{order_number}%",
+                "today": today.isoformat()
+            }).scalar()
+            if existing > 0:
+                logger.info(f"采购单 {order_number} 今天已通知过，跳过")
+                continue
+
+            # 查询已入库情况
+            received_items = db.execute(text("""
+                SELECT COALESCE(SUM(ioi.quantity), 0) as received_qty
+                FROM inbound_order_items ioi
+                JOIN inbound_orders io ON io.id = ioi.inbound_order_id AND io.deleted_at IS NULL
+                WHERE io.purchase_order_id = :po_id
+                  AND io.status = 'confirmed'
+                  AND ioi.deleted_at IS NULL
+            """), {"po_id": order_id}).fetchone()
+            received_qty = int(received_items[0]) if received_items and received_items[0] else 0
+
+            # 查询采购单总数量
+            total_ordered = db.execute(text("""
+                SELECT COALESCE(SUM(quantity), 0) as total_qty,
+                       COALESCE(SUM(received_quantity), 0) as total_received
+                FROM purchase_order_items
+                WHERE purchase_order_id = :po_id AND deleted_at IS NULL
+            """), {"po_id": order_id}).fetchone()
+            total_qty = int(total_ordered[0]) if total_ordered else 0
+            total_received = int(total_ordered[1]) if total_ordered and total_ordered[1] else 0
+
+            # 获取产品明细
+            items = db.execute(text("""
+                SELECT poi.quantity, poi.received_quantity, p.name as product_name
+                FROM purchase_order_items poi
+                LEFT JOIN products p ON p.id = poi.product_id AND p.deleted_at IS NULL
+                WHERE poi.purchase_order_id = :po_id AND poi.deleted_at IS NULL
+            """), {"po_id": order_id}).fetchall()
+
+            item_details = []
+            not_received_items = []
+            for item in items:
+                ordered = int(item[0])
+                received = int(item[1])
+                product_name = item[2] or "未知产品"
+                item_details.append(f"{product_name}(已订{ordered}/已收{received})")
+                if received < ordered:
+                    not_received_items.append(f"{product_name}(缺{ordered - received}件)")
+
+            # 如果已入库数量 >= 采购数量，说明已完成入库，跳过
+            if received_qty >= total_qty:
+                logger.info(f"采购单 {order_number} 已全部入库({received_qty}/{total_qty})，跳过")
+                continue
+
+            # 构建通知内容
+            status_label = {
+                'approved': '已审批',
+                'ordered': '已下单',
+                'partial_received': '部分收货',
+            }.get(status, status)
+
+            title = f"超期未入库提醒 - 采购单 {order_number}"
+
+            item_summary = "、".join(item_details[:3])
+            if len(item_details) > 3:
+                item_summary += f" 等{len(item_details)}项"
+
+            missing_summary = "、".join(not_received_items[:3]) if not_received_items else "全部未入库"
+
+            content = (
+                f"采购单「{order_number}」已审批{days_passed}天(状态:{status_label})，"
+                f"仍有商品未完成入库。\n"
+                f"明细: {item_summary}\n"
+                f"待入库: {missing_summary}\n"
+                f"总金额: ¥{total_amount:.2f}"
+            )
+
+            notified_user_ids = set()
+            if created_by:
+                notified_user_ids.add(created_by)
+            if approved_by:
+                notified_user_ids.add(approved_by)
+
+            for user_id in notified_user_ids:
+                exists = db.execute(text("""
+                    SELECT COUNT(*) FROM notifications
+                    WHERE tenant_id = :tid AND user_id = :uid AND title = :title
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+                """), {"tid": tenant_id, "uid": user_id, "title": title}).scalar()
+                if exists > 0:
+                    logger.info(f"  用户 ID={user_id} 已在5分钟内收到相同通知，跳过")
+                    continue
+                notification_rows.append({
+                    "tid": tenant_id,
+                    "tenant_id": tenant_id,
+                    "uid": user_id,
+                    "title": title,
+                    "content": content
+                })
+
+            logger.info(
+                f"采购单 {order_number}: 已过{days_passed}天, "
+                f"已入库{received_qty}/{total_qty}, "
+                f"通知{len(notified_user_ids)}人"
+            )
+
+        if notification_rows:
+            try:
+                db.execute(text("""
+                    INSERT INTO notifications (tenant_id, user_id, type, title, content, link)
+                    VALUES (:tid, :uid, 'warning', :title, :content, '/purchase')
+                """), notification_rows)
+                logger.info(f"批量写入 {len(notification_rows)} 条超期采购单通知")
+            except Exception as e:
+                logger.error(f"批量写入通知失败: {e}")
+                db.rollback()
+                return
+
+        db.commit()
+        logger.info(f"========== 检查完成！共 {len(overdue_orders)} 个超期采购单，发送 {len(notification_rows)} 条通知 ==========")
+
+    except Exception as e:
+        logger.error(f"超期采购单检查任务失败: {e}")
         import traceback
         logger.error(traceback.format_exc())
         db.rollback()

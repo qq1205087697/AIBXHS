@@ -1,11 +1,14 @@
 from typing import Optional
+from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from database.database import get_db
 from services.auth_service import authenticate_user, create_user, create_access_token, get_password_hash, verify_password
 from dependencies import get_current_user
 from models.user import User
+from typing import Optional
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -15,6 +18,9 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     nickname: Optional[str] = None
+    # nickname: str | None = None
+    company_name: str | None = None
+    company_code: str | None = None
 
 
 class UserLogin(BaseModel):
@@ -31,8 +37,12 @@ class UserResponse(BaseModel):
     id: int
     username: str
     email: str
-    nickname: str | None
+    nickname: Optional[str]
     role: str
+    tenant_id: int | None = None
+    tenant_name: str | None = None
+    tenant_code: str | None = None
+    is_personal: bool = False
 
 
 class ChangePasswordRequest(BaseModel):
@@ -72,11 +82,13 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
         username=user_data.username,
         email=user_data.email,
         password=user_data.password,
-        nickname=user_data.nickname
+        nickname=user_data.nickname,
+        company_name=user_data.company_name,
+        company_code=user_data.company_code
     )
     
     # 创建访问令牌
-    access_token = create_access_token(data={"sub": user.username})
+    access_token = create_access_token(data={"sub": user.username, "uid": user.id, "tid": user.tenant_id})
     
     return TokenResponse(access_token=access_token)
 
@@ -91,19 +103,31 @@ async def login(user_data: UserLogin, db: Session = Depends(get_db)):
             detail="用户名或密码错误"
         )
     
-    access_token = create_access_token(data={"sub": user.username})
+    access_token = create_access_token(data={"sub": user.username, "uid": user.id, "tid": user.tenant_id})
     return TokenResponse(access_token=access_token)
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
+async def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """获取当前用户信息"""
+    role_code = None
+    if current_user.role_id:
+        role_row = db.execute(text(
+            "SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"
+        ), {"role_id": current_user.role_id}).fetchone()
+        if role_row:
+            role_code = role_row[0]
+    
     return UserResponse(
         id=current_user.id,
         username=current_user.username,
         email=current_user.email,
         nickname=current_user.nickname,
-        role=current_user.role or "operator"
+        role=role_code or "operator",
+        tenant_id=current_user.tenant_id,
+        tenant_name=getattr(current_user, '_tenant_name', None),
+        tenant_code=getattr(current_user, '_tenant_code', None),
+        is_personal=getattr(current_user, '_is_personal', False)
     )
 
 

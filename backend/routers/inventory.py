@@ -6,24 +6,27 @@ from database.database import get_db
 from models.inventory import InventoryAlert, InventoryAction, AlertStatus
 from models.product import Product
 from config import get_settings
+from dependencies import get_current_user
+from models.user import User
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 settings = get_settings()
 
 
 @router.get("/alerts")
-async def get_inventory_alerts(db: Session = Depends(get_db)):
+async def get_inventory_alerts(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """获取库存预警列表"""
     try:
         # 从数据库获取库存预警，只获取未处理的预警
         alerts = db.query(InventoryAlert).filter(
+            InventoryAlert.tenant_id == current_user.tenant_id,
             InventoryAlert.status.in_([AlertStatus.NEW, AlertStatus.ACKNOWLEDGED, AlertStatus.PROCESSING])
         ).order_by(InventoryAlert.priority.desc(), InventoryAlert.created_at.desc()).all()
         
         # 转换为前端需要的格式
         alert_data = []
         for alert in alerts:
-            product = db.query(Product).filter(Product.id == alert.product_id).first()
+            product = db.query(Product).filter(Product.id == alert.product_id, Product.tenant_id == current_user.tenant_id).first()
             
             alert_data.append({
                 "id": str(alert.id),
@@ -45,7 +48,7 @@ async def get_inventory_alerts(db: Session = Depends(get_db)):
 
 
 @router.post("/execute")
-async def execute_inventory_action(action_data: Dict[str, Any], db: Session = Depends(get_db)):
+async def execute_inventory_action(action_data: Dict[str, Any], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """执行库存操作"""
     try:
         asin = action_data.get("asin")
@@ -54,20 +57,21 @@ async def execute_inventory_action(action_data: Dict[str, Any], db: Session = De
         print(f"执行库存操作: ASIN={asin}, Action={action}")
         
         # 查找对应的商品
-        product = db.query(Product).filter(Product.asin == asin).first()
+        product = db.query(Product).filter(Product.asin == asin, Product.tenant_id == current_user.tenant_id).first()
         if not product:
             raise HTTPException(status_code=404, detail=f"商品 {asin} 不存在")
         
         # 创建操作记录
         inventory_action = InventoryAction(
-            tenant_id=1,  # 暂时使用固定租户ID
+            tenant_id=current_user.tenant_id,
             product_id=product.id,
-            store_id=1,  # 暂时使用固定店铺ID
+            store_id=action_data.get("store_id") or getattr(product, "store_id", None) or 0,
             action_type=action,
             action_title=f"执行{action}操作",
             action_details=action_data,
             status="success",
             triggered_by="manual",
+            executed_by=current_user.id,
             result=f"操作执行成功",
             executed_at=datetime.now()
         )

@@ -18,14 +18,14 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 # 异步处理批量分析 - 使用独立的线程池
-def async_batch_analyze(review_ids: List[int]):
+def async_batch_analyze(review_ids: List[int], tenant_id: Optional[int] = None):
     """后台分析任务，完全独立于主线程"""
     logger.info(f"开始异步分析 {len(review_ids)} 条评论")
     db = None
     try:
         # 每次都创建全新的数据库会话
         db = SessionLocal()
-        batch_analyze_reviews(db, review_ids)
+        batch_analyze_reviews(db, review_ids, tenant_id=tenant_id)
         logger.info(f"完成分析 {len(review_ids)} 条评论")
     except Exception as e:
         logger.error(f"分析失败: {e}")
@@ -54,8 +54,8 @@ async def get_reviews(
 ):
     """获取差评列表（支持分页、搜索、排序、部门过滤、日期筛选、状态筛选）"""
     try:
-        where_conditions = ["r.rating <= 3"]
-        params = {"limit": page_size, "offset": (page - 1) * page_size}
+        where_conditions = ["r.rating <= 3", "r.tenant_id = :tenant_id"]
+        params = {"tenant_id": current_user.tenant_id, "limit": page_size, "offset": (page - 1) * page_size}
         
         # 检查 importance_level 列是否存在
         has_importance_level = False
@@ -66,19 +66,27 @@ async def get_reviews(
             has_importance_level = False
         
         # 非管理员用户按部门过滤数据
-        if current_user.role != "admin":
-            dept_ids = db.execute(
-                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
-                {"uid": current_user.id}
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+        
+        if not is_admin:
+            store_ids = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            dept_id_list = [d[0] for d in dept_ids]
-            if dept_id_list:
-                dept_placeholders = ",".join([f":dept_{i}" for i in range(len(dept_id_list))])
-                for i, did in enumerate(dept_id_list):
-                    params[f"dept_{i}"] = did
-                where_conditions.append(f"s.department_id IN ({dept_placeholders}) AND s.department_id IS NOT NULL")
+            store_id_list = [s[0] for s in store_ids]
+            if store_id_list:
+                store_placeholders = ",".join([f":store_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"store_{i}"] = sid
+                where_conditions.append(f"r.store_id IN ({store_placeholders})")
             else:
-                # 用户没有分配任何部门，不显示任何数据
+                # 用户没有分配任何店铺，不显示任何数据
                 where_conditions.append("1=0")
         
         if asin_search:
@@ -119,13 +127,18 @@ async def get_reviews(
         else:
             order_by_clause = "r.review_date DESC"
         
-        # Need store join for department filtering
-        store_join = "LEFT JOIN stores s ON r.store_id = s.id" if current_user.role != "admin" else ""
+        # Need store join for department filtering (reuse is_admin from above)
+        store_join = "LEFT JOIN stores s ON r.store_id = s.id" if not is_admin else ""
         
         count_query = text(f"""
             SELECT COUNT(DISTINCT r.id)
             FROM reviews r
-            LEFT JOIN products p ON r.asin = p.asin
+            LEFT JOIN (
+            SELECT DISTINCT pp.asin, p.name
+            FROM platform_products pp
+            JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+            WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+        ) p ON r.asin = p.asin
             {store_join}
             WHERE {where_clause}
         """)
@@ -143,10 +156,15 @@ async def get_reviews(
                         COALESCE(p.name, r.asin, '未知商品') as product_name,
                         rc.review_count, r.importance_level
                     FROM reviews r
-                    LEFT JOIN products p ON r.asin = p.asin
+                    LEFT JOIN (
+            SELECT DISTINCT pp.asin, p.name
+            FROM platform_products pp
+            JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+            WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+        ) p ON r.asin = p.asin
                     LEFT JOIN (
                         SELECT asin, COUNT(*) as review_count
-                        FROM reviews WHERE rating <= 3 GROUP BY asin
+                        FROM reviews WHERE rating <= 3 AND tenant_id = :tenant_id GROUP BY asin
                     ) rc ON r.asin = rc.asin
                     {store_join}
                     WHERE {where_clause}
@@ -162,10 +180,15 @@ async def get_reviews(
                         COALESCE(p.name, r.asin, '未知商品') as product_name,
                         rc.review_count
                     FROM reviews r
-                    LEFT JOIN products p ON r.asin = p.asin
+                    LEFT JOIN (
+            SELECT DISTINCT pp.asin, p.name
+            FROM platform_products pp
+            JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+            WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+        ) p ON r.asin = p.asin
                     LEFT JOIN (
                         SELECT asin, COUNT(*) as review_count
-                        FROM reviews WHERE rating <= 3 GROUP BY asin
+                        FROM reviews WHERE rating <= 3 AND tenant_id = :tenant_id GROUP BY asin
                     ) rc ON r.asin = rc.asin
                     {store_join}
                     WHERE {where_clause}
@@ -182,7 +205,12 @@ async def get_reviews(
                         COALESCE(p.name, r.asin, '未知商品') as product_name,
                         r.importance_level
                     FROM reviews r
-                    LEFT JOIN products p ON r.asin = p.asin
+                    LEFT JOIN (
+            SELECT DISTINCT pp.asin, p.name
+            FROM platform_products pp
+            JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+            WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+        ) p ON r.asin = p.asin
                     {store_join}
                     WHERE {where_clause}
                     ORDER BY {order_by_clause}
@@ -196,7 +224,12 @@ async def get_reviews(
                         r.review_date, r.status, r.return_rate,
                         COALESCE(p.name, r.asin, '未知商品') as product_name
                     FROM reviews r
-                    LEFT JOIN products p ON r.asin = p.asin
+                    LEFT JOIN (
+            SELECT DISTINCT pp.asin, p.name
+            FROM platform_products pp
+            JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+            WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+        ) p ON r.asin = p.asin
                     {store_join}
                     WHERE {where_clause}
                     ORDER BY {order_by_clause}
@@ -209,8 +242,9 @@ async def get_reviews(
         analysis_query = text("""
             SELECT review_id, key_points, summary, topics, suggestions
             FROM review_analyses
+            WHERE tenant_id = :tenant_id AND deleted_at IS NULL
         """)
-        analysis_result = db.execute(analysis_query)
+        analysis_result = db.execute(analysis_query, {"tenant_id": current_user.tenant_id})
         analysis_map = {row[0]: {"key_points": row[1], "summary": row[2], "topics": row[3], "suggestions": row[4]} for row in analysis_result}
 
         review_data = []
@@ -312,14 +346,107 @@ async def get_reviews(
         raise HTTPException(status_code=500, detail=f"获取差评列表失败: {str(e)}")
 
 
+@router.get("/stats")
+async def get_review_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """获取差评统计数据（全部数据，按重要性等级分组）"""
+    try:
+        # 检查 importance_level 列是否存在
+        has_importance_level = False
+        try:
+            check_col = db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
+            has_importance_level = check_col.fetchone() is not None
+        except:
+            has_importance_level = False
+
+        store_join = ""
+        dept_filter = ""
+        params = {"tenant_id": current_user.tenant_id}
+        # 检查是否是管理员（只通过 role_id 检查）
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+        
+        if not is_admin:
+            dept_ids = db.execute(
+                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
+                {"uid": current_user.id}
+            ).fetchall()
+            dept_id_list = [d[0] for d in dept_ids]
+            if dept_id_list:
+                placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
+                for i, did in enumerate(dept_id_list):
+                    params[f"d_{i}"] = did
+                dept_filter = f"AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
+                store_join = "LEFT JOIN stores s ON reviews.store_id = s.id"
+            else:
+                dept_filter = "AND 1=0"
+
+        if has_importance_level:
+            query = text(f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN reviews.importance_level = 'high' AND reviews.status != 'resolved' THEN 1 ELSE 0 END), 0) as high_unviewed,
+                    COALESCE(SUM(CASE WHEN reviews.importance_level = 'high' AND reviews.status = 'resolved' THEN 1 ELSE 0 END), 0) as high_viewed,
+                    COALESCE(SUM(CASE WHEN (reviews.importance_level = 'medium' OR reviews.importance_level IS NULL OR reviews.importance_level = '') AND reviews.status != 'resolved' THEN 1 ELSE 0 END), 0) as medium_unviewed,
+                    COALESCE(SUM(CASE WHEN (reviews.importance_level = 'medium' OR reviews.importance_level IS NULL OR reviews.importance_level = '') AND reviews.status = 'resolved' THEN 1 ELSE 0 END), 0) as medium_viewed,
+                    COALESCE(SUM(CASE WHEN reviews.importance_level = 'low' AND reviews.status != 'resolved' THEN 1 ELSE 0 END), 0) as low_unviewed,
+                    COALESCE(SUM(CASE WHEN reviews.importance_level = 'low' AND reviews.status = 'resolved' THEN 1 ELSE 0 END), 0) as low_viewed
+                FROM reviews
+                {store_join}
+                WHERE reviews.rating <= 3
+                  AND reviews.tenant_id = :tenant_id
+                  {dept_filter}
+            """)
+        else:
+            # 如果没有 importance_level 列，所有数据归为 medium
+            query = text(f"""
+                SELECT
+                    0 as high_unviewed, 0 as high_viewed,
+                    COALESCE(SUM(CASE WHEN reviews.status != 'resolved' THEN 1 ELSE 0 END), 0) as medium_unviewed,
+                    COALESCE(SUM(CASE WHEN reviews.status = 'resolved' THEN 1 ELSE 0 END), 0) as medium_viewed,
+                    0 as low_unviewed, 0 as low_viewed
+                FROM reviews
+                {store_join}
+                WHERE reviews.rating <= 3
+                  AND reviews.tenant_id = :tenant_id
+                  {dept_filter}
+            """)
+
+        result = db.execute(query, params)
+        row = result.fetchone()
+
+        return {
+            "success": True,
+            "data": {
+                "high": {"unviewed": row[0], "viewed": row[1]},
+                "medium": {"unviewed": row[2], "viewed": row[3]},
+                "low": {"unviewed": row[4], "viewed": row[5]}
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取统计数据失败: {str(e)}")
+
+
 @router.get("/{review_id}")
 async def get_review_detail(review_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """获取差评详情"""
     try:
         # 非管理员用户按部门过滤
         dept_filter = ""
-        params = {"review_id": review_id}
-        if current_user.role != "admin":
+        params = {"review_id": review_id, "tenant_id": current_user.tenant_id}
+        # 检查是否是管理员（只通过 role_id 检查）
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+        
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}
@@ -348,9 +475,15 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
                 r.status,
                 COALESCE(p.name, r.asin, '未知商品') as product_name
             FROM reviews r
-            LEFT JOIN products p ON r.asin = p.asin
+            LEFT JOIN (
+            SELECT DISTINCT pp.asin, p.name
+            FROM platform_products pp
+            JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+            WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+        ) p ON r.asin = p.asin
             LEFT JOIN stores s ON r.store_id = s.id
             WHERE r.id = :review_id
+              AND r.tenant_id = :tenant_id
             {dept_filter}
         """)
 
@@ -363,9 +496,9 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
         analysis_query = text("""
             SELECT key_points, summary, topics, suggestions
             FROM review_analyses
-            WHERE review_id = :review_id
+            WHERE review_id = :review_id AND tenant_id = :tenant_id AND deleted_at IS NULL
         """)
-        analysis_result = db.execute(analysis_query, {"review_id": review_id})
+        analysis_result = db.execute(analysis_query, {"review_id": review_id, "tenant_id": current_user.tenant_id})
         analysis_row = analysis_result.fetchone()
 
         review_detail = {
@@ -527,9 +660,18 @@ async def update_review_status(review_id: str, status_data: Dict[str, str], db: 
             raise HTTPException(status_code=400, detail="无效的状态值")
 
         # 非管理员用户按部门过滤
-        check_params = {"review_id": review_id}
-        check_where = "r.id = :review_id"
-        if current_user.role != "admin":
+        check_params = {"review_id": review_id, "tenant_id": current_user.tenant_id}
+        check_where = "r.id = :review_id AND r.tenant_id = :tenant_id"
+        # 检查是否是管理员（只通过 role_id 检查）
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+        
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}
@@ -556,9 +698,9 @@ async def update_review_status(review_id: str, status_data: Dict[str, str], db: 
         update_query = text("""
             UPDATE reviews
             SET status = :new_status, updated_at = NOW()
-            WHERE id = :review_id
+            WHERE id = :review_id AND tenant_id = :tenant_id
         """)
-        db.execute(update_query, {"new_status": new_status, "review_id": review_id})
+        db.execute(update_query, {"new_status": new_status, "review_id": review_id, "tenant_id": current_user.tenant_id})
         db.commit()
 
         return {
@@ -585,8 +727,17 @@ async def get_new_reviews_count(db: Session = Depends(get_db), current_user: Use
         
         store_join = ""
         dept_filter = ""
-        params = {"three_days_ago": three_days_ago}
-        if current_user.role != "admin":
+        params = {"three_days_ago": three_days_ago, "tenant_id": current_user.tenant_id}
+        # 检查是否是管理员（只通过 role_id 检查）
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+        
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}
@@ -607,6 +758,7 @@ async def get_new_reviews_count(db: Session = Depends(get_db), current_user: Use
             FROM reviews
             {store_join}
             WHERE rating <= 3
+              AND tenant_id = :tenant_id
               AND status = 'new'
               AND review_date >= :three_days_ago
               {dept_filter}
@@ -631,9 +783,18 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
             raise HTTPException(status_code=400, detail="无效的重要性等级")
 
         # 非管理员用户按部门过滤
-        check_params = {"review_id": review_id}
-        check_where = "r.id = :review_id"
-        if current_user.role != "admin":
+        check_params = {"review_id": review_id, "tenant_id": current_user.tenant_id}
+        check_where = "r.id = :review_id AND r.tenant_id = :tenant_id"
+        # 检查是否是管理员（只通过 role_id 检查）
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+        
+        if not is_admin:
             dept_ids = db.execute(
                 text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
                 {"uid": current_user.id}
@@ -668,8 +829,8 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
         
         if has_importance_level:
             db.execute(text("""
-                UPDATE reviews SET importance_level = :level WHERE id = :rid
-            """), {"level": level or None, "rid": review_id})
+                UPDATE reviews SET importance_level = :level WHERE id = :rid AND tenant_id = :tenant_id
+            """), {"level": level or None, "rid": review_id, "tenant_id": current_user.tenant_id})
             db.commit()
         
         return {"success": True, "message": "重要性等级更新成功"}
@@ -682,7 +843,7 @@ async def update_review_importance(review_id: str, data: Dict[str, str], db: Ses
 
 
 @router.post("/analyze/batch")
-async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks: BackgroundTasks):
+async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """批量分析选中的差评（异步处理）"""
     try:
         if not review_ids or len(review_ids) == 0:
@@ -694,16 +855,55 @@ async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks
                 int_review_ids.append(int(review_id))
             except (ValueError, TypeError):
                 continue
-        
-        # 使用线程池在后台完全独立运行，不依赖主线程
+        if not int_review_ids:
+            raise HTTPException(status_code=400, detail="请选择有效的评论ID")
+
+        validate_params = {"tenant_id": current_user.tenant_id}
+        access_join = ""
+        access_where = "r.tenant_id = :tenant_id"
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
+            dept_ids = db.execute(
+                text("SELECT department_id FROM user_departments WHERE user_id = :uid"),
+                {"uid": current_user.id}
+            ).fetchall()
+            dept_id_list = [d[0] for d in dept_ids]
+            if not dept_id_list:
+                raise HTTPException(status_code=403, detail="用户未分配部门，无权访问")
+            placeholders = ",".join([f":d_{i}" for i in range(len(dept_id_list))])
+            for i, did in enumerate(dept_id_list):
+                validate_params[f"d_{i}"] = did
+            access_join = " LEFT JOIN stores s ON r.store_id = s.id "
+            access_where += f" AND s.department_id IN ({placeholders}) AND s.department_id IS NOT NULL"
+
+        id_placeholders = ",".join([f":rid_{i}" for i in range(len(int_review_ids))])
+        for i, rid in enumerate(int_review_ids):
+            validate_params[f"rid_{i}"] = rid
+        validate_query = text(f"""
+            SELECT r.id
+            FROM reviews r
+            {access_join}
+            WHERE {access_where} AND r.id IN ({id_placeholders})
+        """)
+        allowed_review_ids = [row[0] for row in db.execute(validate_query, validate_params).fetchall()]
+        if not allowed_review_ids:
+            raise HTTPException(status_code=403, detail="无权分析这些评论")
+
         import concurrent.futures
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        executor.submit(async_batch_analyze, int_review_ids)
-        executor.shutdown(wait=False)  # 不等待，让它在后台继续
+        executor.submit(async_batch_analyze, allowed_review_ids, current_user.tenant_id)
+        executor.shutdown(wait=False)
 
         return {
             "success": True,
-            "message": f"已开始分析 {len(int_review_ids)} 条评论，请稍后刷新查看结果"
+            "message": f"已提交 {len(allowed_review_ids)} 条评论进行分析"
         }
 
     except HTTPException:
