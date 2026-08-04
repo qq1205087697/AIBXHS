@@ -44,6 +44,7 @@ import {
   PackagePlus,
   Ship,
   Star,
+  AlertTriangle,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -286,7 +287,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             label: "广告机器人",
           },
         ]
-      : []),
+      : []),     
+    {
+      key: '/data-alert',
+      icon: <AlertTriangle size={20} />,
+      label: '数据驾驶舱',
+    },
     ...(hasPermission("product:view")
       ? [
           {
@@ -436,6 +442,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/email": "邮件机器人",
       "/ads": "广告机器人",
       "/rating-optimization": "页面优化机器人",
+      '/data-alert': '数据驾驶舱',
       "/org": "组织管理",
       "/permissions": "权限管理",
       "/stores": "店铺管理",

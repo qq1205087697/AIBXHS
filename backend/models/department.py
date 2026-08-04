@@ -11,6 +11,7 @@ class Department(BaseModel):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
     name = Column(String(100), nullable=False, comment="部门名称")
     description = Column(String(500), nullable=True, comment="部门描述")
+    region = Column(String(100), nullable=True, comment="范围/地区")
 
     tenant = relationship("Tenant", back_populates="departments")
     # users = relationship("UserDepartment", back_populates="department")
