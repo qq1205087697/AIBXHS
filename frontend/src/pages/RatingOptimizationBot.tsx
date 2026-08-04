@@ -121,7 +121,7 @@ const RatingOptimizationBot: React.FC = () => {
       else if (ratingStatusFilter === 'unrated') ratingStatusValue = 0
       else if (ratingStatusFilter === 'low_score') ratingStatusValue = 1
 
-      const res = await productPageInfoApi.getList({
+      const params = {
         page: currentPage,
         page_size: pageSize,
         asin_search: asinSearch || undefined,
@@ -129,17 +129,31 @@ const RatingOptimizationBot: React.FC = () => {
         store_filter: storeFilter || undefined,
         rating_status: ratingStatusValue,
         low_score: ratingStatusFilter === 'low_score' ? true : undefined,
-      })
+      }
+      console.log('[DEBUG] fetchData 请求参数:', JSON.stringify(params))
+      const res = await productPageInfoApi.getList(params)
+      console.log('[DEBUG] fetchData 响应状态:', res.status, '响应数据:', JSON.stringify(res.data).substring(0, 500))
       if (res.data.success) {
         setData(res.data.data)
         setTotal(res.data.total)
         dataCache.current.set(cacheKey, { data: res.data.data, total: res.data.total })
+      } else {
+        console.error('[DEBUG] fetchData success=false:', res.data)
+        message.error(res.data.message || '获取数据失败')
       }
       setLoading(false)
-    } catch (error) {
-      console.error('获取评分数据失败:', error)
+    } catch (error: any) {
+      console.error('[DEBUG] 获取评分数据失败:', error)
+      console.error('[DEBUG] 错误详情:', {
+        message: error?.message,
+        status: error?.response?.status,
+        statusText: error?.response?.statusText,
+        responseData: error?.response?.data,
+        requestURL: error?.config?.url,
+        requestParams: error?.config?.params,
+      })
       setLoading(false)
-      message.error('获取评分数据失败')
+      message.error(`获取评分数据失败: ${error?.response?.status || ''} ${error?.message || ''}`)
     }
   }
 

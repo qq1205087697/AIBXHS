@@ -10,7 +10,7 @@ from urllib.parse import quote
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
-from services.operation_log import log_order_create, log_order_confirm, log_order_cancel, log_order_delete
+from services.operation_log import log_order_create, log_order_confirm, log_order_cancel, log_order_delete, log_order_update
 from services.inventory_batch import deduce_inventory_fifo, deduce_inventory_from_specific_batch, apply_deduction, rollback_deduction, recalculate_product_local_stock
 from services.excel_helper import create_outbound_excel_template, parse_outbound_excel
 import json
@@ -33,6 +33,7 @@ class OutboundOrderCreate(BaseModel):
     warehouse: Optional[str] = None
     handler: Optional[str] = None
     outbound_date: Optional[str] = None
+    store_group_id: Optional[int] = None
     notes: Optional[str] = None
     items: List[OutboundItemCreate]
 
@@ -43,6 +44,7 @@ class OutboundOrderUpdate(BaseModel):
     warehouse: Optional[str] = None
     handler: Optional[str] = None
     outbound_date: Optional[str] = None
+    store_group_id: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -55,6 +57,7 @@ async def get_outbound_orders(
     search: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    store_group_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -77,6 +80,9 @@ async def get_outbound_orders(
         if end_date:
             where_conditions.append("DATE(oo.created_at) <= :end_date")
             params["end_date"] = end_date
+        if store_group_id:
+            where_conditions.append("oo.store_group_id = :store_group_id")
+            params["store_group_id"] = store_group_id
 
         where_clause = " AND ".join(where_conditions)
 
@@ -90,8 +96,9 @@ async def get_outbound_orders(
             SELECT oo.id, oo.order_number, oo.outbound_type, oo.warehouse,
                    oo.handler, oo.outbound_date, oo.total_quantity, oo.total_amount,
                    oo.status, oo.notes, oo.created_by, oo.confirmed_at, oo.created_at,
-                   oo.confirmed_by
+                   oo.confirmed_by, oo.store_group_id, sg.name as store_group_name
             FROM outbound_orders oo
+            LEFT JOIN store_groups sg ON oo.store_group_id = sg.id AND sg.deleted_at IS NULL
             WHERE {where_clause}
             ORDER BY oo.created_at DESC
             LIMIT :limit OFFSET :offset
@@ -176,6 +183,8 @@ async def get_outbound_orders(
                 "confirmed_at": row[11].strftime("%Y-%m-%d %H:%M:%S") if row[11] else "",
                 "created_at": row[12].strftime("%Y-%m-%d %H:%M:%S") if row[12] else "",
                 "confirmed_by": row[13],
+                "store_group_id": row[14],
+                "store_group_name": row[15] or "",
                 "creator_name": user_map.get(row[10], ""),
                 "confirmer_name": user_map.get(row[13], ""),
                 "items": order_items,
@@ -195,12 +204,19 @@ async def create_outbound_order(
     try:
         if not data.items:
             raise HTTPException(status_code=400, detail="请至少添加一条出库明细")
-        
         # 验证：如果是报废类型，每个商品必须选择批次
         if data.outbound_type == "scrap":
             for item in data.items:
                 if not item.selected_batch_id:
                     raise HTTPException(status_code=400, detail="报废类型的出库单必须为每个商品选择指定批次")
+
+        # 验证：如果指定了store_group_id，需要验证是否存在
+        if data.store_group_id:
+            group_check = db.execute(text(
+                "SELECT id FROM store_groups WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            ), {"id": data.store_group_id, "tid": current_user.tenant_id}).fetchone()
+            if not group_check:
+                raise HTTPException(status_code=400, detail="指定的店铺分组不存在")
 
         total_qty = sum(item.quantity for item in data.items)
         total_amt = sum((item.quantity * (item.unit_price or 0)) for item in data.items)
@@ -219,9 +235,9 @@ async def create_outbound_order(
 
         db.execute(text("""
             INSERT INTO outbound_orders (tenant_id, order_number, outbound_type,
-                warehouse, handler, outbound_date, total_quantity, total_amount, status, notes, created_by, created_at, updated_at)
+                warehouse, handler, outbound_date, total_quantity, total_amount, status, store_group_id, notes, created_by, created_at, updated_at)
             VALUES (:tenant_id, :order_number, :outbound_type,
-                :warehouse, :handler, :outbound_date, :total_quantity, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
+                :warehouse, :handler, :outbound_date, :total_quantity, :total_amount, 'draft', :store_group_id, :notes, :created_by, :created_at, :updated_at)
         """), {
             "tenant_id": current_user.tenant_id,
             "order_number": data.order_number,
@@ -231,6 +247,7 @@ async def create_outbound_order(
             "outbound_date": outbound_date_value,
             "total_quantity": total_qty,
             "total_amount": total_amt,
+            "store_group_id": data.store_group_id,
             "notes": data.notes,
             "created_by": current_user.id,
             "created_at": datetime.now(),
@@ -255,6 +272,7 @@ async def create_outbound_order(
         log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "outbound", order_id, data.order_number,
                          {"order_number": data.order_number, "items_count": len(data.items), "total_quantity": total_qty})
+        db.commit()
 
         return {"success": True, "message": "出库订单创建成功", "data": {"id": order_id}}
     except HTTPException:
@@ -273,16 +291,26 @@ async def update_outbound_order(
 ):
     try:
         row = db.execute(text(
-            "SELECT id, status FROM outbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            "SELECT id, order_number, status FROM outbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
         ), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="出库订单不存在")
-        if row[1] != "draft":
+        if row[2] != "draft":
             raise HTTPException(status_code=400, detail="只能修改草稿状态的订单")
+
+        before_data = {"order_number": row[1], "status": row[2]}
+
+        # 验证：如果指定了store_group_id，需要验证是否存在
+        if data.store_group_id:
+            group_check = db.execute(text(
+                "SELECT id FROM store_groups WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            ), {"id": data.store_group_id, "tid": current_user.tenant_id}).fetchone()
+            if not group_check:
+                raise HTTPException(status_code=400, detail="指定的店铺分组不存在")
 
         updates = []
         params = {"id": order_id}
-        for field in ["order_number", "outbound_type", "warehouse", "handler", "outbound_date", "notes"]:
+        for field in ["order_number", "outbound_type", "warehouse", "handler", "outbound_date", "store_group_id", "notes"]:
             val = getattr(data, field)
             if val is not None:
                 updates.append(f"{field} = :{field}")
@@ -291,6 +319,11 @@ async def update_outbound_order(
         if updates:
             db.execute(text(f"UPDATE outbound_orders SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"), params)
             db.commit()
+
+        log_order_update(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
+                         "outbound", order_id, row[1], before_data,
+                         {"order_number": row[1], "status": "draft"})
+        db.commit()
 
         return {"success": True, "message": "出库订单更新成功"}
     except HTTPException:
@@ -308,14 +341,15 @@ async def confirm_outbound_order(
 ):
     try:
         order = db.execute(text(
-            "SELECT id, order_number, status, tenant_id, outbound_type FROM outbound_orders WHERE id = :id AND deleted_at IS NULL"
+            "SELECT id, order_number, status, tenant_id, outbound_type, store_group_id FROM outbound_orders WHERE id = :id AND deleted_at IS NULL"
         ), {"id": order_id}).fetchone()
         if not order:
             raise HTTPException(status_code=404, detail="出库订单不存在")
         if order[2] != "draft":
             raise HTTPException(status_code=400, detail=f"当前状态'{order[2]}'不允许确认")
-        
+
         outbound_type = order[4]
+        store_group_id = order[5]  # 获取店铺分组ID
 
         items = db.execute(text(
             "SELECT ooi.id, ooi.product_id, ooi.quantity, p.name as product_name, p.product_code, ooi.batch_id "
@@ -323,36 +357,52 @@ async def confirm_outbound_order(
             "LEFT JOIN products p ON p.id = ooi.product_id "
             "WHERE ooi.outbound_order_id = :oid AND ooi.deleted_at IS NULL"
         ), {"oid": order_id}).fetchall()
-        
         # 验证：如果是报废类型，每个商品必须选择批次
         if outbound_type == "scrap":
             for item in items:
                 if not item[5]:  # item[5] is batch_id
                     raise HTTPException(status_code=400, detail="报废类型的出库单必须为每个商品选择指定批次")
 
-        deduction_results = []
-        deduction_details_all = []
+        # 合并同产品的数量，避免重复扣减库存
+        product_quantity_map = {}
+        product_items_map = {}  # 记录每个产品对应的行项目
         for item in items:
             item_id, product_id, quantity, product_name, product_code, selected_batch_id = item
-            if selected_batch_id:
-                # 用户选择了指定批次，从该批次扣减
+            if product_id not in product_quantity_map:
+                product_quantity_map[product_id] = 0
+                product_items_map[product_id] = []
+            product_quantity_map[product_id] += int(quantity)
+            product_items_map[product_id].append(item)
+
+        deduction_results = []
+        deduction_details_all = []
+
+        # 按产品合并扣减库存
+        for product_id, total_quantity in product_quantity_map.items():
+            # 检查该产品是否有指定批次（如果有多个行，只要有指定批次就按指定批次处理）
+            selected_batch_ids = [item[5] for item in product_items_map[product_id] if item[5]]
+
+            if selected_batch_ids:
+                # 有指定批次，从指定批次扣减（取第一个指定批次）
                 details, actual_qty, fulfilled = deduce_inventory_from_specific_batch(
-                    db, current_user.tenant_id, product_id, int(quantity), selected_batch_id
+                    db, current_user.tenant_id, product_id, total_quantity, selected_batch_ids[0], store_group_id
                 )
                 if not fulfilled:
+                    group_msg = f"（店铺分组#{store_group_id}）" if store_group_id else ""
                     raise HTTPException(
                         status_code=400,
-                        detail=f"产品#{product_id}选择的批次库存不足: 需要{quantity}件，当前可用{actual_qty}件"
+                        detail=f"产品#{product_id}选择的批次库存不足{group_msg}: 需要{total_quantity}件，当前可用{actual_qty}件"
                     )
             else:
                 # 未选择批次，按 FIFO 自动分配
                 details, actual_qty, fulfilled = deduce_inventory_fifo(
-                    db, current_user.tenant_id, product_id, int(quantity)
+                    db, current_user.tenant_id, product_id, total_quantity, store_group_id
                 )
                 if not fulfilled:
+                    group_msg = f"（店铺分组#{store_group_id}）" if store_group_id else ""
                     raise HTTPException(
                         status_code=400,
-                        detail=f"产品#{product_id}库存不足: 需要{quantity}件，当前可用{actual_qty}件"
+                        detail=f"产品#{product_id}库存不足{group_msg}: 需要{total_quantity}件，当前可用{actual_qty}件"
                     )
             deduction_details_all.extend(details)
 
@@ -365,19 +415,22 @@ async def confirm_outbound_order(
             # 取第一个批次作为主批次
             first_batch_id = details[0]["batch_id"] if len(details) > 0 else None
             first_batch_number = details[0]["batch_number"] if len(details) > 0 else None
-            db.execute(text("""
-                UPDATE outbound_order_items SET
-                    batch_id = :bid, batch_number = :bn, batch_details = :bd, updated_at = :now
-                WHERE id = :iid
-            """), {
-                "bid": first_batch_id, "bn": first_batch_number,
-                "bd": batch_details_json, "now": datetime.now(), "iid": item[0]
-            })
+            
+            # 更新该产品的所有行项目
+            for item in product_items_map[product_id]:
+                db.execute(text("""
+                    UPDATE outbound_order_items SET
+                        batch_id = :bid, batch_number = :bn, batch_details = :bd, updated_at = :now
+                    WHERE id = :iid
+                """), {
+                    "bid": first_batch_id, "bn": first_batch_number,
+                    "bd": batch_details_json, "now": datetime.now(), "iid": item[0]
+                })
 
             deduction_results.append({
-                "product_id": item[1],
-                "product_name": item[3] or f"产品#{item[1]}",
-                "product_code": item[4] or "",
+                "product_id": product_id,
+                "product_name": product_items_map[product_id][0][3] or f"产品#{product_id}",
+                "product_code": product_items_map[product_id][0][4] or "",
                 "details": details,
                 "batch_info": batch_info,
             })
@@ -392,12 +445,22 @@ async def confirm_outbound_order(
         """), {"uid": current_user.id, "now": datetime.now(), "id": order_id})
         db.commit()
 
+        # 构建日志消息
+        deduction_msg = "FIFO逻辑: 优先出库最早批次"
+        if store_group_id:
+            deduction_msg += f"，限定在店铺分组#{store_group_id}范围内"
+
         log_order_confirm(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                           "outbound", order_id, order[1],
-                          {"status": before_status},
-                          {"status": "confirmed", "deduction_by_batch": "FIFO逻辑: 优先出库最早批次"})
+                          {"status": before_status, "store_group_id": store_group_id},
+                          {"status": "confirmed", "deduction_by_batch": deduction_msg})
+        db.commit()
 
-        return {"success": True, "message": "出库订单已确认，按FIFO规则自动扣减库存", "data": {"deduction_results": deduction_results}}
+        success_msg = "出库订单已确认，按FIFO规则自动扣减库存"
+        if store_group_id:
+            success_msg += f"（店铺分组#{store_group_id}）"
+
+        return {"success": True, "message": success_msg, "data": {"deduction_results": deduction_results}}
     except HTTPException:
         raise
     except Exception as e:
@@ -475,6 +538,7 @@ async def delete_outbound_order(
 
         log_order_delete(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                         "outbound", order_id, row[1], before_data)
+        db.commit()
 
         return {"success": True, "message": "出库订单已删除"}
     except HTTPException:

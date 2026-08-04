@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import Optional, List
 from pydantic import BaseModel
 from database.database import get_db
 from models.product_page_info import ProductPageInfo
 from models.store import Store
+from models.department import UserDepartment
 from dependencies import get_current_user
 from models.user import User
 import httpx
@@ -16,6 +18,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/product-page-info", tags=["product-page-info"])
+
+
+def is_admin_user(user: User, db: Session) -> bool:
+    """判断用户是否是管理员（通过 role_id）"""
+    if not user.role_id:
+        return False
+    role = db.execute(text("""
+        SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+    """), {"role_id": user.role_id}).fetchone()
+    return role and role[0] == "admin"
+
+
+def get_user_store_names(user: User, db: Session) -> list:
+    """获取非管理员用户所属部门下的所有店铺inventory_name列表"""
+    dept_ids = db.query(UserDepartment.department_id).filter(
+        UserDepartment.user_id == user.id
+    ).all()
+    dept_id_list = [d[0] for d in dept_ids]
+    if not dept_id_list:
+        return []
+    stores = db.query(Store.inventory_name).filter(
+        Store.tenant_id == user.tenant_id,
+        Store.department_id.in_(dept_id_list),
+        Store.inventory_name.isnot(None)
+    ).all()
+    return [s[0] for s in stores if s[0]]
 
 
 def parse_string_score(val: Optional[str]) -> Optional[float]:
@@ -234,6 +262,15 @@ async def get_product_page_info_list(
         ProductPageInfo.tenant_id == current_user.tenant_id
     )
 
+    # 非管理员用户按部门过滤数据
+    if not is_admin_user(current_user, db):
+        user_store_names = get_user_store_names(current_user, db)
+        if user_store_names:
+            query = query.filter(ProductPageInfo.store.in_(user_store_names))
+        else:
+            # 用户没有分配任何部门店铺，不显示任何数据
+            query = query.filter(ProductPageInfo.id == -1)
+
     if rating_status is not None:
         query = query.filter(ProductPageInfo.rating_status == rating_status)
 
@@ -416,10 +453,20 @@ async def get_ranking(
 ):
     """获取评分排行榜（仅已评分记录）"""
     # 查询所有已评分记录
-    rated_items = db.query(ProductPageInfo).filter(
+    rated_query = db.query(ProductPageInfo).filter(
         ProductPageInfo.tenant_id == current_user.tenant_id,
         ProductPageInfo.rating_status == 1
-    ).all()
+    )
+
+    # 非管理员用户按部门过滤数据
+    if not is_admin_user(current_user, db):
+        user_store_names = get_user_store_names(current_user, db)
+        if user_store_names:
+            rated_query = rated_query.filter(ProductPageInfo.store.in_(user_store_names))
+        else:
+            rated_query = rated_query.filter(ProductPageInfo.id == -1)
+
+    rated_items = rated_query.all()
 
     if not rated_items:
         return {"success": True, "data": {"top10": [], "bottom10": []}}
@@ -569,9 +616,19 @@ async def get_store_options(
     current_user: User = Depends(get_current_user),
 ):
     """获取店铺下拉选项（从 product_page_info 表中提取唯一店铺名，映射为shop_abbr）"""
-    stores = db.query(ProductPageInfo.store).filter(
+    stores_query = db.query(ProductPageInfo.store).filter(
         ProductPageInfo.tenant_id == current_user.tenant_id
-    ).distinct().all()
+    )
+
+    # 非管理员用户按部门过滤店铺
+    if not is_admin_user(current_user, db):
+        user_store_names = get_user_store_names(current_user, db)
+        if user_store_names:
+            stores_query = stores_query.filter(ProductPageInfo.store.in_(user_store_names))
+        else:
+            stores_query = stores_query.filter(ProductPageInfo.id == -1)
+
+    stores = stores_query.distinct().all()
     store_names = list(dict.fromkeys([s[0].strip() for s in stores if s[0]]))
 
     # 查询映射

@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { ConfigProvider, App as AntdApp } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+import { AuthProvider } from './contexts/AuthContext'
 import App from './App.tsx'
 import './index.css'
 
@@ -27,7 +28,9 @@ const ThemedApp: React.FC = () => {
       }}
     >
       <AntdApp>
-        <App />
+        <AuthProvider>
+          <App />
+        </AuthProvider>
       </AntdApp>
     </ConfigProvider>
   )

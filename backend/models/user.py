@@ -13,8 +13,7 @@ class User(BaseModel):
     email = Column(String(255), nullable=True, comment="邮箱")
     password_hash = Column(String(255), nullable=False, comment="密码哈希")
     nickname = Column(String(100), nullable=True, comment="昵称")
-    role = Column(String(20), default="operator", comment="角色编码（兼容旧版）")
-    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True, comment="角色ID（新版）")
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True, comment="角色ID")
     status = Column(String(20), default="active", index=True, comment="状态")
 
     # 关联关系

@@ -13,16 +13,29 @@ class Department(BaseModel):
     description = Column(String(500), nullable=True, comment="部门描述")
 
     tenant = relationship("Tenant", back_populates="departments")
-    users = relationship("UserDepartment", back_populates="department")
+    # users = relationship("UserDepartment", back_populates="department")
+    members = relationship("UserDepartment", back_populates="department", cascade="all, delete-orphan")
+
+# class UserDepartment(BaseModel):
+#     """用户-部门关联模型"""
+#     __tablename__ = "user_departments"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+#     department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
+
+#     user = relationship("User", back_populates="departments")
+#     department = relationship("Department", back_populates="users")
+    
 
 
 class UserDepartment(BaseModel):
-    """用户-部门关联模型"""
     __tablename__ = "user_departments"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
+    id = Column(Integer, primary_key=True, index=True, comment="关联ID")
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True, comment="用户ID")
+    department_id = Column(Integer, ForeignKey("departments.id"), nullable=False, index=True, comment="部门ID")
 
+    department = relationship("Department", back_populates="members")
     user = relationship("User", back_populates="departments")
-    department = relationship("Department", back_populates="users")

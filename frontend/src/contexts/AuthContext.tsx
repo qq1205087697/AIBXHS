@@ -106,6 +106,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const logout = () => {
     localStorage.removeItem('token');
+    sessionStorage.removeItem('product_management_session_filters_v1');
     setUser(null);
     setPermissions([]);
   };

@@ -22,26 +22,29 @@ import {
   Pagination,
 } from "antd";
 import {
-  PlusOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  UserOutlined,
-  KeyOutlined,
-  SaveOutlined,
-  MoreOutlined,
-  UserAddOutlined,
-  ShoppingOutlined,
-  ArrowDownOutlined,
-  ArrowUpOutlined,
-  TruckOutlined,
-  DatabaseOutlined,
-  ShopOutlined,
-  TeamOutlined,
-  SafetyOutlined,
-  FileTextOutlined,
-  RobotOutlined,
-  SwapOutlined,
-  HomeOutlined,
+    PlusOutlined,
+    DeleteOutlined,
+    EditOutlined,
+    UserOutlined,
+    KeyOutlined,
+    SaveOutlined,
+    MoreOutlined,
+    UserAddOutlined,
+    ShoppingOutlined,
+    ArrowDownOutlined,
+    ArrowUpOutlined,
+    TruckOutlined,
+    DatabaseOutlined,
+    ShopOutlined,
+    TeamOutlined,
+    SafetyOutlined,
+    FileTextOutlined,
+    RobotOutlined,
+    SwapOutlined,
+    HomeOutlined,
+    MailOutlined,
+    PlusSquareOutlined,
+    StarOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
 
@@ -339,22 +342,26 @@ const PermissionManagement: React.FC = () => {
   };
 
   // 模块配置 - 定义每个模块的图标和颜色
-  const moduleConfig: Record<string, { icon: React.ReactNode; color: string }> = {
-    '产品管理': { icon: <ShoppingOutlined />, color: '#722ed1' },
-    '入库管理': { icon: <ArrowDownOutlined />, color: '#52c41a' },
-    '出库管理': { icon: <ArrowUpOutlined />, color: '#fa541c' },
-    '采购管理': { icon: <TruckOutlined />, color: '#fa8c16' },
-    '挪货管理': { icon: <SwapOutlined />, color: '#eb2f96' },
-    '仓库管理': { icon: <HomeOutlined />, color: '#fa8c16' },
-    '库存管理': { icon: <DatabaseOutlined />, color: '#13c2c2' },
-    '店铺管理': { icon: <ShopOutlined />, color: '#2f54eb' },
-    '组织管理': { icon: <TeamOutlined />, color: '#eb2f96' },
-    '权限管理': { icon: <SafetyOutlined />, color: '#f5222d' },
-    '系统管理': { icon: <FileTextOutlined />, color: '#595959' },
-    'AI聊天助手': { icon: <RobotOutlined />, color: '#1677ff' },
-    '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
-    '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
-  };
+    const moduleConfig: Record<string, { icon: React.ReactNode; color: string }> = {
+        '产品管理': { icon: <ShoppingOutlined />, color: '#722ed1' },
+        '入库管理': { icon: <ArrowDownOutlined />, color: '#52c41a' },
+        '出库管理': { icon: <ArrowUpOutlined />, color: '#fa541c' },
+        '采购管理': { icon: <TruckOutlined />, color: '#fa8c16' },
+        '挪货管理': { icon: <SwapOutlined />, color: '#eb2f96' },
+        '仓库管理': { icon: <HomeOutlined />, color: '#fa8c16' },
+        '库存管理': { icon: <DatabaseOutlined />, color: '#13c2c2' },
+        '店铺管理': { icon: <ShopOutlined />, color: '#2f54eb' },
+        '组织管理': { icon: <TeamOutlined />, color: '#eb2f96' },
+        '权限管理': { icon: <SafetyOutlined />, color: '#f5222d' },
+        '系统管理': { icon: <FileTextOutlined />, color: '#595959' },
+        'AI聊天助手': { icon: <RobotOutlined />, color: '#1677ff' },
+        '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
+        '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
+        '邮件机器人': { icon: <MailOutlined />, color: '#1890ff' },
+        '页面优化机器人': { icon: <StarOutlined />, color: '#faad14' },
+        '补货管理': { icon: <PlusSquareOutlined />, color: '#7c3aed' },
+        '发货管理': { icon: <ShopOutlined />, color: '#1890ff' },
+    };
 
   // 计算权限总数
   const totalPermissionsCount = Object.values(permissions).reduce(
@@ -762,22 +769,20 @@ const PermissionManagement: React.FC = () => {
         width={900}
       >
         <Transfer
-          dataSource={allUsers
-            // 过滤掉已经有其他角色的用户（当前角色的用户除外）
-            .filter(user => {
-              const hasOtherRole = user.roles && user.roles.length > 0 && 
-                user.roles.some(r => r.id !== selectedRole?.id);
-              const isCurrentRoleUser = roleUsers.some(ru => ru.id === user.id);
-              return !hasOtherRole || isCurrentRoleUser;
-            })
-            .map(user => ({
+          dataSource={allUsers.map(user => {
+            // 判断用户是否已有其他角色（非当前选中角色）
+            const hasOtherRole = user.roles && user.roles.length > 0 &&
+              user.roles.some((r: any) => r.id !== selectedRole?.id);
+            // 无任何角色的用户，或者仅属于当前角色的用户，都可以选择
+            const hasNoRole = !user.roles || user.roles.length === 0;
+            return {
               key: user.id,
               title: user.username,
               description: user.nickname || user.email,
               roles: user.roles,
-              disabled: user.roles && user.roles.length > 0 && 
-                user.roles.some(r => r.id !== selectedRole?.id)
-            }))}
+              disabled: hasOtherRole, // 已有其他角色的用户禁用，防止误操作
+            };
+          })}
           titles={['可用用户', '已选用户']}
           targetKeys={selectedUserIds}
           onChange={(targetKeys) => setSelectedUserIds(targetKeys as number[])}

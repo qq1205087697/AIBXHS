@@ -2,15 +2,40 @@
 本地仓库存API路由
 """
 import logging
+import os
 from datetime import date
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from typing import Optional
 from sqlalchemy.orm import Session
 from database.database import get_db
+from dependencies import get_current_user
+from models.user import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/local-inventory", tags=["local-inventory"])
+
+# 允许的文件扩展名
+ALLOWED_EXTENSIONS = {".xlsx", ".xls"}
+# 最大文件大小: 10MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
+
+def _validate_upload_file(file: UploadFile, content: bytes) -> None:
+    """校验上传的文件：扩展名 + 大小"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    ext = os.path.splitext(file.filename.lower())[1]
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: {ext}，仅支持 .xlsx 和 .xls 文件"
+        )
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件过大: {len(content) / 1024 / 1024:.1f}MB，最大支持 10MB"
+        )
 
 
 @router.post("/import")
@@ -29,11 +54,13 @@ async def import_local_inventory(
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="上传的文件为空")
+        _validate_upload_file(file, content)
 
-        result = import_local_inventory(db, file_content=content, filename=file.filename)
+        result = import_local_inventory(db, current_user.tenant_id, file_content=content, filename=file.filename)
         return {"success": True, "data": result}
 
     except ValueError as e:
+        logger.warning(f"减表导入失败(ValueError): {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
@@ -43,11 +70,11 @@ async def import_local_inventory(
 
 
 @router.get("/summary")
-async def get_local_inventory_summary(db: Session = Depends(get_db)):
+async def get_local_inventory_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """获取本地仓库存汇总统计"""
     try:
         from services.local_inventory_service import get_local_inventory_summary
-        result = get_local_inventory_summary(db)
+        result = get_local_inventory_summary(db, current_user.tenant_id)
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"获取本地仓库存汇总失败: {e}")
@@ -64,7 +91,7 @@ async def get_local_inventory_list(
     """查询本地仓库存列表"""
     try:
         from services.local_inventory_service import get_local_inventory_list
-        result = get_local_inventory_list(db, keyword=keyword, page=page, page_size=page_size)
+        result = get_local_inventory_list(db, current_user.tenant_id, keyword=keyword, page=page, page_size=page_size)
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"查询本地仓库存列表失败: {e}")
@@ -72,11 +99,11 @@ async def get_local_inventory_list(
 
 
 @router.delete("/clear")
-async def clear_local_inventory(db: Session = Depends(get_db)):
+async def clear_local_inventory(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """清空本地仓库存数据"""
     try:
         from services.local_inventory_service import clear_local_inventory
-        result = clear_local_inventory(db)
+        result = clear_local_inventory(db, current_user.tenant_id)
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"清空本地仓库存失败: {e}")
@@ -100,11 +127,13 @@ async def import_reduction_table(
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="上传的文件为空")
+        _validate_upload_file(file, content)
 
-        result = import_reduction_table(db, country=country, file_content=content)
+        result = import_reduction_table(db, country=country, file_content=content, tenant_id=current_user.tenant_id)
         return {"success": True, "data": result}
 
     except ValueError as e:
+        logger.warning(f"减表导入失败(ValueError): {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise

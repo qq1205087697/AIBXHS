@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, Select, message,
-  Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination,
+  Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination, Dropdown, Menu,
 } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
-  AppstoreOutlined, ShopOutlined,
+  AppstoreOutlined, ShopOutlined, TeamOutlined, UserOutlined, DownOutlined,
 } from '@ant-design/icons'
 import { storesApi, departmentsApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
@@ -16,11 +17,11 @@ interface Store {
   name: string
   platform: string
   site: string
-  platform_store_id: string
   status: string
   department_id: number | null
   department_name: string
   inventory_name: string | null
+  ziniao_account: string | null
   group_id: number | null
   group_name: string
   created_at: string
@@ -48,12 +49,27 @@ const StoreManagement: React.FC = () => {
   const [modalOpen, setModalOpen] = useState(false)
   const [editingStore, setEditingStore] = useState<Store | null>(null)
   const [form] = Form.useForm()
-  const [searchForm] = Form.useForm()
-  const [filters, setFilters] = useState({ name_search: '', site_search: '' })
+  const [searchText, setSearchText] = useState('')
+  const [filters, setFilters] = useState<Record<string, any>>({ search: '' })
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
+  const searchTimeoutRef = useRef<number | null>(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchForm] = Form.useForm()
+
+  // 分配人员相关状态
+  const [memberModalOpen, setMemberModalOpen] = useState(false)
+  const [memberStoreId, setMemberStoreId] = useState<number | null>(null)
+  const [memberGroupId, setMemberGroupId] = useState<number | null>(null)
+  const [memberList, setMemberList] = useState<any[]>([])
+  const [memberLoading, setMemberLoading] = useState(false)
+  const [allUsers, setAllUsers] = useState<any[]>([])
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([])
+
+  // 分配店铺分组相关状态
+  const [assignGroupModalOpen, setAssignGroupModalOpen] = useState(false)
+  const [assignGroupStore, setAssignGroupStore] = useState<Store | null>(null)
+  const [assignGroupForm] = Form.useForm()
 
   const [groups, setGroups] = useState<StoreGroup[]>([])
   const [groupLoading, setGroupLoading] = useState(false)
@@ -75,6 +91,7 @@ const StoreManagement: React.FC = () => {
     { label: 'Shopee', value: 'shopee' },
     { label: 'Lazada', value: 'lazada' },
     { label: 'TikTok', value: 'tiktok' },
+    { label: 'Temu', value: 'temu' },
     { label: 'Other', value: 'other' },
   ]
 
@@ -152,17 +169,26 @@ const StoreManagement: React.FC = () => {
     }
   }
 
-  const handleSearch = async () => {
-    const values = await searchForm.validateFields()
-    setFilters(values)
-    setPagination((prev) => ({ ...prev, current: 1 }))
+  const handleSearch = (value: string) => {
+    setSearchText(value)
+    
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+    
+    searchTimeoutRef.current = setTimeout(() => {
+      setFilters(prev => ({ ...prev, search: value }))
+      setPagination((prev) => ({ ...prev, current: 1 }))
+    }, 300)
   }
 
-  const handleReset = () => {
-    searchForm.resetFields()
-    setFilters({ name_search: '', site_search: '' })
-    setPagination((prev) => ({ ...prev, current: 1 }))
-  }
+  useEffect(() => {
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const rowSelection = {
     selectedRowKeys,
@@ -205,9 +231,11 @@ const StoreManagement: React.FC = () => {
     setEditingStore(store)
     form.setFieldsValue({
       name: store.name,
+      inventory_name: store.inventory_name,
+      ziniao_account: store.ziniao_account,
       platform: store.platform,
       site: store.site,
-      platform_store_id: store.platform_store_id,
+      shop_abbr: (store as any).shop_abbr,
       department_id: store.department_id,
       status: store.status,
     })
@@ -230,6 +258,82 @@ const StoreManagement: React.FC = () => {
     } catch (e: any) {
       if (e.errorFields) return
       message.error('操作失败')
+    }
+  }
+
+  // 分配人员相关函数
+  const handleOpenMemberModal = async (id: number, type: 'store' | 'group' = 'store') => {
+    if (type === 'store') {
+      setMemberStoreId(id)
+      setMemberGroupId(null)
+    } else {
+      setMemberGroupId(id)
+      setMemberStoreId(null)
+    }
+    setMemberModalOpen(true)
+    setMemberLoading(true)
+    try {
+      if (type === 'store') {
+        // 获取店铺人员
+        const memberRes = await storesApi.getMembers(id)
+        const members = memberRes.data?.data || []
+        setMemberList(members)
+        setSelectedUserIds(members.map((m: any) => m.id))
+      } else {
+        // 获取店铺分组的人员（合并分组下所有店铺的人员）
+        const memberRes = await storeGroupsApi.getMembers(id)
+        const members = memberRes.data?.data || []
+        setMemberList(members)
+        setSelectedUserIds(members.map((m: any) => m.id))
+      }
+
+      // 获取所有用户
+      const userRes = await departmentsApi.getAllUsers()
+      setAllUsers(userRes.data?.data || [])
+    } catch (e) {
+      message.error('获取数据失败')
+    } finally {
+      setMemberLoading(false)
+    }
+  }
+
+  const handleSaveMembers = async () => {
+    if (!memberStoreId && !memberGroupId) return
+    setMemberLoading(true)
+    try {
+      if (memberStoreId) {
+        await storesApi.setMembers(memberStoreId, { user_ids: selectedUserIds })
+      } else if (memberGroupId) {
+        await storeGroupsApi.setMembers(memberGroupId, { user_ids: selectedUserIds })
+      }
+      message.success('保存成功')
+      setMemberModalOpen(false)
+    } catch (e) {
+      message.error('保存失败')
+    } finally {
+      setMemberLoading(false)
+    }
+  }
+
+  // 分配店铺分组相关函数
+  const handleOpenGroupModal = (store: Store) => {
+    setAssignGroupStore(store)
+    assignGroupForm.setFieldsValue({ group_id: store.group_id })
+    setAssignGroupModalOpen(true)
+  }
+
+  const handleSaveAssignGroup = async () => {
+    if (!assignGroupStore) return
+    try {
+      const values = await assignGroupForm.validateFields()
+      // 调用API更新店铺分组
+      await storesApi.update(assignGroupStore.id, { group_id: values.group_id } as any)
+      message.success('分配店铺分组成功')
+      setAssignGroupModalOpen(false)
+      fetchStores()
+      fetchAllStores()
+    } catch (e) {
+      message.error('分配失败')
     }
   }
 
@@ -326,22 +430,15 @@ const StoreManagement: React.FC = () => {
   }
 
   const storeColumns = [
-    { title: '店铺名称', dataIndex: 'name', key: 'name' },
-    { title: '店铺', dataIndex: 'inventory_name', key: 'inventory_name' },
+    { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
     {
       title: '平台',
       dataIndex: 'platform',
       key: 'platform',
       render: (v: string) => <Tag color="blue">{v}</Tag>,
     },
+    { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account' },
     { title: '站点', dataIndex: 'site', key: 'site' },
-    { title: '店铺ID', dataIndex: 'platform_store_id', key: 'platform_store_id' },
-    {
-      title: '所属部门',
-      dataIndex: 'department_name',
-      key: 'department_name',
-      render: (v: string) => <Tag color="green">{v}</Tag>,
-    },
     {
       title: '所属分组',
       dataIndex: 'group_name',
@@ -361,14 +458,48 @@ const StoreManagement: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      render: (_: any, record: Store) => (
-        <Space>
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>编辑</Button>
-          <Popconfirm title="确定删除?" onConfirm={() => handleDelete(record.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
-        </Space>
-      ),
+      width: 100,
+      render: (_: any, record: Store) => {
+        const items: MenuProps['items'] = [
+          {
+            key: 'edit',
+            label: '编辑',
+            icon: <EditOutlined />,
+            onClick: () => handleEdit(record),
+          },
+          {
+            key: 'assignGroup',
+            label: '分配店铺分组',
+            icon: <TeamOutlined />,
+            onClick: () => handleOpenGroupModal(record),
+          },
+          {
+            type: 'divider',
+          },
+          {
+            key: 'delete',
+            label: '删除',
+            icon: <DeleteOutlined />,
+            danger: true,
+            onClick: () => {
+              Modal.confirm({
+                title: '确定删除?',
+                content: '删除后数据将无法恢复',
+                okText: '确定',
+                cancelText: '取消',
+                onOk: () => handleDelete(record.id),
+              })
+            },
+          },
+        ]
+        return (
+          <Dropdown menu={{ items }} trigger={['click']}>
+            <Button size="small">
+              操作 <DownOutlined />
+            </Button>
+          </Dropdown>
+        )
+      },
     },
   ]
 
@@ -385,23 +516,60 @@ const StoreManagement: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      render: (_: any, record: StoreGroup) => (
-        <Space>
-          <Button size="small" icon={<ShopOutlined />} onClick={() => handleOpenGroupDrawer(record)}>
-            管理店铺
-          </Button>
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleGroupEdit(record)}>编辑</Button>
-          <Popconfirm title="删除分组后，分组内店铺将取消分组，确定删除?" onConfirm={() => handleGroupDelete(record.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
-        </Space>
-      ),
+      width: 100,
+      render: (_: any, record: StoreGroup) => {
+        const items: MenuProps['items'] = [
+          {
+            key: 'manage',
+            label: '管理店铺',
+            icon: <ShopOutlined />,
+            onClick: () => handleOpenGroupDrawer(record),
+          },
+          {
+            key: 'assignMember',
+            label: '分配人员',
+            icon: <UserOutlined />,
+            onClick: () => handleOpenMemberModal(record.id, 'group'),
+          },
+          {
+            key: 'edit',
+            label: '编辑',
+            icon: <EditOutlined />,
+            onClick: () => handleGroupEdit(record),
+          },
+          {
+            type: 'divider',
+          },
+          {
+            key: 'delete',
+            label: '删除',
+            icon: <DeleteOutlined />,
+            danger: true,
+            onClick: () => {
+              Modal.confirm({
+                title: '删除分组',
+                content: '删除分组后，分组内店铺将取消分组，确定删除?',
+                okText: '确定',
+                cancelText: '取消',
+                onOk: () => handleGroupDelete(record.id),
+              })
+            },
+          },
+        ]
+        return (
+          <Dropdown menu={{ items }} trigger={['click']}>
+            <Button size="small">
+              操作 <DownOutlined />
+            </Button>
+          </Dropdown>
+        )
+      },
     },
   ]
 
   const transferDataSource = allStores.map((s) => ({
     key: String(s.id),
-    title: `${s.name}${s.site ? ` - ${s.site}` : ''}`,
+    title: `${s.inventory_name || s.name}${s.site ? ` - ${s.site}` : ''}`,
     description: s.platform,
   }))
 
@@ -420,20 +588,14 @@ const StoreManagement: React.FC = () => {
                 <Card
                   loading={loading}
                   title={
-                    <Form form={searchForm} layout="inline" style={{ margin: 0 }}>
-                      <Form.Item name="name_search" label="店铺名">
-                        <Input placeholder="请输入店铺名" style={{ width: 150 }} />
-                      </Form.Item>
-                      <Form.Item name="site_search" label="站点">
-                        <Input placeholder="请输入站点" style={{ width: 150 }} />
-                      </Form.Item>
-                      <Form.Item>
-                        <Space>
-                          <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch}>搜索</Button>
-                          <Button onClick={handleReset}>重置</Button>
-                        </Space>
-                      </Form.Item>
-                    </Form>
+                    <Input
+                      placeholder="搜索紫鸟账号、店铺名、站点..."
+                      prefix={<SearchOutlined />}
+                      allowClear
+                      style={{ width: 400 }}
+                      value={searchText}
+                      onChange={(e) => handleSearch(e.target.value)}
+                    />
                   }
                   extra={
                     <Space>
@@ -504,8 +666,14 @@ const StoreManagement: React.FC = () => {
         width={600}
       >
         <Form form={form} layout="vertical">
-          <Form.Item name="name" label="店铺名称" rules={[{ required: true, message: '请输入店铺名称' }]}>
-            <Input placeholder="请输入店铺名称" />
+          <Form.Item name="inventory_name" label="店铺名" rules={[{ required: true, message: '请输入店铺名' }]}>
+            <Input placeholder="请输入店铺名" />
+          </Form.Item>
+          <Form.Item name="ziniao_account" label="紫鸟账号">
+            <Input placeholder="请输入紫鸟账号" />
+          </Form.Item>
+          <Form.Item name="name" label="店铺名称">
+            <Input placeholder="可选，不填则自动使用店铺名" />
           </Form.Item>
           <Form.Item name="platform" label="平台" rules={[{ required: true, message: '请选择平台' }]} initialValue="amazon">
             <Select placeholder="请选择平台" options={platformOptions} />
@@ -513,8 +681,8 @@ const StoreManagement: React.FC = () => {
           <Form.Item name="site" label="站点">
             <Input placeholder="请输入站点，如US、UK等" />
           </Form.Item>
-          <Form.Item name="platform_store_id" label="平台店铺ID">
-            <Input placeholder="请输入平台店铺ID" />
+          <Form.Item name="shop_abbr" label="店铺简称" rules={[{ required: true, message: '请输入店铺简称' }]}>
+            <Input placeholder="请输入店铺简称" />
           </Form.Item>
           <Form.Item name="department_id" label="所属部门">
             <Select
@@ -584,13 +752,14 @@ const StoreManagement: React.FC = () => {
           size="small"
           pagination={false}
           columns={[
-            { title: '店铺名称', dataIndex: 'name', key: 'name' },
+            { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
             {
               title: '平台',
               dataIndex: 'platform',
               key: 'platform',
               render: (v: string) => <Tag color="blue">{v}</Tag>,
             },
+            { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account' },
             { title: '站点', dataIndex: 'site', key: 'site' },
             {
               title: '操作',
@@ -623,6 +792,53 @@ const StoreManagement: React.FC = () => {
             item.title.toLowerCase().includes(inputValue.toLowerCase())
           }
           listStyle={{ width: 280, height: 400 }}
+        />
+      </Modal>
+
+      {/* 分配店铺分组弹窗 */}
+      <Modal
+        title="分配店铺分组"
+        open={assignGroupModalOpen}
+        onOk={handleSaveAssignGroup}
+        onCancel={() => setAssignGroupModalOpen(false)}
+        width={400}
+      >
+        <Form form={assignGroupForm} layout="vertical">
+          <Form.Item name="group_id" label="选择店铺分组">
+            <Select
+              placeholder="请选择店铺分组"
+              options={groups.map((g) => ({ label: g.name, value: g.id }))}
+              allowClear
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 分配人员弹窗 */}
+      <Modal
+        title="分配人员"
+        open={memberModalOpen}
+        onOk={handleSaveMembers}
+        onCancel={() => setMemberModalOpen(false)}
+        confirmLoading={memberLoading}
+        width={600}
+      >
+        <Transfer
+          dataSource={allUsers.map((u: any) => ({
+            key: u.id,
+            title: u.name || u.username,
+            description: u.email,
+          }))}
+          targetKeys={selectedUserIds}
+          onChange={(keys) => setSelectedUserIds(keys as number[])}
+          render={(item) => item.title}
+          titles={['可选人员', '已分配人员']}
+          showSearch
+          filterOption={(inputValue, item) =>
+            item.title.toLowerCase().includes(inputValue.toLowerCase()) ||
+            (item.description && item.description.toLowerCase().includes(inputValue.toLowerCase()))
+          }
+          listStyle={{ width: 260, height: 350 }}
         />
       </Modal>
     </div>
