@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -13,7 +14,7 @@ class UserRegister(BaseModel):
     username: str
     email: EmailStr
     password: str
-    nickname: str | None = None
+    nickname: Optional[str] = None
 
 
 class UserLogin(BaseModel):

@@ -56,6 +56,7 @@ def init_db():
         from models import review
         from models import conversation
         from models import department
+        from models import data_warning
         
         # 导入所有模型类
         from models.tenant import Tenant
@@ -66,9 +67,23 @@ def init_db():
         from models.review import Review, ReviewAnalysis, ReviewHandling
         from models.conversation import ConversationHistory
         from models.department import Department, UserDepartment
+        from models.data_warning import DataWarning
+        from models.product_sales import ProductSales
+        from models.threshold_setting import ThresholdSetting
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)
+        
+        # 检查并添加缺失的字段
+        with engine.connect() as conn:
+            tables_to_check = ['product_sales']
+            for table in tables_to_check:
+                try:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN deleted_at DATETIME NULL'))
+                except Exception as e:
+                    print(f"添加 {table}.deleted_at 字段失败（可能已存在）: {e}")
+            conn.commit()
+        
         print("数据库表结构创建成功")
     except Exception as e:
         print(f"数据库初始化失败: {e}")

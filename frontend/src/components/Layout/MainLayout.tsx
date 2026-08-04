@@ -19,6 +19,7 @@ import {
   Users,
   Building2,
   Mail,
+  AlertTriangle,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -190,6 +191,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <Mail size={20} />,
       label: '邮件机器人',
     },
+    {
+      key: '/data-alert',
+      icon: <AlertTriangle size={20} />,
+      label: '数据驾驶舱',
+    },
     ...(isAdmin
       ? [
           {
@@ -224,6 +230,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/inventory': '库存机器人',
       '/review': '差评机器人',
       '/email': '邮件机器人',
+    '/data-alert': '数据驾驶舱',
       '/org': '角色管理',
       '/stores': '店铺管理',
       '/products': '产品管理',

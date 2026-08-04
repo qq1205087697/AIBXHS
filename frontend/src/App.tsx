@@ -7,7 +7,8 @@ import ChatBot from './pages/ChatBot'
 import Dashboard from './pages/Dashboard'
 import InventoryBot from './pages/InventoryBot'
 import ReviewBot from './pages/ReviewBot'
-import EmailBot from './pages/EmailBot'
+import EmailBot from './pages/EmailBot';
+import DataAlertBot from './pages/DataAlertBot';
 import OrgManagement from './pages/OrgManagement'
 import StoreManagement from './pages/StoreManagement'
 import ProductManagement from './pages/ProductManagement'
@@ -76,6 +77,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <EmailBot />
+            </MainLayout>
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/data-alert" 
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <DataAlertBot />
             </MainLayout>
           </ProtectedRoute>
         } 
