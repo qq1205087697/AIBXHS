@@ -2182,6 +2182,7 @@ async def create_product(
         return {
             "success": True,
             "message": "商品创建成功",
+            # "data": {"id": result.lastrowid}
             "data": {"id": product_id}
         }
     except HTTPException:
@@ -2697,3 +2698,347 @@ async def delete_platform_product(
         raise HTTPException(status_code=500, detail=f"删除平台商品失败: {str(e)}")
 
 
+# @router.get("/template/download")
+# async def download_product_template(
+#     current_user: User = Depends(get_current_user)
+# ):
+#     try:
+#         file_stream = create_product_excel_template()
+#         filename = f"产品导入模板_{datetime.now().strftime('%Y%m%d')}.xlsx"
+#         return StreamingResponse(
+#             file_stream,
+#             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+#             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+#         )
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"下载模板失败: {str(e)}")
+
+
+# @router.post("/upload/preview")
+# async def upload_product_preview(
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db),
+#     current_user: User = Depends(PermissionChecker("product:create"))
+# ):
+#     try:
+#         file_bytes = await file.read()
+#         result = parse_product_excel(file_bytes, db, current_user.tenant_id)
+#         products = result.get("products", [])
+#         platform_products = result.get("platform_products", [])
+        
+#         message = f"成功解析 {len(products)} 个产品"
+#         if platform_products:
+#             message += f"，{len(platform_products)} 个平台商品"
+        
+#         return {"success": True, "data": {"products": products, "platform_products": platform_products}, "message": message}
+#     except ValueError as e:
+#         raise HTTPException(status_code=400, detail=str(e))
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"解析文件失败: {str(e)}")
+
+
+# class BatchProductImport(BaseModel):
+#     products: List[dict] = []
+#     platform_products: List[dict] = []
+
+
+# @router.post("/batch-import")
+# async def batch_import_products(
+#     data: BatchProductImport,
+#     db: Session = Depends(get_db),
+#     current_user: User = Depends(PermissionChecker("product:create"))
+# ):
+#     try:
+#         if not data.products and not data.platform_products:
+#             raise HTTPException(status_code=400, detail="没有可导入的数据")
+        
+#         created = 0
+#         updated = 0
+#         platform_created = 0
+#         platform_updated = 0
+#         errors = []
+        
+#         # 先处理产品导入
+#         product_code_to_id = {}
+        
+#         for idx, item in enumerate(data.products):
+#             product_code = item.get("product_code", "").strip()
+#             name = item.get("name", "").strip()
+            
+#             if not product_code or not name:
+#                 errors.append(f"产品第 {idx + 1} 行: 产品编码或名称为空")
+#                 continue
+            
+#             existing = db.execute(
+#                 text("SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid AND deleted_at IS NULL"),
+#                 {"code": product_code, "tid": current_user.tenant_id}
+#             ).fetchone()
+            
+#             product_type_list = item.get("product_type")
+#             product_type_str = ",".join(product_type_list) if product_type_list and isinstance(product_type_list, list) else None
+            
+#             if existing:
+#                 updates = []
+#                 params = {"id": existing[0]}
+#                 field_map = {
+#                     "name": item.get("name"),
+#                     "name_en": item.get("name_en"),
+#                     "product_type": product_type_str,
+#                     "product_attribute": item.get("product_attribute"),
+#                     "category": item.get("category"),
+#                     "brand": item.get("brand"),
+#                     "purchase_price": item.get("purchase_price"),
+#                     "sale_price": item.get("sale_price"),
+#                     "main_image": item.get("main_image"),
+#                     "weight": item.get("weight"),
+#                     "length": item.get("length"),
+#                     "width": item.get("width"),
+#                     "height": item.get("height"),
+#                     "status": item.get("status"),
+#                 }
+#                 for field, value in field_map.items():
+#                     if value is not None:
+#                         updates.append(f"{field} = :{field}")
+#                         params[field] = value
+                
+#                 if updates:
+#                     db.execute(
+#                         text(f"UPDATE products SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"),
+#                         params
+#                     )
+#                 updated += 1
+#                 product_code_to_id[product_code] = existing[0]
+#             else:
+#                 insert_sql = text("""
+#                     INSERT INTO products (tenant_id, product_code, name, name_en, product_type, product_attribute,
+#                                           category, brand, purchase_price, sale_price, main_image,
+#                                           weight, length, width, height, status)
+#                     VALUES (:tenant_id, :product_code, :name, :name_en, :product_type, :product_attribute,
+#                             :category, :brand, :purchase_price, :sale_price, :main_image,
+#                             :weight, :length, :width, :height, :status)
+#                 """)
+#                 result = db.execute(insert_sql, {
+#                     "tenant_id": current_user.tenant_id,
+#                     "product_code": product_code,
+#                     "name": name,
+#                     "name_en": item.get("name_en"),
+#                     "product_type": product_type_str,
+#                     "product_attribute": item.get("product_attribute"),
+#                     "category": item.get("category"),
+#                     "brand": item.get("brand"),
+#                     "purchase_price": item.get("purchase_price"),
+#                     "sale_price": item.get("sale_price"),
+#                     "main_image": item.get("main_image"),
+#                     "weight": item.get("weight"),
+#                     "length": item.get("length"),
+#                     "width": item.get("width"),
+#                     "height": item.get("height"),
+#                     "status": item.get("status", "active"),
+#                 })
+#                 created += 1
+#                 product_code_to_id[product_code] = result.lastrowid
+        
+#         # 处理平台商品导入
+#         import json
+#         for idx, item in enumerate(data.platform_products):
+#             product_code = item.get("product_code", "").strip()
+#             platform = item.get("platform", "").strip()
+#             store_name = item.get("store_name", "").strip()
+#             store_site = item.get("store_site", "").strip() if item.get("store_site") else None
+            
+#             store_names = item.get("store_names", [store_name] if store_name else [])
+#             store_sites = item.get("store_sites", [store_site] if store_site else [])
+#             if not store_names and store_name:
+#                 store_names = [s.strip() for s in store_name.split("|") if s.strip()]
+#             if not store_sites and store_site:
+#                 store_sites = [s.strip() for s in store_site.split("|") if s.strip()]
+#             if not store_sites:
+#                 store_sites = [None] * len(store_names)
+            
+#             if not product_code or not platform or not store_names:
+#                 errors.append(f"平台商品第 {idx + 1} 行: 产品编码、平台或店铺名称为空")
+#                 continue
+            
+#             # 获取产品ID
+#             product_id = product_code_to_id.get(product_code)
+#             if not product_id:
+#                 existing = db.execute(
+#                     text("SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid AND deleted_at IS NULL"),
+#                     {"code": product_code, "tid": current_user.tenant_id}
+#                 ).fetchone()
+#                 if not existing:
+#                     errors.append(f"平台商品第 {idx + 1} 行: 产品编码 '{product_code}' 不存在")
+#                     continue
+#                 product_id = existing[0]
+#                 product_code_to_id[product_code] = product_id
+            
+#             # 查找所有店铺ID
+#             store_ids = []
+#             for si in range(len(store_names)):
+#                 sn = store_names[si].strip()
+#                 ss = store_sites[si] if si < len(store_sites) and store_sites[si] else None
+#                 if not sn:
+#                     continue
+                
+#                 store = None
+#                 if ss:
+#                     store = db.execute(
+#                         text("SELECT id FROM stores WHERE name = :name AND site = :site AND tenant_id = :tid AND deleted_at IS NULL LIMIT 1"),
+#                         {"name": sn, "site": ss.strip() if ss else None, "tid": current_user.tenant_id}
+#                     ).fetchone()
+                
+#                 if not store:
+#                     store = db.execute(
+#                         text("SELECT id FROM stores WHERE name = :name AND tenant_id = :tid AND deleted_at IS NULL LIMIT 1"),
+#                         {"name": sn, "tid": current_user.tenant_id}
+#                     ).fetchone()
+                
+#                 if not store:
+#                     if ss:
+#                         errors.append(f"平台商品第 {idx + 1} 行: 店铺 '{sn}' - '{ss}' 不存在")
+#                     else:
+#                         errors.append(f"平台商品第 {idx + 1} 行: 店铺 '{sn}' 不存在")
+#                     continue
+#                 store_ids.append(store[0])
+            
+#             if not store_ids:
+#                 errors.append(f"平台商品第 {idx + 1} 行: 未找到有效店铺")
+#                 continue
+            
+#             # 检查是否已存在相同的平台商品（产品+平台+完全相同的店铺集合）
+#             existing_platform = db.execute(
+#                 text("""
+#                     SELECT id FROM platform_products 
+#                     WHERE product_id = :pid AND platform = :platform AND store_id = :store_id::jsonb 
+#                     AND tenant_id = :tid AND deleted_at IS NULL
+#                 """),
+#                 {"pid": product_id, "platform": platform, "store_id": json.dumps(store_ids), "tid": current_user.tenant_id}
+#             ).fetchone()
+            
+#             if existing_platform:
+#                 # 更新
+#                 updates = []
+#                 params = {"id": existing_platform[0]}
+#                 field_map = {
+#                     "platform_product_id": item.get("platform_product_id"),
+#                     "asin": item.get("asin"),
+#                     "spu": item.get("spu"),
+#                     "sku": item.get("sku"),
+#                     "title": item.get("title"),
+#                     "title_en": item.get("title_en"),
+#                     "image_url": item.get("image_url"),
+#                     "currency": item.get("currency"),
+#                     "price": item.get("price"),
+#                     "cost_price": item.get("cost_price"),
+#                     "status": item.get("status"),
+#                 }
+#                 for field, value in field_map.items():
+#                     if value is not None:
+#                         updates.append(f"{field} = :{field}")
+#                         params[field] = value
+                
+#                 if updates:
+#                     db.execute(
+#                         text(f"UPDATE platform_products SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"),
+#                         params
+#                     )
+#                 platform_updated += 1
+#             else:
+#                 # 新建
+#                 insert_sql = text("""
+#                     INSERT INTO platform_products (tenant_id, product_id, platform, store_id, platform_product_id,
+#                                                   asin, spu, sku, title, title_en, image_url, currency,
+#                                                   price, cost_price, status)
+#                     VALUES (:tenant_id, :product_id, :platform, :store_id, :platform_product_id,
+#                             :asin, :spu, :sku, :title, :title_en, :image_url, :currency,
+#                             :price, :cost_price, :status)
+#                 """)
+#                 db.execute(insert_sql, {
+#                     "tenant_id": current_user.tenant_id,
+#                     "product_id": product_id,
+#                     "platform": platform,
+#                     "store_id": json.dumps(store_ids),
+#                     "platform_product_id": item.get("platform_product_id"),
+#                     "asin": item.get("asin"),
+#                     "spu": item.get("spu"),
+#                     "sku": item.get("sku"),
+#                     "title": item.get("title"),
+#                     "title_en": item.get("title_en"),
+#                     "image_url": item.get("image_url"),
+#                     "currency": item.get("currency"),
+#                     "price": item.get("price"),
+#                     "cost_price": item.get("cost_price"),
+#                     "status": item.get("status", "active"),
+#                 })
+#                 platform_created += 1
+        
+#         db.commit()
+        
+#         result_msg = f"导入完成！产品新增 {created} 个，更新 {updated} 个"
+#         if data.platform_products:
+#             result_msg += f"；平台商品新增 {platform_created} 个，更新 {platform_updated} 个"
+#         if errors:
+#             result_msg += f"，{len(errors)} 条错误"
+        
+#         return {
+#             "success": True,
+#             "message": result_msg,
+#             "data": {
+#                 "products_created": created,
+#                 "products_updated": updated,
+#                 "platform_created": platform_created,
+#                 "platform_updated": platform_updated,
+#                 "errors": errors
+#             }
+#         }
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"批量导入失败: {str(e)}")
+
+
+# @router.post("/batch-update-missing")
+# async def batch_update_product_missing_data(
+#     data: BatchProductImport,
+#     db: Session = Depends(get_db),
+#     current_user: User = Depends(PermissionChecker("product:edit"))
+# ):
+#     try:
+#         if not data.items:
+#             raise HTTPException(status_code=400, detail="没有可更新的数据")
+        
+#         updated_count = 0
+#         for item in data.items:
+#             product_id = item.get("id")
+#             if not product_id:
+#                 continue
+            
+#             product = db.execute(
+#                 text("SELECT id FROM products WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"),
+#                 {"id": product_id, "tid": current_user.tenant_id}
+#             ).fetchone()
+#             if not product:
+#                 continue
+            
+#             updates = []
+#             params = {"id": product_id}
+            
+#             for field in ["purchase_price", "sale_price", "weight", "length", "width", "height", "category", "brand"]:
+#                 val = item.get(field)
+#                 if val is not None:
+#                     updates.append(f"{field} = :{field}")
+#                     params[field] = val
+            
+#             if updates:
+#                 db.execute(
+#                     text(f"UPDATE products SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"),
+#                     params
+#                 )
+#                 updated_count += 1
+        
+#         db.commit()
+#         return {"success": True, "message": f"成功更新 {updated_count} 个产品数据", "data": {"updated": updated_count}}
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"批量更新失败: {str(e)}")

@@ -44,6 +44,7 @@ import {
     HomeOutlined,
     MailOutlined,
     PlusSquareOutlined,
+    StarOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
 
@@ -357,6 +358,7 @@ const PermissionManagement: React.FC = () => {
         '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
         '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
         '邮件机器人': { icon: <MailOutlined />, color: '#1890ff' },
+        '页面优化机器人': { icon: <StarOutlined />, color: '#faad14' },
         '补货管理': { icon: <PlusSquareOutlined />, color: '#7c3aed' },
         '发货管理': { icon: <ShopOutlined />, color: '#1890ff' },
     };

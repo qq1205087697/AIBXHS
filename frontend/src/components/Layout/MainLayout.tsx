@@ -43,6 +43,7 @@ import {
   Megaphone,
   PackagePlus,
   Ship,
+  Star,
   AlertTriangle,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
@@ -269,6 +270,15 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           },
         ]
       : []),
+    ...(hasPermission("robot:rating:view")
+      ? [
+          {
+            key: "/rating-optimization",
+            icon: <Star size={20} />,
+            label: "页面优化机器人",
+          },
+        ]
+      : []),
     ...(hasPermission("robot:ad:view")
       ? [
           {
@@ -431,6 +441,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/review": "差评机器人",
       "/email": "邮件机器人",
       "/ads": "广告机器人",
+      "/rating-optimization": "页面优化机器人",
       '/data-alert': '数据驾驶舱',
       "/org": "组织管理",
       "/permissions": "权限管理",
@@ -689,7 +700,6 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         open={changePasswordOpen}
         onCancel={() => setChangePasswordOpen(false)}
       />
-
       <Modal
         title="通知详情"
         open={detailModalOpen}

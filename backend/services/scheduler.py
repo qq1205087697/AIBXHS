@@ -191,7 +191,6 @@ def analyze_unanalyzed_reviews_job():
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
                     "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc
                 })
-
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
                 if importance_level not in ["high", "medium", "low"]:

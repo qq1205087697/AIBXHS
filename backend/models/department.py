@@ -1,9 +1,10 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func
 from sqlalchemy.orm import relationship
 from models.base import BaseModel
 
 
 class Department(BaseModel):
+    """部门模型"""
     __tablename__ = "departments"
 
     id = Column(Integer, primary_key=True, index=True, comment="部门ID")
@@ -13,7 +14,20 @@ class Department(BaseModel):
     region = Column(String(100), nullable=True, comment="范围/地区")
 
     tenant = relationship("Tenant", back_populates="departments")
+    # users = relationship("UserDepartment", back_populates="department")
     members = relationship("UserDepartment", back_populates="department", cascade="all, delete-orphan")
+
+# class UserDepartment(BaseModel):
+#     """用户-部门关联模型"""
+#     __tablename__ = "user_departments"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+#     department_id = Column(Integer, ForeignKey("departments.id"), nullable=False)
+
+#     user = relationship("User", back_populates="departments")
+#     department = relationship("Department", back_populates="users")
+    
 
 
 class UserDepartment(BaseModel):

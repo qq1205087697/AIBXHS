@@ -2179,7 +2179,6 @@ const InventoryBot: React.FC = () => {
           >
             {calcButtonLabel}
           </Button>
-
           {localSummary && localSummary.total_sku > 0 && (
             <Popconfirm
               title="确定要清空所有本地仓库存数据吗？"
