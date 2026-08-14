@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 from typing import Dict, Any, Optional, Tuple
 from config import get_settings
 
@@ -99,38 +100,48 @@ def _build_infringement_prompt(product_data: Dict[str, Any]) -> str:
 
 # ========== OpenAI 调用 ==========
 
+def _call_openai_sync(system_prompt: str, user_prompt: str) -> Optional[str]:
+    """同步调用OpenAI接口（在线程池中运行，不阻塞事件循环）"""
+    from openai import OpenAI
+
+    if not settings.OPENAI_API_KEY:
+        logger.error("OpenAI API Key 未配置")
+        return None
+
+    client = OpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        base_url=settings.OPENAI_API_BASE,
+    )
+
+    response = client.chat.completions.create(
+        model=settings.OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        timeout=120,
+    )
+
+    answer_text = response.choices[0].message.content.strip() if response.choices else ""
+    if not answer_text:
+        logger.warning("OpenAI返回空内容")
+        return None
+
+    logger.debug(f"OpenAI 响应: {answer_text[:200]}...")
+    return answer_text
+
+
 async def _call_openai(system_prompt: str, user_prompt: str) -> Optional[str]:
-    """调用后端OpenAI接口"""
+    """异步调用OpenAI接口，通过线程池避免阻塞事件循环"""
     try:
-        from openai import OpenAI
-
-        if not settings.OPENAI_API_KEY:
-            logger.error("OpenAI API Key 未配置")
-            return None
-
-        client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
+        return await asyncio.wait_for(
+            asyncio.to_thread(_call_openai_sync, system_prompt, user_prompt),
+            timeout=180,
         )
-
-        response = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            timeout=120,
-        )
-
-        answer_text = response.choices[0].message.content.strip() if response.choices else ""
-        if not answer_text:
-            logger.warning("OpenAI返回空内容")
-            return None
-
-        logger.debug(f"OpenAI 响应: {answer_text[:200]}...")
-        return answer_text
-
+    except asyncio.TimeoutError:
+        logger.error("OpenAI 调用超时（180秒）")
+        return None
     except Exception as e:
         logger.error(f"OpenAI 调用失败: {e}")
         return None

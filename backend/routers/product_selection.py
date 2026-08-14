@@ -546,10 +546,13 @@ def _calc_traffic_score(traffic_trend_str: str | None) -> tuple[float, str]:
 @router.post("/{selection_id}/analyze")
 async def analyze_product_selection(
     selection_id: int,
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # 1. 查询产品数据后立即释放数据库连接，避免AI分析期间占用连接池
+    from database.database import SessionLocal
+    db = SessionLocal()
     try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
         query = text("""
             SELECT id, product_title, url, asin, image_url, rating, review_count, keywords,
                    price, commission, first_leg_cost, last_mile_cost, weight_kg,
@@ -579,26 +582,29 @@ async def analyze_product_selection(
             "monthly_sales": row[15],
             "traffic_trend": row[16] or "",
         }
-
-        from services.ai_analysis_service import analyze_product_selection as do_analyze
-        ai_result = await do_analyze(product_data)
-
-        if not ai_result:
-            raise HTTPException(status_code=500, detail="AI分析失败，请稍后重试")
-
-        # 根据产品实际数据自动计算评分
         product_rating = float(row[5]) if row[5] is not None else None
         product_review_count = row[6]
         product_monthly_sales = row[15]
+    finally:
+        db.close()
 
-        rating_score = _calc_rating_score(product_rating, product_review_count)
-        sales_score = _calc_sales_score(product_monthly_sales)
-        penalty_factor = _calc_penalty_factor(rating_score)
-        traffic_score, traffic_score_result = _calc_traffic_score(product_data.get("traffic_trend"))
+    # 2. AI分析（在线程池中运行，不阻塞事件循环，不占用数据库连接）
+    from services.ai_analysis_service import analyze_product_selection as do_analyze
+    ai_result = await do_analyze(product_data)
 
-        # 综合评分公式：(惩罚因子 * 流量评分 * 0.6 + 销量评分 * 5 * 0.4).ROUND(2)
-        composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+    if not ai_result:
+        raise HTTPException(status_code=500, detail="AI分析失败，请稍后重试")
 
+    # 3. 计算评分并写入数据库（新连接）
+    rating_score = _calc_rating_score(product_rating, product_review_count)
+    sales_score = _calc_sales_score(product_monthly_sales)
+    penalty_factor = _calc_penalty_factor(rating_score)
+    traffic_score, traffic_score_result = _calc_traffic_score(product_data.get("traffic_trend"))
+    composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
         update_sql = text("""
             UPDATE product_selections SET
                 seasonality = :seasonality,
@@ -628,107 +634,116 @@ async def analyze_product_selection(
             "id": selection_id,
         })
         db.commit()
-
-        return {"success": True, "message": "AI分析完成", "data": {
-            **ai_result, "rating_score": rating_score, "sales_score": sales_score,
-            "penalty_factor": penalty_factor, "composite_score": composite_score
-        }}
-    except HTTPException:
-        raise
     except Exception as e:
         db.rollback()
-        logger.error(f"AI分析失败: {e}")
-        raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
+        logger.error(f"AI分析结果写入数据库失败: {e}")
+        raise HTTPException(status_code=500, detail=f"AI分析结果保存失败: {str(e)}")
+    finally:
+        db.close()
+
+    return {"success": True, "message": "AI分析完成", "data": {
+        **ai_result, "rating_score": rating_score, "sales_score": sales_score,
+        "penalty_factor": penalty_factor, "composite_score": composite_score
+    }}
 
 
 @router.post("/batch-analyze")
 async def batch_analyze_product_selections(
     ids: List[int],
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    from database.database import SessionLocal
+    from services.ai_analysis_service import analyze_product_selection as do_analyze
     results = []
     for selection_id in ids:
         try:
-            query = text("""
-                SELECT id, product_title, url, asin, image_url, rating, review_count, keywords,
-                       price, commission, first_leg_cost, last_mile_cost, weight_kg,
-                       cost_at_15_profit, product_type, monthly_sales, traffic_trend
-                FROM product_selections
-                WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
-            """)
-            row = db.execute(query, {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
-            if not row:
-                results.append({"id": selection_id, "success": False, "message": "记录不存在"})
-                continue
+            # 查询产品数据后立即释放连接
+            db = SessionLocal()
+            try:
+                db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+                query = text("""
+                    SELECT id, product_title, url, asin, image_url, rating, review_count, keywords,
+                           price, commission, first_leg_cost, last_mile_cost, weight_kg,
+                           cost_at_15_profit, product_type, monthly_sales, traffic_trend
+                    FROM product_selections
+                    WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
+                """)
+                row = db.execute(query, {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+                if not row:
+                    results.append({"id": selection_id, "success": False, "message": "记录不存在"})
+                    continue
 
-            product_data = {
-                "product_title": row[1], "url": row[2] or "", "asin": row[3] or "",
-                "image_url": row[4] or "", "rating": row[5], "review_count": row[6],
-                "keywords": row[7] or "", "price": float(row[8]) if row[8] is not None else None,
-                "commission": float(row[9]) if row[9] is not None else None,
-                "first_leg_cost": float(row[10]) if row[10] is not None else None,
-                "last_mile_cost": float(row[11]) if row[11] is not None else None,
-                "weight_kg": float(row[12]) if row[12] is not None else None,
-                "cost_at_15_profit": float(row[13]) if row[13] is not None else None,
-                "product_type": row[14] or "", "monthly_sales": row[15],
-                "traffic_trend": row[16] or "",
-            }
-
-            from services.ai_analysis_service import analyze_product_selection as do_analyze
-            ai_result = await do_analyze(product_data)
-
-            if ai_result:
-                # 根据产品实际数据自动计算评分
+                product_data = {
+                    "product_title": row[1], "url": row[2] or "", "asin": row[3] or "",
+                    "image_url": row[4] or "", "rating": row[5], "review_count": row[6],
+                    "keywords": row[7] or "", "price": float(row[8]) if row[8] is not None else None,
+                    "commission": float(row[9]) if row[9] is not None else None,
+                    "first_leg_cost": float(row[10]) if row[10] is not None else None,
+                    "last_mile_cost": float(row[11]) if row[11] is not None else None,
+                    "weight_kg": float(row[12]) if row[12] is not None else None,
+                    "cost_at_15_profit": float(row[13]) if row[13] is not None else None,
+                    "product_type": row[14] or "", "monthly_sales": row[15],
+                    "traffic_trend": row[16] or "",
+                }
                 product_rating = float(row[5]) if row[5] is not None else None
                 product_review_count = row[6]
                 product_monthly_sales = row[15]
+            finally:
+                db.close()
 
+            # AI分析（不占用数据库连接）
+            ai_result = await do_analyze(product_data)
+
+            if ai_result:
                 rating_score = _calc_rating_score(product_rating, product_review_count)
                 sales_score = _calc_sales_score(product_monthly_sales)
                 penalty_factor = _calc_penalty_factor(rating_score)
                 traffic_score, traffic_score_result = _calc_traffic_score(product_data.get("traffic_trend"))
-
-                # 综合评分公式：(惩罚因子 * 流量评分 * 0.6 + 销量评分 * 5 * 0.4).ROUND(2)
                 composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
 
-                update_sql = text("""
-                    UPDATE product_selections SET
-                        seasonality = :seasonality,
-                        infringement_analysis = :infringement_analysis,
-                        infringement_conclusion = :infringement_conclusion,
-                        traffic_score_result = :traffic_score_result,
-                        traffic_score = :traffic_score,
-                        sales_score = :sales_score,
-                        rating_score = :rating_score,
-                        penalty_factor = :penalty_factor,
-                        composite_score = :composite_score,
-                        ai_raw_response = :ai_raw_response,
-                        updated_at = NOW()
-                    WHERE id = :id
-                """)
-                db.execute(update_sql, {
-                    "seasonality": ai_result.get("seasonality", ""),
-                    "infringement_analysis": ai_result.get("infringement_analysis", ""),
-                    "infringement_conclusion": ai_result.get("infringement_conclusion", ""),
-                    "traffic_score_result": traffic_score_result,
-                    "traffic_score": traffic_score,
-                    "sales_score": sales_score,
-                    "rating_score": rating_score,
-                    "penalty_factor": penalty_factor,
-                    "composite_score": composite_score,
-                    "ai_raw_response": json.dumps(ai_result, ensure_ascii=False),
-                    "id": selection_id,
-                })
-                db.commit()
-                results.append({"id": selection_id, "success": True, "data": {
-                    **ai_result, "rating_score": rating_score, "sales_score": sales_score,
-                    "penalty_factor": penalty_factor, "composite_score": composite_score
-                }})
+                # 新连接写入结果
+                db = SessionLocal()
+                try:
+                    db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+                    update_sql = text("""
+                        UPDATE product_selections SET
+                            seasonality = :seasonality,
+                            infringement_analysis = :infringement_analysis,
+                            infringement_conclusion = :infringement_conclusion,
+                            traffic_score_result = :traffic_score_result,
+                            traffic_score = :traffic_score,
+                            sales_score = :sales_score,
+                            rating_score = :rating_score,
+                            penalty_factor = :penalty_factor,
+                            composite_score = :composite_score,
+                            ai_raw_response = :ai_raw_response,
+                            updated_at = NOW()
+                        WHERE id = :id
+                    """)
+                    db.execute(update_sql, {
+                        "seasonality": ai_result.get("seasonality", ""),
+                        "infringement_analysis": ai_result.get("infringement_analysis", ""),
+                        "infringement_conclusion": ai_result.get("infringement_conclusion", ""),
+                        "traffic_score_result": traffic_score_result,
+                        "traffic_score": traffic_score,
+                        "sales_score": sales_score,
+                        "rating_score": rating_score,
+                        "penalty_factor": penalty_factor,
+                        "composite_score": composite_score,
+                        "ai_raw_response": json.dumps(ai_result, ensure_ascii=False),
+                        "id": selection_id,
+                    })
+                    db.commit()
+                    results.append({"id": selection_id, "success": True, "data": {
+                        **ai_result, "rating_score": rating_score, "sales_score": sales_score,
+                        "penalty_factor": penalty_factor, "composite_score": composite_score
+                    }})
+                finally:
+                    db.close()
             else:
                 results.append({"id": selection_id, "success": False, "message": "AI分析失败"})
         except Exception as e:
-            db.rollback()
+            logger.error(f"批量分析中ID={selection_id}失败: {e}")
             results.append({"id": selection_id, "success": False, "message": str(e)})
 
     return {"success": True, "data": results}

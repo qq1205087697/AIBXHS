@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     COZE_BOT_ID: str = ""
     COZE_WORKFLOW_ID: str = ""
 
+    # 火山引擎 TOS 对象存储配置
+    TOS_ACCESS_KEY: str = ""
+    TOS_SECRET_KEY: str = ""
+    TOS_ENDPOINT: str = ""
+    TOS_REGION: str = ""
+    TOS_BUCKET: str = ""
+    TOS_PREFIX: str = "uploads/"
+    TOS_CUSTOM_DOMAIN: str = ""
+
     # JWT配置
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"

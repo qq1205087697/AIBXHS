@@ -280,6 +280,20 @@ const ProductSelection: React.FC = () => {
       if (res.data.success) {
         message.success('AI分析完成')
         fetchData()
+        // 同步更新详情抽屉数据
+        if (detailItem && detailItem.id === id) {
+          setDetailItem({
+            ...detailItem,
+            seasonality: res.data.data.seasonality || '',
+            infringement_analysis: res.data.data.infringement_analysis || '',
+            infringement_conclusion: res.data.data.infringement_conclusion || '',
+            traffic_score: res.data.data.traffic_score ?? null,
+            sales_score: res.data.data.sales_score ?? null,
+            rating_score: res.data.data.rating_score ?? null,
+            penalty_factor: res.data.data.penalty_factor ?? null,
+            composite_score: res.data.data.composite_score ?? null,
+          })
+        }
       } else {
         message.error('AI分析失败')
       }
@@ -1380,10 +1394,7 @@ const ProductSelection: React.FC = () => {
                 <Button
                   type="primary"
                   icon={<RobotOutlined />}
-                  onClick={() => {
-                    setDetailOpen(false)
-                    handleDetailAnalyze()
-                  }}
+                  onClick={() => handleDetailAnalyze()}
                   style={{ marginTop: 16 }}
                   loading={analyzingIds.has(detailItem.id)}
                 >
@@ -1407,20 +1418,23 @@ const ProductSelection: React.FC = () => {
         footer={null}
         width={520}
         destroyOnHidden
+        zIndex={2000}
       >
         {analyzeModal.mode === 'single' && analyzeModal.targetItem && (
           <div>
-            <div style={{ marginBottom: 16 }}>
-              <Text strong>产品：</Text>
-              <Text>{analyzeModal.targetItem.product_title || analyzeModal.targetItem.asin}</Text>
-            </div>
-
-            {(analyzeModal.targetItem.seasonality || analyzeModal.targetItem.infringement_analysis) && (
+            {(analyzeModal.targetItem.seasonality || analyzeModal.targetItem.infringement_analysis) ? (
               <Alert
                 message="该产品已存在AI分析数据（侵权分析 + 季节性分析），重新分析将覆盖原有结果"
                 type="warning"
                 showIcon
-                style={{ marginBottom: 20 }}
+                style={{ marginBottom: 16 }}
+              />
+            ) : (
+              <Alert
+                message="AI分析将执行侵权分析和季节性分析，整个过程需要一段时间，请耐心等待"
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
               />
             )}
 
@@ -1440,6 +1454,13 @@ const ProductSelection: React.FC = () => {
             <div style={{ marginBottom: 12 }}>
               <Text>已选择 <Text strong>{analyzeModal.targetIds?.length}</Text> 条产品进行AI分析</Text>
             </div>
+
+            <Alert
+              message="AI分析需要逐条执行，整个过程可能需要较长时间，请耐心等待"
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
 
             {/* 统计已分析/未分析数量 */}
             {analyzeModal.targetItems && (() => {
