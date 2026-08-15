@@ -25,6 +25,9 @@ settings = get_settings()
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# 会话级补货候选商品缓存
+SESSION_REPLENISHMENT_CANDIDATES: Dict[str, List[Dict[str, Any]]] = {}
+
 client = OpenAI(
     api_key=settings.OPENAI_API_KEY,
     base_url=settings.OPENAI_API_BASE
@@ -2142,7 +2145,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
 
     logger.info(f"[CHAT] 准备调用AI, 工具数: {len(tools)}, 对话类型: {chat_type}")
     try:
-        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
+        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=tools, tool_choice="auto", timeout=180)
 
         assistant_message = response.choices[0].message
         logger.info(f"[CHAT] AI返回: content={assistant_message.content}, tool_calls={assistant_message.tool_calls}")

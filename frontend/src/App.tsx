@@ -17,6 +17,7 @@ import ProductManagement from "./pages/ProductManagement";
 import InboundManagement from './pages/InboundManagement'
 import OutboundManagement from './pages/OutboundManagement'
 import PurchaseManagement from './pages/PurchaseManagement'
+import ReplenishmentManagement from './pages/ReplenishmentManagement'
 import OperationLogs from './pages/OperationLogs'
 import StockTransferManagement from './pages/StockTransferManagement'
 import ShipmentManagement from './pages/ShipmentManagement'
@@ -189,6 +190,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <PurchaseManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/replenishment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ReplenishmentManagement />
             </MainLayout>
           </ProtectedRoute>
         }

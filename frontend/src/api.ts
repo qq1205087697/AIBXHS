@@ -858,9 +858,16 @@ export const purchaseOrdersApi = {
       warehouse?: string;
       expected_date?: string;
       notes?: string;
-      store_group_id?: number | null;
-    }[];
-  }) => apiClient.put(`/purchase-orders/${id}`, data),
+      items?: {
+        product_id: number;
+        quantity: number;
+        unit_price?: number;
+        supplier?: string;
+        notes?: string;
+        store_group_id?: number | null;
+      }[];
+    },
+  ) => apiClient.put(`/purchase-orders/${id}`, data),
   delete: (id: number) => apiClient.delete(`/purchase-orders/${id}`),
   cancelApproval: (id: number) =>
     apiClient.post(`/purchase-orders/${id}/cancel-approval`),

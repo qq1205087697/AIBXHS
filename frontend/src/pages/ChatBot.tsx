@@ -479,7 +479,7 @@ const ChatBot: React.FC = () => {
 
   return (
     <div style={{
-      height: '100%',
+      height: 'calc(100vh - 96px)',
       display: 'flex',
       backgroundColor: '#f7f7f8',
       overflow: 'hidden'
@@ -563,11 +563,17 @@ const ChatBot: React.FC = () => {
                     if (session.session_id !== sessionId) {
                       e.currentTarget.style.backgroundColor = '#fafafa'
                     }
+                    // 悬停会话项时显示删除按钮
+                    const deleteBtn = e.currentTarget.querySelector('.session-delete-btn') as HTMLElement
+                    if (deleteBtn) deleteBtn.style.opacity = '1'
                   }}
                   onMouseLeave={(e) => {
                     if (session.session_id !== sessionId) {
                       e.currentTarget.style.backgroundColor = 'transparent'
                     }
+                    // 离开会话项时隐藏删除按钮
+                    const deleteBtn = e.currentTarget.querySelector('.session-delete-btn') as HTMLElement
+                    if (deleteBtn) deleteBtn.style.opacity = '0'
                   }}
                   onClick={() => loadSessionMessages(session.session_id)}
                 >
@@ -619,15 +625,10 @@ const ChatBot: React.FC = () => {
                       danger
                       icon={<Trash2 size={14} />}
                       onClick={(e) => e.stopPropagation()}
+                      className="session-delete-btn"
                       style={{ 
                         opacity: 0,
                         transition: 'opacity 0.15s'
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.opacity = '1'
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.opacity = '0'
                       }}
                     />
                   </Popconfirm>
