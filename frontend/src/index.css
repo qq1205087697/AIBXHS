@@ -4,14 +4,16 @@
   box-sizing: border-box;
 }
 
-html,
-body {
+html {
   height: 100%;
   width: 100%;
   overflow: hidden;
 }
 
 body {
+  height: 100%;
+  width: 100%;
+  overflow: visible;
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu",
     "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
@@ -24,10 +26,9 @@ body {
   overflow: hidden;
 }
 
-/* 防止页面级水平滚动条 */
-.ant-layout,
+/* 允许内容区横向滚动以适配小屏 */
 .ant-layout-content {
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 code {
@@ -186,4 +187,32 @@ code {
 
 .shared-inventory-row:hover td {
   background-color: #bae7ff !important;
+}
+
+/* ========== 响应式设计 ========== */
+
+/* 小屏幕：仅弹窗适配，页面内容保持桌面宽度通过横向滚动查看 */
+@media (max-width: 767px) {
+  .ant-modal {
+    max-width: calc(100vw - 16px) !important;
+    margin: 8px auto !important;
+  }
+
+  .ant-modal .ant-modal-body {
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+}
+
+/* 确保下拉弹窗不被裁剪且显示完整 */
+.ant-select-dropdown,
+.ant-dropdown,
+.ant-cascader-dropdown,
+.ant-picker-dropdown {
+  z-index: 1050 !important;
+}
+
+/* AutoComplete下拉弹窗最小宽度确保选项完整显示 */
+.ant-select-dropdown {
+  min-width: 180px !important;
 }

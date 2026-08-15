@@ -617,6 +617,11 @@ async def init_default_permissions(
         {"name": "确认发货", "code": "shipment:confirm", "type": "function", "module": "发货管理", "sort_order": 73},
         {"name": "删除发货", "code": "shipment:delete", "type": "function", "module": "发货管理", "sort_order": 74},
         {"name": "发货管理KPI卡片", "code": "shipment:kpi", "type": "function", "module": "发货管理", "sort_order": 75},
+        # 供应商管理
+        {"name": "查看供应商", "code": "supplier:view", "type": "function", "module": "供应商管理", "sort_order": 76},
+        {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
+        {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
+        {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
     ]
 
     for perm in default_permissions:
@@ -702,6 +707,11 @@ async def add_missing_permissions(
         {"name": "确认发货", "code": "shipment:confirm", "type": "function", "module": "发货管理", "sort_order": 73},
         {"name": "删除发货", "code": "shipment:delete", "type": "function", "module": "发货管理", "sort_order": 74},
         {"name": "发货管理KPI卡片", "code": "shipment:kpi", "type": "function", "module": "发货管理", "sort_order": 75},
+        # 供应商管理
+        {"name": "查看供应商", "code": "supplier:view", "type": "function", "module": "供应商管理", "sort_order": 76},
+        {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
+        {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
+        {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
     ]
 
     # 先清理无用的旧权限码

@@ -49,6 +49,7 @@ import { UploadOutlined, DownloadOutlined } from "@ant-design/icons";
 import { inventoryApi, localInventoryApi } from "../api";
 import { useTheme } from "../contexts/ThemeContext";
 import { useAuth } from "../contexts/AuthContext";
+import { useResponsive } from "../hooks/useResponsive";
 
 // ==================== TypeScript Interfaces ====================
 
@@ -180,6 +181,7 @@ const truncateText = (text: string, maxLen: number): string => {
 const InventoryBot: React.FC = () => {
   const { currentTheme } = useTheme();
   const { hasPermission } = useAuth();
+  const res = useResponsive();
   const [messageApi, contextHolder] = message.useMessage();
 
   // --- Loading states ---
@@ -2228,7 +2230,7 @@ const InventoryBot: React.FC = () => {
                 transition: "all 0.2s ease",
                 border: "1px solid #f0f0f0",
               }}
-              bodyStyle={{ padding: "16px 20px" }}
+              styles={{ body: { padding: "16px 20px" } }}
               onClick={() => handleTableRiskFilterChange([])}
               onMouseEnter={(e) => {
                 e.currentTarget.style.borderColor = "#1890ff";
@@ -2283,7 +2285,7 @@ const InventoryBot: React.FC = () => {
                   ? "#fff1f0"
                   : "white",
               }}
-              bodyStyle={{ padding: "16px 20px" }}
+              styles={{ body: { padding: "16px 20px" } }}
               onClick={() => {
                 const newFilter = tableRiskFilter?.includes("red")
                   ? tableRiskFilter.filter((f) => f !== "red")
@@ -2363,7 +2365,7 @@ const InventoryBot: React.FC = () => {
                   ? "#fff7e6"
                   : "white",
               }}
-              bodyStyle={{ padding: "16px 20px" }}
+              styles={{ body: { padding: "16px 20px" } }}
               onClick={() => {
                 const newFilter = tableRiskFilter?.includes("yellow")
                   ? tableRiskFilter.filter((f) => f !== "yellow")
@@ -2443,7 +2445,7 @@ const InventoryBot: React.FC = () => {
                   ? "#f6ffed"
                   : "white",
               }}
-              bodyStyle={{ padding: "16px 20px" }}
+              styles={{ body: { padding: "16px 20px" } }}
               onClick={() => {
                 const newFilter = tableRiskFilter?.includes("green")
                   ? tableRiskFilter.filter((f) => f !== "green")
@@ -3436,7 +3438,7 @@ const InventoryBot: React.FC = () => {
         open={inboundModalVisible}
         onCancel={() => setInboundModalVisible(false)}
         footer={null}
-        width={800}
+        width={res.isMobile ? '95vw' : 800}
       >
         <Spin spinning={inboundLoading}>
           {inboundDetails && inboundDetails.length > 0 ? (
@@ -3446,6 +3448,7 @@ const InventoryBot: React.FC = () => {
               rowKey="shipment_id"
               pagination={false}
               size="small"
+              scroll={{ x: res.isMobile ? true : false }}
             />
           ) : (
             <Empty
@@ -3468,7 +3471,7 @@ const InventoryBot: React.FC = () => {
         onCancel={() => setExportModalVisible(false)}
         onOk={handleConfirmExport}
         confirmLoading={exporting}
-        width={600}
+        width={res.isMobile ? '95vw' : 600}
       >
         <div style={{ marginBottom: 16 }}>
           <Space>
@@ -3544,6 +3547,7 @@ const InventoryBot: React.FC = () => {
         }}
         footer={null}
         destroyOnClose
+        width={res.isMobile ? '95vw' : 520}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div>

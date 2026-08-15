@@ -36,6 +36,16 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        translate_untranslated_reviews_job,
+        trigger="cron",
+        hour=6,
+        minute=30,
+        id="daily_review_translation",
+        name="每日翻译未翻译差评",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         analyze_unanalyzed_reviews_job,
         trigger="cron",
         hour=7,
@@ -79,6 +89,69 @@ def check_reviews_job():
 
 def send_daily_report_job():
     logger.info("发送每日运营报告...")
+
+
+def translate_untranslated_reviews_job():
+    """每天早上6点30分：批量翻译所有未翻译的差评（含已有分析但无翻译的历史数据）"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    from services.translate_service import translate_review
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+
+        # 查询所有需要翻译的差评（translated_content 为空或等于原文）
+        query = text("""
+            SELECT id, tenant_id, title, content, translated_content
+            FROM reviews
+            WHERE (translated_content IS NULL OR translated_content = '') AND content IS NOT NULL
+            LIMIT 200
+        """)
+        result = db.execute(query)
+        untranslated = result.fetchall()
+
+        if not untranslated:
+            logger.info("没有需要翻译的差评")
+            return
+
+        logger.info(f"发现 {len(untranslated)} 条需要翻译的差评，开始翻译...")
+        success_count = 0
+        fail_count = 0
+
+        for row in untranslated:
+            review_id = row[0]
+            title = row[2] or ""
+            content = row[3] or ""
+            try:
+                translated_title, translated_content = translate_review(title, content)
+                if translated_content:
+                    db.execute(text("""
+                        UPDATE reviews
+                        SET translated_title = :tt, translated_content = :tc
+                        WHERE id = :rid
+                    """), {
+                        "tt": translated_title,
+                        "tc": translated_content,
+                        "rid": review_id,
+                    })
+                    db.commit()
+                    success_count += 1
+                    logger.info(f"翻译成功 review_id={review_id}")
+                else:
+                    fail_count += 1
+                    logger.warning(f"翻译返回空值 review_id={review_id}")
+            except Exception as e:
+                fail_count += 1
+                db.rollback()
+                logger.error(f"翻译失败 review_id={review_id}: {e}")
+
+        logger.info(f"差评翻译任务完成：成功 {success_count} 条，失败 {fail_count} 条")
+    except Exception as e:
+        logger.error(f"每日差评翻译任务失败: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def analyze_unanalyzed_reviews_job():
@@ -134,10 +207,15 @@ def analyze_unanalyzed_reviews_job():
                 if not translated_content:
                     try:
                         from services.translate_service import translate_review
+                        logger.info(f"开始翻译 review_id={review_id}")
                         _, translated_content = translate_review(title, content)
-                        thread_db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
-                                   {"tc": translated_content, "rid": review_id})
-                        thread_db.commit()
+                        if translated_content:
+                            thread_db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
+                                       {"tc": translated_content, "rid": review_id})
+                            thread_db.commit()
+                            logger.info(f"翻译成功并保存 review_id={review_id}")
+                        else:
+                            logger.warning(f"翻译返回空值 review_id={review_id}")
                     except Exception as te:
                         logger.error(f"翻译失败 review_id={review_id}: {te}")
 
@@ -546,7 +624,7 @@ def check_overdue_purchase_orders_job():
             # 构建通知内容
             status_label = {
                 'approved': '已审批',
-                'ordered': '已下单',
+                'purchased': '已采购',
                 'partial_received': '部分收货',
             }.get(status, status)
 

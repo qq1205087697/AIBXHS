@@ -14,6 +14,8 @@ import { useTheme } from '../contexts/ThemeContext'
 import { stockTransfersApi, warehousesApi, storeGroupsApi } from '../api'
 import { useNavigate } from 'react-router-dom'
 import dayjs, { Dayjs } from 'dayjs'
+import { useResponsive } from '../hooks/useResponsive'
+import './management-responsive.css'
 
 interface StockTransferOrder {
   id: number
@@ -129,6 +131,7 @@ const StockTransferManagement: React.FC = () => {
   const { user, hasPermission } = useAuth()
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
+  const resp = useResponsive()
 
   const [orders, setOrders] = useState<StockTransferOrder[]>([])
   const [loading, setLoading] = useState(false)
@@ -590,6 +593,7 @@ const StockTransferManagement: React.FC = () => {
       title: '源店铺分组',
       dataIndex: 'source_store_group_name',
       key: 'source_store_group_name',
+      responsive: ['md'],
       width: 120,
       render: (text: string) => <Tag color="purple">{text || '-'}</Tag>,
     },
@@ -597,6 +601,7 @@ const StockTransferManagement: React.FC = () => {
       title: '目标店铺分组',
       dataIndex: 'target_store_group_name',
       key: 'target_store_group_name',
+      responsive: ['md'],
       width: 120,
       render: (text: string) => <Tag color="cyan">{text || '-'}</Tag>,
     },
@@ -604,6 +609,7 @@ const StockTransferManagement: React.FC = () => {
       title: '源仓库',
       dataIndex: 'source_warehouse',
       key: 'source_warehouse',
+      responsive: ['md'],
       width: 100,
       render: (text: string) => text ? <Tag color="blue">{text}</Tag> : '-',
     },
@@ -611,6 +617,7 @@ const StockTransferManagement: React.FC = () => {
       title: '目标仓库',
       dataIndex: 'target_warehouse',
       key: 'target_warehouse',
+      responsive: ['md'],
       width: 100,
       render: (text: string) => text ? <Tag color="green">{text}</Tag> : '-',
     },
@@ -618,24 +625,28 @@ const StockTransferManagement: React.FC = () => {
       title: '发起者',
       dataIndex: 'creator_name',
       key: 'creator_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '审批者',
       dataIndex: 'confirmer_name',
       key: 'confirmer_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '总数量',
       dataIndex: 'total_quantity',
       key: 'total_quantity',
+      responsive: ['md'],
       width: 90,
     },
     {
       title: '总金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
+      responsive: ['md'],
       width: 100,
       render: (amount: number) => amount != null ? `¥${amount.toFixed(2)}` : '-',
     },
@@ -654,6 +665,7 @@ const StockTransferManagement: React.FC = () => {
       title: '备注',
       dataIndex: 'notes',
       key: 'notes',
+      responsive: ['md'],
       width: 200,
       ellipsis: true,
     },
@@ -661,12 +673,14 @@ const StockTransferManagement: React.FC = () => {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
+      responsive: ['md'],
       width: 170,
     },
     {
       title: '审批时间',
       dataIndex: 'confirmed_at',
       key: 'confirmed_at',
+      responsive: ['md'],
       width: 170,
     },
     {
@@ -752,70 +766,78 @@ const StockTransferManagement: React.FC = () => {
   }))
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 24 }}>
+    <div className="page-container">
       <Card
         loading={loading}
         title={
-          <Space wrap size="middle">
-            <Input
-              placeholder="搜索单号/仓库"
-              prefix={<SearchOutlined />}
-              allowClear
-              value={searchText}
-              onChange={(e) => {
-                const val = e.target.value
-                if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
-                searchTimeoutRef.current = window.setTimeout(() => {
-                  setSearchText(val)
+          <div className="filter-bar">
+            <div className="filter-item">
+              <Input
+                placeholder="搜索单号/仓库"
+                prefix={<SearchOutlined />}
+                allowClear
+                value={searchText}
+                onChange={(e) => {
+                  const val = e.target.value
+                  if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+                  searchTimeoutRef.current = window.setTimeout(() => {
+                    setSearchText(val)
+                    setPagination(prev => ({ ...prev, current: 1 }))
+                  }, 400)
+                }}
+                style={{ width: 200 }}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="状态"
+                value={statusFilter}
+                onChange={(val) => { setStatusFilter(val); setPagination(prev => ({ ...prev, current: 1 })) }}
+                options={statusOptions}
+                style={{ width: 120 }}
+                allowClear
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="源仓库"
+                value={sourceWhFilter}
+                onChange={(val) => { setSourceWhFilter(val); setPagination(prev => ({ ...prev, current: 1 })) }}
+                options={[
+                  { label: '全部', value: '' },
+                  ...warehouseList.filter(w => w.status === 'active').map(w => ({ label: w.name, value: w.name })),
+                ]}
+                style={{ width: 150 }}
+                allowClear
+              />
+            </div>
+            <div className="filter-item">
+              <DatePicker.RangePicker
+                value={dateRange as any}
+                onChange={(dates) => {
+                  setDateRange(dates as [Dayjs | null, Dayjs | null] | null)
+                  if (dates && dates[0] && dates[1]) {
+                    setFilters(prev => ({
+                      ...prev,
+                      start_date: dates[0]!.format('YYYY-MM-DD'),
+                      end_date: dates[1]!.format('YYYY-MM-DD'),
+                    }))
+                  } else {
+                    setFilters(prev => {
+                      const { start_date, end_date, ...rest } = prev
+                      return rest
+                    })
+                  }
                   setPagination(prev => ({ ...prev, current: 1 }))
-                }, 400)
-              }}
-              style={{ width: 200 }}
-            />
-            <Select
-              placeholder="状态"
-              value={statusFilter}
-              onChange={(val) => { setStatusFilter(val); setPagination(prev => ({ ...prev, current: 1 })) }}
-              options={statusOptions}
-              style={{ width: 120 }}
-              allowClear
-            />
-            <Select
-              placeholder="源仓库"
-              value={sourceWhFilter}
-              onChange={(val) => { setSourceWhFilter(val); setPagination(prev => ({ ...prev, current: 1 })) }}
-              options={[
-                { label: '全部', value: '' },
-                ...warehouseList.filter(w => w.status === 'active').map(w => ({ label: w.name, value: w.name })),
-              ]}
-              style={{ width: 150 }}
-              allowClear
-            />
-            <DatePicker.RangePicker
-              value={dateRange as any}
-              onChange={(dates) => {
-                setDateRange(dates as [Dayjs | null, Dayjs | null] | null)
-                if (dates && dates[0] && dates[1]) {
-                  setFilters(prev => ({
-                    ...prev,
-                    start_date: dates[0]!.format('YYYY-MM-DD'),
-                    end_date: dates[1]!.format('YYYY-MM-DD'),
-                  }))
-                } else {
-                  setFilters(prev => {
-                    const { start_date, end_date, ...rest } = prev
-                    return rest
-                  })
-                }
-                setPagination(prev => ({ ...prev, current: 1 }))
-              }}
-              style={{ width: 260 }}
-            />
+                }}
+                style={{ width: 260 }}
+              />
+            </div>
             <Button onClick={resetFilters} icon={<ReloadOutlined />}>重置</Button>
-          </Space>
+          </div>
         }
         extra={
-          <Space>
+          <div className="action-bar">
             {(hasPermission('stock_transfer:confirm') || hasPermission('stock_transfer:delete')) && selectedRowKeys.length > 0 && (
               <Dropdown menu={{ items: batchActionsMenu }} trigger={['click']}>
                 <Button type="primary">
@@ -828,11 +850,12 @@ const StockTransferManagement: React.FC = () => {
                 新增挪货申请
               </Button>
             )}
-          </Space>
+          </div>
         }
         style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
         styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
       >
+<div className="responsive-table-wrapper">
         <Table
           dataSource={orders}
           columns={columns}
@@ -848,8 +871,9 @@ const StockTransferManagement: React.FC = () => {
             }
           }}
         />
+        </div>
       </Card>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
+      <div className="pagination-wrapper">
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -874,12 +898,12 @@ const StockTransferManagement: React.FC = () => {
         }}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={viewingOrder || editingOrder ? 800 : 900}
+        width={resp.isMobile ? '95vw' : (viewingOrder || editingOrder ? 800 : 900)}
         style={{ top: 20 }}
         styles={{ body: { maxHeight: 'calc(100vh - 180px)', overflow: 'auto', paddingRight: 8 } }}
       >
         <Form form={form} layout="vertical">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item
               name="order_number"
               label="挪货单号"
@@ -901,7 +925,7 @@ const StockTransferManagement: React.FC = () => {
               />
             </Form.Item>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item
               name="target_store_group_id"
               label="目标店铺分组"
@@ -930,7 +954,7 @@ const StockTransferManagement: React.FC = () => {
               />
             </Form.Item>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item
               name="target_warehouse"
               label="目标仓库（可选）"

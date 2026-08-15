@@ -54,6 +54,35 @@ async def get_store_groups(
         raise HTTPException(status_code=500, detail=f"获取分组列表失败: {str(e)}")
 
 
+@router.get("/my-group")
+async def get_my_store_group(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取当前用户所属的店铺分组（通过 user_stores -> stores -> store_groups 关联）"""
+    try:
+        query = text("""
+            SELECT DISTINCT sg.id, sg.name
+            FROM store_groups sg
+            INNER JOIN stores s ON s.group_id = sg.id
+            INNER JOIN user_stores us ON us.store_id = s.id
+            WHERE us.user_id = :user_id AND sg.tenant_id = :tenant_id
+              AND sg.deleted_at IS NULL AND s.deleted_at IS NULL
+            LIMIT 1
+        """)
+        row = db.execute(query, {
+            "user_id": current_user.id,
+            "tenant_id": current_user.tenant_id
+        }).fetchone()
+
+        if row:
+            return {"success": True, "data": {"id": row[0], "name": row[1]}}
+        else:
+            return {"success": True, "data": None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取用户店铺分组失败: {str(e)}")
+
+
 @router.get("/{group_id}/stores")
 async def get_group_stores(
     group_id: int,

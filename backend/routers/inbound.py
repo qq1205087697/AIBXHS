@@ -140,11 +140,14 @@ async def get_inbound_orders(
                 SELECT ioi.id, ioi.product_id, p.name as product_name, p.product_code,
                        ioi.quantity, ioi.unit_price, ioi.total_price, ioi.batch_number,
                        ioi.production_date, ioi.expiry_date, ioi.warehouse, ioi.shelf_number,
-                       ioi.notes, ioi.purchase_order_item_id, po.order_number as purchase_order_number
+                       ioi.notes, ioi.purchase_order_item_id, po.order_number as purchase_order_number,
+                       po.approved_at, poi.quantity as ordered_qty, poi.received_quantity,
+                       pp.product_code as finished_code, pp.name as finished_name
                 FROM inbound_order_items ioi
                 LEFT JOIN products p ON p.id = ioi.product_id
                 LEFT JOIN purchase_order_items poi ON poi.id = ioi.purchase_order_item_id
                 LEFT JOIN purchase_orders po ON po.id = poi.purchase_order_id
+                LEFT JOIN products pp ON pp.id = poi.product_id
                 WHERE ioi.inbound_order_id = :oid AND ioi.deleted_at IS NULL
             """), {"oid": row[0]}).fetchall()
 
@@ -166,6 +169,11 @@ async def get_inbound_orders(
                     "notes": item[12] or "",
                     "purchase_order_item_id": item[13],
                     "purchase_order_number": item[14] or "",
+                    "purchase_order_approved_at": item[15].strftime("%Y-%m-%d") if item[15] else "",
+                    "purchase_ordered_qty": int(item[16]) if item[16] else 0,
+                    "purchase_received_qty": int(item[17]) if item[17] else 0,
+                    "finished_code": item[18] or "",
+                    "finished_name": item[19] or "",
                 })
 
             orders.append({
@@ -548,7 +556,7 @@ async def confirm_inbound_order(
             if poi_id:
                 poi_row = db.execute(text("""
                     SELECT poi.id, poi.quantity as ordered_qty, poi.received_quantity,
-                           po.order_number, p.name as product_name, po.store_group_id
+                           po.order_number, p.name as product_name, poi.store_group_id, po.store_group_id as po_store_group_id
                     FROM purchase_order_items poi
                     JOIN purchase_orders po ON po.id = poi.purchase_order_id
                     LEFT JOIN products p ON p.id = poi.product_id
@@ -561,11 +569,14 @@ async def confirm_inbound_order(
                     remaining_qty = ordered_qty - received_qty
                     po_number = poi_row[3]
                     product_name = poi_row[4] or f"产品#{product_id}"
-                    poi_store_group_id = poi_row[5]  # 采购单的店铺分组ID
+                    poi_store_group_id = poi_row[5]  # 采购单明细的店铺分组ID
+                    po_store_group_id = poi_row[6]  # 采购单层面的店铺分组ID
                     
-                    # 优先使用明细关联的采购单的店铺分组ID
+                    # 优先使用明细关联的店铺分组ID，其次使用采购单层面的
                     if poi_store_group_id:
                         item_store_group_id = poi_store_group_id
+                    elif po_store_group_id:
+                        item_store_group_id = po_store_group_id
 
                     if inbound_qty != remaining_qty:
                         diff_type = "超收" if inbound_qty > remaining_qty else "少收"
@@ -648,14 +659,40 @@ async def confirm_inbound_order(
                         """), {"po_id": po_id_for_update})
 
         # ========== 统一组装入库逻辑 ==========
-        # 收集本次入库的所有配件product_id
-        accessory_ids_in_order = set()
+        # 收集本次入库的所有配件项及其店铺分组、仓库信息
+        accessory_items = []
         for item in items:
-            accessory_ids_in_order.add(item[1])
+            product_id = item[1]
+            inbound_qty = int(item[2])
+            poi_id = item[9]
+            store_group_id = None
+            warehouse = item[4] or order[3]
+            shelf_number = item[8]
+
+            if poi_id:
+                poi_sg_row = db.execute(text("""
+                    SELECT poi.store_group_id, po.store_group_id as po_store_group_id
+                    FROM purchase_order_items poi
+                    JOIN purchase_orders po ON po.id = poi.purchase_order_id
+                    WHERE poi.id = :poi_id AND poi.deleted_at IS NULL
+                """), {"poi_id": poi_id}).fetchone()
+                if poi_sg_row:
+                    store_group_id = poi_sg_row[0] or poi_sg_row[1]
+
+            accessory_items.append({
+                "product_id": product_id,
+                "quantity": inbound_qty,
+                "poi_id": poi_id,
+                "store_group_id": store_group_id,
+                "warehouse": warehouse,
+                "shelf_number": shelf_number,
+            })
+
+        accessory_product_ids = set(x["product_id"] for x in accessory_items)
 
         # 查找这些配件绑定的所有成品（去重）
-        if accessory_ids_in_order:
-            id_list = ','.join(str(x) for x in accessory_ids_in_order)
+        if accessory_product_ids:
+            id_list = ','.join(str(x) for x in accessory_product_ids)
             finished_products = db.execute(text(f"""
                 SELECT DISTINCT pb.finished_product_id
                 FROM product_bindings pb
@@ -675,27 +712,17 @@ async def confirm_inbound_order(
                     WHERE pb.finished_product_id = :fp_id AND pb.deleted_at IS NULL AND p.deleted_at IS NULL
                 """), {"fp_id": finished_product_id}).fetchall()
 
-                # 对每个配件，计算当前可用库存能组装多少成品
-                min_assembled = float('inf')
-                for ab in all_bindings:
-                    acc_product_id = ab[0]
-                    required_qty = ab[1]
-                    # 获取该配件当前可用库存（刚入库的采购批次 + 之前的库存）
-                    acc_stock_row = db.execute(text("""
-                        SELECT COALESCE(SUM(current_quantity), 0)
-                        FROM inventory_batches
-                        WHERE product_id = :acc_id AND tenant_id = :tid
-                          AND status = 'active' AND current_quantity > 0 AND deleted_at IS NULL
-                    """), {"acc_id": acc_product_id, "tid": current_user.tenant_id}).scalar()
-                    available_qty = int(acc_stock_row or 0)
-                    can_assemble = available_qty // required_qty
-                    if can_assemble < min_assembled:
-                        min_assembled = can_assemble
-
-                if min_assembled == float('inf') or min_assembled <= 0:
-                    continue
-
-                assembled_qty = min_assembled
+                # 收集本次入库涉及的所有（采购单ID, 店铺分组ID）组合
+                po_sg_pairs = set()
+                if purchase_order_id:
+                    po_sg_pairs.add((purchase_order_id, None))
+                for acc_item in accessory_items:
+                    if acc_item["poi_id"]:
+                        poi_po_row = db.execute(text(
+                            "SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id AND deleted_at IS NULL"
+                        ), {"poi_id": acc_item["poi_id"]}).fetchone()
+                        if poi_po_row:
+                            po_sg_pairs.add((poi_po_row[0], acc_item["store_group_id"]))
 
                 # 获取成品信息
                 finished_product_row = db.execute(text("""
@@ -704,151 +731,160 @@ async def confirm_inbound_order(
                 finished_name = finished_product_row[0] if finished_product_row else f"成品#{finished_product_id}"
                 finished_unit_price = float(finished_product_row[1]) if finished_product_row and finished_product_row[1] else 0
 
-                # 获取第一个入库项的店铺分组ID、仓库等作为组装批次的信息
-                # 优先从入库明细的采购单明细获取store_group_id，其次从入库单层面获取
-                first_item_store_group_id = inbound_order_store_group_id
-                first_item_warehouse = order[3]
-                first_item_shelf = None
-                print(f"[ASSEMBLY] Processing finished_product#{finished_product_id}, inbound_order_store_group_id={inbound_order_store_group_id}")
-                for item in items:
-                    if item[1] in accessory_ids_in_order:
-                        if item[4]:
-                            first_item_warehouse = item[4]
-                        if item[8]:
-                            first_item_warehouse = item[8]
-                        # 尝试从入库明细的采购单明细获取store_group_id
-                        poi_id = item[9]  # purchase_order_item_id
-                        print(f"[ASSEMBLY] Found matching item: product_id={item[1]}, poi_id={poi_id}, first_item_store_group_id={first_item_store_group_id}")
-                        if poi_id and not first_item_store_group_id:
-                            poi_row = db.execute(text("""
-                                SELECT po.store_group_id
-                                FROM purchase_order_items poi
-                                JOIN purchase_orders po ON po.id = poi.purchase_order_id
-                                WHERE poi.id = :poi_id AND poi.deleted_at IS NULL
-                            """), {"poi_id": poi_id}).fetchone()
-                            print(f"[ASSEMBLY] POI query result: poi_row={poi_row}")
-                            if poi_row and poi_row[0]:
-                                first_item_store_group_id = poi_row[0]
-                                print(f"[ASSEMBLY] Got store_group_id from POI: {first_item_store_group_id}")
-                        break
+                total_assembled_qty = 0
 
-                print(f"[ASSEMBLY] Final first_item_store_group_id={first_item_store_group_id} for finished_product#{finished_product_id}")
+                # 按店铺分组分别计算可组装数量并创建组装批次
+                sg_list = sorted(set(sg for _, sg in po_sg_pairs), key=lambda x: (x is None, x))
+                for sg_id in sg_list:
+                    min_assembled = float('inf')
+                    for ab in all_bindings:
+                        acc_product_id = ab[0]
+                        required_qty = ab[1]
 
-                # 为成品创建一个组装入库批次
-                assembly_batch_number = f"A{finished_product_id:06d}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                insert_params = {
-                    "tenant_id": current_user.tenant_id,
-                    "store_group_id": first_item_store_group_id,
-                    "product_id": finished_product_id,
-                    "inbound_order_id": order_id,
-                    "batch_number": assembly_batch_number,
-                    "initial_quantity": assembled_qty,
-                    "current_quantity": assembled_qty,
-                    "unit_price": finished_unit_price,
-                    "warehouse": first_item_warehouse,
-                    "shelf_number": first_item_shelf,
-                    "inbound_date": inbound_date_str,
-                    "production_date": None,
-                    "expiry_date": None,
-                    "source_batch_id": None,
-                    "assembly_quantity": None,
-                    "notes": f"组装入库: 入库{assembled_qty}件成品{finished_name}",
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now(),
-                }
-                print(f"[ASSEMBLY] INSERT params for finished_product#{finished_product_id}: store_group_id={insert_params['store_group_id']}")
-                db.execute(text("""
-                    INSERT INTO inventory_batches (tenant_id, store_group_id, product_id, inbound_order_id, batch_number,
-                        initial_quantity, current_quantity, locked_quantity, unit_price, warehouse, shelf_number,
-                        inbound_date, production_date, expiry_date, status, batch_type, source_batch_id, assembly_quantity, notes, created_at, updated_at)
-                    VALUES (:tenant_id, :store_group_id, :product_id, :inbound_order_id, :batch_number,
-                        :initial_quantity, :current_quantity, 0, :unit_price, :warehouse, :shelf_number,
-                        :inbound_date, :production_date, :expiry_date, 'active', 'assembly', :source_batch_id, :assembly_quantity, :notes, :created_at, :updated_at)
-                """), insert_params)
+                        # 查询该店铺分组下该配件的可用库存
+                        if sg_id is None:
+                            acc_stock_row = db.execute(text("""
+                                SELECT COALESCE(SUM(current_quantity), 0)
+                                FROM inventory_batches
+                                WHERE product_id = :acc_id AND tenant_id = :tid
+                                  AND status = 'active' AND current_quantity > 0 AND deleted_at IS NULL
+                            """), {"acc_id": acc_product_id, "tid": current_user.tenant_id}).scalar()
+                        else:
+                            acc_stock_row = db.execute(text("""
+                                SELECT COALESCE(SUM(current_quantity), 0)
+                                FROM inventory_batches
+                                WHERE product_id = :acc_id AND tenant_id = :tid AND store_group_id = :sg_id
+                                  AND status = 'active' AND current_quantity > 0 AND deleted_at IS NULL
+                            """), {"acc_id": acc_product_id, "tid": current_user.tenant_id, "sg_id": sg_id}).scalar()
 
-                recalculate_product_local_stock(db, current_user.tenant_id, finished_product_id)
+                        available_qty = int(acc_stock_row or 0)
+                        can_assemble = available_qty // required_qty
+                        if can_assemble < min_assembled:
+                            min_assembled = can_assemble
 
-                # 更新采购单中成品的入库数量（配件组装后成品入库）
-                # 从配件明细关联的采购单明细中获取采购单ID
-                # 收集本次入库配件关联的所有采购单ID
-                related_purchase_order_ids = set()
-                for item in items:
-                    poi_id = item[9]  # purchase_order_item_id
-                    if poi_id:
-                        poi_po_row = db.execute(text("""
-                            SELECT purchase_order_id FROM purchase_order_items
-                            WHERE id = :poi_id AND deleted_at IS NULL
-                        """), {"poi_id": poi_id}).fetchone()
-                        if poi_po_row:
-                            related_purchase_order_ids.add(poi_po_row[0])
+                    if min_assembled == float('inf') or min_assembled <= 0:
+                        continue
 
-                # 同时加入入库单层面关联的采购单ID
-                if purchase_order_id:
-                    related_purchase_order_ids.add(purchase_order_id)
+                    assembled_qty = min_assembled
+                    total_assembled_qty += assembled_qty
 
-                # 对每个相关采购单，更新成品的入库数量
-                for po_id in related_purchase_order_ids:
-                    # 查询采购单中是否有该成品
-                    po_finished_item = db.execute(text("""
-                        SELECT id, received_quantity
-                        FROM purchase_order_items
-                        WHERE purchase_order_id = :po_id AND product_id = :fp_id AND deleted_at IS NULL
-                    """), {"po_id": po_id, "fp_id": finished_product_id}).fetchone()
+                    # 获取该分组下第一个入库项的仓库信息
+                    first_warehouse = order[3]
+                    first_shelf = None
+                    for acc_item in accessory_items:
+                        if acc_item["store_group_id"] == sg_id:
+                            if acc_item["warehouse"]:
+                                first_warehouse = acc_item["warehouse"]
+                            if acc_item["shelf_number"]:
+                                first_shelf = acc_item["shelf_number"]
+                            break
 
-                    if po_finished_item:
-                        poi_id_for_finished = po_finished_item[0]
-                        current_finished_received = int(po_finished_item[1] or 0)
-                        new_finished_received = current_finished_received + assembled_qty
+                    # 为成品创建一个组装入库批次
+                    assembly_batch_number = f"A{finished_product_id:06d}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+                    insert_params = {
+                        "tenant_id": current_user.tenant_id,
+                        "store_group_id": sg_id,
+                        "product_id": finished_product_id,
+                        "inbound_order_id": order_id,
+                        "batch_number": assembly_batch_number,
+                        "initial_quantity": assembled_qty,
+                        "current_quantity": assembled_qty,
+                        "unit_price": finished_unit_price,
+                        "warehouse": first_warehouse,
+                        "shelf_number": first_shelf,
+                        "inbound_date": inbound_date_str,
+                        "production_date": None,
+                        "expiry_date": None,
+                        "source_batch_id": None,
+                        "assembly_quantity": None,
+                        "notes": f"组装入库: 入库{assembled_qty}件成品{finished_name}",
+                        "created_at": datetime.now(),
+                        "updated_at": datetime.now(),
+                    }
+                    print(f"[ASSEMBLY] INSERT finished_product#{finished_product_id} store_group_id={insert_params['store_group_id']} qty={assembled_qty}")
+                    db.execute(text("""
+                        INSERT INTO inventory_batches (tenant_id, store_group_id, product_id, inbound_order_id, batch_number,
+                            initial_quantity, current_quantity, locked_quantity, unit_price, warehouse, shelf_number,
+                            inbound_date, production_date, expiry_date, status, batch_type, source_batch_id, assembly_quantity, notes, created_at, updated_at)
+                        VALUES (:tenant_id, :store_group_id, :product_id, :inbound_order_id, :batch_number,
+                            :initial_quantity, :current_quantity, 0, :unit_price, :warehouse, :shelf_number,
+                            :inbound_date, :production_date, :expiry_date, 'active', 'assembly', :source_batch_id, :assembly_quantity, :notes, :created_at, :updated_at)
+                    """), insert_params)
 
-                        # 更新采购单中成品的已收货数量
-                        db.execute(text("""
-                            UPDATE purchase_order_items
-                            SET received_quantity = :new_qty, updated_at = NOW()
-                            WHERE id = :poi_id
-                        """), {"new_qty": new_finished_received, "poi_id": poi_id_for_finished})
-                        print(f"[ASSEMBLY-PO] 采购单#{po_id} 成品#{finished_product_id}({finished_name}) 已入库数量从{current_finished_received}增加到{new_finished_received}")
+                    recalculate_product_local_stock(db, current_user.tenant_id, finished_product_id)
 
-                        # 检查该采购单是否需要更新状态
-                        po_status_check = db.execute(text("""
-                            SELECT po.id, po.status,
-                                   SUM(poi.quantity) as total_ordered,
-                                   SUM(COALESCE(poi.received_quantity, 0)) as total_received
-                            FROM purchase_orders po
-                            JOIN purchase_order_items poi ON poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
-                            WHERE po.id = :po_id AND po.deleted_at IS NULL
-                            GROUP BY po.id, po.status
-                        """), {"po_id": po_id}).fetchone()
+                    # 更新同采购单同店铺分组的成品 received_quantity
+                    for po_id, po_sg_id in po_sg_pairs:
+                        if po_sg_id != sg_id:
+                            continue
 
-                        if po_status_check:
-                            total_ordered = int(po_status_check[2])
-                            total_received = int(po_status_check[3])
-                            current_po_status = po_status_check[1]
+                        if sg_id is None:
+                            po_finished_item = db.execute(text("""
+                                SELECT id, received_quantity
+                                FROM purchase_order_items
+                                WHERE purchase_order_id = :po_id AND product_id = :fp_id AND store_group_id IS NULL AND deleted_at IS NULL
+                            """), {"po_id": po_id, "fp_id": finished_product_id}).fetchone()
+                        else:
+                            po_finished_item = db.execute(text("""
+                                SELECT id, received_quantity
+                                FROM purchase_order_items
+                                WHERE purchase_order_id = :po_id AND product_id = :fp_id AND store_group_id = :sg_id AND deleted_at IS NULL
+                            """), {"po_id": po_id, "fp_id": finished_product_id, "sg_id": sg_id}).fetchone()
 
-                            if total_received >= total_ordered:
-                                db.execute(text("""
-                                    UPDATE purchase_orders SET status = 'completed', updated_at = NOW() WHERE id = :po_id
-                                """), {"po_id": po_id})
-                            elif current_po_status != 'pending_reshipment' and total_received > 0:
-                                db.execute(text("""
-                                    UPDATE purchase_orders SET status = 'partial_received', updated_at = NOW()
-                                    WHERE id = :po_id AND status NOT IN ('completed', 'cancelled', 'pending_reshipment')
-                                """), {"po_id": po_id})
+                        if po_finished_item:
+                            poi_id_for_finished = po_finished_item[0]
+                            current_finished_received = int(po_finished_item[1] or 0)
+                            new_finished_received = current_finished_received + assembled_qty
 
-                # 依次扣减各配件库存（FIFO）
-                for ab in all_bindings:
-                    acc_product_id = ab[0]
-                    required_qty = ab[1]
-                    acc_name = ab[2] or f"配件#{acc_product_id}"
-                    accessory_qty_to_deduct = assembled_qty * required_qty
-                    deduction_details, actual_deducted, fully_fulfilled = deduce_inventory_fifo(
-                        db, current_user.tenant_id, acc_product_id, accessory_qty_to_deduct
-                    )
-                    if actual_deducted > 0:
-                        apply_deduction(db, deduction_details)
-                        recalculate_product_local_stock(db, current_user.tenant_id, acc_product_id)
-                    print(f"[ASSEMBLY-DEDUCT] 配件#{acc_product_id}({acc_name})扣减库存{actual_deducted}件(组装成品消耗)")
+                            db.execute(text("""
+                                UPDATE purchase_order_items
+                                SET received_quantity = :new_qty, updated_at = NOW()
+                                WHERE id = :poi_id
+                            """), {"new_qty": new_finished_received, "poi_id": poi_id_for_finished})
+                            print(f"[ASSEMBLY-PO] 采购单#{po_id} 店铺分组#{sg_id} 成品#{finished_product_id}({finished_name}) 已入库数量从{current_finished_received}增加到{new_finished_received}")
 
-                print(f"[ASSEMBLY] 成品#{finished_product_id}({finished_name})组装入库{assembled_qty}件")
+                            # 检查该采购单是否需要更新状态
+                            po_status_check = db.execute(text("""
+                                SELECT po.id, po.status,
+                                       SUM(poi.quantity) as total_ordered,
+                                       SUM(COALESCE(poi.received_quantity, 0)) as total_received
+                                FROM purchase_orders po
+                                JOIN purchase_order_items poi ON poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
+                                WHERE po.id = :po_id AND po.deleted_at IS NULL
+                                GROUP BY po.id, po.status
+                            """), {"po_id": po_id}).fetchone()
+
+                            if po_status_check:
+                                total_ordered = int(po_status_check[2])
+                                total_received = int(po_status_check[3])
+                                current_po_status = po_status_check[1]
+
+                                if total_received >= total_ordered:
+                                    db.execute(text("""
+                                        UPDATE purchase_orders SET status = 'completed', updated_at = NOW() WHERE id = :po_id
+                                    """), {"po_id": po_id})
+                                elif current_po_status != 'pending_reshipment' and total_received > 0:
+                                    db.execute(text("""
+                                        UPDATE purchase_orders SET status = 'partial_received', updated_at = NOW()
+                                        WHERE id = :po_id AND status NOT IN ('completed', 'cancelled', 'pending_reshipment')
+                                    """), {"po_id": po_id})
+
+                    # 扣减该店铺分组下各配件库存（FIFO）
+                    for ab in all_bindings:
+                        acc_product_id = ab[0]
+                        required_qty = ab[1]
+                        acc_name = ab[2] or f"配件#{acc_product_id}"
+                        accessory_qty_to_deduct = assembled_qty * required_qty
+                        deduction_details, actual_deducted, fully_fulfilled = deduce_inventory_fifo(
+                            db, current_user.tenant_id, acc_product_id, accessory_qty_to_deduct, store_group_id=sg_id
+                        )
+                        if actual_deducted > 0:
+                            apply_deduction(db, deduction_details)
+                            recalculate_product_local_stock(db, current_user.tenant_id, acc_product_id)
+                        print(f"[ASSEMBLY-DEDUCT] 店铺分组#{sg_id} 配件#{acc_product_id}({acc_name})扣减库存{actual_deducted}件(组装成品消耗)")
+
+                if total_assembled_qty > 0:
+                    print(f"[ASSEMBLY] 成品#{finished_product_id}({finished_name})组装入库{total_assembled_qty}件")
 
         db.execute(text("""
             UPDATE inbound_orders SET status = 'confirmed', confirmed_by = :uid, confirmed_at = :now,
@@ -954,9 +990,86 @@ async def delete_inbound_order(
                             )
         
         before_data = {"order_number": row[1], "status": order_status}
-        
+
         # 软删除相关的库存批次（仅在没有库存被使用时）
         if order_status == "confirmed":
+            # ========== 回滚组装批次对采购单成品已收货数量的影响 ==========
+            assembly_batches = db.execute(text("""
+                SELECT id, product_id, initial_quantity, notes
+                FROM inventory_batches
+                WHERE inbound_order_id = :oid AND batch_type = 'assembly' AND deleted_at IS NULL
+            """), {"oid": order_id}).fetchall()
+
+            for ab in assembly_batches:
+                ab_id, finished_product_id, assembled_qty, ab_notes = ab[0], ab[1], int(ab[2]), ab[3]
+                print(f"[DELETE-ROLLBACK] 发现组装批次#{ab_id}: 成品#{finished_product_id}, 组装量={assembled_qty}")
+
+                # 查找采购单中该成品的明细
+                # 从入库明细的采购单关联中获取采购单ID
+                related_po_ids = set()
+                ioi_poi_rows = db.execute(text("""
+                    SELECT ioi.purchase_order_item_id
+                    FROM inbound_order_items ioi
+                    WHERE ioi.inbound_order_id = :oid AND ioi.deleted_at IS NULL
+                      AND ioi.purchase_order_item_id IS NOT NULL
+                """), {"oid": order_id}).fetchall()
+                for r in ioi_poi_rows:
+                    po_row = db.execute(text("""
+                        SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id AND deleted_at IS NULL
+                    """), {"poi_id": r[0]}).fetchone()
+                    if po_row:
+                        related_po_ids.add(po_row[0])
+
+                # 同时从入库单层面获取采购单ID
+                po_id_from_order = db.execute(text("""
+                    SELECT purchase_order_id FROM inbound_orders WHERE id = :oid AND deleted_at IS NULL
+                """), {"oid": order_id}).fetchone()
+                if po_id_from_order and po_id_from_order[0]:
+                    related_po_ids.add(po_id_from_order[0])
+
+                for po_id in related_po_ids:
+                    po_finished_item = db.execute(text("""
+                        SELECT id, received_quantity
+                        FROM purchase_order_items
+                        WHERE purchase_order_id = :po_id AND product_id = :fp_id AND deleted_at IS NULL
+                    """), {"po_id": po_id, "fp_id": finished_product_id}).fetchone()
+
+                    if po_finished_item:
+                        poi_id_for_finished = po_finished_item[0]
+                        old_received = int(po_finished_item[1] or 0)
+                        new_received = max(old_received - assembled_qty, 0)
+
+                        db.execute(text("""
+                            UPDATE purchase_order_items
+                            SET received_quantity = :new_qty, updated_at = NOW()
+                            WHERE id = :poi_id
+                        """), {"new_qty": new_received, "poi_id": poi_id_for_finished})
+                        print(f"[DELETE-ROLLBACK] 采购单#{po_id} 成品#{finished_product_id} received_quantity {old_received} -> {new_received} (减去组装量 {assembled_qty})")
+
+                        # 检查采购单状态是否需要恢复
+                        po_status_row = db.execute(text("""
+                            SELECT po.id, po.status,
+                                   SUM(poi.quantity) as total_ordered,
+                                   SUM(COALESCE(poi.received_quantity, 0)) as total_received
+                            FROM purchase_orders po
+                            JOIN purchase_order_items poi ON poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
+                            WHERE po.id = :po_id AND po.deleted_at IS NULL
+                            GROUP BY po.id
+                        """), {"po_id": po_id}).fetchone()
+
+                        if po_status_row:
+                            current_po_status = po_status_row[1]
+                            total_ordered = int(po_status_row[2])
+                            total_received = int(po_status_row[3])
+
+                            if current_po_status == 'completed' and total_received < total_ordered:
+                                new_status = 'partial_received' if total_received > 0 else 'approved'
+                                db.execute(text("""
+                                    UPDATE purchase_orders SET status = :new_status, updated_at = NOW() WHERE id = :po_id
+                                """), {"po_id": po_id, "new_status": new_status})
+                                print(f"[DELETE-ROLLBACK] 采购单状态变更: {current_po_status} -> {new_status}")
+
+            # ========== 软删除库存批次 ==========
             db.execute(text("""
                 UPDATE inventory_batches SET deleted_at = NOW()
                 WHERE inbound_order_id = :oid AND deleted_at IS NULL
@@ -1039,10 +1152,88 @@ async def delete_inbound_order(
             """), {"oid": order_id}).fetchall()
             for item in items:
                 recalculate_product_local_stock(db, current_user.tenant_id, item[0])
-        
+
         db.execute(text("UPDATE inbound_orders SET deleted_at = NOW() WHERE id = :id"), {"id": order_id})
         db.execute(text("UPDATE inbound_order_items SET deleted_at = NOW() WHERE inbound_order_id = :oid"), {"oid": order_id})
-        
+
+        # ========== 重新计算受影响采购单中成品的received_quantity ==========
+        # 成品的received_quantity = 直接入库量 + 组装批次量
+        # 删除入库单后，需要基于剩余数据重新计算
+        if order_status == "confirmed":
+            affected_po_ids = set()
+            # 从已回滚的配件POI中收集采购单ID
+            for poi in poi_items:
+                po_row = db.execute(text("""
+                    SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id
+                """), {"poi_id": poi[1]}).fetchone()
+                if po_row:
+                    affected_po_ids.add(po_row[0])
+
+            for po_id in affected_po_ids:
+                # 查找该采购单中的成品（在product_bindings中作为finished_product_id存在的）
+                finished_items = db.execute(text("""
+                    SELECT poi.id, poi.product_id, poi.received_quantity
+                    FROM purchase_order_items poi
+                    WHERE poi.purchase_order_id = :po_id AND poi.deleted_at IS NULL
+                      AND poi.product_id IN (
+                          SELECT DISTINCT finished_product_id FROM product_bindings WHERE deleted_at IS NULL
+                      )
+                """), {"po_id": po_id}).fetchall()
+
+                for fi in finished_items:
+                    poi_id = fi[0]
+                    fp_id = fi[1]
+                    old_received = int(fi[2] or 0)
+
+                    # 直接入库量：其他确认的入库单中，关联到这个POI的入库明细总量
+                    direct_inbound = db.execute(text("""
+                        SELECT COALESCE(SUM(ioi.quantity), 0)
+                        FROM inbound_order_items ioi
+                        JOIN inbound_orders io ON io.id = ioi.inbound_order_id
+                        WHERE ioi.purchase_order_item_id = :poi_id
+                          AND io.status = 'confirmed' AND io.deleted_at IS NULL AND ioi.deleted_at IS NULL
+                    """), {"poi_id": poi_id}).scalar()
+
+                    # 组装入库量：剩余未删除的组装批次总量
+                    assembly_inbound = db.execute(text("""
+                        SELECT COALESCE(SUM(ib.initial_quantity), 0)
+                        FROM inventory_batches ib
+                        WHERE ib.product_id = :fp_id AND ib.tenant_id = :tid
+                          AND ib.batch_type = 'assembly' AND ib.deleted_at IS NULL
+                    """), {"fp_id": fp_id, "tid": current_user.tenant_id}).scalar()
+
+                    correct_received = int(direct_inbound or 0) + int(assembly_inbound or 0)
+
+                    if old_received != correct_received:
+                        db.execute(text("""
+                            UPDATE purchase_order_items
+                            SET received_quantity = :new_qty, updated_at = NOW()
+                            WHERE id = :poi_id
+                        """), {"new_qty": correct_received, "poi_id": poi_id})
+                        print(f"[DELETE-RECALC] 采购单#{po_id} 成品#{fp_id} POI#{poi_id} received_quantity {old_received} -> {correct_received} (直接入库={direct_inbound}, 组装={assembly_inbound})")
+
+                        # 检查采购单状态是否需要更新
+                        po_status_check = db.execute(text("""
+                            SELECT po.status,
+                                   SUM(poi.quantity) as total_ordered,
+                                   SUM(COALESCE(poi.received_quantity, 0)) as total_received
+                            FROM purchase_orders po
+                            JOIN purchase_order_items poi ON poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
+                            WHERE po.id = :po_id AND po.deleted_at IS NULL
+                            GROUP BY po.status
+                        """), {"po_id": po_id}).fetchone()
+
+                        if po_status_check:
+                            cur_status = po_status_check[0]
+                            total_ordered = int(po_status_check[1])
+                            total_received = int(po_status_check[2])
+                            if cur_status == 'completed' and total_received < total_ordered:
+                                new_status = 'partial_received' if total_received > 0 else 'approved'
+                                db.execute(text("""
+                                    UPDATE purchase_orders SET status = :new_status, updated_at = NOW() WHERE id = :po_id
+                                """), {"po_id": po_id, "new_status": new_status})
+                                print(f"[DELETE-RECALC] 采购单#{po_id} 状态变更: {cur_status} -> {new_status}")
+
         db.commit()
 
         log_order_delete(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
@@ -1088,8 +1279,6 @@ async def get_pending_purchase_items(
     2. 间接匹配：传入的product_id是配件，查找其绑定的成品对应的采购单
     """
     try:
-        # 查询采购单明细：直接匹配 + 通过配件绑定关系匹配成品
-        # 不合并同一采购单的多条明细，每条单独返回以便用户区分
         rows = db.execute(text("""
             SELECT poi.id as poi_id,
                    po.id as po_id,
@@ -1115,7 +1304,7 @@ async def get_pending_purchase_items(
             WHERE po.tenant_id = :tenant_id
               AND po.deleted_at IS NULL
               AND poi.deleted_at IS NULL
-              AND po.status IN ('approved', 'ordered', 'partial_received', 'pending_reshipment')
+              AND po.status IN ('approved', 'purchased', 'partial_received', 'pending_reshipment')
               AND (poi.quantity - COALESCE(poi.received_quantity, 0)) > 0
               AND (poi.product_id = :product_id OR pb.id IS NOT NULL)
             ORDER BY COALESCE(po.approved_at, po.created_at) ASC
@@ -1679,7 +1868,7 @@ async def resolve_diffs(
             if item.resolution not in ('reshipment', 'reduce_po'):
                 continue
 
-            # 获取当前入库明细信息
+            # 获取当前入库明细信息及采购单信息
             ioi_row = db.execute(text("""
                 SELECT ioi.id, ioi.quantity, ioi.purchase_order_item_id,
                        poi.quantity as po_ordered, COALESCE(poi.received_quantity, 0) as po_received
@@ -1696,6 +1885,17 @@ async def resolve_diffs(
             po_ordered = int(ioi_row[3]) if ioi_row[3] else 0
             po_received = int(ioi_row[4])
 
+            # 计算差异类型：剩余应收 = 订购量 - 已收量（不含本次）
+            remaining_qty = po_ordered - po_received
+            diff_type = "超收" if inbound_qty > remaining_qty else "少收"
+
+            # 超收时不能选择厂家补发
+            if diff_type == "超收" and item.resolution == "reshipment":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"入库明细#{item.inbound_item_id}为超收状态，无法选择厂家补发"
+                )
+
             # 更新差异处理方式
             db.execute(text("""
                 UPDATE inbound_order_items
@@ -1703,72 +1903,77 @@ async def resolve_diffs(
                 WHERE id = :ioi_id AND deleted_at IS NULL
             """), {"ioi_id": item.inbound_item_id, "resolution": item.resolution})
 
-            # 如果选择"减少采购单数量"，则减少采购单的订购量
+            # 如果选择"平采购单数量"，调整采购单订购量以匹配实际入库
+            # 超收时增加订购量，少收时减少订购量
             if item.resolution == 'reduce_po' and poi_id:
-                new_ordered = po_received + inbound_qty  # 新订购量 = 已收货 + 本次入库
-                if new_ordered < po_ordered:
-                    db.execute(text("""
-                        UPDATE purchase_order_items
-                        SET quantity = :new_qty, updated_at = NOW()
-                        WHERE id = :poi_id AND deleted_at IS NULL
-                    """), {"poi_id": poi_id, "new_qty": new_ordered})
+                # 新订购量 = 已收货（不含本次） + 本次入库
+                # 无论超收还是少收，都能使订购量匹配实际入库量
+                new_ordered = po_received + inbound_qty
 
-                    # 同步更新采购单总金额
-                    db.execute(text("""
-                        UPDATE purchase_orders po
-                        SET total_amount = (
-                            SELECT COALESCE(SUM(poi.quantity * COALESCE(poi.unit_price, 0)), 0)
-                            FROM purchase_order_items poi
-                            WHERE poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
-                        ),
-                        updated_at = NOW()
-                        WHERE po.id = (SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id)
-                          AND po.deleted_at IS NULL
-                    """), {"poi_id": poi_id})
+                # 无论增加还是减少，都执行更新
+                db.execute(text("""
+                    UPDATE purchase_order_items
+                    SET quantity = :new_qty, updated_at = NOW()
+                    WHERE id = :poi_id AND deleted_at IS NULL
+                """), {"poi_id": poi_id, "new_qty": new_ordered})
 
-                    reduced_po_items.append({
-                        "poi_id": poi_id,
-                        "old_ordered": po_ordered,
-                        "new_ordered": new_ordered,
-                    })
+                # 同步更新采购单总金额
+                db.execute(text("""
+                    UPDATE purchase_orders po
+                    SET total_amount = (
+                        SELECT COALESCE(SUM(poi.quantity * COALESCE(poi.unit_price, 0)), 0)
+                        FROM purchase_order_items poi
+                        WHERE poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
+                    ),
+                    updated_at = NOW()
+                    WHERE po.id = (SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id)
+                      AND po.deleted_at IS NULL
+                """), {"poi_id": poi_id})
 
-                    print(f"[RESOLVE-DIFF] 入库明细#{item.inbound_item_id} 选择减少采购单数量: "
-                          f"POI#{poi_id} quantity {po_ordered} -> {new_ordered}")
+                reduced_po_items.append({
+                    "poi_id": poi_id,
+                    "old_ordered": po_ordered,
+                    "new_ordered": new_ordered,
+                    "diff_type": diff_type,
+                })
 
-                    # 减少数量后检查该采购单是否全部收货完毕（订购量=已收量），是则标记为已完成
-                    po_check = db.execute(text("""
-                        SELECT po.id,
-                               SUM(poi.quantity) as total_ordered,
-                               SUM(COALESCE(poi.received_quantity, 0)) as total_received
-                        FROM purchase_orders po
-                        JOIN purchase_order_items poi ON poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
-                        WHERE po.id = (SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id)
-                          AND po.deleted_at IS NULL
-                        GROUP BY po.id
-                    """), {"poi_id": poi_id}).fetchone()
+                print(f"[RESOLVE-DIFF] 入库明细#{item.inbound_item_id} 选择平采购单数量({diff_type}): "
+                      f"POI#{poi_id} quantity {po_ordered} -> {new_ordered}")
 
-                    if po_check:
-                        total_ord = int(po_check[1])
-                        total_recv = int(po_check[2])
-                        if total_recv >= total_ord:
-                            db.execute(text("""
-                                UPDATE purchase_orders SET status = 'completed', updated_at = NOW()
-                                WHERE id = :po_id AND status NOT IN ('cancelled')
-                            """), {"po_id": po_check[0]})
-                            # 采购单变为已完成，自动更新关联补货单为已完成
-                            rep_rows = db.execute(text("""
-                                SELECT id FROM replenishment_orders
-                                WHERE purchase_order_id = :po_id AND deleted_at IS NULL AND status IN ('pending', 'purchased')
-                            """), {"po_id": po_check[0]}).fetchall()
-                            if rep_rows:
-                                rep_ids = [r[0] for r in rep_rows]
-                                rep_ph = ', '.join(f':rid{i}' for i in range(len(rep_ids)))
-                                rep_params = {f'rid{i}': rep_ids[i] for i in range(len(rep_ids))}
-                                db.execute(text(f"""
-                                    UPDATE replenishment_orders SET status = 'completed', updated_at = NOW()
-                                    WHERE id IN ({rep_ph}) AND deleted_at IS NULL
-                                """), rep_params)
-                            print(f"[RESOLVE-DIFF] 采购单#{po_check[0]} 数量已全部收齐，状态->已完成")
+                # 平账后检查该采购单是否全部收货完毕（订购量=已收量），是则标记为已完成
+                po_check = db.execute(text("""
+                    SELECT po.id,
+                           SUM(poi.quantity) as total_ordered,
+                           SUM(COALESCE(poi.received_quantity, 0)) as total_received
+                    FROM purchase_orders po
+                    JOIN purchase_order_items poi ON poi.purchase_order_id = po.id AND poi.deleted_at IS NULL
+                    WHERE po.id = (SELECT purchase_order_id FROM purchase_order_items WHERE id = :poi_id)
+                      AND po.deleted_at IS NULL
+                    GROUP BY po.id
+                """), {"poi_id": poi_id}).fetchone()
+
+                if po_check:
+                    total_ord = int(po_check[1])
+                    total_recv = int(po_check[2])
+                    if total_recv >= total_ord:
+                        db.execute(text("""
+                            UPDATE purchase_orders SET status = 'completed', updated_at = NOW()
+                            WHERE id = :po_id AND status NOT IN ('cancelled')
+                        """), {"po_id": po_check[0]})
+                        # 采购单变为已完成，自动更新关联补货单为已完成
+                        rep_rows = db.execute(text("""
+                            SELECT id FROM replenishment_orders
+                            WHERE purchase_order_id = :po_id AND deleted_at IS NULL AND status IN ('pending', 'purchased')
+                        """), {"po_id": po_check[0]}).fetchall()
+                        if rep_rows:
+                            rep_ids = [r[0] for r in rep_rows]
+                            rep_ph = ', '.join(f':rid{i}' for i in range(len(rep_ids)))
+                            rep_params = {f'rid{i}': rep_ids[i] for i in range(len(rep_ids))}
+                            db.execute(text(f"""
+                                UPDATE replenishment_orders SET status = 'completed', updated_at = NOW()
+                                WHERE id IN ({rep_ph}) AND deleted_at IS NULL
+                            """), rep_params)
+                        print(f"[RESOLVE-DIFF] 采购单#{po_check[0]} 数量已全部收齐，状态->已完成")
 
             elif item.resolution == 'reshipment':
                 # 厂家补发：将关联的采购单状态改为"待补发"

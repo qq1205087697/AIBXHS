@@ -454,6 +454,7 @@ export const productsApi = {
     product_type?: string;
     status?: string;
     hide_zero_stock?: boolean;
+    around_product_id?: number;
   }) => apiClient.get("/products/", { params }),
   getById: (id: number) => apiClient.get(`/products/${id}`),
   create: (data: {
@@ -467,6 +468,7 @@ export const productsApi = {
     purchase_price?: number;
     sale_price?: number;
     main_image?: string;
+    video_url?: string;
     weight?: number;
     length?: number;
     width?: number;
@@ -491,6 +493,7 @@ export const productsApi = {
       purchase_price?: number;
       sale_price?: number;
       main_image?: string;
+      video_url?: string;
       weight?: number;
       length?: number;
       width?: number;
@@ -504,6 +507,14 @@ export const productsApi = {
     },
   ) => apiClient.put(`/products/${id}`, data),
   delete: (id: number) => apiClient.delete(`/products/${id}`),
+  getProfitMargins: (productId: number) =>
+    apiClient.get(`/products/${productId}/profit-margins`),
+  getProfitMarginsBatch: (productIds: number[]) =>
+    apiClient.post('/products/profit-margins/batch', { product_ids: productIds }),
+  getStoreGroupSku: (productId: number, storeGroupId?: number) =>
+    apiClient.get(`/products/${productId}/store-group-sku`, { params: storeGroupId ? { store_group_id: storeGroupId } : {} }),
+  getStoreGroupSkusBatch: (productIds: number[], storeGroupId?: number) =>
+    apiClient.post('/products/store-group-skus/batch', { product_ids: productIds }, { params: storeGroupId ? { store_group_id: storeGroupId } : {} }),
   getPlatformProducts: (productId: number) =>
     apiClient.get(`/products/${productId}/platform-products`),
   createPlatformProduct: (
@@ -518,6 +529,9 @@ export const productsApi = {
       title?: string;
       title_en?: string;
       image_url?: string;
+      description?: string;
+      bullet_points?: string;
+      keywords?: string;
       currency?: string;
       price?: number;
       cost_price?: number;
@@ -535,6 +549,9 @@ export const productsApi = {
       title?: string;
       title_en?: string;
       image_url?: string;
+      description?: string;
+      bullet_points?: string;
+      keywords?: string;
       currency?: string;
       price?: number;
       cost_price?: number;
@@ -602,6 +619,28 @@ export const productsApi = {
     apiClient.get(`/products/import-records/${id}`),
 };
 
+// ========== Upload API (火山引擎 TOS) ==========
+export const uploadApi = {
+  uploadImage: (file: File, customName?: string) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (customName) formData.append('custom_name', customName);
+    return apiClient.post('/upload/image', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000,
+    });
+  },
+  uploadVideo: (file: File, customName?: string) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (customName) formData.append('custom_name', customName);
+    return apiClient.post('/upload/video', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    });
+  },
+};
+
 // ========== Inventory Count API ==========
 export const inventoryCountApi = {
   downloadTemplate: () =>
@@ -620,8 +659,8 @@ export const inventoryCountApi = {
 // ========== Store Groups API ==========
 export const storeGroupsApi = {
   getList: () => apiClient.get("/store-groups/"),
-  getGroupStores: (groupId: number) =>
-    apiClient.get(`/store-groups/${groupId}/stores`),
+  getMyGroup: () => apiClient.get("/store-groups/my-group"),
+  getGroupStores: (groupId: number) => apiClient.get(`/store-groups/${groupId}/stores`),
   create: (data: { name: string; description?: string }) =>
     apiClient.post("/store-groups/", data),
   update: (id: number, data: { name?: string; description?: string }) =>
@@ -806,6 +845,7 @@ export const purchaseOrdersApi = {
       quantity: number;
       unit_price?: number;
       notes?: string;
+      store_group_id?: number | null;
     }[];
   }) => apiClient.post("/purchase-orders/", data),
   update: (
@@ -818,13 +858,13 @@ export const purchaseOrdersApi = {
       warehouse?: string;
       expected_date?: string;
       notes?: string;
-      status?: string;
       items?: {
         product_id: number;
         quantity: number;
         unit_price?: number;
         supplier?: string;
         notes?: string;
+        store_group_id?: number | null;
       }[];
     },
   ) => apiClient.put(`/purchase-orders/${id}`, data),
@@ -842,6 +882,7 @@ export const purchaseOrdersApi = {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },
+  exportOrders: (ids: number[]) => apiClient.post('/purchase-orders/export', { ids }, { responseType: 'blob' }),
 };
 
 // ========== Inventory Batches API ==========
@@ -1202,23 +1243,14 @@ export const replenishmentOrdersApi = {
   update: (id: number, data: any) =>
     apiClient.put(`/replenishment-orders/${id}`, data),
   delete: (id: number) => apiClient.delete(`/replenishment-orders/${id}`),
-  batchDelete: (ids: number[]) =>
-    apiClient.post("/replenishment-orders/batch-delete", { ids }),
-  batchConvert: (data: {
-    ids: number[];
-    supplier?: string;
-    contact_person?: string;
-    contact_phone?: string;
-    notes?: string;
-  }) => apiClient.post("/replenishment-orders/batch-convert", data),
-  approve: (id: number) =>
-    apiClient.post(`/replenishment-orders/${id}/approve`),
-  cancelApproval: (id: number) =>
-    apiClient.post(`/replenishment-orders/${id}/cancel-approval`),
-  downloadTemplate: () =>
-    apiClient.get("/replenishment-orders/template/download", {
-      responseType: "blob",
-    }),
+  batchDelete: (ids: number[]) => apiClient.post('/replenishment-orders/batch-delete', { ids }),
+  batchConvert: (data: { ids: number[]; supplier?: string; contact_person?: string; contact_phone?: string; notes?: string }) =>
+    apiClient.post("/replenishment-orders/batch-convert", data),
+  batchApprove: (ids: number[]) => apiClient.post('/replenishment-orders/batch-approve', { ids }),
+  batchImport: (groups: any[]) => apiClient.post('/replenishment-orders/batch-import', { groups }),
+  approve: (id: number) => apiClient.post(`/replenishment-orders/${id}/approve`),
+  cancelApproval: (id: number) => apiClient.post(`/replenishment-orders/${id}/cancel-approval`),
+  downloadTemplate: () => apiClient.get("/replenishment-orders/template/download", { responseType: 'blob' }),
   uploadPreview: (file: File) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -1256,6 +1288,29 @@ export const shipmentsApi = {
   confirm: (id: number) => apiClient.put(`/shipments/${id}/confirm`),
   delete: (id: number) => apiClient.delete(`/shipments/${id}`),
   getKpiCount: () => apiClient.get("/shipments/kpi-count"),
+  batchConfirm: (ids: number[]) => apiClient.post("/shipments/batch-confirm", { ids }),
+  batchDelete: (ids: number[]) => apiClient.post("/shipments/batch-delete", { ids }),
+  batchConvertOutbound: (ids: number[], notes?: string) => apiClient.post("/shipments/batch-convert-outbound", { ids, notes }),
+  exportDetail: (id: number) => apiClient.get(`/shipments/${id}/export`, { responseType: 'blob' }),
+  importDetail: (id: number, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return apiClient.post(`/shipments/${id}/import`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+};
+
+// ========== Suppliers API ==========
+export const suppliersApi = {
+  getList: (params?: { page?: number; page_size?: number; search?: string }) =>
+    apiClient.get("/suppliers/", { params }),
+  listAll: () => apiClient.get("/suppliers/list-all"),
+  create: (data: { name: string; contact_person?: string; contact_phone?: string; address?: string; notes?: string }) =>
+    apiClient.post("/suppliers/", data),
+  update: (id: number, data: { name?: string; contact_person?: string; contact_phone?: string; address?: string; notes?: string }) =>
+    apiClient.put(`/suppliers/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/suppliers/${id}`),
 };
 
 export default apiClient;
