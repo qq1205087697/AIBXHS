@@ -364,7 +364,8 @@ const ReplenishmentManagement: React.FC = () => {
   const handleCreate = () => {
     setEditingOrder(null)
     setViewingOrder(null)
-    const orderNumber = `RP${dayjs().format('YYYYMMDDHHmmssSSS')}`
+    // 新建时前端预生成单号并展示，格式与后端保持一致：RO + 年月日时分秒 + 3位毫秒
+    const orderNumber = `RO${dayjs().format('YYYYMMDDHHmmssSSS')}`
     form.setFieldsValue({
       order_number: orderNumber,
       store_group_id: undefined,

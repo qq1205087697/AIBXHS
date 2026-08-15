@@ -18,6 +18,7 @@ from models.review import Review, ReviewAnalysis, Sentiment
 from openai import OpenAI
 from config import get_settings
 from services.ai_concurrency import ai_call_slot
+from utils.order_number import generate_replenishment_order_number
 
 settings = get_settings()
 
@@ -1210,7 +1211,7 @@ def create_replenishment_order(db: Session, tenant_id: int, user_id: int,
             if user_store_group:
                 store_group_id = user_store_group[0]
 
-        order_number = f"RO{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        order_number = generate_replenishment_order_number()
         db.execute(text("""
             INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
                 created_by, created_at, updated_at)

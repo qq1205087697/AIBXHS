@@ -18,6 +18,7 @@ from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
 from services.operation_log import log_order_create
+from utils.order_number import generate_replenishment_order_number
 
 router = APIRouter(prefix="/api/replenishment-orders", tags=["replenishment_orders"])
 
@@ -447,7 +448,7 @@ async def create_replenishment_order(
             store_group_name = group[1]
 
         # 自动生成单号：RO + 时间戳
-        order_number = data.order_number or f"RO{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        order_number = data.order_number or generate_replenishment_order_number()
 
         db.execute(text("""
             INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
@@ -927,7 +928,7 @@ async def batch_import_replenishment_orders(
                 if sg:
                     store_group_name = sg[0]
 
-            order_number = f"RO{now.strftime('%Y%m%d%H%M%S%f')}_{len(created_orders) + 1}"
+            order_number = generate_replenishment_order_number()
 
             db.execute(text("""
                 INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,

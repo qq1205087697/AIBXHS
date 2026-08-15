@@ -359,7 +359,9 @@ const PurchaseManagement: React.FC = () => {
         setOrders(res.data.data)
         setPagination((prev) => ({ ...prev, total: res.data.total }))
       }
-    } catch {
+    } catch (e: any) {
+      console.error('加载采购单列表失败:', e)
+      message.error(e?.response?.data?.detail || '加载采购单列表失败')
     } finally {
       setLoading(false)
     }
