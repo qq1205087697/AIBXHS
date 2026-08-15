@@ -1,4 +1,5 @@
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import MainLayout from "./components/Layout/MainLayout";
 import Home from "./pages/Home";
@@ -8,13 +9,14 @@ import InventoryBot from "./pages/InventoryBot";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
+import RatingOptimizationBot from "./pages/RatingOptimizationBot";
+import DataAlertBot from "./pages/DataAlertBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
 import ProductManagement from "./pages/ProductManagement";
 import InboundManagement from './pages/InboundManagement'
 import OutboundManagement from './pages/OutboundManagement'
 import PurchaseManagement from './pages/PurchaseManagement'
-import ReplenishmentManagement from './pages/ReplenishmentManagement'
 import OperationLogs from './pages/OperationLogs'
 import StockTransferManagement from './pages/StockTransferManagement'
 import ShipmentManagement from './pages/ShipmentManagement'
@@ -24,6 +26,7 @@ import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+
 
 function AppRoutes() {
   return (
@@ -111,7 +114,27 @@ function AppRoutes() {
         }
       />
       <Route
-        path="/org"
+        path="/rating-optimization"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <RatingOptimizationBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route 
+        path="/data-alert" 
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <DataAlertBot />
+            </MainLayout>
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/org" 
         element={
           <ProtectedRoute>
             <MainLayout>
@@ -166,16 +189,6 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <PurchaseManagement />
-            </MainLayout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/replenishment"
-        element={
-          <ProtectedRoute>
-            <MainLayout>
-              <ReplenishmentManagement />
             </MainLayout>
           </ProtectedRoute>
         }
@@ -256,9 +269,11 @@ function AppRoutes() {
 
 function App() {
   return (
-    <Router>
-      <AppRoutes />
-    </Router>
+    <AuthProvider>
+      <Router>
+        <AppRoutes />
+      </Router>
+    </AuthProvider>
   );
 }
 

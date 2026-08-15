@@ -104,6 +104,8 @@ async def get_all_stores(
 async def get_stores(
     page: int = 1,
     page_size: int = 20,
+    # name_search: Optional[str] = None,
+    # site_search: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

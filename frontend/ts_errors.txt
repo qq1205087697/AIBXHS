@@ -1,0 +1,45 @@
+﻿src/components/Layout/MainLayout.tsx(8,3): error TS6133: 'Database' is declared but its value is never read.
+src/components/Layout/MainLayout.tsx(13,3): error TS6133: 'Settings' is declared but its value is never read.
+src/components/Layout/MainLayout.tsx(15,3): error TS6133: 'BarChart3' is declared but its value is never read.
+src/components/Layout/MainLayout.tsx(145,9): error TS6133: 'handleDetailModalOk' is declared but its value is never read.
+src/pages/ChatBot.tsx(112,57): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string | undefined'.
+  Type 'null' is not assignable to type 'string | undefined'.
+src/pages/EmailBot.tsx(3,1): error TS6133: 'MenuProps' is declared but its value is never read.
+src/pages/EmailBot.tsx(323,44): error TS6133: 'text' is declared but its value is never read.
+src/pages/InventoryBot.tsx(21,1): error TS6133: 'UploadProps' is declared but its value is never read.
+src/pages/InventoryBot.tsx(108,7): error TS6133: 'getDaysSupplyColor' is declared but its value is never read.
+src/pages/InventoryBot.tsx(1130,55): error TS2339: Property 'total_stock' does not exist on type 'StockoutItem'.
+src/pages/InventoryBot.tsx(1321,60): error TS2339: Property 'age_3_6' does not exist on type 'OverstockItem'.
+src/pages/OrgManagement.tsx(27,9): error TS6133: 'currentTheme' is declared but its value is never read.
+src/pages/ProductManagement.tsx(4,28): error TS6196: 'TableProps' is declared but never used.
+src/pages/ProductManagement.tsx(85,9): error TS6133: 'currentTheme' is declared but its value is never read.
+src/pages/ProductManagement.tsx(207,13): error TS6133: 'e' is declared but its value is never read.
+src/pages/ReviewBot.tsx(2,52): error TS6133: 'Statistic' is declared but its value is never read.
+src/pages/ReviewBot.tsx(4,3): error TS6133: 'MessageSquare' is declared but its value is never read.
+src/pages/ReviewBot.tsx(5,3): error TS6133: 'AlertTriangle' is declared but its value is never read.
+src/pages/ReviewBot.tsx(8,3): error TS6133: 'Bell' is declared but its value is never read.
+src/pages/ReviewBot.tsx(10,3): error TS6133: 'CheckSquare' is declared but its value is never read.
+src/pages/ReviewBot.tsx(11,3): error TS6133: 'PlayCircle' is declared but its value is never read.
+src/pages/ReviewBot.tsx(181,63): error TS2367: This comparison appears to be unintentional because the types '"processing" | "resolved"' and '"read"' have no overlap.
+src/pages/ReviewBot.tsx(212,24): error TS2345: Argument of type '"read"' is not assignable to parameter of type 'SetStateAction<"new" | "processing" | "resolved">'.
+src/pages/ReviewBot.tsx(269,18): error TS2345: Argument of type '(prev: ReviewItem[]) => (ReviewItem | { importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; ... 9 more ...; returnRate?: number | undefined; })[]' is not assignable to parameter of type 'SetStateAction<ReviewItem[]>'.
+  Type '(prev: ReviewItem[]) => (ReviewItem | { importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; ... 9 more ...; returnRate?: number | undefined; })[]' is not assignable to type '(prevState: ReviewItem[]) => ReviewItem[]'.
+    Type '(ReviewItem | { importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; originalText: string; translatedText: string; ... 7 more ...; returnRate?: number | undefined; })[]' is not assignable to type 'ReviewItem[]'.
+      Type 'ReviewItem | { importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; originalText: string; translatedText: string; ... 7 more ...; returnRate?: number | undefined; }' is not assignable to type 'ReviewItem'.
+        Type '{ importanceLevel: string | null; id: string; asin: string; productName: string; title?: string; rating: number; originalText: string; translatedText: string; keyPoints: string[]; topics: string[]; ... 5 more ...; returnRate?: number; }' is not assignable to type 'ReviewItem'.
+          Types of property 'importanceLevel' are incompatible.
+            Type 'string | null' is not assignable to type 'string | undefined'.
+              Type 'null' is not assignable to type 'string | undefined'.
+src/pages/ReviewBot.tsx(271,27): error TS2345: Argument of type '(prev: ReviewItem | null) => { importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; originalText: string; ... 8 more ...; returnRate?: number | undefined; } | null' is not assignable to parameter of type 'SetStateAction<ReviewItem | null>'.
+  Type '(prev: ReviewItem | null) => { importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; originalText: string; ... 8 more ...; returnRate?: number | undefined; } | null' is not assignable to type '(prevState: ReviewItem | null) => ReviewItem | null'.
+    Type '{ importanceLevel: string | null; id: string; asin: string; productName: string; title?: string | undefined; rating: number; originalText: string; translatedText: string; keyPoints: string[]; ... 6 more ...; returnRate?: number | undefined; } | null' is not assignable to type 'ReviewItem | null'.
+      Type '{ importanceLevel: string | null; id: string; asin: string; productName: string; title?: string; rating: number; originalText: string; translatedText: string; keyPoints: string[]; topics: string[]; ... 5 more ...; returnRate?: number; }' is not assignable to type 'ReviewItem'.
+        Types of property 'importanceLevel' are incompatible.
+          Type 'string | null' is not assignable to type 'string | undefined'.
+            Type 'null' is not assignable to type 'string | undefined'.
+src/pages/ReviewBot.tsx(400,53): error TS2345: Argument of type 'NoUndefinedRangeValueType<Dayjs> | null' is not assignable to parameter of type 'SetStateAction<[Dayjs | null, Dayjs | null]>'.
+  Type 'null' is not assignable to type 'SetStateAction<[Dayjs | null, Dayjs | null]>'.
+src/pages/ReviewBot.tsx(765,110): error TS2367: This comparison appears to be unintentional because the types '"processing" | "resolved"' and '"read"' have no overlap.
+src/pages/StoreManagement.tsx(25,9): error TS6133: 'currentTheme' is declared but its value is never read.
+src/pages/TenantManagement.tsx(65,12): error TS18046: 'error' is of type 'unknown'.
+src/pages/TenantManagement.tsx(80,15): error TS6133: 'colorMap' is declared but its value is never read.

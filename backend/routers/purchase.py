@@ -33,6 +33,11 @@ class PurchaseItemCreate(BaseModel):
 
 class PurchaseOrderCreate(BaseModel):
     order_number: str
+    # supplier: Optional[str] = None
+    # contact_person: Optional[str] = None
+    # contact_phone: Optional[str] = None
+    # warehouse: Optional[str] = None
+    # expected_date: Optional[str] = None
     warehouse: Optional[str] = None
     store_group_id: Optional[int] = None
     notes: Optional[str] = None

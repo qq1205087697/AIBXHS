@@ -682,7 +682,7 @@ const EmailBot: React.FC = () => {
       )}
 
       <Modal
-        title="填写回复备注"
+        title="填写回复"
         open={replyModalVisible}
         onCancel={() => setReplyModalVisible(false)}
         footer={null}

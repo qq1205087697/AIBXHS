@@ -204,7 +204,6 @@ async def create_outbound_order(
     try:
         if not data.items:
             raise HTTPException(status_code=400, detail="请至少添加一条出库明细")
-
         # 验证：如果是报废类型，每个商品必须选择批次
         if data.outbound_type == "scrap":
             for item in data.items:
@@ -367,7 +366,6 @@ async def confirm_outbound_order(
             "LEFT JOIN products p ON p.id = ooi.product_id "
             "WHERE ooi.outbound_order_id = :oid AND ooi.deleted_at IS NULL"
         ), {"oid": order_id}).fetchall()
-
         # 验证：如果是报废类型，每个商品必须选择批次
         if outbound_type == "scrap":
             for item in items:

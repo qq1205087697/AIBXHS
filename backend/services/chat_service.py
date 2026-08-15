@@ -30,10 +30,6 @@ client = OpenAI(
     base_url=settings.OPENAI_API_BASE
 ) if settings.OPENAI_API_KEY else None
 
-# ???????????? AI ?????????? 123 ???????
-SESSION_REPLENISHMENT_CANDIDATES: dict[str, list[dict[str, Any]]] = {}
-
-
 DATE_PARSING_TOOLS = [
     {
         "type": "function",
@@ -707,7 +703,7 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
 }}
 """
 
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},
@@ -818,7 +814,7 @@ def analyze_review(db: Session, review: Review) -> dict:
 {{"sentiment":"negative","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low"}}
 """
 
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "你是专业差评分析助手。所有分析结果必须使用中文输出。只输出JSON。"},
@@ -930,9 +926,9 @@ def batch_analyze_reviews(db: Session, review_ids: List[int], tenant_id: Optiona
 
 输出JSON:{{"sentiment":"","sentiment_score":0,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low"}}"""
 
-                if client:
+                if settings.OPENAI_API_KEY:
                     try:
-                        resp = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3, timeout=120)
+                        resp = openai.ChatCompletion.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3, timeout=120)
                         rc = resp.choices[0].message.content.strip()
                         if rc.startswith("```"): rc = rc.split("\n",1)[-1]
                         if rc.endswith("```"): rc = rc[:-3]
@@ -2146,8 +2142,7 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
 
     logger.info(f"[CHAT] 准备调用AI, 工具数: {len(tools)}, 对话类型: {chat_type}")
     try:
-        with ai_call_slot():
-            response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=tools, tool_choice="auto", timeout=180)
+        response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=messages, tools=DATE_PARSING_TOOLS, tool_choice="auto", timeout=180)
 
         assistant_message = response.choices[0].message
         logger.info(f"[CHAT] AI返回: content={assistant_message.content}, tool_calls={assistant_message.tool_calls}")

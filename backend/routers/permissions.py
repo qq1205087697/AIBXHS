@@ -552,7 +552,10 @@ async def init_default_permissions(
         {"name": "删除采购", "code": "purchase:delete", "type": "function", "module": "采购管理", "sort_order": 28},
         {"name": "导入采购", "code": "purchase:import", "type": "function", "module": "采购管理", "sort_order": 29},
         {"name": "导出采购", "code": "purchase:export", "type": "function", "module": "采购管理", "sort_order": 30},
-        # 店铺管理
+        # 库存管理
+        # {"name": "查看库存", "code": "inventory:view", "type": "function", "module": "库存管理", "sort_order": 31},
+        # {"name": "调整库存", "code": "inventory:adjust", "type": "function", "module": "库存管理", "sort_order": 32},
+        # # 店铺管理
         {"name": "查看店铺", "code": "store:view", "type": "function", "module": "店铺管理", "sort_order": 33},
         {"name": "新增店铺", "code": "store:create", "type": "function", "module": "店铺管理", "sort_order": 34},
         {"name": "编辑店铺", "code": "store:edit", "type": "function", "module": "店铺管理", "sort_order": 35},
@@ -584,6 +587,8 @@ async def init_default_permissions(
         {"name": "库存机器人KPI卡片", "code": "robot:inventory:kpi", "type": "function", "module": "库存机器人", "sort_order": 49},
         {"name": "AI聊天助手KPI卡片", "code": "chat:kpi", "type": "function", "module": "AI聊天助手", "sort_order": 50},
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
+        # 页面优化机器人
+        {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -672,6 +677,8 @@ async def add_missing_permissions(
         {"name": "库存机器人KPI卡片", "code": "robot:inventory:kpi", "type": "function", "module": "库存机器人", "sort_order": 49},
         {"name": "AI聊天助手KPI卡片", "code": "chat:kpi", "type": "function", "module": "AI聊天助手", "sort_order": 50},
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
+        # 页面优化机器人
+        {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -718,6 +725,7 @@ async def add_missing_permissions(
         removed_count += result.rowcount
 
     added_count = 0
+    added_permission_ids = []
     
     for perm in new_permissions:
         existing = db.execute(text("""
@@ -726,7 +734,7 @@ async def add_missing_permissions(
         """), {"tenant_id": tenant_id, "code": perm["code"]}).fetchone()
         
         if not existing:
-            db.execute(text("""
+            result = db.execute(text("""
                 INSERT INTO permissions (tenant_id, name, code, type, module, sort_order, created_at, updated_at)
                 VALUES (:tenant_id, :name, :code, :type, :module, :sort_order, NOW(), NOW())
             """), {
@@ -738,6 +746,32 @@ async def add_missing_permissions(
                 "sort_order": perm["sort_order"]
             })
             added_count += 1
+            # 获取新插入的权限ID
+            new_perm = db.execute(text("""
+                SELECT id FROM permissions 
+                WHERE tenant_id = :tenant_id AND code = :code AND deleted_at IS NULL
+            """), {"tenant_id": tenant_id, "code": perm["code"]}).fetchone()
+            if new_perm:
+                added_permission_ids.append(new_perm[0])
+    
+    # 给admin角色分配新增的权限
+    if added_permission_ids:
+        admin_role = db.execute(text("""
+            SELECT id FROM roles 
+            WHERE tenant_id = :tenant_id AND code = 'admin' AND deleted_at IS NULL
+        """), {"tenant_id": tenant_id}).fetchone()
+        if admin_role:
+            for perm_id in added_permission_ids:
+                # 检查是否已分配
+                existing_rp = db.execute(text("""
+                    SELECT id FROM role_permissions 
+                    WHERE tenant_id = :tenant_id AND role_id = :role_id AND permission_id = :perm_id
+                """), {"tenant_id": tenant_id, "role_id": admin_role[0], "perm_id": perm_id}).fetchone()
+                if not existing_rp:
+                    db.execute(text("""
+                        INSERT INTO role_permissions (tenant_id, role_id, permission_id, created_at, updated_at)
+                        VALUES (:tenant_id, :role_id, :perm_id, NOW(), NOW())
+                    """), {"tenant_id": tenant_id, "role_id": admin_role[0], "perm_id": perm_id})
     
     # 规范化已有权限的模块和名称（防止之前的数据错乱）
     fix_map = [
@@ -748,6 +782,7 @@ async def add_missing_permissions(
         {"code": "robot:review:view", "name": "查看差评", "module": "差评机器人"},
         {"code": "robot:review:analyze", "name": "AI分析差评", "module": "差评机器人"},
         {"code": "robot:review:manage", "name": "管理差评状态", "module": "差评机器人"},
+        {"code": "robot:rating:view", "name": "查看页面优化", "module": "页面优化机器人"},
     ]
     fixed_count = 0
     for fm in fix_map:
