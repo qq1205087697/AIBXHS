@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, Alert,
-  InputNumber, Tooltip, Progress, Statistic, Row, Col, Typography, Drawer, Descriptions, Image, Dropdown
+  InputNumber, Tooltip, Progress, Statistic, Row, Col, Typography, Drawer, Descriptions, Image, Dropdown, Tabs
 } from 'antd'
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
-  RobotOutlined, EyeOutlined, ThunderboltOutlined, BarChartOutlined,
-  AlertOutlined, RiseOutlined, StarOutlined, StarFilled, FireOutlined, MoreOutlined, QuestionCircleOutlined, ReloadOutlined
+  RobotOutlined, EyeOutlined, BarChartOutlined,
+  AlertOutlined, RiseOutlined, StarOutlined, StarFilled, FireOutlined, MoreOutlined, QuestionCircleOutlined, ReloadOutlined,
+  CheckOutlined, DownOutlined, FileTextOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { productSelectionApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
+import { useAuth } from '../contexts/AuthContext'
 
 const { Text, Title } = Typography
 
@@ -40,6 +42,7 @@ interface ProductSelectionItem {
   rating_score: number | null
   penalty_factor: number | null
   composite_score: number | null
+  status: string | null
   created_at: string
   updated_at: string
 }
@@ -64,8 +67,16 @@ const getScoreTag = (score: number | null, label: string, max: number = 100) => 
   )
 }
 
+const getCurrencySymbol = (site: string | undefined): string => {
+  if (!site) return '$'
+  if (site.includes('德') || site.toLowerCase().includes('de')) return '€'
+  if (site.includes('美') || site.toLowerCase().includes('us')) return '$'
+  return '$'
+}
+
 const ProductSelection: React.FC = () => {
   const { currentTheme } = useTheme()
+  const { hasPermission } = useAuth()
   const [items, setItems] = useState<ProductSelectionItem[]>([])
   const [loading, setLoading] = useState(false)
   const [analyzingIds, setAnalyzingIds] = useState<Set<number>>(new Set())
@@ -97,13 +108,22 @@ const ProductSelection: React.FC = () => {
     field: null, order: null,
   })
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'approved' | 'empty'>('all')
+  const [statusFilter, setStatusFilter] = useState<string[]>([])
 
+  // 初始化加载配置数据
   useEffect(() => {
-    fetchData()
     fetchTypes()
-    fetchDates()
     fetchSites()
-  }, [pagination.current, pagination.pageSize, searchText, productTypeFilter, siteFilter, dateFilter])
+    fetchDates()
+  }, [])
+
+  // 数据刷新（筛选条件变化或初始化完成）
+  useEffect(() => {
+    if (datesInitialized) {
+      fetchData()
+    }
+  }, [datesInitialized, pagination.current, pagination.pageSize, searchText, productTypeFilter, siteFilter, dateFilter, activeTab, statusFilter, localSort.field, localSort.order])
 
   const fetchTypes = async () => {
     try {
@@ -143,6 +163,10 @@ const ProductSelection: React.FC = () => {
   const fetchData = async () => {
     setLoading(true)
     try {
+      const statusParams: string[] = [
+        ...(activeTab === 'all' ? [] : [activeTab]),
+        ...statusFilter,
+      ].filter((v, idx, arr) => arr.indexOf(v) === idx)
       const res = await productSelectionApi.getList({
         page: pagination.current,
         page_size: pagination.pageSize,
@@ -150,6 +174,9 @@ const ProductSelection: React.FC = () => {
         product_type: productTypeFilter,
         site: siteFilter,
         date_filter: dateFilter,
+        status: statusParams.length ? statusParams : undefined,
+        sort_by: localSort.field || undefined,
+        sort_order: localSort.order === 'ascend' ? 'asc' : localSort.order === 'descend' ? 'desc' : undefined,
       })
       if (res.data.success) {
         setItems(res.data.data)
@@ -172,27 +199,10 @@ const ProductSelection: React.FC = () => {
     setProductTypeFilter(undefined)
     setSiteFilter(undefined)
     setDateFilter(undefined)
+    setStatusFilter([])
     setLocalSort({ field: null, order: null })
     setPagination(prev => ({ ...prev, current: 1 }))
   }
-
-  // 前端排序：纯内存操作，不请求后端
-  const sortedItems = useMemo(() => {
-    if (!localSort.field || !localSort.order) return items
-    return [...items].sort((a, b) => {
-      const av = (a as any)[localSort.field!]
-      const bv = (b as any)[localSort.field!]
-      if (av == null && bv == null) return 0
-      if (av == null) return localSort.order === 'ascend' ? -1 : 1
-      if (bv == null) return localSort.order === 'ascend' ? 1 : -1
-      if (typeof av === 'string' && typeof bv === 'string') {
-        return localSort.order === 'ascend' ? av.localeCompare(bv) : bv.localeCompare(av)
-      }
-      const an = Number(av) || 0
-      const bn = Number(bv) || 0
-      return localSort.order === 'ascend' ? an - bn : bn - an
-    })
-  }, [items, localSort])
 
   const handleCreate = () => {
     setEditingItem(null)
@@ -342,6 +352,170 @@ const ProductSelection: React.FC = () => {
     setAnalyzeModal({ open: true, mode: 'single', targetId: detailItem.id, targetItem: detailItem })
   }
 
+  const handleSubmitForApproval = async (id: number) => {
+    try {
+      const res = await productSelectionApi.submitForApproval(id)
+      if (res.data.success) {
+        message.success('已申请选品')
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '申请选品失败')
+    }
+  }
+
+  const handleApprove = async (id: number) => {
+    try {
+      const res = await productSelectionApi.approve(id)
+      if (res.data.success) {
+        message.success('审批通过')
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '审批失败')
+    }
+  }
+
+  const handleCancelApprovalApplication = async (id: number) => {
+    try {
+      const res = await productSelectionApi.cancelApprovalApplication(id)
+      if (res.data.success) {
+        message.success('已取消申请')
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '取消申请失败')
+    }
+  }
+
+  const handleGeneratePurchaseOrder = async (id: number) => {
+    try {
+      const res = await productSelectionApi.generatePurchaseOrder(id)
+      if (res.data.success) {
+        message.success(`采购单 ${res.data.data.order_number} 生成成功`)
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '生成采购单失败')
+    }
+  }
+
+  const handleBatchApprove = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要审批的选品')
+      return
+    }
+    const ids = selectedRowKeys as number[]
+    const pendingIds = items.filter(i => ids.includes(i.id) && i.status === 'pending').map(i => i.id)
+    if (pendingIds.length === 0) {
+      message.warning('所选选品中没有待审批状态的记录')
+      return
+    }
+    try {
+      for (const id of pendingIds) {
+        await productSelectionApi.approve(id)
+      }
+      message.success(`成功审批 ${pendingIds.length} 条选品`)
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '批量审批失败')
+    }
+  }
+
+  const handleBatchGeneratePurchaseOrder = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要生成采购单的选品')
+      return
+    }
+    const ids = selectedRowKeys as number[]
+    try {
+      const res = await productSelectionApi.batchGeneratePurchaseOrders(ids)
+      if (res.data.success) {
+        const { created, errors } = res.data.data
+        if (created.length > 0) {
+          message.success(`成功生成 ${created.length} 个采购单`)
+        }
+        if (errors.length > 0) {
+          message.warning(`${errors.length} 条生成失败：${errors[0].message}`)
+        }
+        setSelectedRowKeys([])
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '批量生成采购单失败')
+    }
+  }
+
+  const handleBatchSubmitForApproval = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要申请选品的产品')
+      return
+    }
+    const ids = selectedRowKeys as number[]
+    const emptyIds = items.filter(i => ids.includes(i.id) && !i.status).map(i => i.id)
+    if (emptyIds.length === 0) {
+      message.warning('所选选品中没有可申请的产品')
+      return
+    }
+    try {
+      for (const id of emptyIds) {
+        await productSelectionApi.submitForApproval(id)
+      }
+      message.success(`成功申请 ${emptyIds.length} 条选品`)
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '批量申请选品失败')
+    }
+  }
+
+  const handleBatchCancelApprovalApplication = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要取消申请的选品')
+      return
+    }
+    const ids = selectedRowKeys as number[]
+    const pendingIds = items.filter(i => ids.includes(i.id) && i.status === 'pending').map(i => i.id)
+    if (pendingIds.length === 0) {
+      message.warning('所选选品中没有待审批状态的记录')
+      return
+    }
+    try {
+      for (const id of pendingIds) {
+        await productSelectionApi.cancelApprovalApplication(id)
+      }
+      message.success(`成功取消 ${pendingIds.length} 条选品申请`)
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '批量取消申请失败')
+    }
+  }
+
+  const handleBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要删除的选品')
+      return
+    }
+    Modal.confirm({
+      title: '确认删除',
+      content: `确定删除选中的 ${selectedRowKeys.length} 条选品吗？`,
+      onOk: async () => {
+        try {
+          for (const id of selectedRowKeys as number[]) {
+            await productSelectionApi.delete(id)
+          }
+          message.success(`成功删除 ${selectedRowKeys.length} 条选品`)
+          setSelectedRowKeys([])
+          fetchData()
+        } catch (e: any) {
+          message.error(e.response?.data?.detail || '批量删除失败')
+        }
+      },
+    })
+  }
+
   const handleRecalcScores = async () => {
     setRecalcing(true)
     try {
@@ -364,7 +538,25 @@ const ProductSelection: React.FC = () => {
     setDetailOpen(true)
   }
 
-  const columns: ColumnsType<ProductSelectionItem> = [
+  // 计算类型列的最大宽度（自适应最长类型文本）
+  const productTypeMaxWidth = useMemo(() => {
+    if (!items.length) return 100
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return 100
+    ctx.font = '14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial'
+    let maxWidth = 0
+    for (const item of items) {
+      if (item.product_type) {
+        const textWidth = ctx.measureText(item.product_type).width
+        maxWidth = Math.max(maxWidth, textWidth)
+      }
+    }
+    // Tag组件有左右padding 7px * 2 = 14px，边框 1px * 2 = 2px，加上额外空间
+    return Math.max(80, Math.min(300, Math.ceil(maxWidth) + 30))
+  }, [items])
+
+  const columns: ColumnsType<ProductSelectionItem> = useMemo(() => [
     {
       title: '产品标题',
       dataIndex: 'product_title',
@@ -446,17 +638,19 @@ const ProductSelection: React.FC = () => {
       title: '类型',
       dataIndex: 'product_type',
       key: 'product_type',
-      width: 100,
+      width: productTypeMaxWidth,
+      ellipsis: true,
       sorter: true,
-      render: (text: string) => text ? <Tag>{text}</Tag> : '-',
+      render: (text: string) => text ? <Tooltip title={text}><Tag>{text}</Tag></Tooltip> : '-',
     },
     {
       title: '站点',
       dataIndex: 'site',
       key: 'site',
       width: 90,
+      ellipsis: true,
       sorter: true,
-      render: (text: string) => text || '-',
+      render: (text: string) => text ? <Tooltip title={text}>{text}</Tooltip> : '-',
     },
     {
       title: '价格',
@@ -464,7 +658,7 @@ const ProductSelection: React.FC = () => {
       key: 'price',
       width: 90,
       sorter: true,
-      render: (price: number | null) => price != null ? `$${price.toFixed(2)}` : '-',
+      render: (price: number | null, record: ProductSelectionItem) => price != null ? `${getCurrencySymbol(record.site)}${price.toFixed(2)}` : '-',
     },
     {
       title: '佣金',
@@ -472,7 +666,7 @@ const ProductSelection: React.FC = () => {
       key: 'commission',
       width: 80,
       sorter: true,
-      render: (val: number | null) => val != null ? `$${val.toFixed(2)}` : '-',
+      render: (val: number | null, record: ProductSelectionItem) => val != null ? `${getCurrencySymbol(record.site)}${val.toFixed(2)}` : '-',
     },
     {
       title: '头程',
@@ -480,7 +674,7 @@ const ProductSelection: React.FC = () => {
       key: 'first_leg_cost',
       width: 80,
       sorter: true,
-      render: (val: number | null) => val != null ? `$${val.toFixed(2)}` : '-',
+      render: (val: number | null, record: ProductSelectionItem) => val != null ? `${getCurrencySymbol(record.site)}${val.toFixed(2)}` : '-',
     },
     {
       title: '尾程',
@@ -488,7 +682,7 @@ const ProductSelection: React.FC = () => {
       key: 'last_mile_cost',
       width: 80,
       sorter: true,
-      render: (val: number | null) => val != null ? `$${val.toFixed(2)}` : '-',
+      render: (val: number | null, record: ProductSelectionItem) => val != null ? `${getCurrencySymbol(record.site)}${val.toFixed(2)}` : '-',
     },
     {
       title: '重量(kg)',
@@ -504,7 +698,7 @@ const ProductSelection: React.FC = () => {
       key: 'cost_at_15_profit',
       width: 110,
       sorter: true,
-      render: (val: number | null) => val != null ? `$${val.toFixed(2)}` : '-',
+      render: (val: number | null) => val != null ? `¥${val.toFixed(2)}` : '-',
     },
     {
       title: '评分',
@@ -669,49 +863,103 @@ const ProductSelection: React.FC = () => {
       },
     },
     {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 90,
+      align: 'center',
+      render: (status: string | null) => {
+        if (!status) return null
+        if (status === 'pending') return <Tag color="processing">待审批</Tag>
+        if (status === 'approved') return <Tag color="success">已审批</Tag>
+        return <Tag color="default">{status}</Tag>
+      },
+    },
+    {
       title: '操作',
       key: 'actions',
-      width: 140,
+      width: 160,
       fixed: 'right',
-      render: (_: any, record: ProductSelectionItem) => (
-        <Space size="small">
-          <Button
-            size="small"
-            icon={<EyeOutlined />}
-            onClick={() => handleViewDetail(record)}
-          >
-            详情
-          </Button>
-          <Dropdown
-            menu={{
-              items: [
-                {
-                  key: 'analyze',
-                  icon: <RobotOutlined />,
-                  label: 'AI分析',
-                  onClick: () => handleAnalyze(record.id),
-                },
-                { key: 'edit', icon: <EditOutlined />, label: '编辑', onClick: () => handleEdit(record) },
-                {
-                  key: 'delete',
-                  icon: <DeleteOutlined />,
-                  label: (
-                    <Popconfirm title="确定删除?" onConfirm={(e) => { e?.stopPropagation(); handleDelete(record.id) }}>
-                      <span onClick={e => e.stopPropagation()}>删除</span>
-                    </Popconfirm>
-                  ),
-                  danger: true,
-                },
-              ],
-            }}
-            trigger={['click']}
-          >
-            <Button size="small" icon={<MoreOutlined />} />
-          </Dropdown>
-        </Space>
-      ),
+      align: 'right',
+      render: (_: any, record: ProductSelectionItem) => {
+        const canApprove = hasPermission('product_selection:approve')
+        const canCreatePurchase = hasPermission('purchase:create')
+        const dropdownItems: any[] = [
+          {
+            key: 'analyze',
+            icon: <RobotOutlined />,
+            label: 'AI分析',
+            onClick: () => handleAnalyze(record.id),
+          },
+          { key: 'edit', icon: <EditOutlined />, label: '编辑', onClick: () => handleEdit(record) },
+        ]
+        if (!record.status) {
+          dropdownItems.push({
+            key: 'submit-approval',
+            icon: <FileTextOutlined />,
+            label: '申请选品',
+            onClick: () => handleSubmitForApproval(record.id),
+          })
+        }
+        if (record.status === 'pending' && canApprove) {
+          dropdownItems.push({
+            key: 'approve',
+            icon: <CheckOutlined />,
+            label: '审批',
+            onClick: () => handleApprove(record.id),
+          })
+        }
+        if (record.status === 'pending') {
+          dropdownItems.push({
+            key: 'cancel-application',
+            icon: <DeleteOutlined />,
+            label: '取消申请',
+            danger: true,
+            onClick: () => handleCancelApprovalApplication(record.id),
+          })
+        }
+        if (record.status === 'approved' && canCreatePurchase) {
+          dropdownItems.push({
+            key: 'generate-po',
+            icon: <FileTextOutlined />,
+            label: '生成采购单',
+            onClick: () => handleGeneratePurchaseOrder(record.id),
+          })
+        }
+        dropdownItems.push({
+          key: 'delete',
+          icon: <DeleteOutlined />,
+          label: (
+            <Popconfirm title="确定删除?" onConfirm={(e) => { e?.stopPropagation(); handleDelete(record.id) }}>
+              <span onClick={e => e.stopPropagation()}>删除</span>
+            </Popconfirm>
+          ),
+          danger: true,
+        })
+        return (
+          <Space size="small" style={{ justifyContent: 'flex-end' }}>
+            <Button
+              size="small"
+              icon={<EyeOutlined />}
+              onClick={() => handleViewDetail(record)}
+            >
+              详情
+            </Button>
+            <Dropdown
+              menu={{ items: dropdownItems }}
+              trigger={['click']}
+              getPopupContainer={() => document.body}
+            >
+              <Button size="small" icon={<MoreOutlined />} />
+            </Dropdown>
+          </Space>
+        )
+      },
     },
-  ]
+  ].map(col => ({
+    ...col,
+    sortOrder: col.sorter && col.key === localSort.field ? localSort.order : col.sortOrder,
+  })), [localSort, productTypeMaxWidth])
 
   const rowSelection = {
     selectedRowKeys,
@@ -725,8 +973,39 @@ const ProductSelection: React.FC = () => {
         .ps-table .ant-table-thead > tr > th {
           text-align: center;
         }
+        .ps-table .ant-table-tbody > tr > td {
+          text-align: center;
+          vertical-align: middle;
+        }
+        .ps-table .ant-table-column-sorters {
+          color: inherit;
+        }
+        .ps-table .ant-table-column-title {
+          color: inherit;
+        }
+        .ps-table .ant-table-thead > tr > th.ant-table-column-sort {
+          background: transparent !important;
+        }
+        .ps-table .ant-table-tbody > tr > td.ant-table-column-sort {
+          background: transparent !important;
+        }
       `}</style>
-      <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: 24, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, position: 'relative' }}>
+      <Tabs
+        activeKey={activeTab}
+        onChange={(key) => {
+          setActiveTab(key as 'all' | 'pending' | 'approved' | 'empty')
+          setPagination(prev => ({ ...prev, current: 1 }))
+          setSelectedRowKeys([])
+        }}
+        items={[
+          { key: 'all', label: '全部' },
+          { key: 'empty', label: '未申请' },
+          { key: 'pending', label: '待审批' },
+          { key: 'approved', label: '已审批' },
+        ]}
+        style={{ marginBottom: 16, flexShrink: 0 }}
+      />
       <Card
         loading={loading}
         title={
@@ -764,22 +1043,87 @@ const ProductSelection: React.FC = () => {
                 value={dateFilter}
                 onChange={(v) => { setDateFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
+              <Select
+                mode="multiple"
+                placeholder="状态"
+                allowClear
+                style={{ minWidth: 160 }}
+                value={statusFilter}
+                options={[
+                  { label: '未申请', value: 'empty' },
+                  { label: '待审批', value: 'pending' },
+                  { label: '已审批', value: 'approved' },
+                ]}
+                onChange={(v) => { setStatusFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
+              />
               <Button onClick={handleReset}>重置</Button>
             </Space>
           </div>
         }
         extra={
           <Space>
-            <Button
-              icon={<ThunderboltOutlined />}
-              onClick={handleBatchAnalyze}
-              loading={analyzingIds.size > 0}
-              disabled={selectedRowKeys.length === 0}
-              type={selectedRowKeys.length > 0 ? 'primary' : 'default'}
-              ghost
+            <Dropdown
+              menu={{
+                items: [
+                  {
+                    key: 'batch-submit-approval',
+                    icon: <FileTextOutlined />,
+                    label: '批量申请选品',
+                    disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && !i.status),
+                    onClick: handleBatchSubmitForApproval,
+                  },
+                  hasPermission('product_selection:approve') && {
+                    key: 'batch-approve',
+                    icon: <CheckOutlined />,
+                    label: '批量审批',
+                    disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                    onClick: handleBatchApprove,
+                  },
+                  {
+                    key: 'batch-cancel-application',
+                    icon: <DeleteOutlined />,
+                    label: '批量取消申请',
+                    danger: true,
+                    disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                    onClick: handleBatchCancelApprovalApplication,
+                  },
+                  hasPermission('purchase:create') && {
+                    key: 'batch-generate-po',
+                    icon: <FileTextOutlined />,
+                    label: '生成采购单',
+                    disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'approved'),
+                    onClick: handleBatchGeneratePurchaseOrder,
+                  },
+                  {
+                    key: 'batch-analyze',
+                    icon: <RobotOutlined />,
+                    label: 'AI分析',
+                    disabled: selectedRowKeys.length === 0,
+                    onClick: handleBatchAnalyze,
+                  },
+                  {
+                    key: 'batch-delete',
+                    icon: <DeleteOutlined />,
+                    label: '删除',
+                    danger: true,
+                    disabled: selectedRowKeys.length === 0,
+                    onClick: handleBatchDelete,
+                  },
+                ].filter(Boolean) as any[],
+              }}
+              trigger={['click']}
+              getPopupContainer={() => document.body}
             >
-              批量AI分析 ({selectedRowKeys.length})
-            </Button>
+              <Button
+                loading={analyzingIds.size > 0}
+                disabled={selectedRowKeys.length === 0}
+              >
+                <Space size={4}>
+                  批量 ({selectedRowKeys.length})
+                  <DownOutlined />
+                </Space>
+              </Button>
+            </Dropdown>
             <Button
               icon={<ReloadOutlined />}
               onClick={handleRecalcScores}
@@ -789,25 +1133,30 @@ const ProductSelection: React.FC = () => {
             </Button>
           </Space>
         }
-        style={{ flex: 1, display: 'flex', flexDirection: 'column' }}
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
         bodyStyle={{ flex: 1, padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
       >
-        <div style={{ flex: 1, padding: 16, overflow: 'auto' }}>
+        <div style={{ flex: 1, padding: 16, overflow: 'hidden' }}>
           <Table
             className="ps-table"
             rowSelection={rowSelection}
-            dataSource={sortedItems}
+            dataSource={items}
             columns={columns}
             rowKey="id"
-            scroll={{ x: 2200, y: 'calc(100vh - 350px)' }}
+            scroll={{ x: 2200, y: 'calc(100vh - 420px)' }}
             onChange={(pagination, _, sorter) => {
               setPagination(prev => ({ ...prev, current: pagination.current, pageSize: pagination.pageSize || 20 }))
               if (sorter && !Array.isArray(sorter) && sorter.columnKey) {
-                setLocalSort({
+                const newSort = {
                   field: sorter.columnKey as string,
                   order: sorter.order as 'ascend' | 'descend' | null,
-                })
-              } else {
+                }
+                // 如果排序变化，重置到第一页
+                if (newSort.field !== localSort.field || newSort.order !== localSort.order) {
+                  setPagination(prev => ({ ...prev, current: 1 }))
+                }
+                setLocalSort(newSort)
+              } else if (!sorter || !sorter.columnKey) {
                 setLocalSort({ field: null, order: null })
               }
             }}
@@ -1175,7 +1524,8 @@ const ProductSelection: React.FC = () => {
               )
             })()}
 
-            {detailItem.seasonality || detailItem.infringement_analysis ? (
+            {/* 得分详情：独立于AI分析，有评分数据就显示 */}
+            {(detailItem.composite_score != null || detailItem.traffic_score != null || detailItem.sales_score != null || detailItem.rating_score != null) && (
               <>
                 <Title level={5}>
                   <BarChartOutlined style={{ marginRight: 8 }} />
@@ -1302,7 +1652,12 @@ const ProductSelection: React.FC = () => {
                     </Card>
                   </Col>
                 </Row>
+              </>
+            )}
 
+            {/* AI分析结果：季节性判断 + 侵权分析 */}
+            {detailItem.seasonality || detailItem.infringement_analysis ? (
+              <>
                 <Card size="small" title={<span><AlertOutlined /> 季节性判断</span>} style={{ marginBottom: 12 }}>
                   {(() => {
                     try {

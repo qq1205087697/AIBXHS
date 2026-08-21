@@ -908,10 +908,16 @@ export const productSelectionApi = {
     product_type?: string;
     site?: string;
     date_filter?: string;
+    status?: string[];
     sort_by?: string;
     sort_order?: string;
   }) => apiClient.get("/product-selection/", { params }),
   getById: (id: number) => apiClient.get(`/product-selection/${id}`),
+  submitForApproval: (id: number) => apiClient.post(`/product-selection/${id}/submit-for-approval`, {}),
+  approve: (id: number) => apiClient.post(`/product-selection/${id}/approve`, {}),
+  cancelApprovalApplication: (id: number) => apiClient.post(`/product-selection/${id}/cancel-approval-application`, {}),
+  generatePurchaseOrder: (id: number) => apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
+  batchGeneratePurchaseOrders: (ids: number[]) => apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
   create: (data: {
     product_title: string;
     url?: string;

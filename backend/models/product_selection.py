@@ -38,6 +38,7 @@ class ProductSelection(BaseModel):
     composite_score = Column(Float, nullable=True, comment="综合评分")
 
     ai_raw_response = Column(Text, nullable=True, comment="AI原始返回")
+    status = Column(String(50), nullable=True, comment="审批状态: pending(待审批)/approved(已审批)")
 
     tenant = relationship("Tenant", back_populates="product_selections")
 

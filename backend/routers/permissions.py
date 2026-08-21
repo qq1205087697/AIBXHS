@@ -530,6 +530,12 @@ async def init_default_permissions(
         {"name": "删除产品", "code": "product:delete", "type": "function", "module": "产品管理", "sort_order": 3},
         {"name": "导入产品", "code": "product:import", "type": "function", "module": "产品管理", "sort_order": 4},
         {"name": "导出产品", "code": "product:export", "type": "function", "module": "产品管理", "sort_order": 5},
+        # 选品管理
+        {"name": "查看选品", "code": "product_selection:view", "type": "function", "module": "选品管理", "sort_order": 5},
+        {"name": "新增选品", "code": "product_selection:create", "type": "function", "module": "选品管理", "sort_order": 6},
+        {"name": "编辑选品", "code": "product_selection:edit", "type": "function", "module": "选品管理", "sort_order": 7},
+        {"name": "删除选品", "code": "product_selection:delete", "type": "function", "module": "选品管理", "sort_order": 8},
+        {"name": "审批选品", "code": "product_selection:approve", "type": "function", "module": "选品管理", "sort_order": 9},
         # 平台商品管理
         {"name": "查看平台商品", "code": "platform:view", "type": "function", "module": "产品管理", "sort_order": 6},
         {"name": "新增平台商品", "code": "platform:create", "type": "function", "module": "产品管理", "sort_order": 7},
@@ -629,6 +635,12 @@ async def add_missing_permissions(
     
     # 新权限列表（需要补充的）
     new_permissions = [
+        # 选品管理
+        {"name": "查看选品", "code": "product_selection:view", "type": "function", "module": "选品管理", "sort_order": 5},
+        {"name": "新增选品", "code": "product_selection:create", "type": "function", "module": "选品管理", "sort_order": 6},
+        {"name": "编辑选品", "code": "product_selection:edit", "type": "function", "module": "选品管理", "sort_order": 7},
+        {"name": "删除选品", "code": "product_selection:delete", "type": "function", "module": "选品管理", "sort_order": 8},
+        {"name": "审批选品", "code": "product_selection:approve", "type": "function", "module": "选品管理", "sort_order": 9},
         # 平台商品管理
         {"name": "查看平台商品", "code": "platform:view", "type": "function", "module": "产品管理", "sort_order": 6},
         {"name": "新增平台商品", "code": "platform:create", "type": "function", "module": "产品管理", "sort_order": 7},
