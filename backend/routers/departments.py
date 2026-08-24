@@ -54,11 +54,11 @@ async def get_departments(
 ):
     try:
         query = text("""
-            SELECT d.id, d.name, d.description, d.created_at,
+            SELECT d.id, d.name, d.description, d.region, d.created_at,
                    (SELECT COUNT(*) FROM user_departments ud WHERE ud.department_id = d.id) as member_count
             FROM departments d
             WHERE d.tenant_id = :tenant_id AND d.deleted_at IS NULL
-            ORDER BY d.created_at DESC
+            ORDER BY d.id ASC
         """)
         result = db.execute(query, {"tenant_id": current_user.tenant_id})
         departments = []
@@ -67,12 +67,37 @@ async def get_departments(
                 "id": row[0],
                 "name": row[1],
                 "description": row[2] or "",
-                "created_at": row[3].strftime("%Y-%m-%d %H:%M:%S") if row[3] else "",
-                "member_count": row[4]
+                "region": row[3] or "",
+                "created_at": row[4].strftime("%Y-%m-%d %H:%M:%S") if row[4] else "",
+                "member_count": row[5]
             })
         return {"success": True, "data": departments}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取部门列表失败: {str(e)}")
+
+
+@router.get("/regions/list")
+async def get_unique_regions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        query = text("""
+            SELECT DISTINCT d.region
+            FROM departments d
+            WHERE d.tenant_id = :tenant_id 
+              AND d.deleted_at IS NULL 
+              AND d.region IS NOT NULL 
+              AND d.region != ''
+            ORDER BY d.region ASC
+        """)
+        result = db.execute(query, {"tenant_id": current_user.tenant_id})
+        regions = []
+        for row in result:
+            regions.append(row[0])
+        return {"success": True, "data": regions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取地区列表失败: {str(e)}")
 
 
 @router.post("/")
@@ -331,17 +356,17 @@ async def create_user_for_tenant(
         
         # 获取角色信息
         role_id = user_data.role_id
-        role_code = None
-        if role_id:
-            role_result = db.execute(text("SELECT code FROM roles WHERE id = :role_id AND tenant_id = :tid AND deleted_at IS NULL"), {"role_id": role_id, "tid": current_user.tenant_id}).fetchone()
-            if role_result:
-                role_code = role_result[0]
+        # role_code = None
+        # if role_id:
+        #     role_result = db.execute(text("SELECT code FROM roles WHERE id = :role_id AND tenant_id = :tid AND deleted_at IS NULL"), {"role_id": role_id, "tid": current_user.tenant_id}).fetchone()
+        #     if role_result:
+        #         role_code = role_result[0]
         
         # 默认密码123456
         default_password = "123456"
         hashed_password = get_password_hash(default_password)
         
-        # 创建用户，使用当前用户的租户，只写入 role_id，不写入 role
+        # 创建用户，只写入 role_id
         insert_sql = text("""
             INSERT INTO users (tenant_id, username, email, password_hash, nickname, role_id)
             VALUES (:tenant_id, :username, :email, :password_hash, :nickname, :role_id)

@@ -9,20 +9,26 @@ import InventoryBot from "./pages/InventoryBot";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
+import RatingOptimizationBot from "./pages/RatingOptimizationBot";
+import DataAlertBot from "./pages/DataAlertBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
 import ProductManagement from "./pages/ProductManagement";
 import InboundManagement from './pages/InboundManagement'
 import OutboundManagement from './pages/OutboundManagement'
 import PurchaseManagement from './pages/PurchaseManagement'
+import ReplenishmentManagement from './pages/ReplenishmentManagement'
 import OperationLogs from './pages/OperationLogs'
 import StockTransferManagement from './pages/StockTransferManagement'
+import ShipmentManagement from './pages/ShipmentManagement'
+import SupplierManagement from './pages/SupplierManagement'
 import WarehouseManagement from './pages/WarehouseManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
 import ProductSelection from './pages/ProductSelection'
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+
 
 function AppRoutes() {
   return (
@@ -110,7 +116,27 @@ function AppRoutes() {
         }
       />
       <Route
-        path="/org"
+        path="/rating-optimization"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <RatingOptimizationBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route 
+        path="/data-alert" 
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <DataAlertBot />
+            </MainLayout>
+          </ProtectedRoute>
+        } 
+      />
+      <Route 
+        path="/org" 
         element={
           <ProtectedRoute>
             <MainLayout>
@@ -170,6 +196,16 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/replenishment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ReplenishmentManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/operation-logs"
         element={
           <ProtectedRoute>
@@ -185,6 +221,26 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <StockTransferManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/shipment"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ShipmentManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/suppliers"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <SupplierManagement />
             </MainLayout>
           </ProtectedRoute>
         }

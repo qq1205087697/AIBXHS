@@ -123,6 +123,16 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        translate_untranslated_reviews_job,
+        trigger="cron",
+        hour=6,
+        minute=30,
+        id="daily_review_translation",
+        name="每日翻译未翻译差评",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         analyze_unanalyzed_reviews_job,
         trigger="cron",
         hour=7,
@@ -208,8 +218,71 @@ def send_daily_report_job():
         db.close()
 
 
+def translate_untranslated_reviews_job():
+    """每天早上6点30分：批量翻译所有未翻译的差评（含已有分析但无翻译的历史数据）"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    from services.translate_service import translate_review
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+
+        # 查询所有需要翻译的差评（translated_content 为空或等于原文）
+        query = text("""
+            SELECT id, tenant_id, title, content, translated_content
+            FROM reviews
+            WHERE (translated_content IS NULL OR translated_content = '') AND content IS NOT NULL
+            LIMIT 200
+        """)
+        result = db.execute(query)
+        untranslated = result.fetchall()
+
+        if not untranslated:
+            logger.info("没有需要翻译的差评")
+            return
+
+        logger.info(f"发现 {len(untranslated)} 条需要翻译的差评，开始翻译...")
+        success_count = 0
+        fail_count = 0
+
+        for row in untranslated:
+            review_id = row[0]
+            title = row[2] or ""
+            content = row[3] or ""
+            try:
+                translated_title, translated_content = translate_review(title, content)
+                if translated_content:
+                    db.execute(text("""
+                        UPDATE reviews
+                        SET translated_title = :tt, translated_content = :tc
+                        WHERE id = :rid
+                    """), {
+                        "tt": translated_title,
+                        "tc": translated_content,
+                        "rid": review_id,
+                    })
+                    db.commit()
+                    success_count += 1
+                    logger.info(f"翻译成功 review_id={review_id}")
+                else:
+                    fail_count += 1
+                    logger.warning(f"翻译返回空值 review_id={review_id}")
+            except Exception as e:
+                fail_count += 1
+                db.rollback()
+                logger.error(f"翻译失败 review_id={review_id}: {e}")
+
+        logger.info(f"差评翻译任务完成：成功 {success_count} 条，失败 {fail_count} 条")
+    except Exception as e:
+        logger.error(f"每日差评翻译任务失败: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def analyze_unanalyzed_reviews_job():
-    """每天早上7点：检测未分析的差评并进行AI分析"""
+    """每天早上7点：检测未分析的差评并进行AI分析（并发处理）"""
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
@@ -239,7 +312,7 @@ def analyze_unanalyzed_reviews_job():
             logger.info("没有未分析的差评")
             return
 
-        logger.info(f"发现 {len(unanalyzed)} 条未分析的差评，开始AI分析...")
+        logger.info(f"发现 {len(unanalyzed)} 条未分析的差评，开始并发AI分析...")
 
         from config import get_settings
         settings = get_settings()
@@ -251,24 +324,30 @@ def analyze_unanalyzed_reviews_job():
 
         client = OpenAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_API_BASE)
 
-        success_count = 0
-        for row in unanalyzed:
-            review_id = row[0]
-            tenant_id = row[1]
-            title = row[2] or ""
-            content = row[3] or ""
-            translated_content = row[4] or ""
-            rating = row[5]
-            asin = row[6] or ""
-
+        def analyze_single_review(row):
+            """分析单条差评（线程安全：每个线程使用独立db session）"""
+            thread_db = SessionLocal()
             try:
+                review_id = row[0]
+                tenant_id = row[1]
+                title = row[2] or ""
+                content = row[3] or ""
+                translated_content = row[4] or ""
+                rating = row[5]
+                asin = row[6] or ""
+
                 if not translated_content:
                     try:
                         from services.translate_service import translate_review
+                        logger.info(f"开始翻译 review_id={review_id}")
                         _, translated_content = translate_review(title, content)
-                        db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
-                                   {"tc": translated_content, "rid": review_id})
-                        db.commit()
+                        if translated_content:
+                            thread_db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
+                                       {"tc": translated_content, "rid": review_id})
+                            thread_db.commit()
+                            logger.info(f"翻译成功并保存 review_id={review_id}")
+                        else:
+                            logger.warning(f"翻译返回空值 review_id={review_id}")
                     except Exception as te:
                         logger.error(f"翻译失败 review_id={review_id}: {te}")
 
@@ -304,37 +383,54 @@ def analyze_unanalyzed_reviews_job():
                 except json.JSONDecodeError:
                     ar = {"sentiment": "negative", "sentiment_score": 3, "key_points": [], "topics": [], "suggestions": [], "summary": rc[:200]}
 
-                # 保存AI分析结果
-                db.execute(text("""
+                # 保存AI分析结果（使用ON DUPLICATE KEY UPDATE避免并发重复插入）
+                thread_db.execute(text("""
                     INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response)
                     VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw)
+                    ON DUPLICATE KEY UPDATE 
+                        sentiment = VALUES(sentiment),
+                        sentiment_score = VALUES(sentiment_score),
+                        key_points = VALUES(key_points),
+                        topics = VALUES(topics),
+                        suggestions = VALUES(suggestions),
+                        summary = VALUES(summary),
+                        raw_response = VALUES(raw_response)
                 """), {
                     "tid": tenant_id, "rid": review_id, "model": settings.OPENAI_MODEL,
                     "sentiment": ar.get("sentiment", "negative"), "score": ar.get("sentiment_score", 3),
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
                     "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc
                 })
-                
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
                 if importance_level not in ["high", "medium", "low"]:
                     importance_level = "low"
-                
-                # 先检查importance_level列是否存在
-                col_check = db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
+
+                col_check = thread_db.execute(text("SHOW COLUMNS FROM reviews LIKE 'importance_level'"))
                 if col_check.fetchone():
-                    db.execute(text("""
+                    thread_db.execute(text("""
                         UPDATE reviews SET importance_level = :level WHERE id = :rid
                     """), {"level": importance_level, "rid": review_id})
-                    logger.info(f"评论 {review_id} 重要性等级: {importance_level}")
-                
-                db.commit()
-                success_count += 1
-                logger.info(f"评论 {review_id} AI分析完成")
 
+                thread_db.commit()
+                logger.info(f"评论 {review_id} AI分析完成，重要性: {importance_level}")
+                return review_id, True
             except Exception as e:
-                logger.error(f"分析评论 {review_id} 失败: {e}")
-                db.rollback()
+                logger.error(f"分析评论 {row[0]} 失败: {e}")
+                thread_db.rollback()
+                return row[0], False
+            finally:
+                thread_db.close()
+
+        # 并发分析，5个线程同时处理
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        success_count = 0
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(analyze_single_review, row): row for row in unanalyzed}
+            for future in as_completed(futures):
+                _, success = future.result()
+                if success:
+                    success_count += 1
 
         logger.info(f"每日AI分析完成：成功 {success_count}/{len(unanalyzed)} 条")
 
@@ -520,8 +616,18 @@ def push_daily_review_notifications_job():
 
             for member in members:
                 user_id = member[0]
+                exists = db.execute(text("""
+                    SELECT COUNT(*) FROM notifications
+                    WHERE tenant_id = :tenant_id AND user_id = :uid AND title = :title
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+                """), {"tenant_id": tenant_id, "uid": user_id, "title": title}).scalar()
+                if exists > 0:
+                    logger.info(f"  用户 ID={user_id} 已在5分钟内收到相同通知，跳过")
+                    continue
                 logger.info(f"  准备推送给用户 ID={user_id}")
                 notification_rows.append({
+                    "tenant_id": tenant_id,
+                    "tenant_id": tenant_id,
                     "uid": user_id,
                     "title": title,
                     "content": content
@@ -531,7 +637,7 @@ def push_daily_review_notifications_job():
             try:
                 db.execute(text("""
                     INSERT INTO notifications (tenant_id, user_id, type, title, content, link)
-                    VALUES (1, :uid, 'warning', :title, :content, '/review')
+                    VALUES (:tenant_id, :uid, 'warning', :title, :content, '/review')
                 """), notification_rows)
                 notification_count = len(notification_rows)
                 logger.info(f"✅ 批量写入 {notification_count} 条通知")
@@ -869,7 +975,7 @@ def check_overdue_purchase_orders_job():
             # 构建通知内容
             status_label = {
                 'approved': '已审批',
-                'ordered': '已下单',
+                'purchased': '已采购',
                 'partial_received': '部分收货',
             }.get(status, status)
 
@@ -896,8 +1002,17 @@ def check_overdue_purchase_orders_job():
                 notified_user_ids.add(approved_by)
 
             for user_id in notified_user_ids:
+                exists = db.execute(text("""
+                    SELECT COUNT(*) FROM notifications
+                    WHERE tenant_id = :tid AND user_id = :uid AND title = :title
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+                """), {"tid": tenant_id, "uid": user_id, "title": title}).scalar()
+                if exists > 0:
+                    logger.info(f"  用户 ID={user_id} 已在5分钟内收到相同通知，跳过")
+                    continue
                 notification_rows.append({
                     "tid": tenant_id,
+                    "tenant_id": tenant_id,
                     "uid": user_id,
                     "title": title,
                     "content": content

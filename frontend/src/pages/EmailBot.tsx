@@ -5,6 +5,7 @@ import { Mail, Eye, Search, FileEdit, FileText, XCircle, Repeat, Truck, HelpCirc
 import { emailsApi } from '../api'
 import dayjs from 'dayjs'
 import { useAuth } from '../contexts/AuthContext'
+import { useResponsive } from '../hooks/useResponsive'
 
 interface EmailItem {
   id: string
@@ -28,6 +29,7 @@ interface EmailItem {
 
 const EmailBot: React.FC = () => {
   const { hasPermission } = useAuth()
+  const res = useResponsive()
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null)
   const [emails, setEmails] = useState<EmailItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -37,7 +39,7 @@ const EmailBot: React.FC = () => {
 
   const [buyerMailSearch, setBuyerMailSearch] = useState('')
   const [storeNameSearch, setStoreNameSearch] = useState('')
-  const [followUpFilter, setFollowUpFilter] = useState<string>('0')
+  const [followUpFilter, setFollowUpFilter] = useState<number | undefined>(0)
   const [mailSubjectFilter, setMailSubjectFilter] = useState<string>('')
   const [replyModalVisible, setReplyModalVisible] = useState(false)
   const [replyText, setReplyText] = useState('')
@@ -90,7 +92,7 @@ const EmailBot: React.FC = () => {
         page_size: pageSize,
         buyer_mail_number_search: buyerMailSearch || undefined,
         store_name_search: storeNameSearch || undefined,
-        follow_up_status: followUpFilter || undefined,
+        follow_up_status: followUpFilter,
         mail_subject: mailSubjectFilter || undefined,
         sort_by: 'reply_date',
         sort_order: 'desc',
@@ -125,7 +127,7 @@ const EmailBot: React.FC = () => {
     setCurrentPage(1)
   }
 
-  const handleFollowUpFilterChange = (value: string) => {
+  const handleFollowUpFilterChange = (value: number | undefined) => {
     setFollowUpFilter(value)
     setCurrentPage(1)
   }
@@ -175,7 +177,7 @@ const EmailBot: React.FC = () => {
   const handleResetSearch = () => {
     setBuyerMailSearch('')
     setStoreNameSearch('')
-    setFollowUpFilter('')
+    setFollowUpFilter(undefined)
     setMailSubjectFilter('')
     setCurrentPage(1)
   }
@@ -412,8 +414,8 @@ const EmailBot: React.FC = () => {
                     allowClear
                     style={{ width: '100%' }}
                   >
-                    <Select.Option value="0">未跟进</Select.Option>
-                    <Select.Option value="1">已跟进</Select.Option>
+                    <Select.Option value={0}>未跟进</Select.Option>
+                    <Select.Option value={1}>已跟进</Select.Option>
                   </Select>
                 </Col>
                 <Col xs={24} sm={12} md={5}>
@@ -612,7 +614,7 @@ const EmailBot: React.FC = () => {
               </Button>
             </Space>,
           ]}
-          width={800}
+          width={res.isMobile ? '95vw' : 800}
           styles={{ body: { maxHeight: '60vh', overflowY: 'auto', padding: '16px 24px' } }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -680,11 +682,12 @@ const EmailBot: React.FC = () => {
       )}
 
       <Modal
-        title="填写回复备注"
+        title="填写回复"
         open={replyModalVisible}
         onCancel={() => setReplyModalVisible(false)}
         footer={null}
         zIndex={1060}
+        width={res.isMobile ? '95vw' : 520}
       >
         <Form
           form={form}
@@ -736,7 +739,7 @@ const EmailBot: React.FC = () => {
         }}
         footer={null}
         zIndex={1080}
-        width={640}
+        width={res.isMobile ? '95vw' : 640}
       >
         <Form
           form={aiReplyForm}

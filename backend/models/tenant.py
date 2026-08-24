@@ -25,5 +25,7 @@ class Tenant(Base):
     product_selections = relationship("ProductSelection", back_populates="tenant", cascade="all, delete-orphan")
     reviews = relationship("Review", back_populates="tenant", cascade="all, delete-orphan")
     departments = relationship("Department", back_populates="tenant", cascade="all, delete-orphan")
+    data_warnings = relationship("DataWarning", back_populates="tenant", cascade="all, delete-orphan")
+    product_sales = relationship("ProductSales", back_populates="tenant", cascade="all, delete-orphan")
     roles = relationship("Role", back_populates="tenant", cascade="all, delete-orphan")
     permissions = relationship("Permission", back_populates="tenant", cascade="all, delete-orphan")

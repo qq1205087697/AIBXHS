@@ -1,15 +1,40 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker, message, Popconfirm, Space, Tag, Divider, Alert, Dropdown, Menu, Pagination, Tooltip } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, CheckOutlined, SearchOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, RightOutlined, AppstoreOutlined, LinkOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, CheckOutlined, SearchOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, RightOutlined, AppstoreOutlined, LinkOutlined, CloseCircleFilled } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { outboundOrdersApi, productsApi, inventoryBatchesApi, warehousesApi, productBindingsApi } from '../api'
+import { outboundOrdersApi, productsApi, inventoryBatchesApi, warehousesApi, productBindingsApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
+import { useResponsive } from '../hooks/useResponsive'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
 import type { MenuProps } from 'antd'
+import './management-responsive.css'
 const { RangePicker } = DatePicker
+
+// CSS样式：悬停删除图标
+const styleSheet = `
+  .product-select-wrapper:hover .product-clear-icon {
+    opacity: 1 !important;
+  }
+  .product-clear-icon:hover {
+    color: #333 !important;
+  }
+  /* 隐藏Select自带的下拉箭头 */
+  .product-select-with-value .ant-select-arrow {
+    display: none !important;
+  }
+`
+// 注入样式
+if (typeof document !== 'undefined') {
+  const styleElement = document.createElement('style')
+  styleElement.innerHTML = styleSheet
+  if (!document.head.querySelector('style[data-product-clear-icon]')) {
+    styleElement.setAttribute('data-product-clear-icon', 'true')
+    document.head.appendChild(styleElement)
+  }
+}
 
 interface OutboundOrder {
   id: number
@@ -27,6 +52,8 @@ interface OutboundOrder {
   confirmed_by: number | null
   creator_name: string
   confirmer_name: string
+  store_group_id?: number
+  store_group_name?: string
   items: OutboundOrderItem[]
 }
 
@@ -55,6 +82,8 @@ interface Product {
 interface OutboundFormItem {
   key: string
   product_id: number | null
+  product_name?: string
+  product_code?: string
   quantity: number
   unit_price: number
   notes: string
@@ -91,6 +120,7 @@ const outboundTypeLabels: Record<string, string> = {
   transfer: '调拨出库',
   scrap: '报废',
   adjustment: '盘点调整',
+  shipment_fba: '发FBA仓',
   other: '其他',
 }
 
@@ -113,6 +143,7 @@ const outboundTypeOptions = [
   { label: '调拨出库', value: 'transfer' },
   { label: '报废', value: 'scrap' },
   { label: '盘点调整', value: 'adjustment' },
+  { label: '发FBA仓', value: 'shipment_fba' },
   { label: '其他', value: 'other' },
 ]
 
@@ -122,6 +153,7 @@ const createOutboundTypeOptions = [
   { label: '调拨出库', value: 'transfer' },
   { label: '报废', value: 'scrap' },
   { label: '盘点调整', value: 'adjustment' },
+  { label: '发FBA仓', value: 'shipment_fba' },
   { label: '其他', value: 'other' },
 ]
 
@@ -150,9 +182,11 @@ const OutboundManagement: React.FC = () => {
   const { user, hasPermission } = useAuth()
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
+  const res = useResponsive()
   const [orders, setOrders] = useState<OutboundOrder[]>([])
   const [productList, setProductList] = useState<Product[]>([])
   const [warehouseList, setWarehouseList] = useState<{ id: number; name: string; code: string; status: string }[]>([])
+  const [storeGroups, setStoreGroups] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingOrder, setEditingOrder] = useState<OutboundOrder | null>(null)
@@ -161,6 +195,7 @@ const OutboundManagement: React.FC = () => {
   const [searchText, setSearchText] = useState('')
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined)
   const [typeFilter, setTypeFilter] = useState<string | undefined>(undefined)
+  const [groupFilter, setGroupFilter] = useState<number | undefined>(undefined)
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [filters, setFilters] = useState<Record<string, any>>({})
@@ -168,6 +203,12 @@ const OutboundManagement: React.FC = () => {
   const [formItems, setFormItems] = useState<OutboundFormItem[]>([createEmptyFormItem()])
   const [submitting, setSubmitting] = useState(false)
   const [productsLoading, setProductsLoading] = useState(false)
+  // 产品搜索关键字（用于懒加载搜索）
+  const [productSearchKeyword, setProductSearchKeyword] = useState('')
+  // 产品分页状态（用于懒加载）
+  const [productPagination, setProductPagination] = useState({ current: 1, pageSize: 50, total: 0, hasMore: true })
+  // 产品搜索防抖定时器
+  const productSearchTimeoutRef = useRef<number | null>(null)
 
   const [productBatchesMap, setProductBatchesMap] = useState<Record<number, BatchInfo[]>>({})
   const [batchesLoading, setBatchesLoading] = useState(false)
@@ -190,7 +231,19 @@ const OutboundManagement: React.FC = () => {
     fetchData()
     fetchProducts()
     fetchWarehouses()
+    fetchStoreGroups()
   }, [pagination.current, pagination.pageSize, filters])
+
+  const fetchStoreGroups = async () => {
+    try {
+      const res = await storeGroupsApi.getList()
+      if (res.data.success) {
+        setStoreGroups(res.data.data || [])
+      }
+    } catch (e) {
+      console.error('加载店铺分组失败', e)
+    }
+  }
 
   const fetchData = async () => {
     setLoading(true)
@@ -210,18 +263,66 @@ const OutboundManagement: React.FC = () => {
     }
   }
 
-  const fetchProducts = async () => {
+  const fetchProducts = async (keyword: string = '', page: number = 1, append: boolean = false) => {
     setProductsLoading(true)
     try {
-      const res = await productsApi.getList({ page: 1, page_size: 100 })
+      const res = await productsApi.getList({
+        page: page,
+        page_size: productPagination.pageSize,
+        search: keyword || undefined, // 支持搜索参数
+      })
       if (res.data.success) {
-        setProductList(res.data.data || [])
+        const newProducts = res.data.data || []
+        if (append) {
+          // 滚动加载更多：追加到现有列表
+          setProductList(prev => [...prev, ...newProducts])
+        } else {
+          // 搜索或首次加载：替换现有列表
+          setProductList(newProducts)
+        }
+        setProductPagination(prev => ({
+          ...prev,
+          current: page,
+          total: res.data.total || 0,
+          hasMore: newProducts.length === prev.pageSize && page < Math.ceil((res.data.total || 0) / prev.pageSize)
+        }))
       }
     } catch {
       message.error('获取产品列表失败')
     } finally {
       setProductsLoading(false)
     }
+  }
+
+  // 产品搜索处理函数（带防抖）
+  const handleProductSearch = (keyword: string) => {
+    setProductSearchKeyword(keyword)
+
+    // 清除之前的定时器
+    if (productSearchTimeoutRef.current) {
+      clearTimeout(productSearchTimeoutRef.current)
+    }
+
+    // 设置新的定时器（300ms防抖）
+    productSearchTimeoutRef.current = window.setTimeout(() => {
+      // 重置分页，重新搜索
+      setProductPagination(prev => ({ ...prev, current: 1, hasMore: true }))
+
+      // 如果关键字为空，清空搜索状态并恢复初始产品列表
+      if (!keyword || keyword.trim() === '') {
+        fetchProducts('', 1, false)
+      } else {
+        fetchProducts(keyword, 1, false)
+      }
+    }, 300)
+  }
+
+  // 产品滚动加载处理函数（加载下一页）
+  const handleProductScrollLoad = () => {
+    if (productsLoading || !productPagination.hasMore) return
+
+    const nextPage = productPagination.current + 1
+    fetchProducts(productSearchKeyword, nextPage, true)
   }
 
   const fetchWarehouses = async () => {
@@ -318,6 +419,20 @@ const OutboundManagement: React.FC = () => {
     setPagination((prev) => ({ ...prev, current: 1 }))
   }
 
+  const handleGroupFilter = (value: number | undefined) => {
+    setGroupFilter(value)
+    setFilters((prev) => {
+      const next: Record<string, any> = { ...prev }
+      if (value) {
+        next.store_group_id = value
+      } else {
+        delete next.store_group_id
+      }
+      return next
+    })
+    setPagination((prev) => ({ ...prev, current: 1 }))
+  }
+
   const handleDateRangeChange = (dates: [Dayjs | null, Dayjs | null] | null) => {
     setDateRange(dates)
     setFilters((prev) => {
@@ -348,7 +463,12 @@ const OutboundManagement: React.FC = () => {
     setProductBatchesMap({})
     setExpandedAccessories(new Set()) // 重置展开状态
     autoAddedKeysRef.current.clear() // 重置配件映射
-    fetchProducts()
+
+    // 重置产品搜索状态
+    setProductSearchKeyword('')
+    setProductPagination(prev => ({ ...prev, current: 1, hasMore: true }))
+    fetchProducts('', 1, false)  // 恢复初始产品列表
+
     fetchWarehouses()
     setModalOpen(true)
   }
@@ -363,12 +483,15 @@ const OutboundManagement: React.FC = () => {
       handler: order.handler,
       outbound_date: order.outbound_date ? dayjs(order.outbound_date) : undefined,
       notes: order.notes,
+      store_group_id: order.store_group_id || undefined,
     })
     // 加载出库明细
     if (order.items && order.items.length > 0) {
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
         product_id: item.product_id,
+        product_name: item.product_name,
+        product_code: item.product_code,
         quantity: item.quantity,
         unit_price: item.unit_price,
         notes: item.notes || '',
@@ -382,7 +505,10 @@ const OutboundManagement: React.FC = () => {
     setProductBatchesMap({})
     setExpandedAccessories(new Set()) // 重置展开状态
     autoAddedKeysRef.current.clear() // 重置配件映射
-    fetchProducts()
+    // 后台异步加载完整产品列表（不阻塞弹窗打开）
+    setProductSearchKeyword('')
+    setProductPagination(prev => ({ ...prev, current: 1, hasMore: true }))
+    fetchProducts('', 1, false)
     fetchWarehouses()
     setModalOpen(true)
   }
@@ -397,6 +523,7 @@ const OutboundManagement: React.FC = () => {
       handler: order.handler,
       outbound_date: order.outbound_date ? dayjs(order.outbound_date) : undefined,
       notes: order.notes,
+      store_group_id: order.store_group_id || undefined,
     })
     setProductBatchesMap({})
     setExpandedAccessories(new Set()) // 重置展开状态
@@ -406,6 +533,8 @@ const OutboundManagement: React.FC = () => {
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
         product_id: item.product_id,
+        product_name: item.product_name,
+        product_code: item.product_code,
         quantity: item.quantity,
         unit_price: item.unit_price,
         notes: item.notes || '',
@@ -419,7 +548,10 @@ const OutboundManagement: React.FC = () => {
     } else {
       setFormItems([createEmptyFormItem()])
     }
-    fetchProducts()
+    // 后台异步加载完整产品列表（不阻塞弹窗打开）
+    setProductSearchKeyword('')
+    setProductPagination(prev => ({ ...prev, current: 1, hasMore: true }))
+    fetchProducts('', 1, false)
     fetchWarehouses()
     setModalOpen(true)
   }
@@ -436,6 +568,7 @@ const OutboundManagement: React.FC = () => {
           warehouse: values.warehouse,
           handler: values.handler,
           notes: values.notes,
+          store_group_id: values.store_group_id || null,
         }
         if (values.outbound_date) {
           payload.outbound_date = values.outbound_date.format('YYYY-MM-DD HH:mm:ss')
@@ -474,6 +607,7 @@ const OutboundManagement: React.FC = () => {
           warehouse: values.warehouse,
           handler: values.handler,
           notes: values.notes,
+          store_group_id: values.store_group_id || null,
           items,
         }
         if (values.outbound_date) {
@@ -494,40 +628,49 @@ const OutboundManagement: React.FC = () => {
   }
 
   const handleConfirm = async (id: number) => {
-    try {
-      setConfirmingId(id)
-      const res = await outboundOrdersApi.confirm(id)
-      const deductionResultsRaw = res.data?.data?.deduction_results || res.data?.deduction_results || []
-      
-      // 将 API 返回的 deduction_results 展平为 DeductionItem 列表
-      const flatResults: DeductionItem[] = []
-      if (Array.isArray(deductionResultsRaw)) {
-        deductionResultsRaw.forEach((dr: any) => {
-          if (dr.details && dr.details.length > 0) {
-            flatResults.push({
-              product_name: dr.product_name || `产品#${dr.product_id}`,
-              product_code: dr.product_code || '',
-              quantity: dr.details.reduce((sum: number, d: any) => sum + d.quantity, 0),
-              batch_number: dr.details[0].batch_number || '',
-              batch_id: dr.details[0].batch_id || 0,
-              batch_details: dr.details.length > 1 ? dr.details : null,
+    Modal.confirm({
+      title: '确认审批',
+      content: '确定要审批此出库订单吗？此操作将自动扣减库存。',
+      okText: '确定',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          setConfirmingId(id)
+          const res = await outboundOrdersApi.confirm(id)
+          const deductionResultsRaw = res.data?.data?.deduction_results || res.data?.deduction_results || []
+
+          // 将 API 返回的 deduction_results 展平为 DeductionItem 列表
+          const flatResults: DeductionItem[] = []
+          if (Array.isArray(deductionResultsRaw)) {
+            deductionResultsRaw.forEach((dr: any) => {
+              if (dr.details && dr.details.length > 0) {
+                flatResults.push({
+                  product_name: dr.product_name || `产品#${dr.product_id}`,
+                  product_code: dr.product_code || '',
+                  quantity: dr.details.reduce((sum: number, d: any) => sum + d.quantity, 0),
+                  batch_number: dr.details[0].batch_number || '',
+                  batch_id: dr.details[0].batch_id || 0,
+                  batch_details: dr.details.length > 1 ? dr.details : null,
+                })
+              }
             })
           }
-        })
-      }
-      
-      if (flatResults.length > 0) {
-        setDeductionResults(flatResults)
-        setConfirmModalOpen(true)
-      } else {
-        message.success('出库订单已审批，库存已扣减')
-      }
-      fetchData()
-    } catch {
-      message.error('审批失败')
-    } finally {
-      setConfirmingId(null)
-    }
+
+          if (flatResults.length > 0) {
+            setDeductionResults(flatResults)
+            setConfirmModalOpen(true)
+          } else {
+            message.success('出库订单已审批，库存已扣减')
+          }
+          fetchData()
+        } catch (e: any) {
+          const errorMsg = e.response?.data?.detail || e.message || '审批失败'
+          message.error(errorMsg)
+        } finally {
+          setConfirmingId(null)
+        }
+      },
+    })
   }
 
   const handleDelete = async (id: number) => {
@@ -553,7 +696,7 @@ const OutboundManagement: React.FC = () => {
       cancelText: '取消',
       onOk: async () => {
         try {
-          await Promise.all(selectedRowKeys.map(key => 
+          await Promise.all(selectedRowKeys.map(key =>
             outboundOrdersApi.delete(Number(key))
           ))
           message.success('批量删除成功')
@@ -563,7 +706,7 @@ const OutboundManagement: React.FC = () => {
           const errorMsg = e.response?.data?.detail || e.message || '批量删除失败，请稍后重试'
           message.error(errorMsg)
         }
-      }
+      },
     })
   }
 
@@ -1007,45 +1150,60 @@ const OutboundManagement: React.FC = () => {
       title: '出库类型',
       dataIndex: 'outbound_type',
       key: 'outbound_type',
+      responsive: ['md'],
       width: 110,
       render: (type: string) => (
         <Tag>{outboundTypeLabels[type] || type}</Tag>
       ),
     },
     {
+      title: '店铺分组',
+      dataIndex: 'store_group_name',
+      key: 'store_group_name',
+      responsive: ['md'],
+      width: 120,
+      render: (name: string) => name || '-',
+    },
+    {
       title: '仓库',
       dataIndex: 'warehouse',
       key: 'warehouse',
+      responsive: ['md'],
       width: 120,
     },
     {
       title: '发起者',
       dataIndex: 'creator_name',
       key: 'creator_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '审批者',
       dataIndex: 'confirmer_name',
       key: 'confirmer_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '出库日期',
       dataIndex: 'outbound_date',
       key: 'outbound_date',
+      responsive: ['md'],
       width: 120,
     },
     {
       title: '总数量',
       dataIndex: 'total_quantity',
       key: 'total_quantity',
+      responsive: ['md'],
       width: 90,
     },
     {
       title: '总金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
+      responsive: ['md'],
       width: 100,
       render: (amount: number) => amount != null ? `¥${amount.toFixed(2)}` : '-',
     },
@@ -1064,6 +1222,7 @@ const OutboundManagement: React.FC = () => {
       title: '备注',
       dataIndex: 'notes',
       key: 'notes',
+      responsive: ['md'],
       width: 200,
       ellipsis: true,
     },
@@ -1071,12 +1230,14 @@ const OutboundManagement: React.FC = () => {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
+      responsive: ['md'],
       width: 170,
     },
     {
       title: '审批时间',
       dataIndex: 'confirmed_at',
       key: 'confirmed_at',
+      responsive: ['md'],
       width: 170,
     },
     {
@@ -1295,45 +1456,63 @@ const OutboundManagement: React.FC = () => {
   ]
 
   return (
-    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="page-container">
       <Card
         loading={loading}
         title={
-          <Space wrap size="middle">
-            <Input
-              placeholder="搜索出库单号、仓库、经办人..."
-              prefix={<SearchOutlined />}
-              allowClear
-              style={{ width: 300 }}
-              value={searchText}
-              onChange={(e) => handleSearch(e.target.value)}
-            />
-            <Select
-              placeholder="出库类型"
-              allowClear
-              style={{ width: 140 }}
-              value={typeFilter}
-              onChange={handleTypeFilter}
-              options={outboundTypeOptions}
-            />
-            <Select
-              placeholder="状态"
-              allowClear
-              style={{ width: 120 }}
-              value={statusFilter}
-              onChange={handleStatusFilter}
-              options={statusOptions}
-            />
-            <RangePicker
-              placeholder={['开始日期', '结束日期']}
-              value={dateRange}
-              onChange={handleDateRangeChange}
-              style={{ width: 300 }}
-            />
-          </Space>
+          <div className="filter-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <div className="filter-item">
+              <Input
+                placeholder="搜索出库单号、仓库、经办人..."
+                prefix={<SearchOutlined />}
+                allowClear
+                style={{ width: 300 }}
+                value={searchText}
+                onChange={(e) => handleSearch(e.target.value)}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="出库类型"
+                allowClear
+                style={{ width: 140 }}
+                value={typeFilter}
+                onChange={handleTypeFilter}
+                options={outboundTypeOptions}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="店铺分组"
+                allowClear
+                style={{ width: 140 }}
+                value={groupFilter}
+                onChange={handleGroupFilter}
+                options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="状态"
+                allowClear
+                style={{ width: 120 }}
+                value={statusFilter}
+                onChange={handleStatusFilter}
+                options={statusOptions}
+              />
+            </div>
+            <div className="filter-item">
+              <RangePicker
+                placeholder={['开始日期', '结束日期']}
+                value={dateRange}
+                onChange={handleDateRangeChange}
+                style={{ width: 300 }}
+              />
+            </div>
+          </div>
         }
         extra={
-          <Space>
+          <div className="action-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {hasPermission('outbound:create') && (
               <>
                 <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>
@@ -1356,11 +1535,12 @@ const OutboundManagement: React.FC = () => {
                 新增出库订单
               </Button>
             )}
-          </Space>
+          </div>
         }
         style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
         styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
       >
+<div className="responsive-table-wrapper">
         <Table
           dataSource={orders}
           columns={columns}
@@ -1375,8 +1555,9 @@ const OutboundManagement: React.FC = () => {
             }
           }}
         />
+        </div>
       </Card>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
+      <div className="pagination-wrapper">
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -1391,13 +1572,14 @@ const OutboundManagement: React.FC = () => {
       </div>
 
       <Modal
+        className="responsive-modal"
         title={viewingOrder ? '查看出库订单' : (editingOrder ? '编辑出库订单' : '新增出库订单')}
         open={modalOpen}
         onOk={viewingOrder ? () => setModalOpen(false) : handleSubmit}
         onCancel={() => setModalOpen(false)}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={viewingOrder ? 900 : (editingOrder ? 640 : 900)}
+        width={res.isMobile ? '95vw' : (viewingOrder ? 900 : (editingOrder ? 640 : 900))}
         style={{ top: 20 }}
         styles={{ body: {
           maxHeight: 'calc(100vh - 180px)',
@@ -1406,7 +1588,7 @@ const OutboundManagement: React.FC = () => {
         } }}
       >
         <Form form={form} layout="vertical">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item
               name="order_number"
               label="出库单号"
@@ -1419,14 +1601,14 @@ const OutboundManagement: React.FC = () => {
               label="出库类型"
               rules={viewingOrder ? [] : [{ required: true, message: '请选择出库类型' }]}
             >
-              <Select 
-                placeholder="请选择出库类型" 
-                options={createOutboundTypeOptions} 
+              <Select
+                placeholder="请选择出库类型"
+                options={createOutboundTypeOptions}
                 disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
               />
             </Form.Item>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item name="warehouse" label="仓库" rules={[{ required: true, message: '请选择仓库' }]}>
               <Select
                 placeholder="请选择仓库"
@@ -1454,13 +1636,20 @@ const OutboundManagement: React.FC = () => {
                 }
               />
             </Form.Item>
-            <Form.Item name="handler" label="经办人">
-              <Input placeholder="请输入经办人" disabled={true} />
+          </div>
+          <div className="responsive-form-grid">
+            <Form.Item name="store_group_id" label="店铺分组">
+              <Select
+                placeholder="请选择店铺分组（可选）"
+                allowClear
+                options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+                disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
+              />
+            </Form.Item>
+            <Form.Item name="outbound_date" label="出库日期">
+              <DatePicker style={{ width: '100%' }} showTime placeholder="请选择出库日期时间" disabled={true} />
             </Form.Item>
           </div>
-          <Form.Item name="outbound_date" label="出库日期">
-            <DatePicker style={{ width: '100%' }} showTime placeholder="请选择出库日期时间" disabled={true} />
-          </Form.Item>
           <Form.Item name="notes" label="备注">
             <Input.TextArea rows={3} placeholder="请输入备注" disabled={viewingOrder || (editingOrder?.status === 'confirmed')} />
           </Form.Item>
@@ -1554,25 +1743,97 @@ const OutboundManagement: React.FC = () => {
                     </div>
 
                     {/* 表单字段区域 */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 12 }}>
+                    <div className="responsive-grid-3">
                       <div>
                         <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>商品</div>
-                        <Select
-                          placeholder="请选择商品"
-                          showSearch
-                          loading={productsLoading}
-                          value={item.product_id}
-                          onChange={(val) => handleFormItemChange(item.key, 'product_id', val)}
-                          filterOption={(input, option) =>
-                            (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-                          }
-                          options={productList.map((p) => ({
-                            label: `${p.product_code ? `[${p.product_code}] ` : ''}${p.name}`,
-                            value: p.id,
-                          }))}
-                          style={{ width: '100%' }}
-                          disabled={viewingOrder || (editingOrder?.status === 'confirmed') || isAccessory}
-                        />
+                        <div className="product-select-wrapper" style={{ position: 'relative' }}>
+                          <Select
+                            className={item.product_id ? 'product-select-with-value' : ''}
+                            placeholder="请选择商品"
+                            showSearch
+                            loading={productsLoading}
+                            value={item.product_id}
+                            onChange={(val) => {
+                              // 防止选择加载中选项
+                              if (val === -1) return
+                              handleFormItemChange(item.key, 'product_id', val)
+                            }}
+                            onSearch={handleProductSearch}
+                            filterOption={false} // 禁用本地过滤，使用后端搜索
+                            onOpenChange={(open) => {
+                              if (open) {
+                                // 下拉框打开时，如果有搜索关键字，清空并重新加载初始产品列表
+                                if (productSearchKeyword) {
+                                  setProductSearchKeyword('')
+                                  setProductPagination({ current: 1, pageSize: 50, total: 0 })
+                                  fetchProducts('', 1, false)
+                                } else if (productList.length === 0) {
+                                  // 如果没有搜索关键字且产品列表为空，加载初始产品列表
+                                  fetchProducts('', 1, false)
+                                }
+                              }
+                            }}
+                            onPopupScroll={(e) => {
+                              const target = e.target as HTMLDivElement
+                              if (target.scrollTop + target.offsetHeight === target.scrollHeight) {
+                                // 滚动到底部，加载更多
+                                handleProductScrollLoad()
+                              }
+                            }}
+                            options={[
+                              // 如果当前商品不在 productList 中（查看/编辑模式），添加一个显示项
+                              ...(item.product_id && !productList.find(p => p.id === item.product_id) && (viewingOrder || editingOrder) && item.product_name ? [{
+                                label: `${item.product_code ? `[${item.product_code}] ` : ''}${item.product_name}`,
+                                value: item.product_id,
+                              }] : []),
+                              ...productList.map((p) => ({
+                                label: `${p.product_code ? `[${p.product_code}] ` : ''}${p.name}`,
+                                value: p.id,
+                              })),
+                              // 如果正在加载更多，添加加载中提示
+                              ...(productsLoading && productList.length > 0 ? [{
+                                label: <span style={{ color: '#999', fontSize: 12 }}>加载中...</span>,
+                                value: -1,
+                              } as any] : []),
+                            ]}
+                            style={{ width: '100%' }}
+                            disabled={viewingOrder || (editingOrder?.status === 'confirmed') || isAccessory}
+                            notFoundContent={
+                              productsLoading ? <span>加载中...</span> :
+                              productSearchKeyword ? <span>未找到匹配的商品</span> :
+                              <span>暂无商品</span>
+                            }
+                          />
+                          {/* 悬停删除图标 */}
+                          {item.product_id && !viewingOrder && !(editingOrder?.status === 'confirmed') && !isAccessory && (
+                            <div
+                              className="product-clear-icon"
+                              style={{
+                                position: 'absolute',
+                                right: 12,
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                cursor: 'pointer',
+                                opacity: 0,
+                                transition: 'opacity 0.2s, color 0.2s',
+                                color: '#999',
+                                zIndex: 10,
+                                display: 'flex',
+                                alignItems: 'center',
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                handleFormItemChange(item.key, 'product_id', null)
+                                // 清空搜索状态并恢复初始产品列表
+                                setProductSearchKeyword('')
+                                setProductPagination(prev => ({ ...prev, current: 1, hasMore: true }))
+                                fetchProducts('', 1, false)
+                              }}
+                            >
+                              <CloseCircleFilled style={{ fontSize: 14 }} />
+                            </div>
+                          )}
+                        </div>
                       </div>
                       <div>
                         <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>数量</div>
@@ -1686,6 +1947,7 @@ const OutboundManagement: React.FC = () => {
       </Modal>
 
       <Modal
+        className="responsive-modal"
         title="出库审批 - 库存扣减详情"
         open={confirmModalOpen}
         onCancel={() => setConfirmModalOpen(false)}
@@ -1694,7 +1956,7 @@ const OutboundManagement: React.FC = () => {
             知道了
           </Button>
         }
-        width={700}
+        width={res.isMobile ? '95vw' : 700}
       >
         <Alert
           type="success"
@@ -1706,9 +1968,10 @@ const OutboundManagement: React.FC = () => {
         <Table
           dataSource={deductionResults}
           columns={deductionColumns}
-          rowKey={(record, index) => `${record.batch_id || index}`}
+          rowKey={(record) => `${record.batch_id || Math.random()}`}
           pagination={false}
           size="small"
+          scroll={{ x: res.isMobile ? true : false }}
         />
       </Modal>
 
@@ -1721,16 +1984,18 @@ const OutboundManagement: React.FC = () => {
       />
 
       <Modal
+        className="responsive-modal"
         title="导入预览"
         open={previewModalOpen}
         onOk={handleConfirmImport}
         onCancel={() => setPreviewModalOpen(false)}
-        width={800}
+        width={res.isMobile ? '95vw' : 800}
       >
         <Table
           dataSource={previewItems}
           pagination={false}
-          rowKey={(record, index) => index.toString()}
+          scroll={{ x: res.isMobile ? true : false }}
+          rowKey={(record) => record.product_id?.toString() || Math.random().toString()}
           columns={[
             {
               title: 'SKU',
@@ -1751,6 +2016,7 @@ const OutboundManagement: React.FC = () => {
               title: '备注',
               dataIndex: 'notes',
               key: 'notes',
+      responsive: ['md'],
             },
           ]}
         />

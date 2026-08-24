@@ -43,8 +43,11 @@ import {
     SwapOutlined,
     HomeOutlined,
     MailOutlined,
+    PlusSquareOutlined,
+    StarOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
+import { useResponsive } from "../hooks/useResponsive";
 
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -80,6 +83,7 @@ interface User {
 }
 
 const PermissionManagement: React.FC = () => {
+  const resp = useResponsive();
   const [roles, setRoles] = useState<Role[]>([]);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(false);
@@ -356,6 +360,9 @@ const PermissionManagement: React.FC = () => {
         '库存机器人': { icon: <DatabaseOutlined />, color: '#13c2c2' },
         '差评机器人': { icon: <RobotOutlined />, color: '#fa8c16' },
         '邮件机器人': { icon: <MailOutlined />, color: '#1890ff' },
+        '页面优化机器人': { icon: <StarOutlined />, color: '#faad14' },
+        '补货管理': { icon: <PlusSquareOutlined />, color: '#7c3aed' },
+        '发货管理': { icon: <ShopOutlined />, color: '#1890ff' },
     };
 
   // 计算权限总数
@@ -416,7 +423,7 @@ const PermissionManagement: React.FC = () => {
     <Layout style={{ height: "100%", background: "#fff" }}>
       {/* 左侧角色列表 */}
       <Sider width={260} theme="light" style={{ borderRight: "1px solid #f0f0f0" }}>
-        <div style={{ padding: '16px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ padding: '16px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
           <Title level={3} style={{ margin: 0, whiteSpace: 'nowrap' }}>角色</Title>
           <div style={{ flex: 1 }}></div>
           <Space>
@@ -482,7 +489,7 @@ const PermissionManagement: React.FC = () => {
                   ),
                   children: (
                     <div style={{ padding: '24px', height: 'calc(100% - 64px)', display: 'flex', flexDirection: 'column' }}>
-                      <div style={{ marginBottom: '16px', display: 'flex', gap: '8px' }}>
+                      <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                         <Button
                           type="primary"
                           icon={<UserAddOutlined />}
@@ -590,7 +597,7 @@ const PermissionManagement: React.FC = () => {
                   ),
                   children: (
                     <div style={{ padding: '24px', height: 'calc(100vh - 200px)', overflowY: 'auto' }}>
-                      <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                           <span style={{ fontSize: 14, color: '#666' }}>
                             已选 <strong style={{ color: '#1890ff' }}>{selectedPermissions.length}</strong> / {totalPermissionsCount} 项权限
@@ -724,6 +731,7 @@ const PermissionManagement: React.FC = () => {
         okText="确定"
         cancelText="取消"
         confirmLoading={loading}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={roleForm} layout="vertical">
           <Form.Item
@@ -761,25 +769,23 @@ const PermissionManagement: React.FC = () => {
         okText="确定"
         cancelText="取消"
         confirmLoading={loading}
-        width={900}
+        width={resp.isMobile ? '95vw' : 900}
       >
         <Transfer
-          dataSource={allUsers
-            // 过滤掉已经有其他角色的用户（当前角色的用户除外）
-            .filter(user => {
-              const hasOtherRole = user.roles && user.roles.length > 0 && 
-                user.roles.some(r => r.id !== selectedRole?.id);
-              const isCurrentRoleUser = roleUsers.some(ru => ru.id === user.id);
-              return !hasOtherRole || isCurrentRoleUser;
-            })
-            .map(user => ({
+          dataSource={allUsers.map(user => {
+            // 判断用户是否已有其他角色（非当前选中角色）
+            const hasOtherRole = user.roles && user.roles.length > 0 &&
+              user.roles.some((r: any) => r.id !== selectedRole?.id);
+            // 无任何角色的用户，或者仅属于当前角色的用户，都可以选择
+            const hasNoRole = !user.roles || user.roles.length === 0;
+            return {
               key: user.id,
               title: user.username,
               description: user.nickname || user.email,
               roles: user.roles,
-              disabled: user.roles && user.roles.length > 0 && 
-                user.roles.some(r => r.id !== selectedRole?.id)
-            }))}
+              disabled: hasOtherRole, // 已有其他角色的用户禁用，防止误操作
+            };
+          })}
           titles={['可用用户', '已选用户']}
           targetKeys={selectedUserIds}
           onChange={(targetKeys) => setSelectedUserIds(targetKeys as number[])}

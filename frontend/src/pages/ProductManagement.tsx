@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker } from 'antd'
+import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
-import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi } from '../api'
+import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
+import TosUpload from '../components/TosUpload'
+import { useResponsive } from '../hooks/useResponsive'
 
 interface Product {
   id: number
@@ -17,9 +19,11 @@ interface Product {
   product_attribute: string
   category: string
   brand: string
+  supplier: string
   purchase_price: number | null
   sale_price: number | null
   main_image: string
+  video_url: string
   weight: number | null
   length: number | null
   width: number | null
@@ -29,10 +33,13 @@ interface Product {
   created_at: string
   platform_count: number
   local_quantity: number
+  store_group_quantity?: number
   local_warehouse: string
   local_inbound_date: string
   local_stock_age: number | null
   local_value: number | null
+  replenishment_quantity: number
+  purchased_quantity: number
 }
 
 interface PlatformProduct {
@@ -42,11 +49,13 @@ interface PlatformProduct {
   store_names: string[]
   platform_product_id: string
   asin: string
-  spu: string
   sku: string
   title: string
   title_en: string
   image_url: string
+  description: string
+  bullet_points: string
+  keywords: string
   currency: string
   price: number | null
   cost_price: number | null
@@ -102,15 +111,17 @@ const defaultColumns: ColumnState[] = [
   { key: 'product_attribute', title: '产品属性', visible: true, width: 120, minWidth: 100 },
   { key: 'category', title: '分类', visible: true, width: 120, minWidth: 100 },
   { key: 'brand', title: '品牌', visible: true, width: 120, minWidth: 100 },
+  { key: 'supplier', title: '供应商', visible: true, width: 120, minWidth: 100 },
   { key: 'purchase_price', title: '采购价', visible: true, width: 110, minWidth: 90 },
   { key: 'sale_price', title: '建议售价', visible: true, width: 110, minWidth: 90 },
   { key: 'local_quantity', title: '库存数量', visible: true, width: 100, minWidth: 80 },
+  { key: 'replenishment_quantity', title: '补货数量', visible: true, width: 100, minWidth: 80 },
+  { key: 'purchased_quantity', title: '已采购数量', visible: true, width: 110, minWidth: 90 },
   { key: 'local_warehouse', title: '仓库', visible: false, width: 120, minWidth: 100 },
   { key: 'local_inbound_date', title: '入库日期', visible: false, width: 130, minWidth: 110 },
   { key: 'local_stock_age', title: '库龄(天)', visible: false, width: 100, minWidth: 80 },
   { key: 'local_value', title: '货值', visible: true, width: 120, minWidth: 100 },
   { key: 'platform_count', title: '平台数', visible: true, width: 100, minWidth: 80 },
-  { key: 'is_robot_monitored', title: '机器人监控', visible: true, width: 120, minWidth: 110 },
   { key: 'status', title: '状态', visible: true, width: 100, minWidth: 80 },
   { key: 'created_at', title: '创建时间', visible: true, width: 170, minWidth: 150 },
 ]
@@ -123,6 +134,12 @@ const platformOptions = [
   { label: 'Shopee', value: 'shopee' },
   { label: 'Lazada', value: 'lazada' },
   { label: 'TikTok', value: 'tiktok' },
+  { label: 'Temu半托', value: 'temu_half' },
+  { label: 'Temu全托', value: 'temu_full' },
+  { label: 'SHEIN半托', value: 'shein_half' },
+  { label: 'SHEIN全托', value: 'shein_full' },
+  { label: '速卖通半托', value: 'aliexpress_half' },
+  { label: '速卖通全托', value: 'aliexpress_full' },
   { label: '其他', value: 'other' },
 ]
 
@@ -134,7 +151,32 @@ const platformColorMap: Record<string, string> = {
   shopee: 'red',
   lazada: 'purple',
   tiktok: 'cyan',
+  temu_half: 'volcano',
+  temu_full: 'magenta',
+  shein_half: 'geekblue',
+  shein_full: 'purple',
+  aliexpress_half: 'gold',
+  aliexpress_full: 'orange',
   other: 'default',
+}
+
+// 平台显示名称映射
+const platformLabelMap: Record<string, string> = {
+  amazon: 'Amazon',
+  ebay: 'eBay',
+  walmart: 'Walmart',
+  shopify: 'Shopify',
+  shopee: 'Shopee',
+  lazada: 'Lazada',
+  tiktok: 'TikTok',
+  temu: 'Temu',
+  temu_half: 'Temu半托',
+  temu_full: 'Temu全托',
+  shein_half: 'SHEIN半托',
+  shein_full: 'SHEIN全托',
+  aliexpress_half: '速卖通半托',
+  aliexpress_full: '速卖通全托',
+  other: '其他',
 }
 
 const ResizableTitle = (props: any) => {
@@ -165,20 +207,113 @@ const ResizableTitle = (props: any) => {
   )
 }
 
+// 判断产品类型
+const isFinishedProduct = (product?: { product_type?: string | string[] } | null) => {
+  if (!product?.product_type) return false
+  const types = Array.isArray(product.product_type) ? product.product_type : product.product_type.split(',')
+  return types.includes('finished')
+}
+
+const isAccessoryProduct = (product?: { product_type?: string | string[] } | null) => {
+  if (!product?.product_type) return false
+  const types = Array.isArray(product.product_type) ? product.product_type : product.product_type.split(',')
+  return types.includes('accessory')
+}
+
+// 高级筛选条件
+interface AdvancedFilterCondition {
+  id: number
+  field: string
+  operator: string
+  value: string
+  extra_value?: string  // 用于 store_group_stock 字段的店铺分组ID
+}
+
+// 筛选字段选项
+const filterFieldOptions = [
+  { label: '库存数量', value: 'local_quantity' },
+  { label: '店铺分组库存', value: 'store_group_stock' },
+  { label: '产品编码', value: 'product_code' },
+  { label: '产品名称', value: 'name' },
+  { label: '产品类型', value: 'product_type' },
+  { label: '分类', value: 'category' },
+  { label: '品牌', value: 'brand' },
+  { label: '货值', value: 'local_value' },
+  { label: '补货数量', value: 'replenishment_quantity' },
+  { label: '已采购数量', value: 'purchased_quantity' },
+  { label: '平台数', value: 'platform_count' },
+  { label: '状态', value: 'status' },
+]
+
+// 操作符选项
+const filterOperatorOptions = [
+  { label: '等于', value: 'eq' },
+  { label: '不等于', value: 'neq' },
+  { label: '大于', value: 'gt' },
+  { label: '大于等于', value: 'gte' },
+  { label: '小于', value: 'lt' },
+  { label: '小于等于', value: 'lte' },
+  { label: '包含', value: 'contains' },
+  { label: '不包含', value: 'not_contains' },
+]
+
+
+const PRODUCT_FILTER_SESSION_KEY = 'product_management_session_filters_v1'
+const defaultAdvancedFilterConditions: AdvancedFilterCondition[] = [
+  { id: Date.now(), field: 'local_quantity', operator: 'gt', value: '0' },
+]
+
+const loadProductFilterSession = () => {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(PRODUCT_FILTER_SESSION_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    return {
+      searchText: typeof parsed.searchText === 'string' ? parsed.searchText : '',
+      productTypeFilter: Array.isArray(parsed.productTypeFilter) ? parsed.productTypeFilter : undefined,
+      productAttributeFilter: typeof parsed.productAttributeFilter === 'string' ? parsed.productAttributeFilter : undefined,
+      filters: parsed.filters && typeof parsed.filters === 'object' ? parsed.filters : { search: '' },
+      filterConditions: Array.isArray(parsed.filterConditions)
+        ? parsed.filterConditions.map((condition: any, index: number) => ({
+            id: typeof condition.id === 'number' ? condition.id : Date.now() + index,
+            field: condition.field || 'local_quantity',
+            operator: condition.operator || 'gt',
+            value: condition.value ?? '0',
+            extra_value: condition.extra_value,
+          }))
+        : defaultAdvancedFilterConditions,
+      filterMatchMode: parsed.filterMatchMode === 'any' ? 'any' : 'all',
+    }
+  } catch {
+    return null
+  }
+}
+
 const ProductManagement: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission } = useAuth()
+  const res = useResponsive()
+  const initialFilterSession = loadProductFilterSession()
   const [products, setProducts] = useState<Product[]>([])
   const [stores, setStores] = useState<Store[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form] = Form.useForm()
-  const [searchText, setSearchText] = useState('')
-  const [productTypeFilter, setProductTypeFilter] = useState<string[] | undefined>(undefined)
-  const [productAttributeFilter, setProductAttributeFilter] = useState<string | undefined>(undefined)
+  const [searchText, setSearchText] = useState(initialFilterSession?.searchText || '')
+  const [productTypeFilter, setProductTypeFilter] = useState<string[] | undefined>(initialFilterSession?.productTypeFilter)
+  const [productAttributeFilter, setProductAttributeFilter] = useState<string | undefined>(initialFilterSession?.productAttributeFilter)
+  // 高级筛选条件
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false)
+  const [filterConditions, setFilterConditions] = useState<AdvancedFilterCondition[]>(initialFilterSession?.filterConditions || defaultAdvancedFilterConditions)
+  const [filterMatchMode, setFilterMatchMode] = useState<'all' | 'any'>(initialFilterSession?.filterMatchMode || 'all')
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
-  const [filters, setFilters] = useState<Record<string, any>>({ search: '' })
+  const [filters, setFilters] = useState<Record<string, any>>(initialFilterSession?.filters || { search: '' })
   const [columnStates, setColumnStates] = useState<ColumnState[]>(defaultColumns)
   const [columnSettingOpen, setColumnSettingOpen] = useState(false)
   const [columnSettingTarget, setColumnSettingTarget] = useState<'main' | 'platform'>('main')
@@ -193,6 +328,9 @@ const ProductManagement: React.FC = () => {
   const [selectedFinishedProduct, setSelectedFinishedProduct] = useState<number | null>(null)
   const [selectedAccessoryIds, setSelectedAccessoryIds] = useState<number[]>([])
   const [importRecordModalOpen, setImportRecordModalOpen] = useState(false)
+  // 供应商选项（编辑弹窗中使用）
+  const [supplierOptions, setSupplierOptions] = useState<{ value: string; label: string }[]>([])
+  const [totalValue, setTotalValue] = useState<number>(0) // 筛选后所有页面货值总合计
   const [importRecordLoading, setImportRecordLoading] = useState(false)
   const [importRecords, setImportRecords] = useState<any[]>([])
   const [importRecordTotal, setImportRecordTotal] = useState(0)
@@ -219,16 +357,28 @@ const ProductManagement: React.FC = () => {
   const [stockModalOpen, setStockModalOpen] = useState(false)
   const [stockModalProduct, setStockModalProduct] = useState<Product | null>(null)
   const [stockData, setStockData] = useState<any[] | null>(null)
+  const [stockPlatformData, setStockPlatformData] = useState<any[]>([])
+  const [stockGroupData, setStockGroupData] = useState<any[]>([])
   const [stockHistory, setStockHistory] = useState<any[]>([])
   const [stockLoading, setStockLoading] = useState(false)
   
   const [detailModalOpen, setDetailModalOpen] = useState(false)
   const [detailModalProduct, setDetailModalProduct] = useState<Product | null>(null)
+  const [detailActiveTab, setDetailActiveTab] = useState<'basic' | 'platform' | 'accessory' | 'logs'>('basic')
+  const [detailEditMode, setDetailEditMode] = useState(false)
+  const [detailLogs, setDetailLogs] = useState<any[]>([])
+  const [detailLogsLoading, setDetailLogsLoading] = useState(false)
+  const [detailLogsTotal, setDetailLogsTotal] = useState(0)
+  const [detailLogsPage, setDetailLogsPage] = useState(1)
+  const [detailPpPage, setDetailPpPage] = useState(1)
+  const [detailPpPageSize, setDetailPpPageSize] = useState(10)
+  const [detailAccessoryList, setDetailAccessoryList] = useState<any[]>([])
+  const [detailAccessoryLoading, setDetailAccessoryLoading] = useState(false)
   
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [importPreviewOpen, setImportPreviewOpen] = useState(false)
-  const [importPreviewData, setImportPreviewData] = useState<{ products: any[]; platform_products: any[]; file_name?: string }>({ products: [], platform_products: [] })
+  const [importPreviewData, setImportPreviewData] = useState<{ products: any[]; platform_products: any[]; file_name?: string; total_count?: number }>({ products: [], platform_products: [] })
   const [importPreviewRecordId, setImportPreviewRecordId] = useState<number | null>(null)
   const [importing, setImporting] = useState(false)
   const [importErrors, setImportErrors] = useState<string[]>([])
@@ -241,7 +391,9 @@ const ProductManagement: React.FC = () => {
   const [shelfEditBatchId, setShelfEditBatchId] = useState<number | null>(null)
   const [shelfEditValue, setShelfEditValue] = useState('')
   const shelfInputRef = useRef<any>(null)
-  
+
+  const [shipmentCreating, setShipmentCreating] = useState(false)
+
   // 平台商品列表的列状态
   const [ppColumnStates, setPpColumnStates] = useState<ColumnState[]>(defaultPpColumns)
 
@@ -261,11 +413,56 @@ const ProductManagement: React.FC = () => {
   const [bindingEditingItem, setBindingEditingItem] = useState<any>(null)
   const [bindingForm] = Form.useForm()
 
+  // 配件绑定成品管理（反向查看）
+  const [accBindingDrawerOpen, setAccBindingDrawerOpen] = useState(false)
+  const [accBindingProduct, setAccBindingProduct] = useState<Product | null>(null)
+  const [accBindingList, setAccBindingList] = useState<any[]>([])
+  const [accBindingLoading, setAccBindingLoading] = useState(false)
+  const [accBindingModalOpen, setAccBindingModalOpen] = useState(false)
+  const [accBindingEditingItem, setAccBindingEditingItem] = useState<any>(null)
+  const [accBindingForm] = Form.useForm()
+
+  // 全量产品列表（用于绑定选择，支持懒加载）
+  const [allAccessories, setAllAccessories] = useState<Product[]>([])
+  const [allFinishedProducts, setAllFinishedProducts] = useState<Product[]>([])
+  const [accPage, setAccPage] = useState(1) // 配件当前页码
+  const [accTotal, setAccTotal] = useState(0) // 配件总数
+  const [accLoadingMore, setAccLoadingMore] = useState(false) // 配件加载更多中
+  const [finishedPage, setFinishedPage] = useState(1) // 成品当前页码
+  const [finishedTotal, setFinishedTotal] = useState(0) // 成品总数
+  const [finishedLoadingMore, setFinishedLoadingMore] = useState(false) // 成品加载更多中
+  const [accSearchText, setAccSearchText] = useState('') // 配件搜索关键词
+  const [finishedSearchText, setFinishedSearchText] = useState('') // 成品搜索关键词
+  const accSearchTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 配件搜索防抖
+  const finishedSearchTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 成品搜索防抖
+
   const statusOptions = [
   { label: '启用', value: 'active' },
   { label: '停用', value: 'inactive' },
   { label: '归档', value: 'archived' },
 ]
+
+// 平台商品专用状态（在售/停售）
+const platformStatusOptions = [
+  { label: '在售', value: 'on_sale' },
+  { label: '停售', value: 'off_sale' },
+]
+
+const platformStatusColorMap: Record<string, string> = {
+  on_sale: 'success',
+  off_sale: 'default',
+  active: 'success',
+  inactive: 'default',
+  archived: 'default',
+}
+
+const platformStatusLabelMap: Record<string, string> = {
+  on_sale: '在售',
+  off_sale: '停售',
+  active: '在售',
+  inactive: '停售',
+  archived: '停售',
+}
 
 const productTypeOptions = [
   { label: '成品', value: 'finished' },
@@ -291,16 +488,49 @@ const productAttributeLabelMap: Record<string, string> = {
 
   useEffect(() => {
     fetchData()
-  }, [pagination.current, pagination.pageSize, filters])
+  }, [pagination.current, pagination.pageSize, filters, filterConditions, filterMatchMode])
+
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    window.sessionStorage.setItem(
+      PRODUCT_FILTER_SESSION_KEY,
+      JSON.stringify({
+        searchText,
+        productTypeFilter,
+        productAttributeFilter,
+        filters,
+        filterConditions,
+        filterMatchMode,
+      })
+    )
+  }, [searchText, productTypeFilter, productAttributeFilter, filters, filterConditions, filterMatchMode])
+
 
   const fetchData = async () => {
     setLoading(true)
     try {
+      // 将高级筛选条件转换为API参数
+      const advFilters: Record<string, any> = {}
+      if (filterConditions.length > 0) {
+        advFilters.advanced_filters = JSON.stringify({
+          conditions: filterConditions.map(c => ({
+            field: c.field,
+            operator: c.operator,
+            value: c.value,
+            extra_value: c.extra_value,  // 用于 store_group_stock 的店铺分组ID
+          })),
+          match_mode: filterMatchMode,
+        })
+      }
       const [productsRes, storesRes, groupsRes] = await Promise.all([
         productsApi.getList({
           page: pagination.current,
           page_size: pagination.pageSize,
           ...filters,
+          ...advFilters,
         }),
         storesApi.getList({ page: 1, page_size: 1000 }),
         storeGroupsApi.getList(),
@@ -308,6 +538,7 @@ const productAttributeLabelMap: Record<string, string> = {
       if (productsRes.data.success) {
         setProducts(productsRes.data.data)
         setPagination((prev) => ({ ...prev, total: productsRes.data.total }))
+        setTotalValue(productsRes.data.total_value || 0)
       }
       if (storesRes.data.success) setStores(storesRes.data.data)
       if (groupsRes.data.success) setGroups(groupsRes.data.data)
@@ -329,6 +560,19 @@ const productAttributeLabelMap: Record<string, string> = {
       setPagination((prev) => ({ ...prev, current: 1 }))
     }, 300)
   }, [])
+
+  // 加载供应商列表（用于编辑弹窗下拉选择）
+  const fetchSuppliers = async () => {
+    try {
+      const res = await suppliersApi.listAll()
+      if (res.data.success) {
+        const list = (res.data.data || []).map((s: any) => ({ value: s.name, label: s.name }))
+        setSupplierOptions(list)
+      }
+    } catch (e) {
+      console.error('加载供应商列表失败', e)
+    }
+  }
   
   useEffect(() => {
     return () => {
@@ -350,26 +594,46 @@ const productAttributeLabelMap: Record<string, string> = {
     setPagination((prev) => ({ ...prev, current: 1 }))
   }
 
+  // 高级筛选操作
+  const addFilterCondition = () => {
+    setFilterConditions(prev => [
+      ...prev,
+      { id: Date.now(), field: 'local_quantity', operator: 'gt', value: '0' },
+    ])
+  }
+
+  const removeFilterCondition = (id: number) => {
+    setFilterConditions(prev => prev.filter(c => c.id !== id))
+  }
+
+  const updateFilterCondition = (id: number, key: keyof AdvancedFilterCondition, value: string) => {
+    setFilterConditions(prev =>
+      prev.map(c => c.id === id ? { ...c, [key]: value } : c)
+    )
+  }
+
   const handleCreate = () => {
     setEditingProduct(null)
     form.resetFields()
+    fetchSuppliers()
     setModalOpen(true)
   }
 
-  const handleEdit = (product: Product) => {
-    setEditingProduct(product)
+  const fillProductForm = (product: Product) => {
     form.setFieldsValue({
       product_code: product.product_code,
       name: product.name,
       name_en: product.name_en,
-      product_type: Array.isArray(product.product_type) ? product.product_type : 
+      product_type: Array.isArray(product.product_type) ? product.product_type :
                    (product.product_type ? product.product_type.split(',') : []),
       product_attribute: product.product_attribute,
       category: product.category,
       brand: product.brand,
+      supplier: product.supplier,
       purchase_price: product.purchase_price,
       sale_price: product.sale_price,
       main_image: product.main_image,
+      video_url: product.video_url,
       weight: product.weight,
       length: product.length,
       width: product.width,
@@ -381,7 +645,16 @@ const productAttributeLabelMap: Record<string, string> = {
       local_inbound_date: product.local_inbound_date,
       local_stock_age: product.local_stock_age,
     })
-    setModalOpen(true)
+  }
+
+  const handleEdit = (product: Product) => {
+    setEditingProduct(product)
+    setDetailModalProduct(product)
+    fillProductForm(product)
+    fetchSuppliers()
+    setDetailActiveTab('basic')
+    setDetailEditMode(true)
+    setDetailModalOpen(true)
   }
 
   const handleSubmit = async () => {
@@ -395,6 +668,8 @@ const productAttributeLabelMap: Record<string, string> = {
         message.success('商品创建成功')
       }
       setModalOpen(false)
+      setDetailModalOpen(false)
+      setDetailEditMode(false)
       fetchData()
     } catch (e: any) {
       if (e.errorFields) return
@@ -563,6 +838,7 @@ const productAttributeLabelMap: Record<string, string> = {
           products,
           platform_products,
           file_name: d.preview_file_name || `产品导入_${new Date().toISOString().slice(0, 10)}.xlsx`,
+          total_count: d.total_count || (products.length + platform_products.length),
         })
         setImportPreviewOpen(true)
         if (fromDetail) {
@@ -597,6 +873,83 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  const fetchDetailPlatformProducts = async (productId: number) => {
+    setPpLoading(true)
+    try {
+      const res = await productsApi.getPlatformProducts(productId)
+      if (res.data.success) {
+        setPpList(res.data.data)
+      }
+    } catch (e) {
+      message.error('获取平台商品失败')
+    } finally {
+      setPpLoading(false)
+    }
+  }
+
+  const fetchDetailLogs = async (product: Product, page: number = 1) => {
+    setDetailLogsLoading(true)
+    try {
+      const res = await operationLogsApi.getList({
+        module: 'product',
+        search: product.product_code,
+        page,
+        page_size: 10,
+      })
+      if (res.data.success) {
+        setDetailLogs(res.data.data || [])
+        setDetailLogsTotal(res.data.total || 0)
+        setDetailLogsPage(res.data.page || page)
+      }
+    } catch (e) {
+      message.error('获取操作日志失败')
+    } finally {
+      setDetailLogsLoading(false)
+    }
+  }
+
+  const fetchDetailAccessoryInfo = async (product: Product) => {
+    setDetailAccessoryLoading(true)
+    try {
+      const isFinished = Array.isArray(product.product_type)
+        ? product.product_type.includes('finished')
+        : (product.product_type || '').split(',').includes('finished')
+      const isAccessory = Array.isArray(product.product_type)
+        ? product.product_type.includes('accessory')
+        : (product.product_type || '').split(',').includes('accessory')
+
+      if (isFinished) {
+        const res = await productBindingsApi.getByFinished(product.id)
+        if (res.data.success) {
+          setDetailAccessoryList(res.data.data || [])
+        }
+      } else if (isAccessory) {
+        const res = await productBindingsApi.getByAccessory(product.id)
+        if (res.data.success) {
+          setDetailAccessoryList(res.data.data || [])
+        }
+      } else {
+        setDetailAccessoryList([])
+      }
+    } catch (e) {
+      message.error('获取配件信息失败')
+    } finally {
+      setDetailAccessoryLoading(false)
+    }
+  }
+
+  // 编辑模式下进入 accessory tab 时，加载可编辑的绑定数据
+  useEffect(() => {
+    if (!detailEditMode || !detailModalProduct || detailActiveTab !== 'accessory') return
+    if (isFinishedProduct(detailModalProduct)) {
+      setBindingProduct(detailModalProduct)
+      fetchBindings(detailModalProduct.id)
+    } else if (isAccessoryProduct(detailModalProduct)) {
+      setAccBindingProduct(detailModalProduct)
+      fetchAccBindings(detailModalProduct.id)
+    }
+  }, [detailEditMode, detailActiveTab, detailModalProduct])
+
   const handlePpCreate = () => {
     setPpEditingItem(null)
     ppForm.resetFields()
@@ -612,11 +965,13 @@ const productAttributeLabelMap: Record<string, string> = {
       platform: item.platform,
       platform_product_id: item.platform_product_id,
       asin: item.asin,
-      spu: item.spu,
       sku: item.sku,
       title: item.title,
       title_en: item.title_en,
       image_url: item.image_url,
+      description: item.description,
+      bullet_points: item.bullet_points,
+      keywords: item.keywords,
       currency: item.currency,
       price: item.price,
       cost_price: item.cost_price,
@@ -682,6 +1037,10 @@ const productAttributeLabelMap: Record<string, string> = {
         inventoryBatchesApi.getProductHistory(product.id),
       ])
       if (batchRes.data.success) setStockData(batchRes.data.data)
+      if (batchRes.data.platform_stock) setStockPlatformData(batchRes.data.platform_stock)
+      else setStockPlatformData([])
+      if (batchRes.data.group_stock) setStockGroupData(batchRes.data.group_stock)
+      else setStockGroupData([])
       if (historyRes.data.success) setStockHistory(historyRes.data.data)
     } catch (e) {
       message.error('获取库存信息失败')
@@ -846,7 +1205,7 @@ const productAttributeLabelMap: Record<string, string> = {
     }
     setImporting(true)
     try {
-      const total = importPreviewData.products.length + importPreviewData.platform_products.length
+      const total = importPreviewData.total_count || (importPreviewData.products.length + importPreviewData.platform_products.length)
       // 传 record_id 让后端从 DB 读完整数据执行导入（前端数据可能被分页截断）
       const submitRes = await productsApi.batchImport({
         products: [],
@@ -896,6 +1255,79 @@ const productAttributeLabelMap: Record<string, string> = {
   const handleCountClick = () => {
     setCountResult(null)
     setCountModalOpen(true)
+  }
+
+  const handleBatchCreateShipment = async () => {
+    const selectedProducts = products.filter(p => selectedRowKeys.includes(p.id))
+    if (selectedProducts.length === 0) {
+      message.warning('请先选择要操作的商品')
+      return
+    }
+
+    // 检测是否包含配件
+    const accessoryProducts = selectedProducts.filter(p => {
+      const types = Array.isArray(p.product_type) ? p.product_type :
+                   (p.product_type ? p.product_type.split(',') : [])
+      return types.includes('accessory')
+    })
+    if (accessoryProducts.length > 0) {
+      const names = accessoryProducts.map(p => `[${p.product_code}] ${p.name}`).join('、')
+      message.error(`选中的商品包含配件，无法生成发货单：${names}`)
+      return
+    }
+
+    // 从筛选条件中获取店铺分组
+    const storeGroupCondition = filterConditions.find(c => c.field === 'store_group_stock' && c.extra_value)
+    let storeGroupId = storeGroupCondition ? Number(storeGroupCondition.extra_value) : undefined
+    let storeGroupName = groups.find(g => g.id === storeGroupId)?.name
+
+    // 如果没有筛选店铺分组库存，提示用户选择一个分组
+    if (!storeGroupId) {
+      message.warning('请先筛选店铺分组库存，选择一个分组后再生成发货单')
+      return
+    }
+
+    Modal.confirm({
+      title: '批量生成发货单',
+      content: (
+        <div>
+          <div>将根据选中的 <b>{selectedProducts.length}</b> 个商品生成发货单</div>
+          {storeGroupName && <div>店铺分组：<b>{storeGroupName}</b></div>}
+        </div>
+      ),
+      okText: '生成',
+      cancelText: '取消',
+      onOk: async () => {
+        setShipmentCreating(true)
+        try {
+          const orderNumber = `FH${dayjs().format('YYYYMMDDHHmmss')}`
+          const items = selectedProducts.map(p => ({
+            product_id: p.id,
+            product_code: p.product_code,
+            product_name: p.name,
+            stock_quantity: p.store_group_quantity !== undefined && p.store_group_quantity !== null ? p.store_group_quantity : (p.local_quantity || 0),
+          }))
+
+          const res = await shipmentsApi.create({
+            order_number: orderNumber,
+            store_group_id: storeGroupId,
+            store_group_name: storeGroupName,
+            items,
+          })
+
+          if (res.data.success) {
+            message.success(`发货单创建成功，共 ${items.length} 个商品`)
+            setSelectedRowKeys([])
+          } else {
+            message.error(res.data.detail || '创建发货单失败')
+          }
+        } catch (err: any) {
+          message.error(err?.response?.data?.detail || '创建发货单失败')
+        } finally {
+          setShipmentCreating(false)
+        }
+      },
+    })
   }
 
   const handleCountFileUpload = () => {
@@ -1027,14 +1459,85 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
-  const handleBindingCreate = () => {
+
+  const handleBindingCreate = async () => {
     setBindingEditingItem(null)
     bindingForm.resetFields()
+    // 加载全量配件列表（不受筛选限制）
+    await loadAllAccessories()
     setBindingModalOpen(true)
   }
 
-  const handleBindingEdit = (binding: any) => {
+  const loadAllAccessories = async (page: number = 1, append: boolean = false, search: string = '') => {
+    try {
+      if (append) {
+        setAccLoadingMore(true)
+      }
+      // 查询配件，按id正序排序，支持搜索
+      const res = await productsApi.getList({
+        page: page,
+        page_size: 100,
+        product_type: 'accessory',
+        sort_by: 'id',
+        sort_order: 'asc',
+        search: search || undefined
+      })
+      if (res.data.success) {
+        const newProducts = res.data.data || []
+        if (append) {
+          // 滚动加载更多，追加数据
+          setAllAccessories(prev => [...prev, ...newProducts])
+        } else {
+          // 首次加载或搜索，替换数据
+          setAllAccessories(newProducts)
+        }
+        setAccTotal(res.data.total || 0)
+        setAccPage(page)
+        return newProducts
+      }
+      return []
+    } catch (e) {
+      message.error('加载配件列表失败')
+      return []
+    } finally {
+      setAccLoadingMore(false)
+    }
+  }
+
+  const loadMoreAccessories = async () => {
+    if (accLoadingMore) return
+    const nextPage = accPage + 1
+    const loadedCount = allAccessories.length
+    if (loadedCount >= accTotal) return
+    await loadAllAccessories(nextPage, true, accSearchText)
+  }
+
+  // 配件搜索（防抖）
+  const handleAccSearch = (value: string) => {
+    setAccSearchText(value)
+    if (accSearchTimeoutRef.current) {
+      clearTimeout(accSearchTimeoutRef.current)
+    }
+    accSearchTimeoutRef.current = setTimeout(() => {
+      loadAllAccessories(1, false, value)
+    }, 500)
+  }
+
+  const handleBindingEdit = async (binding: any) => {
     setBindingEditingItem(binding)
+    // 先加载配件列表，确保 Select 能显示产品名称而不是 ID
+    const loadedProducts = await loadAllAccessories(1, false, '')
+    // 如果当前编辑的配件不在已加载列表中，单独拉取详情并补充到列表
+    if (binding.accessory_product_id && !loadedProducts.some((p: Product) => p.id === binding.accessory_product_id)) {
+      try {
+        const res = await productsApi.getById(binding.accessory_product_id)
+        if (res.data.success && res.data.data) {
+          setAllAccessories(prev => [res.data.data, ...prev])
+        }
+      } catch (e) {
+        // 忽略单个产品详情加载失败
+      }
+    }
     bindingForm.setFieldsValue({
       accessory_product_id: binding.accessory_product_id,
       quantity: binding.quantity,
@@ -1080,6 +1583,149 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  // ========== 配件绑定成品（反向查看） ==========
+
+  const openAccBindingDrawer = async (product: Product) => {
+    setAccBindingProduct(product)
+    setAccBindingDrawerOpen(true)
+    await fetchAccBindings(product.id)
+  }
+
+  const fetchAccBindings = async (productId: number) => {
+    setAccBindingLoading(true)
+    try {
+      const res = await productBindingsApi.getByAccessory(productId)
+      if (res.data.success) {
+        setAccBindingList(res.data.data || [])
+      }
+    } catch (e) {
+      message.error('获取绑定成品失败')
+    } finally {
+      setAccBindingLoading(false)
+    }
+  }
+
+  const handleAccBindingCreate = async () => {
+    setAccBindingEditingItem(null)
+    accBindingForm.resetFields()
+    // 加载全量成品列表（不受筛选限制）
+    await loadAllFinishedProducts()
+    setAccBindingModalOpen(true)
+  }
+  const loadAllFinishedProducts = async (page: number = 1, append: boolean = false, search: string = '') => {
+    try {
+      if (append) {
+        setFinishedLoadingMore(true)
+      }
+      // 查询成品，按id正序排序，支持搜索
+      const res = await productsApi.getList({
+        page: page,
+        page_size: 100,
+        product_type: 'finished',
+        sort_by: 'id',
+        sort_order: 'asc',
+        search: search || undefined
+      })
+      if (res.data.success) {
+        const newProducts = res.data.data || []
+        if (append) {
+          setAllFinishedProducts(prev => [...prev, ...newProducts])
+        } else {
+          setAllFinishedProducts(newProducts)
+        }
+        setFinishedTotal(res.data.total || 0)
+        setFinishedPage(page)
+        return newProducts
+      }
+      return []
+    } catch (e) {
+      message.error('加载成品列表失败')
+      return []
+    } finally {
+      setFinishedLoadingMore(false)
+    }
+  }
+
+  // 加载更多成品（使用当前搜索关键词）
+  const loadMoreFinishedProducts = async () => {
+    if (finishedLoadingMore) return
+    const nextPage = finishedPage + 1
+    const loadedCount = allFinishedProducts.length
+    if (loadedCount >= finishedTotal) return
+    await loadAllFinishedProducts(nextPage, true, finishedSearchText)
+  }
+
+  // 成品搜索（防抖）
+  const handleFinishedSearch = (value: string) => {
+    setFinishedSearchText(value)
+    if (finishedSearchTimeoutRef.current) {
+      clearTimeout(finishedSearchTimeoutRef.current)
+    }
+    finishedSearchTimeoutRef.current = setTimeout(() => {
+      loadAllFinishedProducts(1, false, value)
+    }, 500)
+  }
+
+  const handleAccBindingEdit = async (binding: any) => {
+    setAccBindingEditingItem(binding)
+    // 先加载成品列表，确保 Select 能显示产品名称而不是 ID
+    const loadedProducts = await loadAllFinishedProducts(1, false, '')
+    // 如果当前编辑的成品不在已加载列表中，单独拉取详情并补充到列表
+    if (binding.finished_product_id && !loadedProducts.some((p: Product) => p.id === binding.finished_product_id)) {
+      try {
+        const res = await productsApi.getById(binding.finished_product_id)
+        if (res.data.success && res.data.data) {
+          setAllFinishedProducts(prev => [res.data.data, ...prev])
+        }
+      } catch (e) {
+        // 忽略单个产品详情加载失败
+      }
+    }
+    accBindingForm.setFieldsValue({
+      finished_product_id: binding.finished_product_id,
+      quantity: binding.quantity,
+    })
+    setAccBindingModalOpen(true)
+  }
+
+  const handleAccBindingSubmit = async () => {
+    if (!accBindingProduct) return
+    try {
+      const values = await accBindingForm.validateFields()
+      if (accBindingEditingItem) {
+        await productBindingsApi.update(accBindingEditingItem.id, {
+          finished_product_id: values.finished_product_id,
+          accessory_product_id: accBindingProduct.id,
+          quantity: values.quantity,
+        })
+        message.success('绑定更新成功')
+      } else {
+        await productBindingsApi.create({
+          finished_product_id: values.finished_product_id,
+          accessory_product_id: accBindingProduct.id,
+          quantity: values.quantity,
+        })
+        message.success('绑定创建成功')
+      }
+      setAccBindingModalOpen(false)
+      fetchAccBindings(accBindingProduct.id)
+    } catch (e: any) {
+      if (e.errorFields) return
+      const errorMsg = e.response?.data?.detail || e.message || '操作失败'
+      message.error(errorMsg)
+    }
+  }
+
+  const handleAccBindingDelete = async (bindingId: number) => {
+    try {
+      await productBindingsApi.delete(bindingId)
+      message.success('绑定已删除')
+      if (accBindingProduct) fetchAccBindings(accBindingProduct.id)
+    } catch (e) {
+      message.error('删除失败')
+    }
+  }
+
   const handleShelfEditStart = (batchId: number, currentValue: string) => {
     setShelfEditBatchId(batchId)
     setShelfEditValue(currentValue || '')
@@ -1096,6 +1742,8 @@ const productAttributeLabelMap: Record<string, string> = {
       if (stockModalProduct) {
         const batchRes = await inventoryBatchesApi.getProductBatches(stockModalProduct.id)
         if (batchRes.data.success) setStockData(batchRes.data.data)
+        if (batchRes.data.platform_stock) setStockPlatformData(batchRes.data.platform_stock)
+        if (batchRes.data.group_stock) setStockGroupData(batchRes.data.group_stock)
       }
     } catch (e: any) {
       message.error('更新货架号失败')
@@ -1232,7 +1880,21 @@ const productAttributeLabelMap: Record<string, string> = {
           }),
         }
 
-        if (col.key === 'main_image') {
+        if (col.key === 'product_code') {
+          column.render = (text: string, record: Product) => (
+            <a
+              style={{ color: '#1890ff', cursor: 'pointer' }}
+              onClick={() => {
+                setDetailModalProduct(record)
+                setDetailActiveTab('basic')
+                setDetailEditMode(false)
+                setDetailModalOpen(true)
+              }}
+            >
+              {text || '-'}
+            </a>
+          )
+        } else if (col.key === 'main_image') {
           column.render = (url: string) =>
             url ? (
               <Image 
@@ -1269,17 +1931,13 @@ const productAttributeLabelMap: Record<string, string> = {
           )
         } else if (col.key === 'purchase_price' || col.key === 'sale_price') {
           column.render = (price: number | null) => price != null ? `¥${price.toFixed(2)}` : '-'
-        } else if (col.key === 'is_robot_monitored') {
-          column.render = (monitored: boolean) => (
-            <Tag color={monitored ? 'success' : 'default'}>{monitored ? '是' : '否'}</Tag>
-          )
         } else if (col.key === 'status') {
-          column.render = (status: string) => {
-            const colorMap: Record<string, string> = { active: 'success', inactive: 'default', archived: 'error' }
-            const labelMap: Record<string, string> = { active: '启用', inactive: '停用', archived: '归档' }
-            return <Tag color={colorMap[status] || 'default'}>{labelMap[status] || status}</Tag>
-          }
-        } else if (col.key === 'product_type') {
+                  column.render = (status: string) => {
+                    const colorMap: Record<string, string> = { active: 'success', inactive: 'default', archived: 'error' }
+                    const labelMap: Record<string, string> = { active: '启用', inactive: '停用', archived: '归档' }
+                    return <Tag color={colorMap[status] || 'default'}>{labelMap[status] || status}</Tag>
+                  }
+                } else if (col.key === 'product_type') {
           column.render = (types: string | string[]) => {
             const typeList = Array.isArray(types) ? types : (types ? types.split(',') : [])
             return typeList.length > 0 ? (
@@ -1304,6 +1962,10 @@ const productAttributeLabelMap: Record<string, string> = {
           )
         } else if (col.key === 'local_value') {
           column.render = (value: number | null) => value != null ? `¥${value.toFixed(2)}` : '-'
+        } else if (col.key === 'replenishment_quantity') {
+          column.render = (qty: number) => qty > 0 ? <Tag color="orange">{qty}</Tag> : <span style={{ color: '#999' }}>0</span>
+        } else if (col.key === 'purchased_quantity') {
+          column.render = (qty: number) => qty > 0 ? <Tag color="blue">{qty}</Tag> : <span style={{ color: '#999' }}>0</span>
         } else if (col.key === 'local_stock_age') {
           column.render = (days: number | null) => {
             if (days == null) return '-'
@@ -1349,19 +2011,21 @@ const productAttributeLabelMap: Record<string, string> = {
         }
         
         if (hasPermission('product:edit')) {
-          dropdownItems.push({
-            key: 'edit',
-            label: '编辑',
-            icon: <EditOutlined />,
-            onClick: () => handleEdit(record),
-          })
-          
           if (record.product_type?.includes('finished')) {
             dropdownItems.push({
               key: 'binding',
               label: '绑定配件',
               icon: <SettingOutlined />,
               onClick: () => openBindingDrawer(record),
+            })
+          }
+
+          if (record.product_type?.includes('accessory')) {
+            dropdownItems.push({
+              key: 'acc_binding',
+              label: '绑定成品',
+              icon: <SettingOutlined />,
+              onClick: () => openAccBindingDrawer(record),
             })
           }
         }
@@ -1385,7 +2049,16 @@ const productAttributeLabelMap: Record<string, string> = {
         return (
           <Space>
             <Tooltip title="平台商品">
-              <Button size="small" icon={<ShopOutlined />} onClick={() => openPpDrawer(record)}>
+              <Button size="small" icon={<ShopOutlined />} onClick={() => {
+                setDetailModalProduct(record)
+                setPpCurrentProductId(record.id)
+                setPpCurrentProductName(record.name)
+                setDetailActiveTab('platform')
+                setDetailEditMode(false)
+                setDetailPpPage(1)
+                fetchDetailPlatformProducts(record.id)
+                setDetailModalOpen(true)
+              }}>
                 平台({record.platform_count})
               </Button>
             </Tooltip>
@@ -1455,8 +2128,8 @@ const productAttributeLabelMap: Record<string, string> = {
                 }
               />
             </Space>
-            <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: 794 }}>
+            <div style={{ display: 'flex', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: 794, flexWrap: 'wrap', gap: 8 }}>
                 <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新增商品</Button>
                 <Dropdown
                   menu={{
@@ -1484,6 +2157,17 @@ const productAttributeLabelMap: Record<string, string> = {
                           setBatchBindOpen(true)
                         },
                       } : null,
+                      hasPermission('shipment:create') ? {
+                        key: 'shipment',
+                        label: '批量生成发货单',
+                        onClick: () => {
+                          if (selectedRowKeys.length === 0) {
+                            message.warning('请先选择要操作的商品')
+                            return
+                          }
+                          handleBatchCreateShipment()
+                        },
+                      } : null,
                     ].filter(Boolean) as any,
                   }}
                 >
@@ -1497,6 +2181,117 @@ const productAttributeLabelMap: Record<string, string> = {
               </div>
               <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
                 <Button onClick={() => setImportRecordModalOpen(true)}>导入记录</Button>
+                <Popover
+                  open={filterPanelOpen}
+                  onOpenChange={(open) => setFilterPanelOpen(open)}
+                  trigger="click"
+                  placement="bottomRight"
+                  content={
+                    <div style={{ width: 600 }}>
+                      {/* 顶部：符合以下 + 所有/任一 */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                        <span>符合以下</span>
+                        <Select
+                          value={filterMatchMode}
+                          onChange={(v) => setFilterMatchMode(v)}
+                          options={[
+                            { label: '所有', value: 'all' },
+                            { label: '任一', value: 'any' },
+                          ]}
+                          style={{ width: 70 }}
+                        />
+                        <span>条件</span>
+                      </div>
+
+                      {/* 条件列表 */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 300, overflowY: 'auto' }}>
+                        {filterConditions.map((condition) => (
+                          <div key={condition.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <Select
+                              value={condition.field}
+                              onChange={(v) => updateFilterCondition(condition.id, 'field', v)}
+                              options={filterFieldOptions}
+                              style={{ width: 150 }}
+                              size="middle"
+                            />
+                            {condition.field === 'store_group_stock' ? (
+                              <>
+                                <Select
+                                  value={condition.extra_value || ''}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'extra_value', v || '')}
+                                  placeholder="选择分组"
+                                  style={{ width: 140 }}
+                                  size="middle"
+                                  allowClear
+                                  options={groups.map(g => ({ label: g.name, value: String(g.id) }))}
+                                />
+                                <Select
+                                  value={condition.operator}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'operator', v)}
+                                  options={filterOperatorOptions}
+                                  style={{ width: 100 }}
+                                  size="middle"
+                                />
+                                <InputNumber
+                                  value={condition.value ? parseFloat(condition.value) : undefined}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'value', String(v || 0))}
+                                  placeholder="库存数量"
+                                  style={{ flex: 1 }}
+                                  size="middle"
+                                  min={0}
+                                />
+                              </>
+                            ) : (
+                              <>
+                                <Select
+                                  value={condition.operator}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'operator', v)}
+                                  options={filterOperatorOptions}
+                                  style={{ width: 100 }}
+                                  size="middle"
+                                />
+                                <Input
+                                  value={condition.value}
+                                  onChange={(e) => updateFilterCondition(condition.id, 'value', e.target.value)}
+                                  placeholder="输入值"
+                                  style={{ flex: 1 }}
+                                  size="middle"
+                                  allowClear
+                                />
+                              </>
+                            )}
+                            <Button
+                              type="text"
+                              danger
+                              icon={<DeleteOutlined />}
+                              onClick={() => removeFilterCondition(condition.id)}
+                              size="small"
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* 底部按钮 */}
+                      <div style={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center', marginTop: 8 }}>
+                        <Button
+                          type="link"
+                          icon={<PlusOutlined />}
+                          onClick={addFilterCondition}
+                          style={{ padding: 0 }}
+                        >
+                          添加条件
+                        </Button>
+                      </div>
+                    </div>
+                  }
+                >
+                  <Button
+                    icon={<FilterOutlined style={{ marginRight: 4 }} />}
+                    style={filterConditions.length > 0 ? { color: '#1890ff', borderColor: '#1890ff' } : undefined}
+                  >
+                    筛选{filterConditions.length > 0 ? `(${filterConditions.length})` : ''}
+                  </Button>
+                </Popover>
                 <Button type="text" icon={<SettingOutlined />} onClick={() => {
                   setColumnSettingTarget('main')
                   setColumnSettingOpen(true)
@@ -1524,7 +2319,17 @@ const productAttributeLabelMap: Record<string, string> = {
         />
       </Card>
 
-      <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', paddingRight: 8 }}>
+      <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 8 }}>
+        <span style={{ fontSize: 13, color: '#666' }}>
+          货值合计：
+          <span style={{ color: '#1677ff', fontWeight: 600 }}>
+            当前页面：¥{products.reduce((sum, p) => sum + (p.local_value || 0), 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+          <span style={{ margin: '0 8px' }}>|</span>
+          <span style={{ color: '#52c41a', fontWeight: 600 }}>
+            所有页面：¥{totalValue.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        </span>
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -1570,7 +2375,7 @@ const productAttributeLabelMap: Record<string, string> = {
         confirmLoading={batchBindLoading}
         okText="绑定"
         cancelText="取消"
-        width={600}
+        width={res.isMobile ? '95vw' : 600}
       >
         <div style={{ marginBottom: 16 }}>
           <p>选择要绑定的配件，将把它们添加到选中的 {selectedRowKeys.length} 个成品：</p>
@@ -1641,7 +2446,7 @@ const productAttributeLabelMap: Record<string, string> = {
             关闭
           </Button>
         ]}
-        width={1200}
+        width={res.isMobile ? '95vw' : 1200}
         style={{ top: 20 }}
         styles={{
           body: {
@@ -1813,6 +2618,28 @@ const productAttributeLabelMap: Record<string, string> = {
                 </Tag>
               </Descriptions.Item>
 
+              {/* 总体进度条 */}
+              {importRecordDetail.status === 'processing' && (
+                <Descriptions.Item label="导入进度" span={2}>
+                  <div style={{ marginBottom: 8 }}>
+                    <Progress
+                      percent={(() => {
+                        const total = (importRecordDetail.product_total ?? 0) + (importRecordDetail.platform_total ?? 0)
+                        const success = (importRecordDetail.product_success ?? 0) + (importRecordDetail.platform_success ?? 0)
+                        if (total === 0) return 0
+                        return Math.round((success / total) * 100)
+                      })()}
+                      status="active"
+                      strokeColor={{ from: '#108ee9', to: '#87d068' }}
+                      style={{ marginTop: 4 }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 12, color: '#666' }}>
+                    已完成 {(importRecordDetail.product_success ?? 0) + (importRecordDetail.platform_success ?? 0)} / {(importRecordDetail.product_total ?? 0) + (importRecordDetail.platform_total ?? 0)} 条
+                  </div>
+                </Descriptions.Item>
+              )}
+
               {/* 产品统计 */}
               <Descriptions.Item label={<span><strong>产品</strong>（共{importRecordDetail.product_total ?? 0}条）</span>}>
                 {importRecordDetail.status === 'processing' || importRecordDetail.status === 'pending' ? (
@@ -1910,7 +2737,7 @@ const productAttributeLabelMap: Record<string, string> = {
         open={modalOpen}
         onOk={handleSubmit}
         onCancel={() => setModalOpen(false)}
-        width={720}
+        width={res.isMobile ? '95vw' : 720}
         style={{ top: 20 }}
         styles={{ body: { 
           maxHeight: 'calc(100vh - 180px)', 
@@ -1940,6 +2767,16 @@ const productAttributeLabelMap: Record<string, string> = {
           <Form.Item name="brand" label="品牌">
             <Input placeholder="请输入品牌" />
           </Form.Item>
+          <Form.Item name="supplier" label="供应商">
+            <AutoComplete
+              options={supplierOptions}
+              placeholder="请输入或选择供应商"
+              allowClear
+              filterOption={(inputValue, option) =>
+                (option?.value ?? '').toLowerCase().includes(inputValue.toLowerCase())
+              }
+            />
+          </Form.Item>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Form.Item name="purchase_price" label="采购价">
               <InputNumber style={{ width: '100%' }} placeholder="采购价" min={0} precision={2} prefix="¥" />
@@ -1948,8 +2785,11 @@ const productAttributeLabelMap: Record<string, string> = {
               <InputNumber style={{ width: '100%' }} placeholder="建议售价" min={0} precision={2} prefix="¥" />
             </Form.Item>
           </div>
-          <Form.Item name="main_image" label="主图URL">
-            <Input placeholder="请输入主图URL" />
+          <Form.Item name="main_image" label="主图">
+            <TosUpload type="image" placeholder="上传主图" customName={form.getFieldValue('product_code') || undefined} />
+          </Form.Item>
+          <Form.Item name="video_url" label="产品视频">
+            <TosUpload type="video" placeholder="上传产品视频" />
           </Form.Item>
           <Divider orientation="left" plain>尺寸/重量</Divider>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
@@ -2032,7 +2872,7 @@ const productAttributeLabelMap: Record<string, string> = {
                       </div>
                     )
                 } else if (col.key === 'platform') {
-                  column.render = (p: string) => <Tag color={platformColorMap[p] || 'default'}>{p?.toUpperCase()}</Tag>
+                  column.render = (p: string) => <Tag color={platformColorMap[p] || 'default'}>{platformLabelMap[p] || p}</Tag>
                 } else if (col.key === 'store_names') {
                   column.render = (names: string[]) => names?.length > 0
                     ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
@@ -2053,11 +2893,9 @@ const productAttributeLabelMap: Record<string, string> = {
                   column.render = (price: number | null, row: PlatformProduct) =>
                     price != null ? `${row.currency || ''}${price.toFixed(2)}` : '-'
                 } else if (col.key === 'status') {
-                  column.render = (s: string) => {
-                    const colorMap: Record<string, string> = { active: 'success', inactive: 'default', archived: 'error' }
-                    const labelMap: Record<string, string> = { active: '启用', inactive: '停用', archived: '归档' }
-                    return <Tag color={colorMap[s] || 'default'}>{labelMap[s] || s}</Tag>
-                  }
+                  column.render = (s: string) => (
+                    <Tag color={platformStatusColorMap[s] || 'default'}>{platformStatusLabelMap[s] || s}</Tag>
+                  )
                 }
                 
                 return column
@@ -2107,12 +2945,12 @@ const productAttributeLabelMap: Record<string, string> = {
           setPpTransferTargetKeys([])
           setPpModalOpen(false)
         }}
-        width={640}
+        width={res.isMobile ? '95vw' : 720}
         style={{ top: 20 }}
-        styles={{ body: { 
-          maxHeight: 'calc(100vh - 180px)', 
-          overflow: 'auto', 
-          paddingRight: 8 
+        styles={{ body: {
+          maxHeight: 'calc(100vh - 180px)',
+          overflow: 'auto',
+          paddingRight: 8
         } }}
       >
         <Form 
@@ -2136,12 +2974,26 @@ const productAttributeLabelMap: Record<string, string> = {
           <Form.Item label="选择店铺">
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <Input
-                value={ppTransferTargetKeys.length > 0 
-                  ? `${ppTransferTargetKeys.length} 个店铺已选中`
+                value={ppTransferTargetKeys.length > 0
+                  ? ppTransferTargetKeys
+                      .map((key) => {
+                        const store = stores.find((s) => s.id === Number(key))
+                        return store ? store.inventory_name || store.name || `店铺ID:${key}` : `店铺ID:${key}`
+                      })
+                      .join('、')
                   : '请点击选择店铺'
                 }
                 placeholder="请点击选择店铺"
                 readOnly
+                title={ppTransferTargetKeys.length > 0
+                  ? ppTransferTargetKeys
+                      .map((key) => {
+                        const store = stores.find((s) => s.id === Number(key))
+                        return store ? store.inventory_name || store.name || `店铺ID:${key}` : `店铺ID:${key}`
+                      })
+                      .join('、')
+                  : ''
+                }
               />
               <Button type="primary" onClick={handleOpenTransfer}>
                 选择店铺
@@ -2149,28 +3001,34 @@ const productAttributeLabelMap: Record<string, string> = {
             </div>
           </Form.Item>
 
-          <Form.Item name="platform_product_id" label="平台商品ID">
-            <Input placeholder="平台侧的商品ID" />
-          </Form.Item>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <Form.Item name="platform_product_id" label="平台商品ID">
+              <Input placeholder="平台侧的商品ID" />
+            </Form.Item>
             <Form.Item name="asin" label="ASIN">
               <Input placeholder="ASIN" />
-            </Form.Item>
-            <Form.Item name="spu" label="SPU">
-              <Input placeholder="SPU" />
             </Form.Item>
             <Form.Item name="sku" label="SKU">
               <Input placeholder="SKU" />
             </Form.Item>
           </div>
           <Form.Item name="title" label="标题">
-            <Input placeholder="平台商品标题" />
+            <Input.TextArea rows={3} placeholder="平台商品标题" />
           </Form.Item>
           <Form.Item name="title_en" label="英文标题">
-            <Input placeholder="英文标题" />
+            <Input.TextArea rows={3} placeholder="英文标题" />
           </Form.Item>
-          <Form.Item name="image_url" label="商品图片URL">
-            <Input placeholder="请输入图片URL" />
+          <Form.Item name="image_url" label="商品图片">
+            <TosUpload type="image" placeholder="上传商品图片" />
+          </Form.Item>
+          <Form.Item name="description" label="产品描述">
+            <Input.TextArea rows={3} placeholder="请输入产品描述" />
+          </Form.Item>
+          <Form.Item name="bullet_points" label="五点描述" tooltip="每行一个卖点">
+            <Input.TextArea rows={5} placeholder="每行一个卖点" />
+          </Form.Item>
+          <Form.Item name="keywords" label="关键词" tooltip="多个关键词用逗号分隔">
+            <Input placeholder="多个关键词用逗号分隔" />
           </Form.Item>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
             <Form.Item name="currency" label="货币">
@@ -2183,8 +3041,8 @@ const productAttributeLabelMap: Record<string, string> = {
               <InputNumber style={{ width: '100%' }} min={0} precision={2} />
             </Form.Item>
           </div>
-          <Form.Item name="status" label="状态" initialValue="active">
-            <Select options={statusOptions} />
+          <Form.Item name="status" label="状态" initialValue="on_sale">
+            <Select options={platformStatusOptions} />
           </Form.Item>
         </Form>
       </Modal>
@@ -2194,7 +3052,7 @@ const productAttributeLabelMap: Record<string, string> = {
         open={ppTransferOpen}
         onOk={() => setPpTransferOpen(false)}
         onCancel={() => setPpTransferOpen(false)}
-        width={700}
+        width={res.isMobile ? '95vw' : 700}
       >
         <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
           <Select
@@ -2309,7 +3167,7 @@ const productAttributeLabelMap: Record<string, string> = {
         open={stockModalOpen}
         onCancel={() => { setStockModalOpen(false); setShelfEditBatchId(null) }}
         footer={null}
-        width={1200}
+        width={res.isMobile ? '95vw' : 1200}
         loading={stockLoading}
         styles={{ body: { maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' } }}
       >
@@ -2331,6 +3189,43 @@ const productAttributeLabelMap: Record<string, string> = {
                 </div>
               </Card>
             </div>
+            <Divider orientation="left">各平台库存</Divider>
+            {stockPlatformData.length > 0 ? (
+              <Table
+                dataSource={stockPlatformData}
+                rowKey="platform"
+                size="small"
+                pagination={false}
+                scroll={{ x: res.isMobile ? true : false }}
+                columns={[
+                  { title: '平台', dataIndex: 'platform', key: 'platform', width: 150,
+                    render: (v: string) => {
+                      return <Tag color={platformColorMap[v] || 'default'}>{platformLabelMap[v] || v}</Tag>
+                    }
+                  },
+                  { title: '库存数量', dataIndex: 'quantity', key: 'quantity', width: 120,
+                    render: (v: number) => <Tag color="blue">{v}</Tag>
+                  },
+                  { title: '店铺分组', key: 'groups', width: 300,
+                    render: (_: any, record: any) => {
+                      const platformGroups = stockGroupData.filter((g: any) => g.platforms && g.platforms.includes(record.platform))
+                      if (platformGroups.length === 0) return <span style={{ color: '#999' }}>-</span>
+                      return (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                          {platformGroups.map((g: any) => (
+                            <Tag key={g.group_id || 'ungrouped'} color="cyan">
+                              {g.group_name || '未分组'}: {g.quantity}
+                            </Tag>
+                          ))}
+                        </div>
+                      )
+                    }
+                  },
+                ]}
+              />
+            ) : (
+              <div style={{ color: '#999', padding: '16px 0', textAlign: 'center' }}>暂无库存</div>
+            )}
             <Divider orientation="left">库存批次明细</Divider>
             <Table
               dataSource={stockData}
@@ -2379,8 +3274,6 @@ const productAttributeLabelMap: Record<string, string> = {
                   }
                 },
                 { title: '入库日期', dataIndex: 'inbound_date', key: 'inbound_date', width: 180 },
-                { title: '生产日期', dataIndex: 'production_date', key: 'production_date', width: 120 },
-                { title: '过期日期', dataIndex: 'expiry_date', key: 'expiry_date', width: 120 },
                 { title: '库龄(天)', dataIndex: 'stock_age', key: 'stock_age', width: 120,
                   render: (days: number) => {
                     let color = 'default'
@@ -2396,7 +3289,7 @@ const productAttributeLabelMap: Record<string, string> = {
                 <Divider orientation="left" style={{ marginTop: 24 }}>出入库历史</Divider>
                 <Table
                   dataSource={stockHistory.slice(0, 20)}
-                  rowKey={(record, index) => `${record.created_at}-${index}`}
+                  rowKey={(record) => `${record.created_at}-${record.product_id || record.sub_type || Math.random()}`}
                   size="small"
                   pagination={false}
                   scroll={{ x: 'max-content' }}
@@ -2444,57 +3337,399 @@ const productAttributeLabelMap: Record<string, string> = {
       </Modal>
       
       <Modal
-        title={`商品详情 - ${detailModalProduct?.name || ''}`}
+        title={detailEditMode ? '编辑商品' : `商品详情 - ${detailModalProduct?.name || ''}`}
         open={detailModalOpen}
-        onCancel={() => setDetailModalOpen(false)}
-        footer={null}
-        width={720}
+        onCancel={() => {
+          setDetailModalOpen(false)
+          setDetailEditMode(false)
+          setDetailActiveTab('basic')
+        }}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            {detailEditMode ? (
+              <>
+                <Button onClick={() => {
+                  setDetailEditMode(false)
+                  if (detailModalProduct) fillProductForm(detailModalProduct)
+                }}>
+                  取消
+                </Button>
+                <Button type="primary" onClick={handleSubmit}>保存</Button>
+              </>
+            ) : (
+              <>
+                <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
+                {hasPermission('product:edit') && detailModalProduct && (
+                  <Button
+                    type="primary"
+                    icon={<EditOutlined />}
+                    onClick={() => {
+                      if (detailModalProduct) {
+                        setEditingProduct(detailModalProduct)
+                        fillProductForm(detailModalProduct)
+                        fetchSuppliers()
+                        setDetailEditMode(true)
+                      }
+                    }}
+                  >
+                    编辑
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        }
+        width={1280}
+        styles={{ body: { padding: 0, overflow: 'hidden', height: 'calc(100vh - 200px)' } }}
+        style={{ top: 24 }}
+        centered
       >
         {detailModalProduct && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {detailModalProduct.main_image && (
-              <div style={{ textAlign: 'center' }}>
-                <Image 
-                  src={detailModalProduct.main_image} 
-                  style={{ width: 200, height: 200, objectFit: 'cover', borderRadius: 8 }}
-                  preview={true}
-                />
+          <div style={{ display: 'flex', height: '100%' }}>
+            {/* 左侧菜单 */}
+            <div style={{ width: 180, borderRight: '1px solid #f0f0f0', padding: '16px 0', background: '#fafafa', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+              {/* 产品图片和标题 */}
+              <div style={{ padding: '0 16px 16px', textAlign: 'center', borderBottom: '1px solid #f0f0f0', marginBottom: 8 }}>
+                {detailModalProduct.main_image ? (
+                  <Image
+                    src={detailModalProduct.main_image}
+                    style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 4 }}
+                    preview={true}
+                  />
+                ) : (
+                  <div style={{ width: 120, height: 120, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto' }}>
+                    <AppstoreOutlined style={{ fontSize: 32, color: '#ccc' }} />
+                  </div>
+                )}
+                <div style={{ marginTop: 10, fontWeight: 'bold', wordBreak: 'break-word', fontSize: 13, lineHeight: 1.4 }}>{detailModalProduct.name}</div>
+                <div style={{ color: '#999', fontSize: 11, marginTop: 4 }}>{detailModalProduct.product_code}</div>
               </div>
-            )}
-            <Card size="small" title="基本信息">
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div><strong>产品编码:</strong> {detailModalProduct.product_code}</div>
-                <div><strong>产品类型:</strong> 
-              {(() => {
-                const types = Array.isArray(detailModalProduct.product_type) 
-                  ? detailModalProduct.product_type 
-                  : (detailModalProduct.product_type ? detailModalProduct.product_type.split(',') : []);
-                return types.length > 0 
-                  ? types.map((type, idx) => <Tag key={idx} style={{ marginRight: 4 }}>{productTypeLabelMap[type] || type}</Tag>) 
-                  : '-';
-              })()}
+              {[
+                { key: 'basic', label: '基本信息' },
+                { key: 'platform', label: '平台商品' },
+                { key: 'accessory', label: isAccessoryProduct(detailModalProduct) ? '关联成品' : '配件信息' },
+                { key: 'logs', label: '操作日志' },
+              ].map(item => (
+                <div
+                  key={item.key}
+                  onClick={() => {
+                    setDetailActiveTab(item.key as any)
+                    if (item.key === 'platform') {
+                      setDetailPpPage(1)
+                      fetchDetailPlatformProducts(detailModalProduct.id)
+                    }
+                    if (item.key === 'accessory') fetchDetailAccessoryInfo(detailModalProduct)
+                    if (item.key === 'logs') fetchDetailLogs(detailModalProduct, 1)
+                  }}
+                  style={{
+                    padding: '10px 24px',
+                    cursor: 'pointer',
+                    color: detailActiveTab === item.key ? '#1890ff' : '#595959',
+                    background: detailActiveTab === item.key ? '#e6f7ff' : 'transparent',
+                    borderRight: detailActiveTab === item.key ? '3px solid #1890ff' : '3px solid transparent',
+                    fontSize: 14,
+                  }}
+                >
+                  {item.label}
+                </div>
+              ))}
             </div>
-                <div><strong>产品属性:</strong> {productAttributeLabelMap[detailModalProduct.product_attribute] || detailModalProduct.product_attribute}</div>
-                <div><strong>分类:</strong> {detailModalProduct.category || '-'}</div>
-                <div><strong>品牌:</strong> {detailModalProduct.brand || '-'}</div>
-                <div><strong>状态:</strong> <Tag color={{ active: 'success', inactive: 'default', archived: 'error' }[detailModalProduct.status]}>{{ active: '启用', inactive: '停用', archived: '归档' }[detailModalProduct.status]}</Tag></div>
-              </div>
-            </Card>
-            <Card size="small" title="价格信息">
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div><strong>采购价:</strong> {detailModalProduct.purchase_price != null ? `¥${detailModalProduct.purchase_price.toFixed(2)}` : '-'}</div>
-                <div><strong>建议售价:</strong> {detailModalProduct.sale_price != null ? `¥${detailModalProduct.sale_price.toFixed(2)}` : '-'}</div>
-                <div><strong>货值:</strong> {detailModalProduct.local_value != null ? `¥${detailModalProduct.local_value.toFixed(2)}` : '-'}</div>
-              </div>
-            </Card>
-            <Card size="small" title="尺寸/重量">
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
-                <div><strong>重量:</strong> {detailModalProduct.weight != null ? `${detailModalProduct.weight} kg` : '-'}</div>
-                <div><strong>长:</strong> {detailModalProduct.length != null ? `${detailModalProduct.length} cm` : '-'}</div>
-                <div><strong>宽:</strong> {detailModalProduct.width != null ? `${detailModalProduct.width} cm` : '-'}</div>
-                <div><strong>高:</strong> {detailModalProduct.height != null ? `${detailModalProduct.height} cm` : '-'}</div>
-              </div>
-            </Card>
+
+            {/* 右侧内容 */}
+            <div style={{ flex: 1, padding: 24, overflow: 'auto', minWidth: 0 }}>
+              {detailActiveTab === 'basic' && (
+                detailEditMode ? (
+                  <Form form={form} layout="vertical">
+                    <Form.Item name="product_code" label="商品编码" rules={[{ required: true, message: '请输入商品编码' }]}>
+                      <Input placeholder="请输入商品编码（唯一）" />
+                    </Form.Item>
+                    <Form.Item name="name" label="商品名称" rules={[{ required: true, message: '请输入商品名称' }]}>
+                      <Input placeholder="请输入商品名称" />
+                    </Form.Item>
+                    <Form.Item name="name_en" label="英文名称">
+                      <Input placeholder="请输入英文名称" />
+                    </Form.Item>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                      <Form.Item name="product_type" label="商品类型">
+                        <Select placeholder="请选择商品类型" options={productTypeOptions} allowClear mode="multiple" />
+                      </Form.Item>
+                      <Form.Item name="product_attribute" label="产品属性" initialValue="general">
+                        <Select placeholder="请选择产品属性" options={productAttributeOptions} />
+                      </Form.Item>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                      <Form.Item name="category" label="分类">
+                        <Input placeholder="请输入分类" />
+                      </Form.Item>
+                      <Form.Item name="brand" label="品牌">
+                        <Input placeholder="请输入品牌" />
+                      </Form.Item>
+                    </div>
+                    <Form.Item name="supplier" label="供应商">
+                      <AutoComplete
+                        options={supplierOptions}
+                        placeholder="请输入或选择供应商"
+                        allowClear
+                        filterOption={(inputValue, option) =>
+                          (option?.value ?? '').toLowerCase().includes(inputValue.toLowerCase())
+                        }
+                      />
+                    </Form.Item>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                      <Form.Item name="purchase_price" label="采购价">
+                        <InputNumber style={{ width: '100%' }} placeholder="采购价" min={0} precision={2} prefix="¥" />
+                      </Form.Item>
+                      <Form.Item name="sale_price" label="建议售价">
+                        <InputNumber style={{ width: '100%' }} placeholder="建议售价" min={0} precision={2} prefix="¥" />
+                      </Form.Item>
+                    </div>
+                    <Form.Item name="main_image" label="主图">
+                      <TosUpload type="image" placeholder="上传主图" customName={form.getFieldValue('product_code') || undefined} />
+                    </Form.Item>
+                    <Form.Item name="video_url" label="产品视频">
+                      <TosUpload type="video" placeholder="上传产品视频" />
+                    </Form.Item>
+                    <Divider orientation="left" plain>尺寸/重量</Divider>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
+                      <Form.Item name="weight" label="重量(kg)">
+                        <InputNumber style={{ width: '100%' }} min={0} precision={3} />
+                      </Form.Item>
+                      <Form.Item name="length" label="长(cm)">
+                        <InputNumber style={{ width: '100%' }} min={0} precision={1} />
+                      </Form.Item>
+                      <Form.Item name="width" label="宽(cm)">
+                        <InputNumber style={{ width: '100%' }} min={0} precision={1} />
+                      </Form.Item>
+                      <Form.Item name="height" label="高(cm)">
+                        <InputNumber style={{ width: '100%' }} min={0} precision={1} />
+                      </Form.Item>
+                    </div>
+                    <Form.Item name="status" label="状态" initialValue="active">
+                      <Select placeholder="请选择状态" options={statusOptions} />
+                    </Form.Item>
+                  </Form>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                        <h2 style={{ margin: 0, fontSize: 20 }}>{detailModalProduct.name}</h2>
+                        <Tag color={{ active: 'success', inactive: 'default', archived: 'error' }[detailModalProduct.status]}>
+                          {{ active: '启用', inactive: '停用', archived: '归档' }[detailModalProduct.status]}
+                        </Tag>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, fontSize: 13 }}>
+                        <div><strong>产品编码:</strong> {detailModalProduct.product_code}</div>
+                        <div><strong>英文名称:</strong> {detailModalProduct.name_en || '-'}</div>
+                        <div><strong>产品类型:</strong>
+                          {(() => {
+                            const types = Array.isArray(detailModalProduct.product_type)
+                              ? detailModalProduct.product_type
+                              : (detailModalProduct.product_type ? detailModalProduct.product_type.split(',') : []);
+                            return types.length > 0
+                              ? types.map((type, idx) => <Tag key={idx} style={{ marginRight: 4 }}>{productTypeLabelMap[type] || type}</Tag>)
+                              : '-';
+                          })()}
+                        </div>
+                        <div><strong>产品属性:</strong> {productAttributeLabelMap[detailModalProduct.product_attribute] || detailModalProduct.product_attribute}</div>
+                        <div><strong>分类:</strong> {detailModalProduct.category || '-'}</div>
+                        <div><strong>品牌:</strong> {detailModalProduct.brand || '-'}</div>
+                        <div><strong>供应商:</strong> {detailModalProduct.supplier || '-'}</div>
+                        <div><strong>采购价:</strong> {detailModalProduct.purchase_price != null ? `¥${detailModalProduct.purchase_price.toFixed(2)}` : '-'}</div>
+                        <div><strong>建议售价:</strong> {detailModalProduct.sale_price != null ? `¥${detailModalProduct.sale_price.toFixed(2)}` : '-'}</div>
+                        <div><strong>货值:</strong> {detailModalProduct.local_value != null ? `¥${detailModalProduct.local_value.toFixed(2)}` : '-'}</div>
+                        <div><strong>重量:</strong> {detailModalProduct.weight != null ? `${detailModalProduct.weight} kg` : '-'}</div>
+                        <div><strong>长:</strong> {detailModalProduct.length != null ? `${detailModalProduct.length} cm` : '-'}</div>
+                        <div><strong>宽:</strong> {detailModalProduct.width != null ? `${detailModalProduct.width} cm` : '-'}</div>
+                        <div><strong>高:</strong> {detailModalProduct.height != null ? `${detailModalProduct.height} cm` : '-'}</div>
+                      </div>
+                    </div>
+                    {detailModalProduct.video_url && (
+                      <Card size="small" title="产品视频">
+                        <video
+                          src={detailModalProduct.video_url}
+                          controls
+                          style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000' }}
+                        />
+                      </Card>
+                    )}
+                  </div>
+                )
+              )}
+
+              {detailActiveTab === 'platform' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0 }}>平台商品</h3>
+                    {hasPermission('platform:create') && (
+                      <Button type="primary" icon={<PlusOutlined />} onClick={handlePpCreate}>
+                        新增平台商品
+                      </Button>
+                    )}
+                  </div>
+                  <Table
+                    dataSource={ppList.slice((detailPpPage - 1) * detailPpPageSize, detailPpPage * detailPpPageSize)}
+                    rowKey="id"
+                    loading={ppLoading}
+                    size="small"
+                    pagination={{
+                      current: detailPpPage,
+                      pageSize: detailPpPageSize,
+                      total: ppList.length,
+                      showSizeChanger: true,
+                      pageSizeOptions: ['10', '20', '50'],
+                      onChange: (page, pageSize) => {
+                        setDetailPpPage(page)
+                        if (pageSize) setDetailPpPageSize(pageSize)
+                      },
+                    }}
+                    scroll={{ x: 'max-content' }}
+                    columns={[
+                      { title: '平台', dataIndex: 'platform', key: 'platform', width: 100, render: (p: string) => <Tag color={platformColorMap[p] || 'default'}>{platformLabelMap[p] || p}</Tag> },
+                      { title: '店铺', dataIndex: 'store_names', key: 'store_names', width: 180, render: (names: string[]) => names?.length > 0 ? <Space size={4} wrap>{names.map((n, i) => <Tag key={i} color="blue">{n}</Tag>)}</Space> : '-' },
+                      { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 120, ellipsis: true },
+                      { title: 'ASIN', dataIndex: 'asin', key: 'asin', width: 120, ellipsis: true },
+                      { title: '标题', dataIndex: 'title', key: 'title', width: 200, ellipsis: true },
+                      { title: '价格', dataIndex: 'price', key: 'price', width: 100, render: (price: number | null, row: PlatformProduct) => price != null ? `${row.currency || ''}${price.toFixed(2)}` : '-' },
+                      { title: '状态', dataIndex: 'status', key: 'status', width: 80, render: (s: string) => <Tag color={platformStatusColorMap[s] || 'default'}>{platformStatusLabelMap[s] || s}</Tag> },
+                      {
+                        title: '操作',
+                        key: 'actions',
+                        width: 120,
+                        fixed: 'right',
+                        render: (_: any, record: PlatformProduct) => (
+                          <Space>
+                            {hasPermission('platform:edit') && (
+                              <Button size="small" icon={<EditOutlined />} onClick={() => handlePpEdit(record)} />
+                            )}
+                            {hasPermission('platform:delete') && (
+                              <Popconfirm title="确定删除?" onConfirm={() => handlePpDelete(record.id)}>
+                                <Button size="small" danger icon={<DeleteOutlined />} />
+                              </Popconfirm>
+                            )}
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                </div>
+              )}
+
+              {detailActiveTab === 'accessory' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0 }}>
+                      {isAccessoryProduct(detailModalProduct)
+                        ? '关联成品（该配件被哪些成品使用）'
+                        : '配件信息（成品关联的配件）'}
+                    </h3>
+                    {detailEditMode && (
+                      <Button type="primary" icon={<PlusOutlined />} onClick={isAccessoryProduct(detailModalProduct) ? handleAccBindingCreate : handleBindingCreate}>
+                        新增
+                      </Button>
+                    )}
+                  </div>
+                  {detailEditMode ? (
+                    isAccessoryProduct(detailModalProduct) ? (
+                      <Table
+                        dataSource={accBindingList}
+                        rowKey="id"
+                        loading={accBindingLoading}
+                        size="small"
+                        pagination={false}
+                        scroll={{ x: 'max-content' }}
+                        columns={[
+                          { title: '成品编码', dataIndex: 'finished_code', width: 140, ellipsis: true },
+                          { title: '成品名称', dataIndex: 'finished_name', width: 200, ellipsis: true },
+                          { title: '数量', dataIndex: 'quantity', width: 80, render: (qty: number) => <Tag color="blue">{qty}</Tag> },
+                          {
+                            title: '操作', key: 'actions', width: 120,
+                            render: (_: any, record: any) => (
+                              <Space>
+                                <Button size="small" icon={<EditOutlined />} onClick={() => handleAccBindingEdit(record)} />
+                                <Popconfirm title="确定删除?" onConfirm={() => handleAccBindingDelete(record.id)}>
+                                  <Button size="small" danger icon={<DeleteOutlined />} />
+                                </Popconfirm>
+                              </Space>
+                            ),
+                          },
+                        ]}
+                        locale={{ emptyText: '暂无关联成品，点击右上角"新增"添加' }}
+                      />
+                    ) : (
+                      <Table
+                        dataSource={bindingList}
+                        rowKey="id"
+                        loading={bindingLoading}
+                        size="small"
+                        pagination={false}
+                        scroll={{ x: 'max-content' }}
+                        columns={[
+                          { title: '配件编码', dataIndex: 'accessory_code', width: 140, ellipsis: true },
+                          { title: '配件名称', dataIndex: 'accessory_name', width: 200, ellipsis: true },
+                          { title: '数量', dataIndex: 'quantity', width: 80, render: (qty: number) => <Tag color="blue">{qty}</Tag> },
+                          {
+                            title: '操作', key: 'actions', width: 120,
+                            render: (_: any, record: any) => (
+                              <Space>
+                                <Button size="small" icon={<EditOutlined />} onClick={() => handleBindingEdit(record)} />
+                                <Popconfirm title="确定删除?" onConfirm={() => handleBindingDelete(record.id)}>
+                                  <Button size="small" danger icon={<DeleteOutlined />} />
+                                </Popconfirm>
+                              </Space>
+                            ),
+                          },
+                        ]}
+                        locale={{ emptyText: '暂无配件绑定，点击右上角"新增"添加' }}
+                      />
+                    )
+                  ) : (
+                    <Table
+                      dataSource={detailAccessoryList}
+                      rowKey="id"
+                      loading={detailAccessoryLoading}
+                      size="small"
+                      pagination={false}
+                      scroll={{ x: 'max-content' }}
+                      columns={isAccessoryProduct(detailModalProduct)
+                        ? [
+                            { title: '产品编码', dataIndex: 'finished_code', key: 'finished_code', width: 140, ellipsis: true },
+                            { title: '产品名称', dataIndex: 'finished_name', key: 'finished_name', width: 200, ellipsis: true },
+                            { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 80 },
+                            { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170 },
+                          ]
+                        : [
+                            { title: '产品编码', dataIndex: 'accessory_code', key: 'accessory_code', width: 140, ellipsis: true },
+                            { title: '产品名称', dataIndex: 'accessory_name', key: 'accessory_name', width: 200, ellipsis: true },
+                            { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 80 },
+                            { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170 },
+                          ]}
+                      locale={{ emptyText: isAccessoryProduct(detailModalProduct) ? '暂无关联成品' : '暂无配件绑定信息' }}
+                    />
+                  )}
+                </div>
+              )}
+
+              {detailActiveTab === 'logs' && (
+                <Table
+                  dataSource={detailLogs}
+                  rowKey="id"
+                  loading={detailLogsLoading}
+                  size="small"
+                  pagination={{
+                    current: detailLogsPage,
+                    pageSize: 10,
+                    total: detailLogsTotal,
+                    onChange: (page) => detailModalProduct && fetchDetailLogs(detailModalProduct, page),
+                  }}
+                  columns={[
+                    { title: '操作类型', dataIndex: 'action', key: 'action', width: 100, render: (a: string) => <Tag>{{ create: '创建', update: '更新', delete: '删除', confirm: '确认', cancel: '取消' }[a] || a}</Tag> },
+                    { title: '摘要', dataIndex: 'summary', key: 'summary', ellipsis: true },
+                    { title: '操作人', dataIndex: 'username', key: 'username', width: 120 },
+                    { title: '操作时间', dataIndex: 'created_at', key: 'created_at', width: 170 },
+                  ]}
+                />
+              )}
+            </div>
           </div>
         )}
       </Modal>
@@ -2506,7 +3741,7 @@ const productAttributeLabelMap: Record<string, string> = {
           setImportPreviewOpen(false)
           setImportPreviewRecordId(null)
         }}
-        width={importPreviewData.platform_products.length > 0 ? 1200 : 900}
+        width={res.isMobile ? '95vw' : (importPreviewData.platform_products.length > 0 ? 1200 : 900)}
         footer={[
           <Button key="cancel" onClick={() => {
             setImportPreviewOpen(false)
@@ -2519,7 +3754,7 @@ const productAttributeLabelMap: Record<string, string> = {
       >
         {importPreviewData.products.length > 0 && (
           <>
-            <Divider orientation="left" plain>产品 ({importPreviewData.products.length} 条)</Divider>
+            <Divider orientation="left" plain>产品 (共 {importPreviewData.products.length} 条)</Divider>
             <Table
               dataSource={importPreviewData.products}
               rowKey={(_, idx) => `product-${idx}`}
@@ -2539,7 +3774,7 @@ const productAttributeLabelMap: Record<string, string> = {
         )}
         {importPreviewData.platform_products.length > 0 && (
           <>
-            <Divider orientation="left" plain style={{ marginTop: importPreviewData.products.length > 0 ? 24 : 0 }}>平台商品 ({importPreviewData.platform_products.length} 条)</Divider>
+            <Divider orientation="left" plain style={{ marginTop: importPreviewData.products.length > 0 ? 24 : 0 }}>平台商品 (共 {importPreviewData.platform_products.length} 条)</Divider>
             <Table
               dataSource={importPreviewData.platform_products}
               rowKey={(_, idx) => `platform-${idx}`}
@@ -2548,15 +3783,15 @@ const productAttributeLabelMap: Record<string, string> = {
               pagination={{ pageSize: 50, showSizeChanger: false, showQuickJumper: true, showTotal: (t) => `共 ${t} 条`, size: 'small' }}
               columns={[
                 { title: '产品编码', dataIndex: 'product_code', width: 120 },
-                { title: '平台', dataIndex: 'platform', width: 100 },
+                { title: '品名', dataIndex: 'product_name', width: 150, render: (v: string) => v || '-' },
+                { title: '平台', dataIndex: 'platform', width: 100, render: (v: string) => <Tag color={platformColorMap[v] || 'default'}>{platformLabelMap[v] || v}</Tag> },
                 { title: '店铺', dataIndex: 'store_with_site_raw', width: 180, render: (v: string) => v || '-' },
                 { title: 'SKU', dataIndex: 'sku', width: 120, render: (v: string) => v || '-' },
                 { title: '标题', dataIndex: 'title', width: 200, render: (v: string) => v || '-' },
                 { title: '售价', dataIndex: 'price', width: 100, render: (v: number, record: any) => v != null ? `${record.currency || ''} ${v.toFixed(2)}` : '-' },
-                { title: '状态', dataIndex: 'status', width: 80, render: (v: string) => {
-                  const statusMap: Record<string, string> = { active: '启用', inactive: '停用', archived: '归档' }
-                  return <Tag color={v === 'active' ? 'green' : v === 'inactive' ? 'default' : 'red'}>{statusMap[v] || v}</Tag>
-                }},
+                { title: '状态', dataIndex: 'status', width: 80, render: (v: string) => (
+                  <Tag color={platformStatusColorMap[v] || 'default'}>{platformStatusLabelMap[v] || v}</Tag>
+                )},
               ]}
             />
           </>
@@ -2599,6 +3834,7 @@ const productAttributeLabelMap: Record<string, string> = {
           rowKey="id"
           size="small"
           pagination={false}
+          scroll={{ x: res.isMobile ? true : false }}
           columns={[
             { title: '产品编码', dataIndex: 'product_code', width: 120 },
             { title: '产品名称', dataIndex: 'name', width: 200 },
@@ -2641,7 +3877,7 @@ const productAttributeLabelMap: Record<string, string> = {
         title="仓库盘存"
         open={countModalOpen}
         onCancel={() => { setCountModalOpen(false); setCountResult(null) }}
-        width={900}
+        width={res.isMobile ? '95vw' : 900}
         footer={
           countResult ? (
             <Space>
@@ -2702,7 +3938,7 @@ const productAttributeLabelMap: Record<string, string> = {
             </div>
             <Table
               dataSource={countResult.items}
-              rowKey={(record: any, index: number) => `${record.product_code}-${index}`}
+              rowKey={(record: any) => `${record.product_code}-${record.product_id || Math.random()}`}
               size="small"
               scroll={{ y: 400 }}
               pagination={false}
@@ -2756,8 +3992,8 @@ const productAttributeLabelMap: Record<string, string> = {
           loading={bindingLoading}
           size="small"
           pagination={false}
+          scroll={{ x: res.isMobile ? true : false }}
           columns={[
-            { title: '配件ID', dataIndex: 'accessory_product_id', width: 80 },
             { title: '配件名称', dataIndex: 'accessory_name', width: 200 },
             { title: '配件编码', dataIndex: 'accessory_code', width: 130 },
             { title: '数量', dataIndex: 'quantity', width: 80,
@@ -2785,8 +4021,17 @@ const productAttributeLabelMap: Record<string, string> = {
         title={bindingEditingItem ? '编辑绑定' : '新增绑定'}
         open={bindingModalOpen}
         onOk={handleBindingSubmit}
-        onCancel={() => { bindingForm.resetFields(); setBindingEditingItem(null); setBindingModalOpen(false) }}
-        width={500}
+        onCancel={() => {
+          bindingForm.resetFields()
+          setBindingEditingItem(null)
+          setBindingModalOpen(false)
+          // 清空搜索状态
+          setAccSearchText('')
+          if (accSearchTimeoutRef.current) {
+            clearTimeout(accSearchTimeoutRef.current)
+          }
+        }}
+        width={res.isMobile ? '95vw' : 500}
       >
         <Form form={bindingForm} layout="vertical">
           <Form.Item
@@ -2798,11 +4043,27 @@ const productAttributeLabelMap: Record<string, string> = {
               placeholder="请选择配件产品"
               showSearch
               disabled={!!bindingEditingItem}
-              filterOption={(input, option) =>
-                (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-              }
-              options={products
-                .filter(p => p.product_type?.includes('accessory') && p.id !== bindingProduct?.id)
+              filterOption={false}
+              onSearch={handleAccSearch}
+              onPopupScroll={(e) => {
+                const target = e.target as HTMLDivElement
+                // 滚动到底部时加载更多
+                if (target.scrollTop + target.clientHeight === target.scrollHeight) {
+                  loadMoreAccessories()
+                }
+              }}
+              dropdownRender={(menu) => (
+                <>
+                  {menu}
+                  {accLoadingMore && (
+                    <div style={{ padding: '8px', textAlign: 'center' }}>
+                      <Spin size="small" />
+                    </div>
+                  )}
+                </>
+              )}
+              options={allAccessories
+                .filter(p => p.id !== bindingProduct?.id)
                 .map(p => ({
                   label: `[${p.product_code}] ${p.name}`,
                   value: p.id,
@@ -2819,6 +4080,113 @@ const productAttributeLabelMap: Record<string, string> = {
           </Form.Item>
         </Form>
       </Modal>
+
+      {/* 配件绑定成品管理（反向查看） */}
+      <Drawer
+        title={`绑定成品 - ${accBindingProduct?.name || ''}`}
+        open={accBindingDrawerOpen}
+        onClose={() => setAccBindingDrawerOpen(false)}
+        width={700}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAccBindingCreate}>
+            新增绑定
+          </Button>
+        }
+      >
+        <Table
+          dataSource={accBindingList}
+          rowKey="id"
+          loading={accBindingLoading}
+          size="small"
+          pagination={false}
+          scroll={{ x: res.isMobile ? true : false }}
+          columns={[
+            { title: '成品名称', dataIndex: 'finished_name', width: 200 },
+            { title: '成品编码', dataIndex: 'finished_code', width: 130 },
+            { title: '数量', dataIndex: 'quantity', width: 80,
+              render: (qty: number) => <Tag color="blue">{qty}</Tag>
+            },
+            {
+              title: '操作',
+              key: 'actions',
+              width: 150,
+              render: (_: any, record: any) => (
+                <Space>
+                  <Button size="small" icon={<EditOutlined />} onClick={() => handleAccBindingEdit(record)} />
+                  <Popconfirm title="确定删除?" onConfirm={() => handleAccBindingDelete(record.id)}>
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                </Space>
+              ),
+            },
+          ]}
+          locale={{ emptyText: '暂无绑定成品，点击右上角"新增绑定"添加' }}
+        />
+      </Drawer>
+
+      <Modal
+        title={accBindingEditingItem ? '编辑绑定' : '新增绑定'}
+        open={accBindingModalOpen}
+        onOk={handleAccBindingSubmit}
+        onCancel={() => {
+          accBindingForm.resetFields()
+          setAccBindingEditingItem(null)
+          setAccBindingModalOpen(false)
+          // 清空搜索状态
+          setFinishedSearchText('')
+          if (finishedSearchTimeoutRef.current) {
+            clearTimeout(finishedSearchTimeoutRef.current)
+          }
+        }}
+        width={res.isMobile ? '95vw' : 500}
+      >
+        <Form form={accBindingForm} layout="vertical">
+          <Form.Item
+            name="finished_product_id"
+            label="成品产品"
+            rules={[{ required: true, message: '请选择成品产品' }]}
+          >
+            <Select
+              placeholder="请选择成品产品"
+              showSearch
+              disabled={!!accBindingEditingItem}
+              filterOption={false}
+              onSearch={handleFinishedSearch}
+              onPopupScroll={(e) => {
+                const target = e.target as HTMLDivElement
+                if (target.scrollTop + target.clientHeight === target.scrollHeight) {
+                  loadMoreFinishedProducts()
+                }
+              }}
+              dropdownRender={(menu) => (
+                <>
+                  {menu}
+                  {finishedLoadingMore && (
+                    <div style={{ padding: '8px', textAlign: 'center' }}>
+                      <Spin size="small" />
+                    </div>
+                  )}
+                </>
+              )}
+              options={allFinishedProducts
+                .filter(p => p.id !== accBindingProduct?.id)
+                .map(p => ({
+                  label: `[${p.product_code}] ${p.name}`,
+                  value: p.id,
+                }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="quantity"
+            label="配件数量"
+            rules={[{ required: true, message: '请输入配件数量' }]}
+            initialValue={1}
+          >
+            <InputNumber min={1} style={{ width: '100%' }} placeholder="请输入出库时自动扣除的配件数量" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
     </div>
   )
 }

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { Input, Button, Typography, message, Spin, List, Avatar, Popconfirm, Empty } from 'antd'
-import { Send, MessageSquare, Plus, Package, Trash2, StopCircle, ChevronRight, MessageCircle, Zap, BarChart3, Bot } from 'lucide-react'
+import { Send, MessageSquare, Plus, Package, Trash2, StopCircle, ChevronRight, MessageCircle, Zap, BarChart3, Bot, Megaphone } from 'lucide-react'
 import { chatApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
+import { useResponsive } from '../hooks/useResponsive'
 import MarkdownRenderer from '../components/common/MarkdownRenderer'
 
 // 定义ChatMessage接口
@@ -48,6 +49,14 @@ const CHAT_CONFIGS = {
     welcome: '您好！我是库存AI分析助手。\n\n您可以问我以下问题：\n- 哪些商品有断货风险？\n- 需要补货的商品有哪些？\n- 帮我分析一下库存状况\n- 低库存商品有哪些？',
     placeholder: '输入库存相关问题，如：哪些商品有断货风险？',
     icon: Package,
+  },
+  ad: {
+    title: '广告分析助手',
+    subtitle: '智能分析广告表现，提供竞价和关键词优化建议',
+    color: '#eb2f96',
+    welcome: '您好！我是亚马逊广告优化专家。\n\n您可以问我以下问题：\n- 分析我的广告ACOS表现\n- 哪些关键词花费太高需要优化？\n- 推荐一些否定关键词\n- 帮我看看广告ROAS趋势',
+    placeholder: '输入广告相关问题，如：分析我的广告ACOS表现',
+    icon: Megaphone,
   },
 }
 
@@ -260,7 +269,8 @@ const RecommendCard = ({
 
 const ChatBot: React.FC = () => {
   const { currentTheme } = useTheme()
-  const [chatType] = useState<'unified' | 'review' | 'inventory'>('unified')
+  const res = useResponsive()
+  const [chatType] = useState<'unified' | 'review' | 'inventory' | 'ad'>('unified')
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
@@ -469,19 +479,19 @@ const ChatBot: React.FC = () => {
 
   return (
     <div style={{
-      height: '100%',
+      height: 'calc(100vh - 96px)',
       display: 'flex',
       backgroundColor: '#f7f7f8',
       overflow: 'hidden'
     }}>
       {/* 左侧边栏 */}
-      <div style={{ 
-        width: '260px', 
-        flexShrink: 0, 
-        height: '100%', 
+      <div style={{
+        width: '260px',
+        flexShrink: 0,
+        height: '100%',
         backgroundColor: '#ffffff',
         borderRight: '1px solid #e5e5e5',
-        display: 'flex',
+        display: res.isMobile ? 'none' : 'flex',
         flexDirection: 'column'
       }}>
         {/* 新对话按钮 */}
@@ -553,11 +563,17 @@ const ChatBot: React.FC = () => {
                     if (session.session_id !== sessionId) {
                       e.currentTarget.style.backgroundColor = '#fafafa'
                     }
+                    // 悬停会话项时显示删除按钮
+                    const deleteBtn = e.currentTarget.querySelector('.session-delete-btn') as HTMLElement
+                    if (deleteBtn) deleteBtn.style.opacity = '1'
                   }}
                   onMouseLeave={(e) => {
                     if (session.session_id !== sessionId) {
                       e.currentTarget.style.backgroundColor = 'transparent'
                     }
+                    // 离开会话项时隐藏删除按钮
+                    const deleteBtn = e.currentTarget.querySelector('.session-delete-btn') as HTMLElement
+                    if (deleteBtn) deleteBtn.style.opacity = '0'
                   }}
                   onClick={() => loadSessionMessages(session.session_id)}
                 >
@@ -609,15 +625,10 @@ const ChatBot: React.FC = () => {
                       danger
                       icon={<Trash2 size={14} />}
                       onClick={(e) => e.stopPropagation()}
+                      className="session-delete-btn"
                       style={{ 
                         opacity: 0,
                         transition: 'opacity 0.15s'
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.opacity = '1'
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.opacity = '0'
                       }}
                     />
                   </Popconfirm>
@@ -636,7 +647,7 @@ const ChatBot: React.FC = () => {
           style={{
             flex: 1,
             overflowY: 'auto',
-            padding: '40px',
+            padding: res.isMobile ? '12px' : '40px',
             backgroundColor: '#f7f7f8',
             minHeight: 0,
             height: 0,
@@ -644,7 +655,7 @@ const ChatBot: React.FC = () => {
         >
           <React.Fragment>
             <div style={{
-              maxWidth: '900px',
+              maxWidth: res.isMobile ? '100%' : '900px',
               margin: '0 auto',
             }}>
               {/* 加载历史消息时显示 */}
@@ -723,7 +734,7 @@ const ChatBot: React.FC = () => {
 
             {/* 消息列表 - 拓宽显示 */}
             {!loadingMessages && displayMessages.length > 0 && (
-              <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+              <div style={{ maxWidth: res.isMobile ? '100%' : '1200px', margin: '0 auto' }}>
                 {messageList}
 
                 {/* 流式生成中提示 */}
@@ -775,13 +786,13 @@ const ChatBot: React.FC = () => {
         {/* 输入区域 */}
         <div
           style={{
-            padding: '24px 40px 40px',
+            padding: res.isMobile ? '12px' : '24px 40px 40px',
             backgroundColor: '#f7f7f8',
             flexShrink: 0,
           }}
         >
           <div style={{
-            maxWidth: '700px',
+            maxWidth: res.isMobile ? '100%' : '700px',
             margin: '0 auto',
             position: 'relative',
           }}>
@@ -848,10 +859,9 @@ const ChatBot: React.FC = () => {
                 </div>
                 <Button
                   className="chat-action-button"
-                  icon={isLoading ? undefined : <Send size={18} color="#1a1a1a" />}
-                  onClick={handleSendMessage}
+                  icon={isLoading ? <Spin size="small" /> : <Send size={18} color="#1a1a1a" />}
+                  onClick={() => handleSendMessage()}
                   disabled={!input.trim() || isLoading || loadingMessages}
-                  loading={isLoading}
                   style={{
                     borderRadius: '10px',
                     padding: '0 12px',
@@ -861,6 +871,7 @@ const ChatBot: React.FC = () => {
                     backgroundColor: 'white',
                     border: '1px solid #e5e5e5',
                     color: '#1a1a1a',
+                    cursor: (!input.trim() || isLoading || loadingMessages) ? 'not-allowed' : 'pointer',
                   }}
                 />
               </div>

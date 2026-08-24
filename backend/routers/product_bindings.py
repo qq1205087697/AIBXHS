@@ -39,7 +39,7 @@ async def get_bindings_by_finished(
     try:
         rows = db.execute(text("""
             SELECT pb.id, pb.finished_product_id, pb.accessory_product_id, pb.quantity,
-                   p.name as accessory_name, p.product_code as accessory_code
+                   p.name as accessory_name, p.product_code as accessory_code, pb.created_at
             FROM product_bindings pb
             LEFT JOIN products p ON p.id = pb.accessory_product_id
             WHERE pb.finished_product_id = :pid AND pb.deleted_at IS NULL
@@ -55,6 +55,7 @@ async def get_bindings_by_finished(
                 "quantity": int(row[3]),
                 "accessory_name": row[4] or f"产品#{row[2]}",
                 "accessory_code": row[5] or "",
+                "created_at": row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "",
             })
 
         return {"success": True, "data": bindings}
@@ -72,7 +73,7 @@ async def get_bindings_by_accessory(
     try:
         rows = db.execute(text("""
             SELECT pb.id, pb.finished_product_id, pb.accessory_product_id, pb.quantity,
-                   p.name as finished_name, p.product_code as finished_code
+                   p.name as finished_name, p.product_code as finished_code, pb.created_at
             FROM product_bindings pb
             LEFT JOIN products p ON p.id = pb.finished_product_id
             WHERE pb.accessory_product_id = :pid AND pb.deleted_at IS NULL
@@ -88,6 +89,7 @@ async def get_bindings_by_accessory(
                 "quantity": int(row[3]),
                 "finished_name": row[4] or f"产品#{row[1]}",
                 "finished_code": row[5] or "",
+                "created_at": row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "",
             })
 
         return {"success": True, "data": bindings}

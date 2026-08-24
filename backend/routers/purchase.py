@@ -6,6 +6,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime
 from urllib.parse import quote
+from urllib.request import urlopen
+from io import BytesIO
+import logging
+
+logger = logging.getLogger(__name__)
 
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
@@ -21,28 +26,31 @@ class PurchaseItemCreate(BaseModel):
     quantity: int
     unit_price: Optional[float] = 0
     notes: Optional[str] = None
+    supplier: Optional[str] = None
+    parent_product_id: Optional[int] = None
+    store_group_id: Optional[int] = None
 
 
 class PurchaseOrderCreate(BaseModel):
     order_number: str
-    supplier: Optional[str] = None
-    contact_person: Optional[str] = None
-    contact_phone: Optional[str] = None
+    # supplier: Optional[str] = None
+    # contact_person: Optional[str] = None
+    # contact_phone: Optional[str] = None
+    # warehouse: Optional[str] = None
+    # expected_date: Optional[str] = None
     warehouse: Optional[str] = None
-    expected_date: Optional[str] = None
+    store_group_id: Optional[int] = None
     notes: Optional[str] = None
     items: List[PurchaseItemCreate]
 
 
 class PurchaseOrderUpdate(BaseModel):
     order_number: Optional[str] = None
-    supplier: Optional[str] = None
-    contact_person: Optional[str] = None
-    contact_phone: Optional[str] = None
     warehouse: Optional[str] = None
-    expected_date: Optional[str] = None
+    store_group_id: Optional[int] = None
     notes: Optional[str] = None
     status: Optional[str] = None
+    items: Optional[List[PurchaseItemCreate]] = None  # 添加 items 字段
 
 
 @router.get("/")
@@ -50,7 +58,6 @@ async def get_purchase_orders(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = None,
-    supplier: Optional[str] = None,
     search: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -64,11 +71,8 @@ async def get_purchase_orders(
         if status:
             where_conditions.append("po.status = :status")
             params["status"] = status
-        if supplier:
-            where_conditions.append("po.supplier LIKE :supplier")
-            params["supplier"] = f"%{supplier}%"
         if search:
-            where_conditions.append("(po.order_number LIKE :search OR po.supplier LIKE :search)")
+            where_conditions.append("po.order_number LIKE :search")
             params["search"] = f"%{search}%"
         if start_date:
             where_conditions.append("DATE(po.created_at) >= :start_date")
@@ -86,22 +90,24 @@ async def get_purchase_orders(
         params["offset"] = offset
 
         rows = db.execute(text(f"""
-            SELECT po.id, po.order_number, po.supplier, po.contact_person, po.contact_phone,
-                   po.warehouse, po.expected_date, po.total_amount, po.status, po.notes, po.created_by,
-                   po.approved_at, po.created_at, po.approved_by
+            SELECT po.id, po.order_number,
+                   po.warehouse, po.total_amount, po.status, po.notes, po.created_by,
+                   po.approved_at, po.created_at, po.approved_by, po.store_group_id, po.platform,
+                   sg.name AS store_group_name
             FROM purchase_orders po
+            LEFT JOIN store_groups sg ON sg.id = po.store_group_id AND sg.deleted_at IS NULL
             WHERE {where_clause}
             ORDER BY po.created_at DESC
             LIMIT :limit OFFSET :offset
         """), params).fetchall()
-        
+
         # 收集所有用户ID
         user_ids = set()
         for row in rows:
-            if row[9]:  # created_by
-                user_ids.add(row[9])
-            if row[12]:  # approved_by
-                user_ids.add(row[12])
+            if row[6]:  # created_by
+                user_ids.add(row[6])
+            if row[10]:  # approved_by
+                user_ids.add(row[10])
         
         # 批量查询用户信息
         user_map = {}
@@ -129,14 +135,94 @@ async def get_purchase_orders(
         for row in rows:
             items = db.execute(text("""
                 SELECT poi.id, poi.product_id, p.name as product_name, p.product_code,
-                       poi.quantity, poi.received_quantity, poi.unit_price, poi.total_price, poi.notes
+                       poi.quantity, poi.received_quantity, poi.unit_price, poi.total_price, poi.notes, poi.supplier,
+                       p.product_type, poi.parent_product_id, poi.store_group_id, sg.name as store_group_name
                 FROM purchase_order_items poi
                 LEFT JOIN products p ON p.id = poi.product_id
+                LEFT JOIN store_groups sg ON sg.id = poi.store_group_id AND sg.deleted_at IS NULL
                 WHERE poi.purchase_order_id = :oid AND poi.deleted_at IS NULL
             """), {"oid": row[0]}).fetchall()
 
+            # 查询该采购单的组装入库数据（batch_type='assembly'）
+            assembly_data = db.execute(text("""
+                SELECT
+                    ab.product_id as finished_product_id,
+                    p.name as finished_name,
+                    p.product_code as finished_code,
+                    SUM(ab.current_quantity) as total_assembly_quantity
+                FROM inventory_batches ab
+                JOIN products p ON p.id = ab.product_id AND p.deleted_at IS NULL
+                JOIN inbound_orders io ON ab.inbound_order_id = io.id AND io.deleted_at IS NULL
+                WHERE io.purchase_order_id = :po_id
+                  AND ab.batch_type = 'assembly'
+                  AND ab.deleted_at IS NULL
+                GROUP BY ab.product_id, p.name, p.product_code
+            """), {"po_id": row[0]}).fetchall()
+
+            # 构建组装入库数据映射：finished_product_id -> {name, code, quantity}
+            assembly_map = {}
+            for assembly in assembly_data:
+                assembly_map[assembly[0]] = {
+                    "finished_name": assembly[1] or "",
+                    "finished_code": assembly[2] or "",
+                    "assembly_quantity": int(assembly[3])
+                }
+
+            # 查询配件与成品的绑定关系（配件对应的成品）
+            # 对于配件产品，需要查询它被绑定到哪些成品
+            product_ids_in_po = [item[1] for item in items]
+            accessory_bindings = {}
+            if product_ids_in_po:
+                bindings = db.execute(text("""
+                    SELECT pb.accessory_product_id, pb.finished_product_id, p.name as finished_name, p.product_code as finished_code
+                    FROM product_bindings pb
+                    JOIN products p ON p.id = pb.finished_product_id AND p.deleted_at IS NULL
+                    WHERE pb.accessory_product_id IN :pids AND pb.deleted_at IS NULL
+                """), {"pids": tuple(product_ids_in_po)}).fetchall()
+                for b in bindings:
+                    acc_id = b[0]
+                    finished_id = b[1]
+                    finished_name = b[2] or ""
+                    finished_code = b[3] or ""
+                    if acc_id not in accessory_bindings:
+                        accessory_bindings[acc_id] = []
+                    accessory_bindings[acc_id].append({
+                        "finished_product_id": finished_id,
+                        "finished_name": finished_name,
+                        "finished_code": finished_code
+                    })
+
             order_items = []
             for item in items:
+                product_id = item[1]
+
+                # 计算组装成品信息
+                assembly_info = None
+
+                # 如果是成品（在assembly_map中有记录），显示组装入库数量
+                if product_id in assembly_map:
+                    assembly_info = {
+                        "product_name": assembly_map[product_id]["finished_name"],
+                        "product_code": assembly_map[product_id]["finished_code"],
+                        "quantity": assembly_map[product_id]["assembly_quantity"]
+                    }
+
+                # 如果是配件（在accessory_bindings中有记录），查找对应成品的组装入库数量
+                elif product_id in accessory_bindings:
+                    # 获取该配件绑定的成品列表
+                    bound_finished_products = accessory_bindings[product_id]
+                    # 查找有组装入库记录的成品
+                    for finished_info in bound_finished_products:
+                        finished_id = finished_info["finished_product_id"]
+                        if finished_id in assembly_map:
+                            assembly_info = {
+                                "product_name": assembly_map[finished_id]["finished_name"],
+                                "product_code": assembly_map[finished_id]["finished_code"],
+                                "quantity": assembly_map[finished_id]["assembly_quantity"]
+                            }
+                            # 只显示第一个有组装记录的成品
+                            break
+
                 order_items.append({
                     "id": item[0],
                     "product_id": item[1],
@@ -147,25 +233,55 @@ async def get_purchase_orders(
                     "unit_price": float(item[6]) if item[6] else 0,
                     "total_price": float(item[7]) if item[7] else 0,
                     "notes": item[8] or "",
+                    "supplier": item[9] or "",
+                    "assembly_info": assembly_info,  # 新增：组装成品信息
+                    "product_type": item[10] or "",  # 产品类型：finished/accessory
+                    "parent_product_id": item[11],  # 关联成品ID
+                    "store_group_id": item[12],
+                    "store_group_name": item[13] or "",
                 })
+
+            # 计算待入库/已入库件数：含配件的成品不计入，只算配件+独立成品
+            product_ids_in_po = [item["product_id"] for item in order_items]
+            finished_with_parts = set()
+            if product_ids_in_po:
+                # 查询哪些产品是"含配件的成品"（在product_bindings中作为finished_product_id存在）
+                bind_rows = db.execute(text("""
+                    SELECT DISTINCT pb.finished_product_id
+                    FROM product_bindings pb
+                    JOIN products p ON p.id = pb.accessory_product_id AND p.deleted_at IS NULL
+                    WHERE pb.finished_product_id IN :pids AND pb.deleted_at IS NULL
+                """), {"pids": tuple(product_ids_in_po)}).fetchall()
+                finished_with_parts = {r[0] for r in bind_rows}
+
+            total_ordered = sum(
+                item["quantity"] for item in order_items
+                if item["product_id"] not in finished_with_parts
+            )
+            total_received = sum(
+                item["received_quantity"] for item in order_items
+                if item["product_id"] not in finished_with_parts
+            )
 
             orders.append({
                 "id": row[0],
                 "order_number": row[1],
-                "supplier": row[2] or "",
-                "contact_person": row[3] or "",
-                "contact_phone": row[4] or "",
-                "warehouse": row[5] or "",
-                "expected_date": row[6].strftime("%Y-%m-%d") if row[6] else "",
-                "total_amount": float(row[7]) if row[7] else 0,
-                "status": row[8],
-                "notes": row[9] or "",
-                "created_by": row[10],
-                "approved_at": row[11].strftime("%Y-%m-%d %H:%M:%S") if row[11] else "",
-                "created_at": row[12].strftime("%Y-%m-%d %H:%M:%S") if row[12] else "",
-                "approved_by": row[13],
-                "creator_name": user_map.get(row[10], ""),
-                "approver_name": user_map.get(row[13], ""),
+                "warehouse": row[2] or "",
+                "total_amount": float(row[3]) if row[3] else 0,
+                "status": row[4],
+                "notes": row[5] or "",
+                "created_by": row[6],
+                "approved_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
+                "created_at": row[8].strftime("%Y-%m-%d %H:%M:%S") if row[8] else "",
+                "approved_by": row[9],
+                "store_group_id": row[10],
+                "store_group_name": row[12] or "",
+                "platform": row[11] or "",
+                "creator_name": user_map.get(row[6], ""),
+                "approver_name": user_map.get(row[9], ""),
+                # 汇总待入库和已入库件数（含配件的成品已排除）
+                "total_ordered": total_ordered,
+                "total_received": total_received,
                 "items": order_items,
             })
 
@@ -181,32 +297,60 @@ async def create_purchase_order(
     current_user: User = Depends(PermissionChecker("purchase:create"))
 ):
     try:
+        # 确保 purchase_orders 表有 store_group_id 字段
+        try:
+            db.execute(text("""
+                ALTER TABLE purchase_orders
+                ADD COLUMN store_group_id INT NULL
+                COMMENT '店铺分组ID'
+                AFTER warehouse
+            """))
+            db.commit()
+        except Exception:
+            pass  # 字段已存在则忽略
+
         if not data.items:
             raise HTTPException(status_code=400, detail="请至少添加一条采购明细")
 
-        # 校验仓库是否存在
+        # 验证 store_group_id 是否存在
+        store_group_name = ""
+        if data.store_group_id:
+            group = db.execute(text("""
+                SELECT id, name FROM store_groups
+                WHERE id = :gid AND tenant_id = :tid AND deleted_at IS NULL
+            """), {"gid": data.store_group_id, "tid": current_user.tenant_id}).fetchone()
+            if not group:
+                raise HTTPException(status_code=400, detail=f"店铺分组ID {data.store_group_id} 不存在")
+            store_group_name = group[1]
+
+        # 校验仓库是否存在，未指定时自动选择最新创建的仓库
         if data.warehouse:
             wh = db.execute(text(
                 "SELECT id FROM warehouses WHERE name = :name AND tenant_id = :tid AND deleted_at IS NULL"
             ), {"name": data.warehouse, "tid": current_user.tenant_id}).fetchone()
             if not wh:
                 raise HTTPException(status_code=400, detail=f"仓库 '{data.warehouse}' 不存在")
+        else:
+            latest_wh = db.execute(text("""
+                SELECT name FROM warehouses
+                WHERE tenant_id = :tid AND deleted_at IS NULL AND status = 'active'
+                ORDER BY created_at DESC LIMIT 1
+            """), {"tid": current_user.tenant_id}).fetchone()
+            if latest_wh:
+                data.warehouse = latest_wh[0]
 
         total_amt = sum((item.quantity * (item.unit_price or 0)) for item in data.items)
 
         db.execute(text("""
-            INSERT INTO purchase_orders (tenant_id, order_number, supplier, contact_person, contact_phone,
-                warehouse, expected_date, total_amount, status, notes, created_by, created_at, updated_at)
-            VALUES (:tenant_id, :order_number, :supplier, :contact_person, :contact_phone,
-                :warehouse, :expected_date, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
+            INSERT INTO purchase_orders (tenant_id, order_number,
+                warehouse, store_group_id, total_amount, status, notes, created_by, created_at, updated_at)
+            VALUES (:tenant_id, :order_number,
+                :warehouse, :store_group_id, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
         """), {
             "tenant_id": current_user.tenant_id,
             "order_number": data.order_number,
-            "supplier": data.supplier,
-            "contact_person": data.contact_person,
-            "contact_phone": data.contact_phone,
             "warehouse": data.warehouse,
-            "expected_date": data.expected_date,
+            "store_group_id": data.store_group_id,
             "total_amount": total_amt,
             "notes": data.notes,
             "created_by": current_user.id,
@@ -218,19 +362,41 @@ async def create_purchase_order(
         for item in data.items:
             total_price = item.quantity * (item.unit_price or 0)
             db.execute(text("""
-                INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, created_at, updated_at)
-                VALUES (:oid, :pid, :qty, :up, :tp, :notes, :created_at, :updated_at)
+                INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, supplier, parent_product_id, store_group_id, created_at, updated_at)
+                VALUES (:oid, :pid, :qty, :up, :tp, :notes, :supplier, :parent_product_id, :store_group_id, :created_at, :updated_at)
             """), {
                 "oid": order_id, "pid": item.product_id, "qty": item.quantity,
-                "up": item.unit_price, "tp": total_price, "notes": item.notes,
+                "up": item.unit_price, "tp": total_price, "notes": item.notes, "supplier": item.supplier,
+                "parent_product_id": item.parent_product_id,
+                "store_group_id": item.store_group_id,
                 "created_at": datetime.now(), "updated_at": datetime.now(),
             })
+            # 更新产品表的供应商字段，并自动创建供应商
+            if item.supplier and item.product_id:
+                db.execute(text("""
+                    UPDATE products SET supplier = :supplier, updated_at = :updated_at
+                    WHERE id = :pid AND tenant_id = :tid
+                """), {
+                    "supplier": item.supplier,
+                    "updated_at": datetime.now(),
+                    "pid": item.product_id,
+                    "tid": current_user.tenant_id,
+                })
+                # 检查供应商是否已存在，不存在则自动创建
+                existing_supplier = db.execute(text("""
+                    SELECT id FROM suppliers WHERE tenant_id = :tid AND name = :name AND deleted_at IS NULL
+                """), {"tid": current_user.tenant_id, "name": item.supplier}).fetchone()
+                if not existing_supplier:
+                    db.execute(text("""
+                        INSERT INTO suppliers (tenant_id, name, created_at, updated_at)
+                        VALUES (:tid, :name, NOW(), NOW())
+                    """), {"tid": current_user.tenant_id, "name": item.supplier})
 
         db.commit()
 
         log_order_create(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "purchase", order_id, data.order_number,
-                         {"order_number": data.order_number, "supplier": data.supplier, "items_count": len(data.items)})
+                         {"order_number": data.order_number, "店铺分组": store_group_name, "items_count": len(data.items)})
         db.commit()
 
         return {"success": True, "message": "采购订单创建成功", "data": {"id": order_id}}
@@ -299,17 +465,26 @@ async def update_purchase_order(
         else:
             await check_permission("purchase:edit", current_user, db)
 
-        # 校验仓库是否存在（更新时）
-        if data.warehouse is not None and data.warehouse != "":
-            wh = db.execute(text(
-                "SELECT id FROM warehouses WHERE name = :name AND tenant_id = :tid AND deleted_at IS NULL"
-            ), {"name": data.warehouse, "tid": current_user.tenant_id}).fetchone()
-            if not wh:
-                raise HTTPException(status_code=400, detail=f"仓库 '{data.warehouse}' 不存在")
+        # 校验仓库是否存在（更新时），未指定时自动选择最新创建的仓库
+        if data.warehouse is not None:
+            if data.warehouse != "":
+                wh = db.execute(text(
+                    "SELECT id FROM warehouses WHERE name = :name AND tenant_id = :tid AND deleted_at IS NULL"
+                ), {"name": data.warehouse, "tid": current_user.tenant_id}).fetchone()
+                if not wh:
+                    raise HTTPException(status_code=400, detail=f"仓库 '{data.warehouse}' 不存在")
+            else:
+                latest_wh = db.execute(text("""
+                    SELECT name FROM warehouses
+                    WHERE tenant_id = :tid AND deleted_at IS NULL AND status = 'active'
+                    ORDER BY created_at DESC LIMIT 1
+                """), {"tid": current_user.tenant_id}).fetchone()
+                if latest_wh:
+                    data.warehouse = latest_wh[0]
 
         updates = []
         params = {"id": order_id}
-        for field in ["order_number", "supplier", "contact_person", "contact_phone", "warehouse", "expected_date", "notes", "status"]:
+        for field in ["order_number", "warehouse", "store_group_id", "notes", "status"]:
             val = getattr(data, field)
             if val is not None:
                 updates.append(f"{field} = :{field}")
@@ -325,13 +500,93 @@ async def update_purchase_order(
             db.execute(text(f"UPDATE purchase_orders SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"), params)
             db.commit()
 
+        # 更新采购单明细（如果有传入 items）
+        if data.items is not None:
+            # 软删除旧的明细
+            db.execute(text("UPDATE purchase_order_items SET deleted_at = NOW() WHERE purchase_order_id = :oid"), {"oid": order_id})
+            # 插入新的明细
+            total_amt = 0
+            for item in data.items:
+                total_price = item.quantity * (item.unit_price or 0)
+                total_amt += total_price
+                db.execute(text("""
+                    INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, supplier, parent_product_id, store_group_id, created_at, updated_at)
+                    VALUES (:oid, :pid, :qty, :up, :tp, :notes, :supplier, :parent_product_id, :store_group_id, :created_at, :updated_at)
+                """), {
+                    "oid": order_id, "pid": item.product_id, "qty": item.quantity,
+                    "up": item.unit_price, "tp": total_price, "notes": item.notes, "supplier": item.supplier,
+                    "parent_product_id": item.parent_product_id,
+                    "store_group_id": item.store_group_id,
+                    "created_at": datetime.now(), "updated_at": datetime.now(),
+                })
+                # 更新产品表的供应商字段，并自动创建供应商
+                if item.supplier and item.product_id:
+                    db.execute(text("""
+                        UPDATE products SET supplier = :supplier, updated_at = :updated_at
+                        WHERE id = :pid AND tenant_id = :tid
+                    """), {
+                        "supplier": item.supplier,
+                        "updated_at": datetime.now(),
+                        "pid": item.product_id,
+                        "tid": current_user.tenant_id,
+                    })
+                    # 检查供应商是否已存在，不存在则自动创建
+                    existing_supplier = db.execute(text("""
+                        SELECT id FROM suppliers WHERE tenant_id = :tid AND name = :name AND deleted_at IS NULL
+                    """), {"tid": current_user.tenant_id, "name": item.supplier}).fetchone()
+                    if not existing_supplier:
+                        db.execute(text("""
+                            INSERT INTO suppliers (tenant_id, name, created_at, updated_at)
+                            VALUES (:tid, :name, NOW(), NOW())
+                        """), {"tid": current_user.tenant_id, "name": item.supplier})
+            # 同步更新采购单总金额
+            db.execute(text("""
+                UPDATE purchase_orders SET total_amount = :total_amount, updated_at = NOW() WHERE id = :id
+            """), {"total_amount": total_amt, "id": order_id})
+            db.commit()
+
         after_data = {"order_number": row[1], "status": data.status or before_status}
-        
+
+        # 采购单变为 completed 时，自动更新关联补货单为 completed
+        if data.status == "completed" and before_status != "completed":
+            replenishment_rows = db.execute(text("""
+                SELECT id FROM replenishment_orders
+                WHERE purchase_order_id = :po_id AND deleted_at IS NULL AND status IN ('pending', 'purchased')
+            """), {"po_id": order_id}).fetchall()
+            if replenishment_rows:
+                rep_ids = [r[0] for r in replenishment_rows]
+                rep_placeholders = ', '.join(f':rid{i}' for i in range(len(rep_ids)))
+                rep_params = {f'rid{i}': rep_ids[i] for i in range(len(rep_ids))}
+                db.execute(text(f"""
+                    UPDATE replenishment_orders SET status = 'completed', updated_at = NOW()
+                    WHERE id IN ({rep_placeholders}) AND deleted_at IS NULL
+                """), rep_params)
+                db.commit()
+                logger.info(f"采购单 {order_id} 变为已完成，已自动更新 {len(rep_ids)} 条关联补货单状态为 completed")
+
         if is_approve:
             log_order_confirm(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                              "purchase", order_id, row[1],
                              {"status": before_status}, {"status": "approved"})
             db.commit()
+
+            # 自动更新关联的补货单状态为 purchased
+            replenishment_rows = db.execute(text("""
+                SELECT id FROM replenishment_orders
+                WHERE purchase_order_id = :po_id AND deleted_at IS NULL AND status = 'pending'
+            """), {"po_id": order_id}).fetchall()
+            if replenishment_rows:
+                rep_ids = [r[0] for r in replenishment_rows]
+                rep_placeholders = ', '.join(f':rid{i}' for i in range(len(rep_ids)))
+                rep_params = {f'rid{i}': rep_ids[i] for i in range(len(rep_ids))}
+                db.execute(text(f"""
+                    UPDATE replenishment_orders SET status = 'purchased', updated_at = NOW()
+                    WHERE id IN ({rep_placeholders}) AND deleted_at IS NULL
+                """), rep_params)
+                db.commit()
+                logger.info(f"采购单 {order_id} 审批通过，已自动更新 {len(rep_ids)} 条关联补货单状态为 purchased，IDs: {rep_ids}")
+            else:
+                logger.info(f"采购单 {order_id} 审批通过，无关联补货单需要更新")
         else:
             log_order_update(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                              "purchase", order_id, row[1], before_data, after_data)
@@ -343,6 +598,43 @@ async def update_purchase_order(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"更新采购订单失败: {str(e)}")
+
+
+@router.post("/{order_id}/cancel-approval")
+async def cancel_purchase_approval(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """管理员取消采购单审批"""
+    try:
+        # 检查用户是否是管理员
+        await check_permission("admin", current_user, db)
+
+        row = db.execute(text(
+            "SELECT id, order_number, status FROM purchase_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="采购订单不存在")
+
+        current_status = row[2]
+        if current_status != "approved":
+            raise HTTPException(status_code=400, detail="只有已审批状态的采购单才能取消审批")
+
+        # 取消审批：状态改为 draft，清除审批人和审批时间
+        db.execute(text("""
+            UPDATE purchase_orders
+            SET status = 'draft', approved_by = NULL, approved_at = NULL, updated_at = NOW()
+            WHERE id = :id
+        """), {"id": order_id})
+        db.commit()
+
+        return {"success": True, "message": "取消审批成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"取消审批失败: {str(e)}")
 
 
 @router.delete("/{order_id}")
@@ -359,6 +651,15 @@ async def delete_purchase_order(
             raise HTTPException(status_code=404, detail="采购订单不存在")
 
         before_data = {"order_number": row[1], "status": row[2]}
+
+        # 清除关联的补货单的purchase_order_id
+        db.execute(text("""
+            UPDATE replenishment_orders
+            SET purchase_order_id = NULL, updated_at = NOW()
+            WHERE purchase_order_id = :po_id AND tenant_id = :tid
+        """), {"po_id": order_id, "tid": current_user.tenant_id})
+
+        # 软删除采购单
         db.execute(text("UPDATE purchase_orders SET deleted_at = NOW() WHERE id = :id"), {"id": order_id})
         db.execute(text("UPDATE purchase_order_items SET deleted_at = NOW() WHERE purchase_order_id = :oid"), {"oid": order_id})
         db.commit()
@@ -367,7 +668,7 @@ async def delete_purchase_order(
                          "purchase", order_id, row[1], before_data)
         db.commit()
 
-        return {"success": True, "message": "采购订单已删除"}
+        return {"success": True, "message": "采购订单已删除，关联的补货单已解除关联"}
     except HTTPException:
         raise
     except Exception as e:
@@ -391,6 +692,272 @@ async def download_purchase_template(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"下载模板失败: {str(e)}")
+
+
+class ExportPurchaseRequest(BaseModel):
+    ids: List[int]
+
+
+@router.post("/export")
+async def export_purchase_orders(
+    data: ExportPurchaseRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """导出采购单Excel，按供应商分页签，每页末尾生成话术"""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+        from openpyxl.drawing.image import Image as XLImage
+        from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+        from openpyxl.drawing.xdr import XDRPositiveSize2D
+        from io import BytesIO
+
+        if not data.ids:
+            raise HTTPException(status_code=400, detail="请选择要导出的采购单")
+
+        # 查询采购单及其明细
+        placeholders = ', '.join(f':id{i}' for i in range(len(data.ids)))
+        id_params = {f'id{i}': v for i, v in enumerate(data.ids)}
+
+        orders = db.execute(text(f"""
+            SELECT po.id, po.order_number, po.warehouse, po.notes, po.created_at,
+                   po.store_group_id, sg.name AS store_group_name
+            FROM purchase_orders po
+            LEFT JOIN store_groups sg ON sg.id = po.store_group_id AND sg.deleted_at IS NULL
+            WHERE po.id IN ({placeholders}) AND po.tenant_id = :tid AND po.deleted_at IS NULL
+            ORDER BY po.created_at DESC
+        """), {**id_params, "tid": current_user.tenant_id}).fetchall()
+
+        if not orders:
+            raise HTTPException(status_code=404, detail="未找到采购单")
+
+        # 收集所有采购单号用于文件名
+        order_numbers = [order[1] for order in orders]
+
+        # 收集所有明细，按供应商分组
+        # supplier_items_map: { supplier_name: [ {order info + item info}, ... ] }
+        supplier_items_map = {}
+        no_supplier_items = []
+
+        for order in orders:
+            order_id, order_number, warehouse, notes, created_at, store_group_id, store_group_name = order
+            items = db.execute(text("""
+                SELECT poi.product_id, p.name as product_name, p.product_code, p.main_image,
+                       poi.quantity, poi.unit_price, poi.total_price, poi.supplier, poi.notes,
+                       poi.store_group_id, sg.name as store_group_name
+                FROM purchase_order_items poi
+                LEFT JOIN products p ON p.id = poi.product_id
+                LEFT JOIN store_groups sg ON sg.id = poi.store_group_id AND sg.deleted_at IS NULL
+                WHERE poi.purchase_order_id = :oid AND poi.deleted_at IS NULL
+            """), {"oid": order_id}).fetchall()
+
+            for item in items:
+                item_data = {
+                    "order_number": order_number,
+                    "warehouse": warehouse or "",
+                    "store_group_name": item[10] or store_group_name or "",
+                    "order_date": created_at.strftime("%Y-%m-%d") if created_at else "",
+                    "product_id": item[0],
+                    "product_code": item[2] or "",
+                    "product_name": item[1] or f"产品#{item[0]}",
+                    "main_image": item[3] or "",
+                    "quantity": int(item[4]),
+                    "unit_price": float(item[5]) if item[5] else 0,
+                    "total_price": float(item[6]) if item[6] else 0,
+                    "supplier": item[7] or "",
+                    "notes": item[8] or "",
+                }
+                supplier_name = item[7] or "未指定供应商"
+                if supplier_name not in supplier_items_map:
+                    supplier_items_map[supplier_name] = []
+                supplier_items_map[supplier_name].append(item_data)
+
+        # 按供应商+产品ID合并相同商品（不同店铺分组聚合到一行）
+        for supplier_name, items in supplier_items_map.items():
+            merged_map = {}
+            for item in items:
+                key = item["product_id"]
+                if key not in merged_map:
+                    merged_map[key] = item
+                else:
+                    existing = merged_map[key]
+                    existing["quantity"] += item["quantity"]
+                    existing["total_price"] += item["total_price"]
+                    # 合并店铺分组（去重）
+                    groups = set(filter(None, existing["store_group_name"].split(", ") + item["store_group_name"].split(", ")))
+                    existing["store_group_name"] = ", ".join(sorted(groups))
+                    # 合并采购单号（去重）
+                    orders = set(filter(None, existing["order_number"].split(", ") + item["order_number"].split(", ")))
+                    existing["order_number"] = ", ".join(sorted(orders))
+                    # 合并仓库（去重）
+                    warehouses = set(filter(None, existing["warehouse"].split(", ") + item["warehouse"].split(", ")))
+                    existing["warehouse"] = ", ".join(sorted(warehouses))
+                    # 合并订单日期（去重）
+                    dates = set(filter(None, existing["order_date"].split(", ") + item["order_date"].split(", ")))
+                    existing["order_date"] = ", ".join(sorted(dates))
+                    # 合并备注
+                    notes = set(filter(None, existing["notes"].split(", ") + item["notes"].split(", ")))
+                    existing["notes"] = ", ".join(sorted(notes))
+            supplier_items_map[supplier_name] = list(merged_map.values())
+
+        # 创建Excel
+        wb = openpyxl.Workbook()
+        # 删除默认的Sheet
+        wb.remove(wb.active)
+
+        # 样式定义
+        header_font = Font(bold=True, size=11)
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font_white = Font(bold=True, size=11, color="FFFFFF")
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        msg_font = Font(bold=True, size=10, color="FF0000")
+        summary_font = Font(bold=True, size=11)
+
+        for supplier_name, items in supplier_items_map.items():
+            # Sheet名称最多31字符，且不能包含特殊字符
+            sheet_name = supplier_name[:31].replace("/", "-").replace("\\", "-").replace(":", "-").replace("?", "-").replace("*", "-").replace("[", "-").replace("]", "-")
+            ws = wb.create_sheet(title=sheet_name)
+
+            # 表头
+            headers = ["采购单号", "店铺分组", "仓库", "订单日期", "产品编码", "产品名称", "产品图", "数量", "单价", "金额", "备注"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = header_font_white
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = thin_border
+
+            # 数据行
+            total_quantity = 0
+            total_amount = 0
+            for row_idx, item in enumerate(items, 2):
+                values = [
+                    item["order_number"],
+                    item["store_group_name"],
+                    item["warehouse"],
+                    item["order_date"],
+                    item["product_code"],
+                    item["product_name"],
+                    "",  # 产品图列，内容由图片填充
+                    item["quantity"],
+                    item["unit_price"],
+                    item["total_price"],
+                    item["notes"],
+                ]
+                for col, val in enumerate(values, 1):
+                    cell = ws.cell(row=row_idx, column=col, value=val)
+                    cell.border = thin_border
+                    cell.alignment = Alignment(vertical='center')
+
+                # 插入产品图（从产品管理 main_image 获取），在单元格内居中显示
+                if item.get("main_image"):
+                    try:
+                        response = urlopen(item["main_image"], timeout=10)
+                        image_bytes = response.read()
+                        img = XLImage(BytesIO(image_bytes))
+                        # 限制图片高度，保持比例
+                        max_height = 80
+                        if img.height > max_height:
+                            ratio = max_height / img.height
+                            img.height = max_height
+                            img.width = int(img.width * ratio)
+
+                        # 根据图片高度设置行高，留出边距
+                        target_row_height = max(img.height + 10, 30)
+                        ws.row_dimensions[row_idx].height = target_row_height
+
+                        # 计算单元格居中偏移量（EMU）
+                        # 近似换算：1 字符宽度 ≈ 7 像素，1 点 ≈ 1.333 像素
+                        col_width_px = ws.column_dimensions['G'].width * 7
+                        row_height_px = target_row_height * 1.333
+                        offset_x = int((col_width_px - img.width) * 9525 / 2)
+                        offset_y = int((row_height_px - img.height) * 9525 / 2)
+
+                        # 使用 OneCellAnchor 将图片锚定到单元格并居中
+                        anchor = OneCellAnchor(
+                            _from=AnchorMarker(
+                                col=6, colOff=max(0, offset_x),
+                                row=row_idx - 1, rowOff=max(0, offset_y)
+                            ),
+                            ext=XDRPositiveSize2D(cx=img.width * 9525, cy=img.height * 9525)
+                        )
+                        img.anchor = anchor
+                        ws._images.append(img)
+                    except Exception:
+                        # 图片下载或处理失败时，单元格保持空白
+                        pass
+
+                total_quantity += item["quantity"]
+                total_amount += item["total_price"]
+
+            # 合计行
+            summary_row = len(items) + 2
+            ws.cell(row=summary_row, column=1, value="合计").font = summary_font
+            ws.cell(row=summary_row, column=1).border = thin_border
+            ws.cell(row=summary_row, column=8, value=total_quantity).font = summary_font
+            ws.cell(row=summary_row, column=8).border = thin_border
+            ws.cell(row=summary_row, column=10, value=round(total_amount, 2)).font = summary_font
+            ws.cell(row=summary_row, column=10).border = thin_border
+
+            # 话术行
+            msg_row = summary_row + 2
+            msg_text = (
+                f"【{supplier_name}】您好，以下是我们公司的采购清单，请按照我司产品编码及数量安排发货，"
+                f"并将产品编码及数量清单随货一起发送，以便我方仓库核对验收。谢谢配合！"
+            )
+            msg_cell = ws.cell(row=msg_row, column=1, value=msg_text)
+            msg_cell.font = msg_font
+            ws.merge_cells(start_row=msg_row, start_column=1, end_row=msg_row, end_column=len(headers))
+
+            # 产品编码+数量清单话术
+            code_list_row = msg_row + 1
+            code_lines = []
+            for item in items:
+                code_lines.append(f"{item['product_code']} × {item['quantity']}")
+            code_text = "产品编码及数量清单：" + "、".join(code_lines)
+            code_cell = ws.cell(row=code_list_row, column=1, value=code_text)
+            code_cell.font = Font(size=10, color="0000FF")
+            ws.merge_cells(start_row=code_list_row, start_column=1, end_row=code_list_row, end_column=len(headers))
+
+            # 列宽调整
+            ws.column_dimensions['A'].width = 22
+            ws.column_dimensions['B'].width = 14
+            ws.column_dimensions['C'].width = 12
+            ws.column_dimensions['D'].width = 12
+            ws.column_dimensions['E'].width = 14
+            ws.column_dimensions['F'].width = 22
+            ws.column_dimensions['G'].width = 14  # 产品图
+            ws.column_dimensions['H'].width = 8
+            ws.column_dimensions['I'].width = 10
+            ws.column_dimensions['J'].width = 12
+            ws.column_dimensions['K'].width = 16
+
+        # 保存到内存
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # 文件名使用采购单号
+        if len(order_numbers) == 1:
+            filename = f"采购单导出_{order_numbers[0]}.xlsx"
+        else:
+            filename = f"采购单导出_批量.xlsx"
+        encoded_filename = quote(filename)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={encoded_filename}"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导出采购单失败: {str(e)}")
 
 
 @router.post("/upload/preview")
