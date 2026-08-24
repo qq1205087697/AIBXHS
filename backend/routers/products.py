@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime
 from urllib.parse import quote
+import json
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
@@ -16,6 +17,28 @@ from services.operation_log import (
 )
 
 router = APIRouter(prefix="/api/products", tags=["products"])
+
+
+def _parse_json_images(value):
+    """解析数据库 JSON 图片数组字段，兼容字符串或已解析列表。"""
+    if not value:
+        return []
+    try:
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+    except Exception:
+        pass
+    return []
+
+
+def _serialize_images(images: Optional[List[str]]) -> Optional[str]:
+    """将图片数组序列化为 JSON 字符串存储，None/空列表统一存为 NULL。"""
+    if not images:
+        return None
+    return json.dumps(images)
 
 
 class ProductCreate(BaseModel):
@@ -30,6 +53,7 @@ class ProductCreate(BaseModel):
     purchase_price: Optional[float] = None
     sale_price: Optional[float] = None
     main_image: Optional[str] = None
+    images: Optional[List[str]] = None
     video_url: Optional[str] = None
     weight: Optional[float] = None
     length: Optional[float] = None
@@ -55,6 +79,7 @@ class ProductUpdate(BaseModel):
     purchase_price: Optional[float] = None
     sale_price: Optional[float] = None
     main_image: Optional[str] = None
+    images: Optional[List[str]] = None
     video_url: Optional[str] = None
     weight: Optional[float] = None
     length: Optional[float] = None
@@ -78,6 +103,7 @@ class PlatformProductBatchCreate(BaseModel):
     title: Optional[str] = None
     title_en: Optional[str] = None
     image_url: Optional[str] = None
+    images: Optional[List[str]] = None
     description: Optional[str] = None
     bullet_points: Optional[str] = None
     keywords: Optional[str] = None
@@ -120,6 +146,7 @@ class PlatformProductUpdate(BaseModel):
     title: Optional[str] = None
     title_en: Optional[str] = None
     image_url: Optional[str] = None
+    images: Optional[List[str]] = None
     description: Optional[str] = None
     bullet_points: Optional[str] = None
     keywords: Optional[str] = None
@@ -348,7 +375,7 @@ async def get_products(
                 SELECT * FROM (
                     (SELECT p.id, p.product_code, p.name, p.name_en, p.product_type, p.product_attribute,
                             p.category, p.brand, p.supplier, p.purchase_price, p.sale_price,
-                            p.main_image, p.video_url, p.weight, p.length, p.width, p.height,
+                            p.main_image, p.images, p.video_url, p.weight, p.length, p.width, p.height,
                             p.status, p.is_robot_monitored, p.created_at,
                             (SELECT COUNT(*) FROM platform_products pp WHERE pp.product_id = p.id AND pp.deleted_at IS NULL) as platform_count,
                             COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
@@ -363,7 +390,7 @@ async def get_products(
                     UNION
                     (SELECT p.id, p.product_code, p.name, p.name_en, p.product_type, p.product_attribute,
                             p.category, p.brand, p.supplier, p.purchase_price, p.sale_price,
-                            p.main_image, p.video_url, p.weight, p.length, p.width, p.height,
+                            p.main_image, p.images, p.video_url, p.weight, p.length, p.width, p.height,
                             p.status, p.is_robot_monitored, p.created_at,
                             (SELECT COUNT(*) FROM platform_products pp WHERE pp.product_id = p.id AND pp.deleted_at IS NULL) as platform_count,
                             COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
@@ -412,7 +439,7 @@ async def get_products(
             query = text(f"""
                 SELECT p.id, p.product_code, p.name, p.name_en, p.product_type, p.product_attribute,
                        p.category, p.brand, p.supplier, p.purchase_price, p.sale_price,
-                       p.main_image, p.video_url, p.weight, p.length, p.width, p.height,
+                       p.main_image, p.images, p.video_url, p.weight, p.length, p.width, p.height,
                        p.status, p.is_robot_monitored, p.created_at,
                        (SELECT COUNT(*) FROM platform_products pp WHERE pp.product_id = p.id AND pp.deleted_at IS NULL) as platform_count,
                        COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
@@ -429,8 +456,8 @@ async def get_products(
         products = []
         for row in result:
             purchase_price = float(row[9]) if row[9] else None
-            local_quantity = int(row[21]) if row[21] else 0
-            store_group_quantity = int(row[22]) if row[22] is not None else None
+            local_quantity = int(row[22]) if row[22] else 0
+            store_group_quantity = int(row[23]) if row[23] is not None else None
             # 计算货值 = 本地库存数量 × 采购价
             local_value = None
             if purchase_price and local_quantity is not None:
@@ -453,23 +480,24 @@ async def get_products(
                 "purchase_price": float(row[9]) if row[9] else None,
                 "sale_price": float(row[10]) if row[10] else None,
                 "main_image": row[11] or "",
-                "video_url": row[12] or "",
-                "weight": float(row[13]) if row[13] else None,
-                "length": float(row[14]) if row[14] else None,
-                "width": float(row[15]) if row[15] else None,
-                "height": float(row[16]) if row[16] else None,
-                "status": row[17],
-                "is_robot_monitored": bool(row[18]),
-                "created_at": row[19].strftime("%Y-%m-%d %H:%M:%S") if row[19] else "",
-                "platform_count": int(row[20]) if row[20] else 0,
+                "images": _parse_json_images(row[12]),
+                "video_url": row[13] or "",
+                "weight": float(row[14]) if row[14] else None,
+                "length": float(row[15]) if row[15] else None,
+                "width": float(row[16]) if row[16] else None,
+                "height": float(row[17]) if row[17] else None,
+                "status": row[18],
+                "is_robot_monitored": bool(row[19]),
+                "created_at": row[20].strftime("%Y-%m-%d %H:%M:%S") if row[20] else "",
+                "platform_count": int(row[21]) if row[21] else 0,
                 "local_quantity": local_quantity,
                 "store_group_quantity": store_group_quantity,
-                "local_warehouse": row[23] or "",
-                "local_inbound_date": row[24].strftime("%Y-%m-%d") if row[24] else "",
-                "local_stock_age": int(row[25]) if row[25] else None,
+                "local_warehouse": row[24] or "",
+                "local_inbound_date": row[25].strftime("%Y-%m-%d") if row[25] else "",
+                "local_stock_age": int(row[26]) if row[26] else None,
                 "local_value": float(local_value) if local_value is not None else None,
-                "replenishment_quantity": int(row[26]) if row[26] else 0,
-                "purchased_quantity": int(row[27]) if row[27] else 0,
+                "replenishment_quantity": int(row[27]) if row[27] else 0,
+                "purchased_quantity": int(row[28]) if row[28] else 0,
             })
         
         # 计算筛选后所有数据的货值总合计
@@ -2104,7 +2132,7 @@ async def get_product(
         query = text("""
             SELECT p.id, p.product_code, p.name, p.name_en, p.product_type, p.product_attribute,
                    p.category, p.brand, p.supplier, p.purchase_price, p.sale_price,
-                   p.main_image, p.video_url, p.weight, p.length, p.width, p.height,
+                   p.main_image, p.images, p.video_url, p.weight, p.length, p.width, p.height,
                    p.status, p.is_robot_monitored, p.created_at, p.config,
                    COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
                    p.local_warehouse, p.local_inbound_date, p.local_stock_age
@@ -2120,7 +2148,7 @@ async def get_product(
         platform_query = text("""
             SELECT pp.id, pp.platform, pp.store_id,
                    pp.platform_product_id, pp.asin, pp.spu, pp.sku,
-                   pp.title, pp.title_en, pp.image_url, pp.description, pp.bullet_points, pp.keywords,
+                   pp.title, pp.title_en, pp.image_url, pp.images, pp.description, pp.bullet_points, pp.keywords,
                    pp.currency, pp.price, pp.cost_price, pp.status, pp.sync_status, pp.created_at
             FROM platform_products pp
             WHERE pp.product_id = :product_id AND pp.deleted_at IS NULL
@@ -2184,19 +2212,20 @@ async def get_product(
                 "title": pp[7] or "",
                 "title_en": pp[8] or "",
                 "image_url": pp[9] or "",
-                "description": pp[10] or "",
-                "bullet_points": pp[11] or "",
-                "keywords": pp[12] or "",
-                "currency": pp[13] or "",
-                "price": float(pp[14]) if pp[14] else None,
-                "cost_price": float(pp[15]) if pp[15] else None,
-                "status": pp[16],
-                "sync_status": pp[17] or "",
-                "created_at": pp[18].strftime("%Y-%m-%d %H:%M:%S") if pp[18] else "",
+                "images": _parse_json_images(pp[10]),
+                "description": pp[11] or "",
+                "bullet_points": pp[12] or "",
+                "keywords": pp[13] or "",
+                "currency": pp[14] or "",
+                "price": float(pp[15]) if pp[15] else None,
+                "cost_price": float(pp[16]) if pp[16] else None,
+                "status": pp[17],
+                "sync_status": pp[18] or "",
+                "created_at": pp[19].strftime("%Y-%m-%d %H:%M:%S") if pp[19] else "",
             })
 
         purchase_price = float(row[9]) if row[9] else None
-        local_quantity = int(row[21]) if row[21] else 0
+        local_quantity = int(row[22]) if row[22] else 0
         # 计算货值 = 本地库存数量 × 采购价
         local_value = None
         if purchase_price and local_quantity is not None:
@@ -2219,19 +2248,20 @@ async def get_product(
             "purchase_price": purchase_price,
             "sale_price": float(row[10]) if row[10] else None,
             "main_image": row[11] or "",
-            "video_url": row[12] or "",
-            "weight": float(row[13]) if row[13] else None,
-            "length": float(row[14]) if row[14] else None,
-            "width": float(row[15]) if row[15] else None,
-            "height": float(row[16]) if row[16] else None,
-            "status": row[17],
-            "is_robot_monitored": bool(row[18]),
-            "created_at": row[19].strftime("%Y-%m-%d %H:%M:%S") if row[19] else "",
-            "config": row[20],
+            "images": _parse_json_images(row[12]),
+            "video_url": row[13] or "",
+            "weight": float(row[14]) if row[14] else None,
+            "length": float(row[15]) if row[15] else None,
+            "width": float(row[16]) if row[16] else None,
+            "height": float(row[17]) if row[17] else None,
+            "status": row[18],
+            "is_robot_monitored": bool(row[19]),
+            "created_at": row[20].strftime("%Y-%m-%d %H:%M:%S") if row[20] else "",
+            "config": row[21],
             "local_quantity": local_quantity,
-            "local_warehouse": row[22] or "",
-            "local_inbound_date": row[23].strftime("%Y-%m-%d") if row[23] else "",
-            "local_stock_age": int(row[24]) if row[24] else None,
+            "local_warehouse": row[23] or "",
+            "local_inbound_date": row[24].strftime("%Y-%m-%d") if row[24] else "",
+            "local_stock_age": int(row[25]) if row[25] else None,
             "local_value": float(local_value) if local_value is not None else None,
             "platform_products": platform_products,
         }
@@ -2249,6 +2279,9 @@ async def create_product(
     current_user: User = Depends(PermissionChecker("product:create"))
 ):
     try:
+        if product_data.images and len(product_data.images) > 9:
+            raise HTTPException(status_code=400, detail="产品图片最多上传 9 张")
+
         if product_data.product_code:
             exists = db.execute(
                 text("SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid AND deleted_at IS NULL"),
@@ -2265,10 +2298,10 @@ async def create_product(
 
         insert_sql = text("""
             INSERT INTO products (tenant_id, product_code, name, name_en, product_type, product_attribute, category, brand, supplier,
-                                  purchase_price, sale_price, main_image, video_url, weight, length, width, height,
+                                  purchase_price, sale_price, main_image, images, video_url, weight, length, width, height,
                                   status, is_robot_monitored, local_quantity, local_warehouse, local_inbound_date, local_stock_age)
             VALUES (:tenant_id, :product_code, :name, :name_en, :product_type, :product_attribute, :category, :brand, :supplier,
-                    :purchase_price, :sale_price, :main_image, :video_url, :weight, :length, :width, :height,
+                    :purchase_price, :sale_price, :main_image, :images, :video_url, :weight, :length, :width, :height,
                     :status, :is_robot_monitored, :local_quantity, :local_warehouse, :local_inbound_date, :local_stock_age)
         """)
         result = db.execute(insert_sql, {
@@ -2284,6 +2317,7 @@ async def create_product(
             "purchase_price": product_data.purchase_price,
             "sale_price": product_data.sale_price,
             "main_image": product_data.main_image,
+            "images": _serialize_images(product_data.images),
             "video_url": product_data.video_url,
             "weight": product_data.weight,
             "length": product_data.length,
@@ -2340,12 +2374,15 @@ async def update_product(
     current_user: User = Depends(PermissionChecker("product:edit"))
 ):
     try:
+        if product_data.images is not None and len(product_data.images) > 9:
+            raise HTTPException(status_code=400, detail="产品图片最多上传 9 张")
+
         # 先获取产品完整信息用于日志（包含所有可更新字段）
         product_row = db.execute(
             text("""
                 SELECT id, product_code, name, name_en, product_type, product_attribute,
                        category, brand, supplier, purchase_price, sale_price, main_image,
-                       video_url, weight, length, width, height, status, is_robot_monitored,
+                       images, video_url, weight, length, width, height, status, is_robot_monitored,
                        local_quantity, local_warehouse, local_inbound_date, local_stock_age
                 FROM products WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
             """),
@@ -2399,6 +2436,11 @@ async def update_product(
                 updates.append(f"{field} = :{field}")
                 params[field] = value
 
+        # images 单独处理：空数组也需要支持清空
+        if product_data.images is not None:
+            updates.append("images = :images")
+            params["images"] = _serialize_images(product_data.images)
+
         if updates:
             # 准备日志的 before_data（包含所有可更新字段）
             before_data = {
@@ -2413,17 +2455,18 @@ async def update_product(
                 "purchase_price": float(product_row[9]) if product_row[9] is not None else None,
                 "sale_price": float(product_row[10]) if product_row[10] is not None else None,
                 "main_image": product_row[11],
-                "video_url": product_row[12],
-                "weight": float(product_row[13]) if product_row[13] is not None else None,
-                "length": float(product_row[14]) if product_row[14] is not None else None,
-                "width": float(product_row[15]) if product_row[15] is not None else None,
-                "height": float(product_row[16]) if product_row[16] is not None else None,
-                "status": product_row[17],
-                "is_robot_monitored": product_row[18],
-                "local_quantity": product_row[19],
-                "local_warehouse": product_row[20],
-                "local_inbound_date": product_row[21],
-                "local_stock_age": product_row[22],
+                "images": _parse_json_images(product_row[12]),
+                "video_url": product_row[13],
+                "weight": float(product_row[14]) if product_row[14] is not None else None,
+                "length": float(product_row[15]) if product_row[15] is not None else None,
+                "width": float(product_row[16]) if product_row[16] is not None else None,
+                "height": float(product_row[17]) if product_row[17] is not None else None,
+                "status": product_row[18],
+                "is_robot_monitored": product_row[19],
+                "local_quantity": product_row[20],
+                "local_warehouse": product_row[21],
+                "local_inbound_date": product_row[22],
+                "local_stock_age": product_row[23],
             }
 
             # 准备日志的 after_data（合并新值）
@@ -2431,6 +2474,8 @@ async def update_product(
             for field, value in field_map.items():
                 if value is not None and field in after_data:
                     after_data[field] = value
+            if product_data.images is not None:
+                after_data["images"] = product_data.images
 
             db.execute(
                 text(f"UPDATE products SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"),
@@ -2844,7 +2889,7 @@ async def get_platform_products(
         query = text("""
             SELECT pp.id, pp.platform, pp.store_id,
                    pp.platform_product_id, pp.asin, pp.spu, pp.sku,
-                   pp.title, pp.title_en, pp.image_url, pp.description, pp.bullet_points, pp.keywords,
+                   pp.title, pp.title_en, pp.image_url, pp.images, pp.description, pp.bullet_points, pp.keywords,
                    pp.currency, pp.price, pp.cost_price, pp.status, pp.sync_status, pp.created_at
             FROM platform_products pp
             WHERE pp.product_id = :product_id AND pp.deleted_at IS NULL
@@ -2911,15 +2956,16 @@ async def get_platform_products(
                 "title": pp[7] or "",
                 "title_en": pp[8] or "",
                 "image_url": pp[9] or "",
-                "description": pp[10] or "",
-                "bullet_points": pp[11] or "",
-                "keywords": pp[12] or "",
-                "currency": pp[13] or "",
-                "price": float(pp[14]) if pp[14] else None,
-                "cost_price": float(pp[15]) if pp[15] else None,
-                "status": pp[16],
-                "sync_status": pp[17] or "",
-                "created_at": pp[18].strftime("%Y-%m-%d %H:%M:%S") if pp[18] else "",
+                "images": _parse_json_images(pp[10]),
+                "description": pp[11] or "",
+                "bullet_points": pp[12] or "",
+                "keywords": pp[13] or "",
+                "currency": pp[14] or "",
+                "price": float(pp[15]) if pp[15] else None,
+                "cost_price": float(pp[16]) if pp[16] else None,
+                "status": pp[17],
+                "sync_status": pp[18] or "",
+                "created_at": pp[19].strftime("%Y-%m-%d %H:%M:%S") if pp[19] else "",
             })
         return {"success": True, "data": items}
     except HTTPException:
@@ -2936,6 +2982,9 @@ async def create_platform_product(
     current_user: User = Depends(PermissionChecker("platform:create"))
 ):
     try:
+        if data.images and len(data.images) > 9:
+            raise HTTPException(status_code=400, detail="商品图片最多上传 9 张")
+
         # 先获取产品名称用于日志
         product = db.execute(
             text("SELECT id, name FROM products WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"),
@@ -2971,11 +3020,11 @@ async def create_platform_product(
         import json
         insert_sql = text("""
             INSERT INTO platform_products (tenant_id, product_id, platform, store_id, platform_product_id,
-                                           asin, spu, sku, title, title_en, image_url,
+                                           asin, spu, sku, title, title_en, image_url, images,
                                            description, bullet_points, keywords, currency,
                                            price, cost_price, status)
             VALUES (:tenant_id, :product_id, :platform, :store_id, :platform_product_id,
-                    :asin, :spu, :sku, :title, :title_en, :image_url,
+                    :asin, :spu, :sku, :title, :title_en, :image_url, :images,
                     :description, :bullet_points, :keywords, :currency,
                     :price, :cost_price, :status)
         """)
@@ -2991,6 +3040,7 @@ async def create_platform_product(
             "title": data.title,
             "title_en": data.title_en,
             "image_url": data.image_url,
+            "images": _serialize_images(data.images),
             "description": data.description,
             "bullet_points": data.bullet_points,
             "keywords": data.keywords,
@@ -3037,6 +3087,9 @@ async def update_platform_product(
     current_user: User = Depends(PermissionChecker("platform:edit"))
 ):
     try:
+        if data.images is not None and len(data.images) > 9:
+            raise HTTPException(status_code=400, detail="商品图片最多上传 9 张")
+
         # 先获取平台商品和产品信息用于日志
         pp_row = db.execute(
             text("""
@@ -3078,6 +3131,11 @@ async def update_platform_product(
                 updates.append(f"{field} = :{field}")
                 params[field] = value
 
+        # images 单独处理：空数组也需要支持清空
+        if data.images is not None:
+            updates.append("images = :images")
+            params["images"] = _serialize_images(data.images)
+
         if data.store_ids is not None:
             import json
             updates.append("store_id = :store_id")
@@ -3107,6 +3165,8 @@ async def update_platform_product(
             for field, value in field_map.items():
                 if value is not None and field in after_data:
                     after_data[field] = value
+            if data.images is not None:
+                after_data["images"] = data.images
             
             db.execute(
                 text(f"UPDATE platform_products SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"),

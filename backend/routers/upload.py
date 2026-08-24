@@ -2,6 +2,7 @@
 import logging
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+from pydantic import BaseModel
 from dependencies import get_current_user
 from models.user import User
 from services import tos_service
@@ -112,3 +113,21 @@ async def upload_video(
     except Exception as e:
         logger.error("视频上传失败: %s", e)
         raise HTTPException(status_code=500, detail=f"视频上传失败: {e}")
+
+
+class DeleteFileRequest(BaseModel):
+    file_url: str
+
+
+@router.post("/delete")
+async def delete_upload_file(
+    data: DeleteFileRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """根据 URL 删除 TOS 上的文件"""
+    if not data.file_url:
+        raise HTTPException(status_code=400, detail="缺少文件 URL")
+    success = tos_service.delete_file(data.file_url)
+    if not success:
+        raise HTTPException(status_code=500, detail="删除文件失败")
+    return {"success": True, "message": "删除成功"}

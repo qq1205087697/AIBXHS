@@ -468,6 +468,7 @@ export const productsApi = {
     purchase_price?: number;
     sale_price?: number;
     main_image?: string;
+    images?: string[];
     video_url?: string;
     weight?: number;
     length?: number;
@@ -493,6 +494,7 @@ export const productsApi = {
       purchase_price?: number;
       sale_price?: number;
       main_image?: string;
+      images?: string[];
       video_url?: string;
       weight?: number;
       length?: number;
@@ -529,6 +531,7 @@ export const productsApi = {
       title?: string;
       title_en?: string;
       image_url?: string;
+      images?: string[];
       description?: string;
       bullet_points?: string;
       keywords?: string;
@@ -549,6 +552,7 @@ export const productsApi = {
       title?: string;
       title_en?: string;
       image_url?: string;
+      images?: string[];
       description?: string;
       bullet_points?: string;
       keywords?: string;
@@ -639,6 +643,8 @@ export const uploadApi = {
       timeout: 300000,
     });
   },
+  deleteFile: (fileUrl: string) =>
+    apiClient.post('/upload/delete', { file_url: fileUrl }),
 };
 
 // ========== Inventory Count API ==========
@@ -1138,6 +1144,78 @@ export const productBindingsApi = {
     apiClient.delete(`/product-bindings/${bindingId}`),
 };
 
+// ========== Product Selection API ==========
+export const productSelectionApi = {
+  getTypes: () => apiClient.get("/product-selection/types"),
+  getDates: () => apiClient.get("/product-selection/dates"),
+  getSites: () => apiClient.get("/product-selection/sites"),
+  getList: (params?: {
+    page?: number;
+    page_size?: number;
+    search?: string;
+    product_type?: string;
+    site?: string;
+    date_filter?: string;
+    status?: string[];
+    sort_by?: string;
+    sort_order?: string;
+  }) => apiClient.get("/product-selection/", { params }),
+  getById: (id: number) => apiClient.get(`/product-selection/${id}`),
+  submitForApproval: (id: number) => apiClient.post(`/product-selection/${id}/submit-for-approval`, {}),
+  approve: (id: number) => apiClient.post(`/product-selection/${id}/approve`, {}),
+  cancelApprovalApplication: (id: number) => apiClient.post(`/product-selection/${id}/cancel-approval-application`, {}),
+  generatePurchaseOrder: (id: number) => apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
+  batchGeneratePurchaseOrders: (ids: number[]) => apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
+  create: (data: {
+    product_title: string;
+    url?: string;
+    asin?: string;
+    image_url?: string;
+    rating?: number;
+    review_count?: number;
+    keywords?: string;
+    price?: number;
+    commission?: number;
+    first_leg_cost?: number;
+    last_mile_cost?: number;
+    weight_kg?: number;
+    cost_at_15_profit?: number;
+    product_type?: string;
+    monthly_sales?: number;
+    traffic_trend?: string;
+  }) => apiClient.post("/product-selection/", data),
+  update: (
+    id: number,
+    data: {
+      product_title?: string;
+      url?: string;
+      asin?: string;
+      image_url?: string;
+      rating?: number;
+      review_count?: number;
+      keywords?: string;
+      price?: number;
+      commission?: number;
+      first_leg_cost?: number;
+      last_mile_cost?: number;
+      weight_kg?: number;
+      cost_at_15_profit?: number;
+      product_type?: string;
+      monthly_sales?: number;
+      traffic_trend?: string;
+    },
+  ) => apiClient.put(`/product-selection/${id}`, data),
+  delete: (id: number) => apiClient.delete(`/product-selection/${id}`),
+  analyze: (id: number) =>
+    apiClient.post(`/product-selection/${id}/analyze`, {}, { timeout: 180000 }),
+  batchAnalyze: (ids: number[]) =>
+    apiClient.post(
+      "/product-selection/batch-analyze",
+      ids,
+      { timeout: 300000 },
+    ),
+  recalcScores: () => apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+};
 // ========== Ads API ==========
 export const adsApi = {
   import: (file: File) => {

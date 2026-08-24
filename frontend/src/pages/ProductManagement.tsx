@@ -8,6 +8,8 @@ import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryC
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import TosUpload from '../components/TosUpload'
+import ImagesUpload from '../components/ImagesUpload'
+import ImageGallery from '../components/ImageGallery'
 import { useResponsive } from '../hooks/useResponsive'
 
 interface Product {
@@ -23,6 +25,7 @@ interface Product {
   purchase_price: number | null
   sale_price: number | null
   main_image: string
+  images?: string[]
   video_url: string
   weight: number | null
   length: number | null
@@ -53,6 +56,7 @@ interface PlatformProduct {
   title: string
   title_en: string
   image_url: string
+  images?: string[]
   description: string
   bullet_points: string
   keywords: string
@@ -633,6 +637,7 @@ const productAttributeLabelMap: Record<string, string> = {
       purchase_price: product.purchase_price,
       sale_price: product.sale_price,
       main_image: product.main_image,
+      images: product.images?.length ? product.images : (product.main_image ? [product.main_image] : []),
       video_url: product.video_url,
       weight: product.weight,
       length: product.length,
@@ -969,6 +974,7 @@ const productAttributeLabelMap: Record<string, string> = {
       title: item.title,
       title_en: item.title_en,
       image_url: item.image_url,
+      images: item.images?.length ? item.images : (item.image_url ? [item.image_url] : []),
       description: item.description,
       bullet_points: item.bullet_points,
       keywords: item.keywords,
@@ -986,40 +992,45 @@ const productAttributeLabelMap: Record<string, string> = {
   }
 
   const handlePpSubmit = async () => {
-    if (!ppCurrentProductId) return
+    const productId = ppCurrentProductId || detailModalProduct?.id
+    console.log('handlePpSubmit start', productId, ppTransferTargetKeys)
+    if (!productId) return
     if (ppTransferTargetKeys.length === 0) {
       message.warning('请先选择店铺')
       return
     }
     try {
       const values = await ppForm.validateFields()
+      console.log('handlePpSubmit values', values)
       const submitData = {
         ...values,
         store_ids: ppTransferTargetKeys.map(Number),
       }
       if (ppEditingItem) {
-        await productsApi.updatePlatformProduct(ppCurrentProductId, ppEditingItem.id, submitData)
+        await productsApi.updatePlatformProduct(productId, ppEditingItem.id, submitData)
         message.success('平台商品更新成功')
       } else {
-        await productsApi.createPlatformProduct(ppCurrentProductId, submitData)
+        await productsApi.createPlatformProduct(productId, submitData)
         message.success('平台商品创建成功')
       }
       setPpModalOpen(false)
-      const res = await productsApi.getPlatformProducts(ppCurrentProductId)
+      const res = await productsApi.getPlatformProducts(productId)
       if (res.data.success) setPpList(res.data.data)
       fetchData()
     } catch (e: any) {
+      console.error('handlePpSubmit error', e)
       if (e.errorFields) return
-      message.error('操作失败')
+      message.error(e?.response?.data?.detail || e?.message || '操作失败')
     }
   }
 
   const handlePpDelete = async (ppId: number) => {
-    if (!ppCurrentProductId) return
+    const productId = ppCurrentProductId || detailModalProduct?.id
+    if (!productId) return
     try {
-      await productsApi.deletePlatformProduct(ppCurrentProductId, ppId)
+      await productsApi.deletePlatformProduct(productId, ppId)
       message.success('平台商品删除成功')
-      const res = await productsApi.getPlatformProducts(ppCurrentProductId)
+      const res = await productsApi.getPlatformProducts(productId)
       if (res.data.success) setPpList(res.data.data)
       fetchData()
     } catch (e) {
@@ -1424,6 +1435,7 @@ const productAttributeLabelMap: Record<string, string> = {
       purchase_price: product.purchase_price,
       sale_price: product.sale_price,
       main_image: product.main_image,
+      images: product.images?.length ? product.images : (product.main_image ? [product.main_image] : []),
       weight: product.weight,
       length: product.length,
       width: product.width,
@@ -1895,13 +1907,14 @@ const productAttributeLabelMap: Record<string, string> = {
             </a>
           )
         } else if (col.key === 'main_image') {
-          column.render = (url: string) =>
-            url ? (
-              <Image 
-                src={url} 
-                width={40} 
-                height={40} 
-                style={{ objectFit: 'cover', borderRadius: 4 }} 
+          column.render = (_: any, record: Product) => {
+            const url = record.images?.[0] || record.main_image
+            return url ? (
+              <Image
+                src={url}
+                width={40}
+                height={40}
+                style={{ objectFit: 'cover', borderRadius: 4 }}
                 preview={{ mask: false }}
                 loading="lazy"
                 placeholder={
@@ -1915,6 +1928,7 @@ const productAttributeLabelMap: Record<string, string> = {
                 <AppstoreOutlined style={{ color: '#ccc' }} />
               </div>
             )
+          }
         } else if (col.key === 'name' || col.key === 'name_en') {
           column.render = (text: string) => (
             <div style={{ 
@@ -2785,8 +2799,8 @@ const productAttributeLabelMap: Record<string, string> = {
               <InputNumber style={{ width: '100%' }} placeholder="建议售价" min={0} precision={2} prefix="¥" />
             </Form.Item>
           </div>
-          <Form.Item name="main_image" label="主图">
-            <TosUpload type="image" placeholder="上传主图" customName={form.getFieldValue('product_code') || undefined} />
+          <Form.Item name="images" label="产品图片">
+            <ImagesUpload placeholder="上传产品图片" maxCount={9} customName={form.getFieldValue('product_code') || undefined} />
           </Form.Item>
           <Form.Item name="video_url" label="产品视频">
             <TosUpload type="video" placeholder="上传产品视频" />
@@ -2851,13 +2865,14 @@ const productAttributeLabelMap: Record<string, string> = {
                 }
                 
                 if (col.key === 'image_url') {
-                  column.render = (url: string) =>
-                    url ? (
-                      <Image 
-                        src={url} 
-                        width={40} 
-                        height={40} 
-                        style={{ objectFit: 'cover', borderRadius: 4 }} 
+                  column.render = (_: any, record: PlatformProduct) => {
+                    const url = record.images?.[0] || record.image_url
+                    return url ? (
+                      <Image
+                        src={url}
+                        width={40}
+                        height={40}
+                        style={{ objectFit: 'cover', borderRadius: 4 }}
                         preview={{ mask: false }}
                         loading="lazy"
                         placeholder={
@@ -2871,6 +2886,7 @@ const productAttributeLabelMap: Record<string, string> = {
                         <AppstoreOutlined style={{ color: '#ccc' }} />
                       </div>
                     )
+                  }
                 } else if (col.key === 'platform') {
                   column.render = (p: string) => <Tag color={platformColorMap[p] || 'default'}>{platformLabelMap[p] || p}</Tag>
                 } else if (col.key === 'store_names') {
@@ -3018,8 +3034,17 @@ const productAttributeLabelMap: Record<string, string> = {
           <Form.Item name="title_en" label="英文标题">
             <Input.TextArea rows={3} placeholder="英文标题" />
           </Form.Item>
-          <Form.Item name="image_url" label="商品图片">
-            <TosUpload type="image" placeholder="上传商品图片" />
+          <Form.Item name="images" label="商品图片">
+            <ImagesUpload
+              placeholder="上传商品图片"
+              maxCount={9}
+              customName={(file, index) => {
+                const productCode = detailModalProduct?.product_code || 'unknown'
+                const platform = ppForm.getFieldValue('platform') || 'unknown'
+                const sku = ppForm.getFieldValue('sku') || 'unknown'
+                return `${productCode}_${platform}_${sku}_${index + 1}`
+              }}
+            />
           </Form.Item>
           <Form.Item name="description" label="产品描述">
             <Input.TextArea rows={3} placeholder="请输入产品描述" />
@@ -3390,17 +3415,20 @@ const productAttributeLabelMap: Record<string, string> = {
             <div style={{ width: 180, borderRight: '1px solid #f0f0f0', padding: '16px 0', background: '#fafafa', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
               {/* 产品图片和标题 */}
               <div style={{ padding: '0 16px 16px', textAlign: 'center', borderBottom: '1px solid #f0f0f0', marginBottom: 8 }}>
-                {detailModalProduct.main_image ? (
-                  <Image
-                    src={detailModalProduct.main_image}
-                    style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 4 }}
-                    preview={true}
-                  />
-                ) : (
-                  <div style={{ width: 120, height: 120, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto' }}>
-                    <AppstoreOutlined style={{ fontSize: 32, color: '#ccc' }} />
-                  </div>
-                )}
+                {(() => {
+                  const firstImage = detailModalProduct.images?.[0] || detailModalProduct.main_image
+                  return firstImage ? (
+                    <Image
+                      src={firstImage}
+                      style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 4 }}
+                      preview={true}
+                    />
+                  ) : (
+                    <div style={{ width: 120, height: 120, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto' }}>
+                      <AppstoreOutlined style={{ fontSize: 32, color: '#ccc' }} />
+                    </div>
+                  )
+                })()}
                 <div style={{ marginTop: 10, fontWeight: 'bold', wordBreak: 'break-word', fontSize: 13, lineHeight: 1.4 }}>{detailModalProduct.name}</div>
                 <div style={{ color: '#999', fontSize: 11, marginTop: 4 }}>{detailModalProduct.product_code}</div>
               </div>
@@ -3483,8 +3511,8 @@ const productAttributeLabelMap: Record<string, string> = {
                         <InputNumber style={{ width: '100%' }} placeholder="建议售价" min={0} precision={2} prefix="¥" />
                       </Form.Item>
                     </div>
-                    <Form.Item name="main_image" label="主图">
-                      <TosUpload type="image" placeholder="上传主图" customName={form.getFieldValue('product_code') || undefined} />
+                    <Form.Item name="images" label="产品图片">
+                      <ImagesUpload placeholder="上传产品图片" maxCount={9} customName={form.getFieldValue('product_code') || undefined} />
                     </Form.Item>
                     <Form.Item name="video_url" label="产品视频">
                       <TosUpload type="video" placeholder="上传产品视频" />
@@ -3543,12 +3571,22 @@ const productAttributeLabelMap: Record<string, string> = {
                         <div><strong>高:</strong> {detailModalProduct.height != null ? `${detailModalProduct.height} cm` : '-'}</div>
                       </div>
                     </div>
+                    {(() => {
+                      const galleryImages = detailModalProduct.images?.length
+                        ? detailModalProduct.images
+                        : (detailModalProduct.main_image ? [detailModalProduct.main_image] : [])
+                      return galleryImages.length > 0 ? (
+                        <Card size="small" title="产品图片">
+                          <ImageGallery images={galleryImages} />
+                        </Card>
+                      ) : null
+                    })()}
                     {detailModalProduct.video_url && (
                       <Card size="small" title="产品视频">
                         <video
                           src={detailModalProduct.video_url}
                           controls
-                          style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000' }}
+                          style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto' }}
                         />
                       </Card>
                     )}
@@ -3584,6 +3622,34 @@ const productAttributeLabelMap: Record<string, string> = {
                     }}
                     scroll={{ x: 'max-content' }}
                     columns={[
+                      {
+                        title: '图片',
+                        dataIndex: 'image_url',
+                        key: 'image_url',
+                        width: 70,
+                        render: (_: any, record: PlatformProduct) => {
+                          const url = record.images?.[0] || record.image_url
+                          return url ? (
+                            <Image
+                              src={url}
+                              width={40}
+                              height={40}
+                              style={{ objectFit: 'cover', borderRadius: 4 }}
+                              preview={{ mask: false }}
+                              loading="lazy"
+                              placeholder={
+                                <div style={{ width: 40, height: 40, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                  <AppstoreOutlined style={{ color: '#ccc' }} />
+                                </div>
+                              }
+                            />
+                          ) : (
+                            <div style={{ width: 40, height: 40, background: '#f0f0f0', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                              <AppstoreOutlined style={{ color: '#ccc' }} />
+                            </div>
+                          )
+                        },
+                      },
                       { title: '平台', dataIndex: 'platform', key: 'platform', width: 100, render: (p: string) => <Tag color={platformColorMap[p] || 'default'}>{platformLabelMap[p] || p}</Tag> },
                       { title: '店铺', dataIndex: 'store_names', key: 'store_names', width: 180, render: (names: string[]) => names?.length > 0 ? <Space size={4} wrap>{names.map((n, i) => <Tag key={i} color="blue">{n}</Tag>)}</Space> : '-' },
                       { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 120, ellipsis: true },

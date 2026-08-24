@@ -763,6 +763,7 @@ async def get_new_reviews_count(db: Session = Depends(get_db), current_user: Use
               AND tenant_id = :tenant_id
               AND status = 'new'
               AND review_date >= :three_days_ago
+              AND tenant_id = :tenant_id
               {dept_filter}
         """)
         

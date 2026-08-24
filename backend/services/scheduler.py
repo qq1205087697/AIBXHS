@@ -2,10 +2,97 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
+
+def acquire_distributed_lock(db, lock_key: str, timeout_minutes: int = 30) -> bool:
+    """获取分布式锁，防止多进程同时执行
+    返回 True 表示成功获取锁，可以执行任务
+    """
+    from sqlalchemy import text
+    lock_expires_at = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+    
+    try:
+        # 先检查锁表是否存在，不存在直接返回 True（允许执行）
+        check_table_sql = text("SHOW TABLES LIKE 'scheduler_locks'")
+        table_exists = db.execute(check_table_sql).fetchone() is not None
+        if not table_exists:
+            logger.warning(f"scheduler_locks 表不存在，不使用锁: {lock_key}")
+            return True
+        
+        # 尝试获取锁：插入记录
+        insert_sql = text("""
+            INSERT INTO scheduler_locks (lock_key, acquired_at, expires_at, is_active)
+            VALUES (:key, NOW(), :expires, TRUE)
+            ON DUPLICATE KEY UPDATE
+                acquired_at = IF(is_active = FALSE OR expires_at < NOW(), NOW(), acquired_at),
+                expires_at = IF(is_active = FALSE OR expires_at < NOW(), :expires, expires_at),
+                is_active = IF(is_active = FALSE OR expires_at < NOW(), TRUE, is_active)
+        """)
+        result = db.execute(insert_sql, {"key": lock_key, "expires": lock_expires_at})
+        
+        # 检查是否真的获取到了锁（影响行数 > 0 说明是第一个）
+        if result.rowcount > 0:
+            db.commit()
+            logger.info(f"✅ 成功获取分布式锁: {lock_key}")
+            return True
+        
+        # 如果没有插入行，检查是否是锁已过期被我们自动续期了
+        check_sql = text("""
+            SELECT 1 FROM scheduler_locks
+            WHERE lock_key = :key
+              AND is_active = TRUE
+              AND expires_at > NOW()
+        """)
+        check_result = db.execute(check_sql, {"key": lock_key}).fetchone()
+        if not check_result:
+            # 锁已过期，我们更新锁
+            update_sql = text("""
+                UPDATE scheduler_locks
+                SET is_active = TRUE,
+                    acquired_at = NOW(),
+                    expires_at = :expires
+                WHERE lock_key = :key
+            """)
+            db.execute(update_sql, {"key": lock_key, "expires": lock_expires_at})
+            db.commit()
+            logger.info(f"🔄 锁已过期，重新获取: {lock_key}")
+            return True
+        
+        db.commit()
+        logger.info(f"🔒 其他进程正在执行该任务，跳过: {lock_key}")
+        return False
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"获取分布式锁失败: {e}")
+        # 出错时允许执行任务（不阻塞）
+        return True
+
+
+def release_distributed_lock(db, lock_key: str):
+    """释放分布式锁"""
+    from sqlalchemy import text
+    try:
+        # 检查锁表是否存在
+        check_table_sql = text("SHOW TABLES LIKE 'scheduler_locks'")
+        table_exists = db.execute(check_table_sql).fetchone() is not None
+        if not table_exists:
+            return
+        
+        update_sql = text("""
+            UPDATE scheduler_locks
+            SET is_active = FALSE
+            WHERE lock_key = :key
+        """)
+        db.execute(update_sql, {"key": lock_key})
+        db.commit()
+        logger.info(f"🔓 释放分布式锁: {lock_key}")
+    except Exception as e:
+        logger.error(f"释放分布式锁失败: {e}")
 
 
 def init_scheduler():
@@ -66,6 +153,16 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        recalc_product_selection_scores_job,
+        trigger="cron",
+        hour=7,
+        minute=0,
+        id="daily_product_selection_recalc",
+        name="每日选品数据评分计算",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         check_overdue_purchase_orders_job,
         trigger="cron",
         hour=9,
@@ -80,15 +177,45 @@ def init_scheduler():
 
 
 def check_inventory_job():
-    logger.info("执行库存检查任务...")
+    from database.database import SessionLocal
+    LOCK_KEY = "inventory_check"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("执行库存检查任务...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def check_reviews_job():
-    logger.info("执行差评监控任务...")
+    from database.database import SessionLocal
+    LOCK_KEY = "reviews_check"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("执行差评监控任务...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def send_daily_report_job():
-    logger.info("发送每日运营报告...")
+    from database.database import SessionLocal
+    LOCK_KEY = "daily_report"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("发送每日运营报告...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def translate_untranslated_reviews_job():
@@ -160,8 +287,13 @@ def analyze_unanalyzed_reviews_job():
     from sqlalchemy import text
     import json
 
+    LOCK_KEY = "daily_review_analysis"
     db = SessionLocal()
     try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
 
         # 查询所有未分析的差评（review_analyses中不存在的差评）
@@ -305,6 +437,7 @@ def analyze_unanalyzed_reviews_job():
     except Exception as e:
         logger.error(f"每日AI分析任务失败: {e}")
     finally:
+        release_distributed_lock(db, LOCK_KEY)
         db.close()
 
 
@@ -314,10 +447,16 @@ def push_daily_review_notifications_job():
     from sqlalchemy import text
     from datetime import datetime, date
 
-    logger.info("========== 开始推送每日差评通知 ==========")
+    LOCK_KEY = "daily_review_notifications"
     
     db = SessionLocal()
     try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        
+        logger.info("========== 开始推送每日差评通知 ==========")
+        
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
         logger.info("数据库连接成功")
         
@@ -514,6 +653,218 @@ def push_daily_review_notifications_job():
         logger.error(traceback.format_exc())
         db.rollback()
     finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def recalc_product_selection_scores_job():
+    """每天早上7点：检查是否有新抓取的选品数据，有则自动计算评分"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    import math
+    import statistics
+    import ast
+    import json
+
+    LOCK_KEY = "daily_product_selection_recalc"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+
+        logger.info("========== 开始每日选品数据评分计算 ==========")
+
+        # 查找未计算过评分的记录（traffic_score IS NULL 或 traffic_score_result IS NULL）
+        query = text("""
+            SELECT id, rating, review_count, monthly_sales, traffic_trend
+            FROM product_selections
+            WHERE deleted_at IS NULL
+              AND (traffic_score IS NULL OR traffic_score_result IS NULL)
+        """)
+        rows = db.execute(query).fetchall()
+
+        if not rows:
+            logger.info("没有需要计算评分的新选品数据")
+            release_distributed_lock(db, LOCK_KEY)
+            db.close()
+            return
+
+        logger.info(f"发现 {len(rows)} 条待计算的选品记录")
+
+        def r2(x):
+            return round(float(x), 2)
+
+        def calc_rating(rating, review_count):
+            if rating is None:
+                return 20.0
+            rc = review_count or 0
+            r = round(rating, 1)
+            if rc <= 3:
+                if r >= 4.8: return 16.0
+                elif r >= 4.5: return 14.0
+                elif r >= 4.2: return 12.0
+                else: return 6.0
+            elif rc <= 10:
+                if r >= 4.7: return 14.0
+                elif r >= 4.4: return 11.0
+                elif r >= 4.1: return 8.0
+                else: return 3.0
+            else:
+                if r >= 4.7: return 18.0
+                elif r >= 4.5: return 15.0
+                elif r >= 4.3: return 12.0
+                elif r >= 4.0: return 9.0
+                else: return 5.0
+
+        def calc_sales(s):
+            s = s or 0
+            if s == 0: return 0.0
+            if s == 1: return 6.0
+            if s == 2: return 9.0
+            if 3 <= s <= 4: return 12.0
+            if 5 <= s <= 9: return 15.0
+            if 10 <= s <= 19: return 18.0
+            return 20.0
+
+        def calc_penalty(rs):
+            if rs >= 16: return 1.00
+            elif rs >= 12: return 0.95
+            elif rs >= 8: return 0.85
+            elif rs >= 4: return 0.70
+            else: return 0.50
+
+        def calc_composite(pf, ts, ss):
+            return round(pf * ts * 0.6 + ss * 5 * 0.4, 2)
+
+        def calc_traffic(traffic_trend_str):
+            if not traffic_trend_str:
+                return 0.0, ""
+            try:
+                month_volume = ast.literal_eval(traffic_trend_str)
+            except Exception:
+                return 0.0, ""
+            if not isinstance(month_volume, dict) or not month_volume:
+                return 0.0, ""
+
+            values = [v for v in month_volume.values() if isinstance(v, (int, float))]
+            n = len(values)
+            if n == 0:
+                return 0.0, ""
+
+            result = {
+                "趋势方向强度分": 0.0,
+                "趋势一致性分": 0.0,
+                "相对增长倍数分": 0.0,
+                "月均增长率分": 0.0,
+                "趋势连续性分": 0.0,
+                "波动惩罚分": 0.0,
+                "趋势总分": 0.0,
+                "历史最低值": r2(min(values)),
+                "最新月份值": r2(values[-1]),
+                "增长倍数": 0.0,
+                "月均增长率": 0.0,
+                "波动系数CV": 0.0,
+            }
+
+            if n >= 6:
+                last_avg = sum(values[-3:]) / 3
+                prev_avg = sum(values[-6:-3]) / 3
+                R = last_avg / prev_avg if prev_avg > 0 else 0
+                result["趋势方向强度分"] = r2(max(0, min(25, (R - 1) * 18)))
+
+            if n >= 6:
+                up = sum(1 for i in range(1, 6) if values[-6 + i] > values[-7 + i])
+                result["趋势一致性分"] = r2((up / 5) * 10)
+
+            if n >= 2 and min(values) > 0:
+                G = values[-1] / min(values)
+                result["增长倍数"] = r2(G)
+                result["相对增长倍数分"] = r2(max(0, min(20, math.log2(G) * 6)))
+
+            if n >= 4 and values[-4] > 0:
+                M = (values[-1] / values[-4]) ** (1 / 4) - 1
+                result["月均增长率"] = r2(M)
+                result["月均增长率分"] = r2(max(0, min(10, M * 120)))
+
+            if n >= 2:
+                cur = max_streak = 0
+                for i in range(1, n):
+                    if values[i] > values[i - 1]:
+                        cur += 1
+                        max_streak = max(max_streak, cur)
+                    else:
+                        cur = 0
+                mapping = {2: 3, 3: 6, 4: 9, 5: 12}
+                result["趋势连续性分"] = 15 if max_streak >= 6 else mapping.get(max_streak, 0)
+
+            if n >= 6:
+                last_6 = values[-6:]
+                mean = statistics.mean(last_6)
+                std = statistics.pstdev(last_6)
+                CV = std / mean if mean > 0 else 0
+                result["波动系数CV"] = r2(CV)
+                if CV <= 0.25: result["波动惩罚分"] = 10
+                elif CV <= 0.35: result["波动惩罚分"] = 7
+                elif CV <= 0.50: result["波动惩罚分"] = 4
+
+            total = (
+                result["趋势方向强度分"]
+                + result["趋势一致性分"]
+                + result["相对增长倍数分"]
+                + result["月均增长率分"]
+                + result["趋势连续性分"]
+                + result["波动惩罚分"]
+            )
+            raw_total = max(0, total)
+            result["趋势总分"] = r2(raw_total)
+
+            # 放大到满分100
+            max_possible = 90
+            final_score = round((raw_total / max_possible) * 100, 2) if max_possible > 0 else 0.0
+
+            return final_score, json.dumps(result, ensure_ascii=False)
+
+        updated = 0
+        for row in rows:
+            rid = row[0]
+            rating_score = calc_rating(row[1], row[2])
+            sales_score = calc_sales(row[3])
+            penalty_factor = calc_penalty(rating_score)
+            traffic_score, traffic_result_json = calc_traffic(row[4])
+            composite_score = calc_composite(penalty_factor, traffic_score, sales_score)
+
+            db.execute(text("""
+                UPDATE product_selections SET
+                    traffic_score = :ts,
+                    traffic_score_result = :tsr,
+                    sales_score = :ss,
+                    rating_score = :rs,
+                    penalty_factor = :pf,
+                    composite_score = :cs,
+                    updated_at = NOW()
+                WHERE id = :id
+            """), {
+                "id": rid,
+                "ts": traffic_score,
+                "tsr": traffic_result_json,
+                "ss": sales_score,
+                "rs": rating_score,
+                "pf": penalty_factor,
+                "cs": composite_score,
+            })
+            updated += 1
+
+        db.commit()
+        logger.info(f"========== 选品评分计算完成：共更新 {updated} 条记录 ==========")
+
+    except Exception as e:
+        logger.error(f"每日选品评分计算任务失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        db.rollback()
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
         db.close()
 
 

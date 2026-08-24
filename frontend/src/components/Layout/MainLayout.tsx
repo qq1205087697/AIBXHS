@@ -30,6 +30,7 @@ import {
   ShoppingBag,
   Users,
   Building2,
+  Target,
   ArrowDownCircle,
   ArrowUpCircle,
   Truck,
@@ -296,6 +297,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           },
         ]
       : []),     
+    ...(hasPermission('product_selection:view')
+      ? [{
+          key: '/product-selection',
+          icon: <Target size={20} />,
+          label: '选品机器人',
+        }] : []),
     {
       key: '/data-alert',
       icon: <AlertTriangle size={20} />,
@@ -446,6 +453,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/warehouses": "仓库管理",
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
+      '/product-selection': '选品机器人',
     };
     return pathMap[location.pathname] || "未知页面";
   };
