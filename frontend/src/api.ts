@@ -468,6 +468,7 @@ export const productsApi = {
     purchase_price?: number;
     sale_price?: number;
     main_image?: string;
+    images?: string[];
     video_url?: string;
     weight?: number;
     length?: number;
@@ -493,6 +494,7 @@ export const productsApi = {
       purchase_price?: number;
       sale_price?: number;
       main_image?: string;
+      images?: string[];
       video_url?: string;
       weight?: number;
       length?: number;
@@ -529,6 +531,7 @@ export const productsApi = {
       title?: string;
       title_en?: string;
       image_url?: string;
+      images?: string[];
       description?: string;
       bullet_points?: string;
       keywords?: string;
@@ -549,6 +552,7 @@ export const productsApi = {
       title?: string;
       title_en?: string;
       image_url?: string;
+      images?: string[];
       description?: string;
       bullet_points?: string;
       keywords?: string;
@@ -639,6 +643,8 @@ export const uploadApi = {
       timeout: 300000,
     });
   },
+  deleteFile: (fileUrl: string) =>
+    apiClient.post('/upload/delete', { file_url: fileUrl }),
 };
 
 // ========== Inventory Count API ==========
@@ -1209,6 +1215,7 @@ export const productSelectionApi = {
       { timeout: 300000 },
     ),
   recalcScores: () => apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+};
 // ========== Ads API ==========
 export const adsApi = {
   import: (file: File) => {

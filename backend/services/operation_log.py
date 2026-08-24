@@ -50,6 +50,7 @@ PRODUCT_FIELD_LABELS = {
     "purchase_price": "采购价",
     "sale_price": "建议售价",
     "main_image": "主图",
+    "images": "产品图片",
     "video_url": "产品视频",
     "weight": "重量",
     "length": "长",
@@ -71,8 +72,10 @@ def format_field_change(field: str, old_val, new_val) -> str:
     def fmt(val):
         if val is None or val == "":
             return "空"
-        if field in ("main_image", "video_url"):
-            # 图片/视频字段只显示是否有值
+        if field in ("main_image", "video_url", "images"):
+            # 图片/视频字段只显示是否有值或数量
+            if isinstance(val, list):
+                return f"{len(val)}张"
             return "有"
         if isinstance(val, bool):
             return "是" if val else "否"
