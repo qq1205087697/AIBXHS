@@ -153,6 +153,36 @@ const createEmptyFormItem = (): FormItemState => ({
   parent_product_id: null,
 })
 
+// 根据后端返回的明细重建前端成品/配件关系
+const buildLoadedFormItems = (detailItems: any[]): FormItemState[] => {
+  const items: FormItemState[] = detailItems.map((item: any) => ({
+    key: generateItemKey(),
+    product_id: Number(item.product_id) || null,
+    quantity: item.quantity,
+    notes: item.notes || '',
+    sku: '',
+    parent_product_id: item.parent_product_id ?? null,
+  }))
+
+  const finishedKeyByProductId = new Map<number, string>()
+  items.forEach((item) => {
+    if (!item.parent_product_id && item.product_id) {
+      finishedKeyByProductId.set(item.product_id, item.key)
+    }
+  })
+
+  items.forEach((item) => {
+    if (item.parent_product_id) {
+      const parentKey = finishedKeyByProductId.get(item.parent_product_id)
+      if (parentKey) {
+        item.parentKey = parentKey
+      }
+    }
+  })
+
+  return items
+}
+
 const ReplenishmentManagement: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission, isAdmin } = useAuth()
@@ -404,14 +434,7 @@ const ReplenishmentManagement: React.FC = () => {
             product_code: item.product_code || '',
           }))
           setProductList(orderProducts)
-          const items = detail.items.map((item: any) => ({
-            key: generateItemKey(),
-            product_id: Number(item.product_id) || null,
-            quantity: item.quantity,
-            notes: item.notes || '',
-            sku: '',
-            parent_product_id: item.parent_product_id ?? null,
-          }))
+          const items = buildLoadedFormItems(detail.items)
           setFormItems(items)
           // 批量加载已有产品的利润率和店铺分组SKU
           const productIds = items.map((i: any) => i.product_id).filter(Boolean) as number[]
@@ -454,14 +477,7 @@ const ReplenishmentManagement: React.FC = () => {
             product_code: item.product_code || '',
           }))
           setProductList(orderProducts)
-          const items = detail.items.map((item: any) => ({
-            key: generateItemKey(),
-            product_id: Number(item.product_id) || null,
-            quantity: item.quantity,
-            notes: item.notes || '',
-            sku: '',
-            parent_product_id: item.parent_product_id ?? null,
-          }))
+          const items = buildLoadedFormItems(detail.items)
           setFormItems(items)
           // 批量加载已有产品的利润率和店铺分组SKU
           const productIds = items.map((i: any) => i.product_id).filter(Boolean) as number[]

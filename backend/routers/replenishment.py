@@ -586,6 +586,20 @@ async def batch_convert_to_purchase_order(
         if not items:
             raise HTTPException(status_code=400, detail="选中的补货单没有明细")
 
+        # 过滤孤立配件：配件的 parent_product_id 必须在同一张补货单的成品行中存在
+        finished_product_ids_by_order = {}
+        for item in items:
+            order_id, pid, parent_product_id = item[0], item[1], item[2]
+            if order_id not in finished_product_ids_by_order:
+                finished_product_ids_by_order[order_id] = set()
+            if parent_product_id is None:
+                finished_product_ids_by_order[order_id].add(pid)
+
+        items = [
+            item for item in items
+            if item[2] is None or item[2] in finished_product_ids_by_order.get(item[0], set())
+        ]
+
         # 按（产品、父产品、店铺分组）汇总数量
         product_agg = {}
         for item in items:
