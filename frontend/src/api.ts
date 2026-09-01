@@ -1391,4 +1391,104 @@ export const suppliersApi = {
   delete: (id: number) => apiClient.delete(`/suppliers/${id}`),
 };
 
+// ========== AI 创作中心 API ==========
+export interface AmazonProductAnalysisResult {
+  product_name_cn: string;
+  product_name_en: string;
+  product_type: string;
+  target_audience: string[];
+  selling_points: string[];
+  material: string[];
+  usage_scenarios: string[];
+  usage_methods: string[];
+  product_components: string[];
+  colors: string[];
+  amazon_category: string;
+  keywords: string[];
+  visible_text: string[];
+  confidence: number;
+  uncertain_information: string[];
+}
+
+export interface VideoStoryboardShot {
+  timestamp: string;
+  shot_purpose: string;
+  shot_type: string;
+  camera_movement: string;
+  character_action: string;
+  character_expression: string;
+  product_action: string;
+  product_position: string;
+  composition: string;
+  environment: string;
+  voiceover: string;
+  voiceover_cn: string;
+  sound: string;
+}
+
+export interface CreativeStrategy {
+  persona_identity: string;
+  persona_role: string;
+  age: string;
+  relationship_to_product: string;
+  story_background: string;
+  consumption_scene: string;
+  core_pain_point: string;
+  core_selling_point: string;
+  emotion: string;
+  video_style: string;
+  camera_language: string;
+}
+
+export interface VideoConcept {
+  concept_title: string;
+  marketing_goal: string;
+  creative_strategy: CreativeStrategy;
+  story: string;
+  character: string;
+  environment: string;
+  music: string;
+  storyboard: VideoStoryboardShot[];
+}
+
+export interface VideoPrompt {
+  concept_title: string;
+  final_prompt: string;
+}
+
+export type VideoMarket = 'US' | 'UK' | 'CA' | 'AU' | 'DE' | 'FR' | 'JP' | 'CN';
+export type VideoDuration = 15 | 30 | 45 | 60;
+
+export const aiCreationApi = {
+  analyzeProduct: (files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult }>(
+      "/ai-creation/analyze-product",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 300000,
+      },
+    );
+  },
+  generateVideoConcepts: (
+    product_profile: AmazonProductAnalysisResult,
+    market: VideoMarket = "US",
+    duration: VideoDuration = 30,
+    previous_concepts?: VideoConcept[],
+  ) =>
+    apiClient.post<{ success: boolean; data: VideoConcept[] }>(
+      "/ai-creation/generate-video-concepts",
+      { product_profile, market, duration, previous_concepts },
+      { timeout: 300000 },
+    ),
+  generateVideoPrompts: (product_profile: AmazonProductAnalysisResult, concepts: VideoConcept[]) =>
+    apiClient.post<{ success: boolean; data: VideoPrompt[] }>(
+      "/ai-creation/generate-video-prompts",
+      { product_profile, concepts },
+      { timeout: 300000 },
+    ),
+};
+
 export default apiClient;

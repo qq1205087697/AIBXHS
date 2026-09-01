@@ -595,6 +595,8 @@ async def init_default_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        # AI 创作中心
+        {"name": "使用AI创作中心", "code": "ai_creation:use", "type": "function", "module": "AI创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -691,6 +693,8 @@ async def add_missing_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        # AI 创作中心
+        {"name": "使用AI创作中心", "code": "ai_creation:use", "type": "function", "module": "AI创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},

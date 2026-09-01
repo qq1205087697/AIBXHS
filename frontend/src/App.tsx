@@ -26,6 +26,7 @@ import WarehouseManagement from './pages/WarehouseManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
 import ProductSelection from './pages/ProductSelection'
+import AICreationCenter from './pages/AICreationCenter'
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -281,6 +282,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <PermissionManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/ai-creation"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AICreationCenter />
             </MainLayout>
           </ProtectedRoute>
         }

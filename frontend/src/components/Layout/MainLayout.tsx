@@ -48,6 +48,7 @@ import {
   ChevronRight,
   Star,
   AlertTriangle,
+  Sparkles,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -303,6 +304,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           icon: <Target size={20} />,
           label: '选品机器人',
         }] : []),
+    ...(hasPermission('ai_creation:use')
+      ? [{
+          key: '/ai-creation',
+          icon: <Sparkles size={20} />,
+          label: 'AI创作中心',
+          shortLabel: '创作',
+        }] : []),
     {
       key: '/data-alert',
       icon: <AlertTriangle size={20} />,
@@ -454,6 +462,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
       '/product-selection': '选品机器人',
+      '/ai-creation': 'AI创作中心',
     };
     return pathMap[location.pathname] || "未知页面";
   };
