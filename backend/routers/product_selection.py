@@ -494,28 +494,19 @@ def _calc_rating_score(rating: float | None, review_count: int | None) -> float:
     if rating is None:
         return 20.0
 
-    review_count = review_count or 0
     r = round(rating, 1)
 
-    if review_count <= 3:
-        # 评论极少，星级参考价值低，惩罚最轻
-        if r >= 4.8: return 16.0
-        elif r >= 4.5: return 14.0
-        elif r >= 4.2: return 12.0
-        else: return 6.0
-    elif review_count <= 10:
-        # 有一定评论量，惩罚居中
-        if r >= 4.7: return 14.0
-        elif r >= 4.4: return 11.0
-        elif r >= 4.1: return 8.0
-        else: return 4.0
-    else:
-        # 评论数 > 10，星级证据充分，低星惩罚最重
-        if r >= 4.7: return 18.0
-        elif r >= 4.5: return 15.0
-        elif r >= 4.3: return 12.0
-        elif r >= 4.0: return 9.0
-        else: return 2.0
+    # 只按星级评分（抓取数据评论数普遍<10条，不再按评论数分档）
+    if r >= 4.8: base = 18.0
+    elif r >= 4.5: base = 16.0
+    elif r >= 4.2: base = 13.0
+    elif r >= 4.0: base = 10.0
+    else: base = 5.0
+
+    # 评论极少(≤3条)时参考价值低，打9折
+    if (review_count or 0) <= 3:
+        base = round(base * 0.9, 1)
+    return base
 
 
 def _calc_sales_score(monthly_sales: int | None) -> float:
@@ -532,11 +523,11 @@ def _calc_sales_score(monthly_sales: int | None) -> float:
 
 
 def _calc_penalty_factor(rating_score: float) -> float:
-    """根据星级评分计算惩罚因子"""
+    """根据星级评分计算惩罚因子（阈值与新星级阶梯对齐）"""
     if rating_score >= 16: return 1.00
-    elif rating_score >= 12: return 0.95
-    elif rating_score >= 8: return 0.85
-    elif rating_score >= 4: return 0.70
+    elif rating_score >= 13: return 0.95
+    elif rating_score >= 10: return 0.85
+    elif rating_score >= 5: return 0.70
     else: return 0.50
 
 
