@@ -1183,6 +1183,7 @@ export const productSelectionApi = {
     product_type?: string;
     monthly_sales?: number;
     traffic_trend?: string;
+    category?: string[];
   }) => apiClient.post("/product-selection/", data),
   update: (
     id: number,
@@ -1203,6 +1204,7 @@ export const productSelectionApi = {
       product_type?: string;
       monthly_sales?: number;
       traffic_trend?: string;
+      category?: string[];
     },
   ) => apiClient.put(`/product-selection/${id}`, data),
   delete: (id: number) => apiClient.delete(`/product-selection/${id}`),
@@ -1212,9 +1214,13 @@ export const productSelectionApi = {
     apiClient.post(
       "/product-selection/batch-analyze",
       ids,
-      { timeout: 300000 },
+      { timeout: 30000 },
     ),
+  batchAnalyzeProgress: (batchId: string) =>
+    apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
   recalcScores: () => apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  switchRate: (useRealtime: boolean) =>
+    apiClient.post("/product-selection/switch-rate", { use_realtime: useRealtime }, { timeout: 60000 }),
 };
 // ========== Ads API ==========
 export const adsApi = {

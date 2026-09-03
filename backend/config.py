@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
+    OPENAI_VISION_MODEL: str = ""
+    OPENAI_VISION_RESPONSE_FORMAT: str = ""
 
     # 火山引擎 TOS 对象存储配置
     # 获取方式：

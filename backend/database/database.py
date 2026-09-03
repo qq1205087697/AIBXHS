@@ -168,6 +168,29 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # 列已存在则忽略
+            # 为已存在的表添加汇率列（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1人民币兑外币)' AFTER cost_at_15_profit"))
+                conn.commit()
+            except Exception:
+                pass
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1人民币兑外币)' AFTER scrape_rate"))
+                conn.commit()
+            except Exception:
+                pass
+            # 为已存在的表添加类目列（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN category VARCHAR(1000) NULL COMMENT '类目(JSON列表)' AFTER realtime_rate"))
+                conn.commit()
+            except Exception:
+                pass
+            # 头程改为3位小数（如果需要）
+            try:
+                conn.execute(text("ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'"))
+                conn.commit()
+            except Exception:
+                pass
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:
