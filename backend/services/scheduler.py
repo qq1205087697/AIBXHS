@@ -363,7 +363,14 @@ def analyze_unanalyzed_reviews_job():
 2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
 3. low（第三级）：其他所有场景
 
-输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low"}}"""
+部门板块分类规则（department字段，必须输出以下四个之一）：
+- operations（运营板块）：文案问题、产品货不对板
+- purchasing（采购板块）：质量不好、字母/印刷出错
+- warehouse（仓库板块）：损坏
+- design（美工板块）：尺寸、颜色、图片、夸大
+根据评论内容判断最符合的板块，无法判断时归入operations。
+
+输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}"""
 
                 response = client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -385,21 +392,23 @@ def analyze_unanalyzed_reviews_job():
 
                 # 保存AI分析结果（使用ON DUPLICATE KEY UPDATE避免并发重复插入）
                 thread_db.execute(text("""
-                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response)
-                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw)
-                    ON DUPLICATE KEY UPDATE 
+                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department)
+                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw, :dept)
+                    ON DUPLICATE KEY UPDATE
                         sentiment = VALUES(sentiment),
                         sentiment_score = VALUES(sentiment_score),
                         key_points = VALUES(key_points),
                         topics = VALUES(topics),
                         suggestions = VALUES(suggestions),
                         summary = VALUES(summary),
-                        raw_response = VALUES(raw_response)
+                        raw_response = VALUES(raw_response),
+                        department = VALUES(department)
                 """), {
                     "tid": tenant_id, "rid": review_id, "model": settings.OPENAI_MODEL,
                     "sentiment": ar.get("sentiment", "negative"), "score": ar.get("sentiment_score", 3),
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
-                    "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc
+                    "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc,
+                    "dept": ar.get("department", "")
                 })
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
@@ -698,24 +707,17 @@ def recalc_product_selection_scores_job():
         def calc_rating(rating, review_count):
             if rating is None:
                 return 20.0
-            rc = review_count or 0
             r = round(rating, 1)
-            if rc <= 3:
-                if r >= 4.8: return 16.0
-                elif r >= 4.5: return 14.0
-                elif r >= 4.2: return 12.0
-                else: return 6.0
-            elif rc <= 10:
-                if r >= 4.7: return 14.0
-                elif r >= 4.4: return 11.0
-                elif r >= 4.1: return 8.0
-                else: return 3.0
-            else:
-                if r >= 4.7: return 18.0
-                elif r >= 4.5: return 15.0
-                elif r >= 4.3: return 12.0
-                elif r >= 4.0: return 9.0
-                else: return 5.0
+            # 只按星级评分（抓取数据评论数普遍<10条，不再按评论数分档）
+            if r >= 4.8: base = 18.0
+            elif r >= 4.5: base = 16.0
+            elif r >= 4.2: base = 13.0
+            elif r >= 4.0: base = 10.0
+            else: base = 5.0
+            # 评论极少(≤3条)时参考价值低，打9折
+            if (review_count or 0) <= 3:
+                base = round(base * 0.9, 1)
+            return base
 
         def calc_sales(s):
             s = s or 0
@@ -729,10 +731,11 @@ def recalc_product_selection_scores_job():
             return 20.0
 
         def calc_penalty(rs):
+            # 阈值与新星级阶梯对齐
             if rs >= 16: return 1.00
-            elif rs >= 12: return 0.95
-            elif rs >= 8: return 0.85
-            elif rs >= 4: return 0.70
+            elif rs >= 13: return 0.95
+            elif rs >= 10: return 0.85
+            elif rs >= 5: return 0.70
             else: return 0.50
 
         def calc_composite(pf, ts, ss):

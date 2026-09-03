@@ -49,6 +49,7 @@ async def get_reviews(
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     status: Optional[str] = Query(None, description="状态筛选: new, read, processing, resolved"),
     importance_level: Optional[str] = Query(None, description="重要等级筛选: high, medium, low"),
+    department: Optional[str] = Query(None, description="问题板块筛选: operations, purchasing, warehouse, design"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -104,6 +105,11 @@ async def get_reviews(
         if end_date:
             where_conditions.append("r.review_date <= :end_date")
             params["end_date"] = f"{end_date} 23:59:59"
+        if department:
+            where_conditions.append(
+                "EXISTS (SELECT 1 FROM review_analyses rad WHERE rad.review_id = r.id AND rad.tenant_id = r.tenant_id AND rad.deleted_at IS NULL AND rad.department = :department)"
+            )
+            params["department"] = department
         # 处理状态筛选
         if status is not None and status != '' and str(status).strip() != '':
             status_str = str(status).strip()
@@ -240,12 +246,12 @@ async def get_reviews(
         reviews = result.fetchall()
 
         analysis_query = text("""
-            SELECT review_id, key_points, summary, topics, suggestions
+            SELECT review_id, key_points, summary, topics, suggestions, department
             FROM review_analyses
             WHERE tenant_id = :tenant_id AND deleted_at IS NULL
         """)
         analysis_result = db.execute(analysis_query, {"tenant_id": current_user.tenant_id})
-        analysis_map = {row[0]: {"key_points": row[1], "summary": row[2], "topics": row[3], "suggestions": row[4]} for row in analysis_result}
+        analysis_map = {row[0]: {"key_points": row[1], "summary": row[2], "topics": row[3], "suggestions": row[4], "department": row[5]} for row in analysis_result}
 
         review_data = []
         for idx, row in enumerate(reviews):
@@ -323,6 +329,7 @@ async def get_reviews(
                 "keyPoints": key_points,
                 "topics": topics,
                 "suggestions": suggestions,
+                "department": analysis.get("department", ""),
                 "date": row[date_idx].strftime("%Y-%m-%d %H:%M:%S") if row[date_idx] else "",
                 "status": row[status_idx] or "new",
                 "isNew": is_new,
@@ -431,6 +438,100 @@ async def get_review_stats(db: Session = Depends(get_db), current_user: User = D
         raise HTTPException(status_code=500, detail=f"获取统计数据失败: {str(e)}")
 
 
+@router.get("/negative-ranking")
+async def get_negative_ranking(
+    months: int = Query(6, ge=1, le=12),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """半年差评排行榜：按ASIN统计差评数量排序，含重要性分布与问题板块分布"""
+    try:
+        params = {"tenant_id": current_user.tenant_id, "months": months}
+        store_filter = ""
+        # 非管理员用户按店铺过滤
+        is_admin = False
+        if current_user.role_id:
+            role = db.execute(text("""
+                SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+            """), {"role_id": current_user.role_id}).fetchone()
+            if role and role[0] == "admin":
+                is_admin = True
+
+        if not is_admin:
+            user_stores = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
+            ).fetchall()
+            store_id_list = [s[0] for s in user_stores]
+            if store_id_list:
+                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
+                for i, sid in enumerate(store_id_list):
+                    params[f"s_{i}"] = sid
+                store_filter = f"AND r.store_id IN ({placeholders})"
+            else:
+                store_filter = "AND 1=0"
+
+        query = text(f"""
+            SELECT r.asin,
+                   COALESCE(p.product_name, r.asin) AS product_name,
+                   p.sku,
+                   COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN r.importance_level = 'high' THEN 1 ELSE 0 END), 0) AS high_cnt,
+                   COALESCE(SUM(CASE WHEN r.importance_level = 'medium' OR r.importance_level IS NULL THEN 1 ELSE 0 END), 0) AS medium_cnt,
+                   COALESCE(SUM(CASE WHEN r.importance_level = 'low' THEN 1 ELSE 0 END), 0) AS low_cnt,
+                   COALESCE(SUM(CASE WHEN ra.department = 'operations' THEN 1 ELSE 0 END), 0) AS operations_cnt,
+                   COALESCE(SUM(CASE WHEN ra.department = 'purchasing' THEN 1 ELSE 0 END), 0) AS purchasing_cnt,
+                   COALESCE(SUM(CASE WHEN ra.department = 'warehouse' THEN 1 ELSE 0 END), 0) AS warehouse_cnt,
+                   COALESCE(SUM(CASE WHEN ra.department = 'design' THEN 1 ELSE 0 END), 0) AS design_cnt
+            FROM reviews r
+            LEFT JOIN review_analyses ra ON r.id = ra.review_id AND ra.deleted_at IS NULL
+            LEFT JOIN (
+                SELECT pp.asin, MAX(p2.name) AS product_name, MAX(p2.product_code) AS sku
+                FROM platform_products pp
+                JOIN products p2 ON p2.id = pp.product_id AND p2.deleted_at IS NULL
+                WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+                GROUP BY pp.asin
+            ) p ON r.asin = p.asin
+            WHERE r.rating <= 3
+              AND r.tenant_id = :tenant_id
+              AND r.review_date >= DATE_SUB(NOW(), INTERVAL :months MONTH)
+              AND r.asin IS NOT NULL AND r.asin != ''
+              {store_filter}
+            GROUP BY r.asin, product_name, p.sku
+            ORDER BY total DESC
+            LIMIT 50
+        """)
+        result = db.execute(query, params)
+        rows = result.fetchall()
+
+        ranking = []
+        for idx, row in enumerate(rows):
+            dept_counts = {
+                "operations": row[7], "purchasing": row[8],
+                "warehouse": row[9], "design": row[10],
+            }
+            main_department = max(dept_counts, key=dept_counts.get) if any(dept_counts.values()) else ""
+            ranking.append({
+                "rank": idx + 1,
+                "asin": row[0],
+                "product_name": row[1],
+                "sku": row[2] or "",
+                "total": row[3],
+                "high": row[4],
+                "medium": row[5],
+                "low": row[6],
+                "operations": row[7],
+                "purchasing": row[8],
+                "warehouse": row[9],
+                "design": row[10],
+                "main_department": main_department,
+            })
+
+        return {"success": True, "data": {"months": months, "ranking": ranking}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取差评排行榜失败: {str(e)}")
+
+
 @router.get("/{review_id}")
 async def get_review_detail(review_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """获取差评详情"""
@@ -495,7 +596,7 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             raise HTTPException(status_code=404, detail=f"差评 {review_id} 不存在")
 
         analysis_query = text("""
-            SELECT key_points, summary, topics, suggestions
+            SELECT key_points, summary, topics, suggestions, department
             FROM review_analyses
             WHERE review_id = :review_id AND tenant_id = :tenant_id AND deleted_at IS NULL
         """)
@@ -519,7 +620,8 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             "sourceUrl": "",
             "analysis": analysis_row[1] if analysis_row else "",
             "topics": analysis_row[2] if analysis_row else [],
-            "suggestions": analysis_row[3] if analysis_row else []
+            "suggestions": analysis_row[3] if analysis_row else [],
+            "department": analysis_row[4] if analysis_row else ""
         }
         
         if isinstance(review_detail["keyPoints"], str):

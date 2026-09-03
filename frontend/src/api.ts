@@ -217,6 +217,7 @@ export const reviewsApi = {
     end_date?: string;
     status?: string;
     importance_level?: string;
+    department?: string;
   }) => {
     // 过滤掉undefined、null和空字符串的参数
     const filteredParams: any = {};
@@ -238,6 +239,8 @@ export const reviewsApi = {
     apiClient.post("/reviews/analyze/batch", ids),
   getNewCount: () => apiClient.get("/reviews/new/count"),
   getStats: () => apiClient.get("/reviews/stats"),
+  getNegativeRanking: (months?: number) =>
+    apiClient.get("/reviews/negative-ranking", { params: months ? { months } : {} }),
 };
 
 // ========== Departments API ==========

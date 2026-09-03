@@ -1754,11 +1754,10 @@ const ProductSelection: React.FC = () => {
                           星级评分
                           <Tooltip title={
                             <div style={{ maxWidth: 260 }}>
-                              <div><strong>根据产品评分+评论数查表，满分20</strong></div>
+                              <div><strong>根据产品星级评分查表，满分20</strong></div>
                               <div style={{ marginTop: 6 }}>
-                                <div>评论≤3条：4.8+→16 | 4.5+→14 | 4.2+→12 | 更低→6</div>
-                                <div>评论4-10条：4.7+→14 | 4.4+→11 | 4.1+→8 | 更低→4</div>
-                                <div>评论&gt;10条：4.7+→18 | 4.5+→15 | 4.3+→12 | 4.0+→9 | 更低→2</div>
+                                <div>4.8+→18 | 4.5+→16 | 4.2+→13 | 4.0+→10 | 更低→5</div>
+                                <div>评论≤3条时打9折</div>
                                 <div>无评分时默认20分</div>
                               </div>
                             </div>
@@ -1781,10 +1780,10 @@ const ProductSelection: React.FC = () => {
                               <div><strong>根据星级评分阶梯取值，范围0.50~1.00</strong></div>
                               <div style={{ marginTop: 6 }}>
                                 <div>星级≥16 → 1.00（无惩罚）</div>
-                                <div>星级≥12 → 0.95（轻微）</div>
-                                <div>星级≥8 → 0.85（中等）</div>
-                                <div>星级≥4 → 0.70（较重）</div>
-                                <div>星级&lt;4 → 0.50（严重）</div>
+                                <div>星级≥13 → 0.95（轻微）</div>
+                                <div>星级≥10 → 0.85（中等）</div>
+                                <div>星级≥5 → 0.70（较重）</div>
+                                <div>星级&lt;5 → 0.50（严重）</div>
                               </div>
                               <div style={{ marginTop: 6 }}>乘以综合评分中的流量部分</div>
                             </div>

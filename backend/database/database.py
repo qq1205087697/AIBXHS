@@ -98,6 +98,11 @@ def init_db():
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN deleted_at DATETIME NULL'))
                 except Exception as e:
                     print(f"添加 {table}.deleted_at 字段失败（可能已存在）: {e}")
+            # 差评分析表新增部门板块分类字段
+            try:
+                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN department VARCHAR(20) NULL COMMENT '问题板块:operations/purchasing/warehouse/design'"))
+            except Exception as e:
+                print(f"添加 review_analyses.department 字段失败（可能已存在）: {e}")
             conn.commit()
         
         print("数据库表结构创建成功")
