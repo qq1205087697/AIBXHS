@@ -720,11 +720,12 @@ def recalc_product_selection_scores_job():
         def calc_sales(s):
             s = s or 0
             if s == 0: return 0.0
-            if s == 1: return 6.0
-            if s == 2: return 9.0
-            if 3 <= s <= 4: return 12.0
-            if 5 <= s <= 9: return 15.0
-            if 10 <= s <= 19: return 18.0
+            if 1 <= s <= 5: return 3.0
+            if 6 <= s <= 10: return 6.0
+            if 11 <= s <= 15: return 9.0
+            if 16 <= s <= 20: return 12.0
+            if 21 <= s <= 25: return 15.0
+            if 26 <= s <= 30: return 18.0
             return 20.0
 
         def calc_penalty(rs):

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, Alert,
   InputNumber, Tooltip, Progress, Statistic, Row, Col, Typography, Drawer, Descriptions, Image, Dropdown, Tabs
 } from 'antd'
@@ -31,6 +31,9 @@ interface ProductSelectionItem {
   last_mile_cost: number | null
   weight_kg: number | null
   cost_at_15_profit: number | null
+  scrape_rate: number | null
+  realtime_rate: number | null
+  category: string[] | null
   product_type: string
   site: string
   monthly_sales: number | null
@@ -81,6 +84,10 @@ const ProductSelection: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [analyzingIds, setAnalyzingIds] = useState<Set<number>>(new Set())
   const [recalcing, setRecalcing] = useState(false)
+  const [useRealtimeRate, setUseRealtimeRate] = useState(false)
+  const [switchingRate, setSwitchingRate] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ total: number; completed: number; success: number; failed: number; status: string } | null>(null)
+  const batchPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [analyzeModal, setAnalyzeModal] = useState<{
     open: boolean;
     mode: 'single' | 'batch';
@@ -229,6 +236,7 @@ const ProductSelection: React.FC = () => {
       product_type: item.product_type || undefined,
       monthly_sales: item.monthly_sales,
       traffic_trend: item.traffic_trend || '',
+      category: (item.category || []).join(' > '),
     })
     setModalOpen(true)
   }
@@ -236,11 +244,18 @@ const ProductSelection: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields()
+      // 类目：输入框为 "a > b > c" 文本，转换为列表存储
+      const categoryText: string = (values.category || '').trim()
+      const categoryList = categoryText
+        ? categoryText.split(/[>\/]/).map((s: string) => s.trim()).filter(Boolean)
+        : []
+      const payload = { ...values, category: categoryList }
+      delete (payload as any).categoryText
       if (editingItem) {
-        await productSelectionApi.update(editingItem.id, values)
+        await productSelectionApi.update(editingItem.id, payload)
         message.success('更新成功')
       } else {
-        await productSelectionApi.create(values)
+        await productSelectionApi.create(payload)
         message.success('创建成功')
       }
       setModalOpen(false)
@@ -314,7 +329,7 @@ const ProductSelection: React.FC = () => {
     }
   }
 
-  // 执行批量AI分析（可跳过已分析的）
+  // 执行批量AI分析（后台异步并发，轮询进度）
   const doBatchAnalyze = async (skipExisting: boolean = false) => {
     if (!analyzeModal.targetIds?.length) return
     let ids = analyzeModal.targetIds
@@ -334,19 +349,50 @@ const ProductSelection: React.FC = () => {
     try {
       const res = await productSelectionApi.batchAnalyze(ids)
       if (res.data.success) {
-        const successCount = res.data.data.filter((d: any) => d.success).length
-        message.success(`批量分析完成，成功 ${successCount}/${res.data.data.length} 条`)
-        setSelectedRowKeys([])
-        fetchData()
+        const batchId = res.data.data.batch_id
+        const total = res.data.data.total
+        message.info(`已启动批量AI分析，共 ${total} 条，后台并发处理中`)
+        setBatchProgress({ total, completed: 0, success: 0, failed: 0, status: 'running' })
+        if (batchPollTimerRef.current) clearInterval(batchPollTimerRef.current)
+        batchPollTimerRef.current = setInterval(async () => {
+          try {
+            const p = await productSelectionApi.batchAnalyzeProgress(batchId)
+            if (p.data.success) {
+              const d = p.data.data
+              setBatchProgress(d)
+              if (d.status === 'done') {
+                if (batchPollTimerRef.current) clearInterval(batchPollTimerRef.current)
+                batchPollTimerRef.current = null
+                setBatchProgress(null)
+                setAnalyzingIds(new Set())
+                message.success(`批量分析完成，成功 ${d.success}/${d.total} 条${d.failed > 0 ? `，失败 ${d.failed} 条` : ''}`)
+                setSelectedRowKeys([])
+                fetchData()
+              }
+            }
+          } catch {
+            // 任务不存在（如后端重启），停止轮询
+            if (batchPollTimerRef.current) clearInterval(batchPollTimerRef.current)
+            batchPollTimerRef.current = null
+            setBatchProgress(null)
+            setAnalyzingIds(new Set())
+            message.warning('批量分析任务状态丢失，请刷新页面查看结果')
+          }
+        }, 3000)
       }
     } catch (e: any) {
       message.error(e.response?.data?.detail || '批量分析失败')
-    } finally {
       setAnalyzingIds(new Set())
     }
   }
 
   // 详情抽屉内的分析按钮也走弹窗确认
+  useEffect(() => {
+    return () => {
+      if (batchPollTimerRef.current) clearInterval(batchPollTimerRef.current)
+    }
+  }, [])
+
   const handleDetailAnalyze = () => {
     if (!detailItem) return
     setAnalyzeModal({ open: true, mode: 'single', targetId: detailItem.id, targetItem: detailItem })
@@ -538,6 +584,27 @@ const ProductSelection: React.FC = () => {
     setDetailOpen(true)
   }
 
+  const handleSwitchRate = async () => {
+    const target = !useRealtimeRate
+    setSwitchingRate(true)
+    try {
+      const res = await productSelectionApi.switchRate(target)
+      if (res.data.success) {
+        setUseRealtimeRate(target)
+        const rates = res.data.rates || {}
+        const rateStr = Object.entries(rates).map(([k, v]) => `${k}: ${v}`).join('，')
+        message.success(target ? `已切换为实时汇率并重算（${rateStr}）` : '已切换为抓取时汇率并重算')
+        fetchData()
+      } else {
+        message.error('切换汇率失败')
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '切换汇率失败')
+    } finally {
+      setSwitchingRate(false)
+    }
+  }
+
   // 计算类型列的最大宽度（自适应最长类型文本）
   const productTypeMaxWidth = useMemo(() => {
     if (!items.length) return 100
@@ -555,6 +622,27 @@ const ProductSelection: React.FC = () => {
     // Tag组件有左右padding 7px * 2 = 14px，边框 1px * 2 = 2px，加上额外空间
     return Math.max(80, Math.min(300, Math.ceil(maxWidth) + 30))
   }, [items])
+
+  // 当前使用的汇率（按站点货币去重，供问号提示展示）
+  const currentRates = useMemo(() => {
+    const getCurrencyCode = (site: string | undefined): string => {
+      if (!site) return 'USD'
+      if (site.includes('德') || site.toLowerCase().includes('de')) return 'EUR'
+      if (site.includes('英') || site.toLowerCase().includes('uk')) return 'GBP'
+      return 'USD'
+    }
+    const rateMap = new Map<string, string>()
+    items.forEach(item => {
+      const rate = useRealtimeRate ? item.realtime_rate : item.scrape_rate
+      if (rate != null) {
+        const code = getCurrencyCode(item.site)
+        if (!rateMap.has(code)) {
+          rateMap.set(code, String(rate))
+        }
+      }
+    })
+    return Array.from(rateMap.entries()).map(([currency, rate]) => ({ currency, rate }))
+  }, [items, useRealtimeRate])
 
   const columns: ColumnsType<ProductSelectionItem> = useMemo(() => [
     {
@@ -672,9 +760,9 @@ const ProductSelection: React.FC = () => {
       title: '头程',
       dataIndex: 'first_leg_cost',
       key: 'first_leg_cost',
-      width: 80,
+      width: 90,
       sorter: true,
-      render: (val: number | null, record: ProductSelectionItem) => val != null ? `${getCurrencySymbol(record.site)}${val.toFixed(2)}` : '-',
+      render: (val: number | null, record: ProductSelectionItem) => val != null ? `${getCurrencySymbol(record.site)}${val.toFixed(3)}` : '-',
     },
     {
       title: '尾程',
@@ -693,12 +781,23 @@ const ProductSelection: React.FC = () => {
       render: (val: number | null) => val != null ? val : '-',
     },
     {
-      title: '15%毛利成本',
+      title: '进货价（需低于）',
       dataIndex: 'cost_at_15_profit',
       key: 'cost_at_15_profit',
-      width: 110,
+      width: 120,
       sorter: true,
       render: (val: number | null) => val != null ? `¥${val.toFixed(2)}` : '-',
+    },
+    {
+      title: '15%毛利',
+      dataIndex: 'price',
+      key: 'profit_15',
+      width: 100,
+      render: (_: number | null, record: ProductSelectionItem) => {
+        const rate = useRealtimeRate ? record.realtime_rate : record.scrape_rate
+        if (record.price != null && rate) return `¥${(record.price * 0.15 / rate).toFixed(2)}`
+        return '-'
+      },
     },
     {
       title: '评分',
@@ -959,7 +1058,7 @@ const ProductSelection: React.FC = () => {
   ].map(col => ({
     ...col,
     sortOrder: col.sorter && col.key === localSort.field ? localSort.order : col.sortOrder,
-  })), [localSort, productTypeMaxWidth])
+  })), [localSort, productTypeMaxWidth, useRealtimeRate])
 
   const rowSelection = {
     selectedRowKeys,
@@ -1097,8 +1196,8 @@ const ProductSelection: React.FC = () => {
                   {
                     key: 'batch-analyze',
                     icon: <RobotOutlined />,
-                    label: 'AI分析',
-                    disabled: selectedRowKeys.length === 0,
+                    label: batchProgress ? `AI分析中 ${batchProgress.completed}/${batchProgress.total}` : 'AI分析',
+                    disabled: selectedRowKeys.length === 0 || !!batchProgress,
                     onClick: handleBatchAnalyze,
                   },
                   {
@@ -1131,6 +1230,29 @@ const ProductSelection: React.FC = () => {
             >
               重新计算分数
             </Button>
+            <Button
+              onClick={handleSwitchRate}
+              loading={switchingRate}
+              type={useRealtimeRate ? 'primary' : 'default'}
+            >
+              {useRealtimeRate ? '切换抓取时汇率' : '切换实时汇率'}
+            </Button>
+            <Tooltip
+              title={
+                <div>
+                  <div>当前使用：{useRealtimeRate ? '实时汇率' : '抓取时汇率'}</div>
+                  {currentRates.length > 0 ? (
+                    currentRates.map(r => (
+                      <div key={r.currency}>1 CNY：{r.rate}{r.currency}</div>
+                    ))
+                  ) : (
+                    <div>暂无汇率数据，请先切换汇率</div>
+                  )}
+                </div>
+              }
+            >
+              <QuestionCircleOutlined style={{ color: '#999', cursor: 'help', fontSize: 14 }} />
+            </Tooltip>
           </Space>
         }
         style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
@@ -1239,8 +1361,8 @@ const ProductSelection: React.FC = () => {
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="cost_at_15_profit" label="15%毛利时成本">
-                <InputNumber style={{ width: '100%' }} placeholder="成本" min={0} precision={2} prefix="$" />
+              <Form.Item name="cost_at_15_profit" label="进货价（需低于）">
+                <InputNumber style={{ width: '100%' }} placeholder="成本" min={0} precision={2} prefix="¥" />
               </Form.Item>
             </Col>
           </Row>
@@ -1278,6 +1400,13 @@ const ProductSelection: React.FC = () => {
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="category" label="类目">
+                <Input placeholder="多级类目用 > 分隔，如：家居 > 厨房 > 水杯" />
+              </Form.Item>
+            </Col>
+          </Row>
         </Form>
       </Modal>
 
@@ -1285,7 +1414,7 @@ const ProductSelection: React.FC = () => {
         title="选品详情"
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={860}
+        width={980}
       >
         {detailItem && (
           <div>
@@ -1301,7 +1430,7 @@ const ProductSelection: React.FC = () => {
               </div>
             )}
 
-            <Descriptions bordered column={3} size="small" style={{ marginBottom: 24 }}>
+            <Descriptions bordered column={3} size="small" style={{ marginBottom: 24 }} labelStyle={{ width: 110 }}>
               <Descriptions.Item label="ASIN">
                 <span style={{ fontFamily: 'monospace', fontSize: 13, whiteSpace: 'nowrap' }}>{detailItem.asin || '-'}</span>
               </Descriptions.Item>
@@ -1312,20 +1441,33 @@ const ProductSelection: React.FC = () => {
                 {detailItem.site || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="价格">
-                {detailItem.price != null ? `$${detailItem.price.toFixed(2)}` : '-'}
+                {detailItem.price != null ? `${getCurrencySymbol(detailItem.site)}${detailItem.price.toFixed(2)}` : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="佣金">
-                {detailItem.commission != null ? `$${detailItem.commission.toFixed(2)}` : '-'}
+                {detailItem.commission != null ? `${getCurrencySymbol(detailItem.site)}${detailItem.commission.toFixed(2)}` : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="头程">
-                {detailItem.first_leg_cost != null ? `$${detailItem.first_leg_cost.toFixed(2)}` : '-'}
+                {detailItem.first_leg_cost != null ? `${getCurrencySymbol(detailItem.site)}${detailItem.first_leg_cost.toFixed(3)}` : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="尾程">
-                {detailItem.last_mile_cost != null ? `$${detailItem.last_mile_cost.toFixed(2)}` : '-'}
+                {detailItem.last_mile_cost != null ? `${getCurrencySymbol(detailItem.site)}${detailItem.last_mile_cost.toFixed(2)}` : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="重量(kg)">{detailItem.weight_kg ?? '-'}</Descriptions.Item>
-              <Descriptions.Item label="15%毛利成本">
-                {detailItem.cost_at_15_profit != null ? `$${detailItem.cost_at_15_profit.toFixed(2)}` : '-'}
+              <Descriptions.Item label="抓取时汇率">
+                {detailItem.scrape_rate != null ? detailItem.scrape_rate : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="实时汇率">
+                {detailItem.realtime_rate != null ? detailItem.realtime_rate : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="进货价（需低于）">
+                {detailItem.cost_at_15_profit != null ? `¥${detailItem.cost_at_15_profit.toFixed(2)}` : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="15%毛利">
+                {(() => {
+                  const rate = useRealtimeRate ? detailItem.realtime_rate : detailItem.scrape_rate
+                  if (detailItem.price != null && rate) return `¥${(detailItem.price * 0.15 / rate).toFixed(2)}`
+                  return '-'
+                })()}
               </Descriptions.Item>
               <Descriptions.Item label="评分">
                 {detailItem.rating != null ? (
@@ -1334,6 +1476,9 @@ const ProductSelection: React.FC = () => {
               </Descriptions.Item>
               <Descriptions.Item label="评论数">{detailItem.review_count ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="月销量">{detailItem.monthly_sales ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="类目" span={3}>
+                {detailItem.category && detailItem.category.length > 0 ? detailItem.category.join(' > ') : '-'}
+              </Descriptions.Item>
               <Descriptions.Item label="关键词" span={3}>
                 <Text type="secondary" style={{ fontSize: 12 }}>{detailItem.keywords || '-'}</Text>
               </Descriptions.Item>
@@ -1588,9 +1733,9 @@ const ProductSelection: React.FC = () => {
                             <div style={{ maxWidth: 240 }}>
                               <div><strong>根据月销量查表得分，满分20</strong></div>
                               <div style={{ marginTop: 6 }}>
-                                <div>0件 → 0分 | 1件 → 6分 | 2件 → 9分</div>
-                                <div>3-4件 → 12分 | 5-9件 → 15分</div>
-                                <div>10-19件 → 18分 | ≥20件 → 20分</div>
+                                <div>0件 → 0分 | 1-5件 → 3分 | 6-10件 → 6分</div>
+                                <div>11-15件 → 9分 | 16-20件 → 12分</div>
+                                <div>21-25件 → 15分 | 26-30件 → 18分 | &gt;30件 → 20分</div>
                               </div>
                             </div>
                           }><QuestionCircleOutlined style={{ marginLeft: 4, color: '#999', fontSize: 12 }} /></Tooltip>
@@ -1611,9 +1756,9 @@ const ProductSelection: React.FC = () => {
                             <div style={{ maxWidth: 260 }}>
                               <div><strong>根据产品评分+评论数查表，满分20</strong></div>
                               <div style={{ marginTop: 6 }}>
-                                <div>评论≤3条：4.8+→16 | 4.5+→14 | 4.2+→12</div>
-                                <div>评论4-10条：4.7+→14 | 4.4+→11 | 4.1+→8</div>
-                                <div>评论&gt;10条：4.7+→18 | 4.5+→15 | 4.3+→12 | 4.0+→9</div>
+                                <div>评论≤3条：4.8+→16 | 4.5+→14 | 4.2+→12 | 更低→6</div>
+                                <div>评论4-10条：4.7+→14 | 4.4+→11 | 4.1+→8 | 更低→4</div>
+                                <div>评论&gt;10条：4.7+→18 | 4.5+→15 | 4.3+→12 | 4.0+→9 | 更低→2</div>
                                 <div>无评分时默认20分</div>
                               </div>
                             </div>
