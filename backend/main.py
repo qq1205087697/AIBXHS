@@ -51,7 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_aging
 from config import get_settings
 
 settings = get_settings()
@@ -110,6 +110,7 @@ app.include_router(ads.router, prefix="/api")
 app.include_router(ad_rules.router, prefix="/api")
 app.include_router(ad_suggestions.router, prefix="/api")
 app.include_router(ad_execution_logs.router, prefix="/api")
+app.include_router(product_aging.router, prefix="/api")
 
 @app.get("/api/health")
 async def health_check():
@@ -197,6 +198,9 @@ async def shutdown_event():
 
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 
+# SPA 不需要缓存的入口文件
+_NO_CACHE_EXTS = {".html", ".htm"}
+
 @app.middleware("http")
 async def serve_static_middleware(request: Request, call_next):
     path = request.url.path
@@ -207,11 +211,33 @@ async def serve_static_middleware(request: Request, call_next):
     file_path = os.path.join(static_dir, path.lstrip("/"))
     
     if os.path.isfile(file_path):
-        return FileResponse(file_path)
+        # 判断是否带 hash（Vite 输出文件名都带 hash，如 index-abc123.js）
+        is_hashed = "-" in os.path.basename(path) and os.path.splitext(path)[1] in (".js", ".css", ".png", ".jpg", ".svg", ".woff2", ".woff", ".ttf")
+        ext = os.path.splitext(path)[1].lower()
+
+        if ext in _NO_CACHE_EXTS:
+            # index.html / SPA 入口：每次都拉最新
+            response = FileResponse(file_path)
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            return response
+        elif is_hashed:
+            # 带 hash 的产物：内容不变 URL 不变，缓存 1 年
+            response = FileResponse(file_path)
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return response
+        else:
+            return FileResponse(file_path)
     
     index_path = os.path.join(static_dir, "index.html")
     if os.path.isfile(index_path):
-        return FileResponse(index_path)
+        # SPA fallback 也强制 no-cache
+        response = FileResponse(index_path)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
     
     return await call_next(request)
 

@@ -57,6 +57,7 @@ def init_db():
         from models import conversation
         from models import department
         from models import data_warning
+        from models import product_aging_inventory
         
         from models import ad_campaign
         from models import ad_report
@@ -74,6 +75,7 @@ def init_db():
         from models.department import Department, UserDepartment
         from models.data_warning import DataWarning
         from models.product_sales import ProductSales
+        from models.product_aging_inventory import ProductAgingInventory
         from models.threshold_setting import ThresholdSetting
         from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
         from models.local_inventory import LocalInventory

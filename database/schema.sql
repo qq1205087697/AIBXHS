@@ -467,6 +467,23 @@ CREATE TABLE IF NOT EXISTS `notifications` (
     CONSTRAINT `fk_notification_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知记录表';
 
+-- 商品超库龄库存表
+CREATE TABLE IF NOT EXISTS `product_aging_inventory` (
+    `id` INT NOT NULL AUTO_INCREMENT COMMENT '记录ID',
+    `date` DATE NOT NULL COMMENT '日期',
+    `store` VARCHAR(100) NOT NULL COMMENT '店铺',
+    `sku` VARCHAR(200) NOT NULL COMMENT 'SKU',
+    `aging_181_270` INT DEFAULT 0 COMMENT '库龄181-270天数量',
+    `aging_271_365` INT DEFAULT 0 COMMENT '库龄271-365天数量',
+    `aging_366_455` INT DEFAULT 0 COMMENT '库龄366-455天数量',
+    `aging_456_plus` INT DEFAULT 0 COMMENT '库龄456天以上数量',
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted_at` DATETIME DEFAULT NULL COMMENT '删除时间',
+    PRIMARY KEY (`id`),
+    KEY `ix_pai_date_store_sku` (`date`, `store`, `sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商品超库龄库存表';
+
 -- =====================================================
 -- 初始化数据
 -- =====================================================
