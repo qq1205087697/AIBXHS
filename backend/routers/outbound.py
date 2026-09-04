@@ -204,7 +204,6 @@ async def create_outbound_order(
     try:
         if not data.items:
             raise HTTPException(status_code=400, detail="请至少添加一条出库明细")
-
         # 验证：如果是报废类型，每个商品必须选择批次
         if data.outbound_type == "scrap":
             for item in data.items:
@@ -352,13 +351,21 @@ async def confirm_outbound_order(
         outbound_type = order[4]
         store_group_id = order[5]  # 获取店铺分组ID
 
+        # 查询店铺分组名称
+        store_group_name = None
+        if store_group_id:
+            sg_row = db.execute(text(
+                "SELECT name FROM store_groups WHERE id = :gid AND deleted_at IS NULL"
+            ), {"gid": store_group_id}).fetchone()
+            if sg_row:
+                store_group_name = sg_row[0]
+
         items = db.execute(text(
             "SELECT ooi.id, ooi.product_id, ooi.quantity, p.name as product_name, p.product_code, ooi.batch_id "
             "FROM outbound_order_items ooi "
             "LEFT JOIN products p ON p.id = ooi.product_id "
             "WHERE ooi.outbound_order_id = :oid AND ooi.deleted_at IS NULL"
         ), {"oid": order_id}).fetchall()
-
         # 验证：如果是报废类型，每个商品必须选择批次
         if outbound_type == "scrap":
             for item in items:
@@ -390,10 +397,12 @@ async def confirm_outbound_order(
                     db, current_user.tenant_id, product_id, total_quantity, selected_batch_ids[0], store_group_id
                 )
                 if not fulfilled:
-                    group_msg = f"（店铺分组#{store_group_id}）" if store_group_id else ""
+                    product_name = product_items_map[product_id][0][3] or f"产品#{product_id}"
+                    product_code = product_items_map[product_id][0][4] or ""
+                    group_msg = f"（店铺分组: {store_group_name}）" if store_group_name else ""
                     raise HTTPException(
                         status_code=400,
-                        detail=f"产品#{product_id}选择的批次库存不足{group_msg}: 需要{total_quantity}件，当前可用{actual_qty}件"
+                        detail=f"产品「{product_name}」（{product_code}）选择的批次库存不足{group_msg}: 需要{total_quantity}件，当前可用{actual_qty}件"
                     )
             else:
                 # 未选择批次，按 FIFO 自动分配
@@ -401,10 +410,12 @@ async def confirm_outbound_order(
                     db, current_user.tenant_id, product_id, total_quantity, store_group_id
                 )
                 if not fulfilled:
-                    group_msg = f"（店铺分组#{store_group_id}）" if store_group_id else ""
+                    product_name = product_items_map[product_id][0][3] or f"产品#{product_id}"
+                    product_code = product_items_map[product_id][0][4] or ""
+                    group_msg = f"（店铺分组: {store_group_name}）" if store_group_name else ""
                     raise HTTPException(
                         status_code=400,
-                        detail=f"产品#{product_id}库存不足{group_msg}: 需要{total_quantity}件，当前可用{actual_qty}件"
+                        detail=f"产品「{product_name}」（{product_code}）库存不足{group_msg}: 需要{total_quantity}件，当前可用{actual_qty}件"
                     )
             deduction_details_all.extend(details)
 
@@ -533,6 +544,13 @@ async def delete_outbound_order(
             for product_id in product_ids:
                 recalculate_product_local_stock(db, current_user.tenant_id, product_id)
         
+        # 清除关联发货单的出库单ID
+        db.execute(text("""
+            UPDATE shipment_orders
+            SET outbound_order_id = NULL, updated_at = NOW()
+            WHERE outbound_order_id = :oid AND tenant_id = :tid
+        """), {"oid": order_id, "tid": current_user.tenant_id})
+
         before_data = {"order_number": row[1], "status": order_status}
         db.execute(text("UPDATE outbound_orders SET deleted_at = NOW() WHERE id = :id"), {"id": order_id})
         db.execute(text("UPDATE outbound_order_items SET deleted_at = NOW() WHERE outbound_order_id = :oid"), {"oid": order_id})

@@ -6,12 +6,14 @@ import { inboundOrdersApi, productsApi, warehousesApi, productBindingsApi } from
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
+import { useResponsive } from '../hooks/useResponsive'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
 import type { MenuProps } from 'antd'
+import './management-responsive.css'
 const { RangePicker } = DatePicker
 
-// CSS样式：悬停删除图标
+// CSS样式：悬停删除图标 + 响应式布局
 const styleSheet = `
   .product-select-wrapper:hover .product-clear-icon {
     opacity: 1 !important;
@@ -70,6 +72,11 @@ interface InboundOrderItem {
   notes: string
   purchase_order_item_id?: number | null
   purchase_order_number?: string
+  purchase_order_approved_at?: string
+  purchase_ordered_qty?: number
+  purchase_received_qty?: number
+  finished_code?: string
+  finished_name?: string
 }
 
 interface Product {
@@ -181,13 +188,21 @@ const InboundManagement: React.FC = () => {
   const { user, hasPermission } = useAuth()
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
+  const res = useResponsive()
   const [orders, setOrders] = useState<InboundOrder[]>([])
   const [productList, setProductList] = useState<Product[]>([])
   const [warehouseList, setWarehouseList] = useState<WarehouseItem[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
-  // 已关联采购单号映射: poi_id → order_number（查看/编辑时使用）
-  const [linkedPOMap, setLinkedPOMap] = useState<Record<number, string>>({})
+  // 已关联采购单详细信息映射: poi_id → {order_number, approved_at, ordered_qty, received_qty, finished_code, finished_name}
+  const [linkedPOMap, setLinkedPOMap] = useState<Record<number, {
+    order_number: string;
+    approved_at: string;
+    ordered_qty: number;
+    received_qty: number;
+    finished_code: string;
+    finished_name: string;
+  }>>({})
   const [editingOrder, setEditingOrder] = useState<InboundOrder | null>(null)
   const [viewingOrder, setViewingOrder] = useState<InboundOrder | null>(null)
   const [form] = Form.useForm()
@@ -406,6 +421,7 @@ const InboundManagement: React.FC = () => {
     const handler = user?.nickname || user?.username || ''
     form.setFieldsValue({
       order_number: orderNumber,
+      inbound_type: 'purchase',
       handler: handler,
     })
     setFormItems([createEmptyFormItem()])
@@ -442,11 +458,25 @@ const InboundManagement: React.FC = () => {
       // 去重产品列表
       const uniqueProducts = Array.from(new Map(orderProducts.map((p: any) => [p.id, p])).values())
       setProductList(uniqueProducts)
-      // 收集已关联采购单号映射
-      const newLinkedPOMap: Record<number, string> = {}
+      // 收集已关联采购单详细信息映射
+      const newLinkedPOMap: Record<number, {
+        order_number: string;
+        approved_at: string;
+        ordered_qty: number;
+        received_qty: number;
+        finished_code: string;
+        finished_name: string;
+      }> = {}
       for (const item of order.items) {
         if (item.purchase_order_item_id && item.purchase_order_number) {
-          newLinkedPOMap[item.purchase_order_item_id] = item.purchase_order_number
+          newLinkedPOMap[item.purchase_order_item_id] = {
+            order_number: item.purchase_order_number,
+            approved_at: item.purchase_order_approved_at || '',
+            ordered_qty: item.purchase_ordered_qty || 0,
+            received_qty: item.purchase_received_qty || 0,
+            finished_code: item.finished_code || '',
+            finished_name: item.finished_name || '',
+          }
         }
       }
       setLinkedPOMap(newLinkedPOMap)
@@ -513,11 +543,25 @@ const InboundManagement: React.FC = () => {
       // 去重产品列表
       const uniqueProducts = Array.from(new Map(orderProducts.map((p: any) => [p.id, p])).values())
       setProductList(uniqueProducts)
-      // 收集已关联采购单号映射
-      const newLinkedPOMap: Record<number, string> = {}
+      // 收集已关联采购单详细信息映射
+      const newLinkedPOMap: Record<number, {
+        order_number: string;
+        approved_at: string;
+        ordered_qty: number;
+        received_qty: number;
+        finished_code: string;
+        finished_name: string;
+      }> = {}
       for (const item of order.items) {
         if (item.purchase_order_item_id && item.purchase_order_number) {
-          newLinkedPOMap[item.purchase_order_item_id] = item.purchase_order_number
+          newLinkedPOMap[item.purchase_order_item_id] = {
+            order_number: item.purchase_order_number,
+            approved_at: item.purchase_order_approved_at || '',
+            ordered_qty: item.purchase_ordered_qty || 0,
+            received_qty: item.purchase_received_qty || 0,
+            finished_code: item.finished_code || '',
+            finished_name: item.finished_name || '',
+          }
         }
       }
       setLinkedPOMap(newLinkedPOMap)
@@ -628,7 +672,7 @@ const InboundManagement: React.FC = () => {
         Modal.confirm({
           title: diffCheckRes.data.warning_message || '入库数量与采购单数量不一致',
           icon: <InfoCircleOutlined style={{ color: '#faad14' }} />,
-          width: 600,
+          width: res.isMobile ? '95vw' : 600,
           content: (
             <div style={{ maxHeight: 300, overflow: 'auto' }}>
               <p style={{ marginBottom: 8, color: '#666' }}>以下商品入库数量与采购单剩余应收数量不一致：</p>
@@ -729,6 +773,7 @@ const InboundManagement: React.FC = () => {
   }
 
   const handleConfirm = async (id: number) => {
+    const isMobile = res.isMobile
     Modal.confirm({
       title: '确认审批',
       content: '确定要审批此入库订单吗？此操作将自动更新库存。',
@@ -752,7 +797,7 @@ const InboundManagement: React.FC = () => {
                 </div>
               ),
               okText: '我已知晓',
-              width: 600,
+              width: isMobile ? '95vw' : 600,
             })
           } else {
             message.success('入库订单已审批，库存已自动更新')
@@ -771,7 +816,7 @@ const InboundManagement: React.FC = () => {
                 </div>
               ),
               okText: '知道了',
-              width: 500,
+              width: isMobile ? '95vw' : 500,
             })
           } else {
             message.error(detail || '审批失败')
@@ -1229,7 +1274,30 @@ const InboundManagement: React.FC = () => {
       return
     }
 
-    // 为导入的商品加载待收货采购单，加载完成后自动匹配
+    // 将导入的商品补充到 productList，避免 Select 因找不到选项而显示 ID
+    const importedProducts: Product[] = previewItems
+      .filter((item: any) => item.product_id && item.product_name && !productList.some(p => p.id === item.product_id))
+      .map((item: any) => ({
+        id: item.product_id,
+        name: item.product_name,
+        product_code: item.product_code || '',
+        product_type: '',
+      }))
+    if (importedProducts.length > 0) {
+      setProductList(prev => [...prev, ...importedProducts])
+    }
+
+    setEditingOrder(null)
+    setViewingOrder(null)
+    const orderNumber = `IN${dayjs().format('YYYYMMDDHHmmss')}`
+    const handler = user?.nickname || user?.username || ''
+    form.setFieldsValue({
+      order_number: orderNumber,
+      inbound_type: 'purchase',
+      handler: handler,
+    })
+
+    // 为导入的商品加载待收货采购单，加载完成后自动匹配并打开弹窗
     const productIds = [...new Set(newItems.map(i => i.product_id!).filter(Boolean))]
     Promise.all(productIds.map(pid => inboundOrdersApi.getPendingPurchaseItems(pid!)))
       .then(results => {
@@ -1244,7 +1312,7 @@ const InboundManagement: React.FC = () => {
         })
         setPendingPurchaseMap(newPendingMap)
         // 根据数量自动匹配采购单
-        setFormItems(prev => prev.map(item => {
+        const matchedItems = newItems.map(item => {
           if (!item.product_id) return item
           const pendingItems = newPendingMap[item.product_id]
           if (!pendingItems || pendingItems.length === 0) return item
@@ -1268,20 +1336,17 @@ const InboundManagement: React.FC = () => {
             return { ...item, purchase_order_item_ids: matchedIds }
           }
           return item
-        }))
+        })
+        setFormItems(matchedItems)
+        setPreviewModalOpen(false)
+        setModalOpen(true)
       })
-      .catch(() => {})
-
-    setEditingOrder(null)
-    const orderNumber = `IN${dayjs().format('YYYYMMDDHHmmss')}`
-    const handler = user?.nickname || user?.username || ''
-    form.setFieldsValue({
-      order_number: orderNumber,
-      handler: handler,
-    })
-    setFormItems(newItems)
-    setPreviewModalOpen(false)
-    setModalOpen(true)
+      .catch(() => {
+        // 加载采购单失败时仍打开弹窗，但不自动匹配
+        setFormItems(newItems)
+        setPreviewModalOpen(false)
+        setModalOpen(true)
+      })
 
     // 导入时默认选择最新创建的仓库
     fetchWarehouses().then((list) => {
@@ -1291,7 +1356,7 @@ const InboundManagement: React.FC = () => {
     })
 
     message.success('导入成功，请填写入库订单信息')
-  }, [previewItems, productList, user, form])
+  }, [previewItems, productList, user, form, pendingPurchaseMap])
 
   const columns: ColumnsType<InboundOrder> = [
     {
@@ -1312,6 +1377,7 @@ const InboundManagement: React.FC = () => {
       title: '入库类型',
       dataIndex: 'inbound_type',
       key: 'inbound_type',
+      responsive: ['md'],
       width: 110,
       render: (type: string) => (
         <Tag>{inboundTypeLabels[type] || type}</Tag>
@@ -1321,24 +1387,28 @@ const InboundManagement: React.FC = () => {
       title: '仓库',
       dataIndex: 'warehouse',
       key: 'warehouse',
+      responsive: ['md'],
       width: 120,
     },
     {
       title: '发起者',
       dataIndex: 'creator_name',
       key: 'creator_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '审批者',
       dataIndex: 'confirmer_name',
       key: 'confirmer_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '入库日期',
       dataIndex: 'inbound_date',
       key: 'inbound_date',
+      responsive: ['md'],
       width: 170,
       render: (date: string) => date ? dayjs(date).format('YYYY-MM-DD HH:mm:ss') : '-',
     },
@@ -1346,12 +1416,14 @@ const InboundManagement: React.FC = () => {
       title: '总数量',
       dataIndex: 'total_quantity',
       key: 'total_quantity',
+      responsive: ['md'],
       width: 90,
     },
     {
       title: '总金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
+      responsive: ['md'],
       width: 100,
       render: (amount: number) => amount != null ? `¥${amount.toFixed(2)}` : '-',
     },
@@ -1370,6 +1442,7 @@ const InboundManagement: React.FC = () => {
       title: '备注',
       dataIndex: 'notes',
       key: 'notes',
+      responsive: ['md'],
       width: 200,
       ellipsis: true,
     },
@@ -1377,12 +1450,14 @@ const InboundManagement: React.FC = () => {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
+      responsive: ['md'],
       width: 170,
     },
     {
       title: '审批时间',
       dataIndex: 'confirmed_at',
       key: 'confirmed_at',
+      responsive: ['md'],
       width: 170,
     },
     {
@@ -1486,45 +1561,53 @@ const InboundManagement: React.FC = () => {
   ]
 
   return (
-    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="page-container">
       <Card
         loading={loading}
         title={
-          <Space wrap size="middle">
-            <Input
-              placeholder="搜索入库单号、仓库、经办人..."
-              prefix={<SearchOutlined />}
-              allowClear
-              style={{ width: 300 }}
-              value={searchText}
-              onChange={(e) => handleSearch(e.target.value)}
-            />
-            <Select
-              placeholder="入库类型"
-              allowClear
-              style={{ width: 140 }}
-              value={typeFilter}
-              onChange={handleTypeFilter}
-              options={inboundTypeOptions}
-            />
-            <Select
-              placeholder="状态"
-              allowClear
-              style={{ width: 120 }}
-              value={statusFilter}
-              onChange={handleStatusFilter}
-              options={statusOptions}
-            />
-            <RangePicker
-              placeholder={['开始日期', '结束日期']}
-              value={dateRange}
-              onChange={handleDateRangeChange}
-              style={{ width: 300 }}
-            />
-          </Space>
+          <div className="filter-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <div className="filter-item">
+              <Input
+                placeholder="搜索入库单号、仓库、经办人..."
+                prefix={<SearchOutlined />}
+                allowClear
+                style={{ width: 300 }}
+                value={searchText}
+                onChange={(e) => handleSearch(e.target.value)}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="入库类型"
+                allowClear
+                style={{ width: 140 }}
+                value={typeFilter}
+                onChange={handleTypeFilter}
+                options={inboundTypeOptions}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="状态"
+                allowClear
+                style={{ width: 120 }}
+                value={statusFilter}
+                onChange={handleStatusFilter}
+                options={statusOptions}
+              />
+            </div>
+            <div className="filter-item">
+              <RangePicker
+                placeholder={['开始日期', '结束日期']}
+                value={dateRange}
+                onChange={handleDateRangeChange}
+                style={{ width: 300 }}
+              />
+            </div>
+          </div>
         }
         extra={
-          <Space>
+          <div className="action-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {hasPermission('inbound:create') && (
               <>
                 <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>
@@ -1547,12 +1630,13 @@ const InboundManagement: React.FC = () => {
                 新增入库订单
               </Button>
             )}
-          </Space>
+          </div>
         }
         style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
         styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
       >
-        <Table
+        <div className="responsive-table-wrapper">
+<Table
           dataSource={orders}
           columns={columns}
           rowKey="id"
@@ -1566,8 +1650,9 @@ const InboundManagement: React.FC = () => {
             }
           }}
         />
+        </div>
       </Card>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
+      <div className="pagination-wrapper">
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -1582,6 +1667,7 @@ const InboundManagement: React.FC = () => {
       </div>
 
       <Modal
+        className="responsive-modal"
         title={viewingOrder ? '查看入库订单' : (editingOrder ? '编辑入库订单' : '新增入库订单')}
         open={modalOpen}
         onOk={viewingOrder ? () => setModalOpen(false) : handleSubmit}
@@ -1592,7 +1678,7 @@ const InboundManagement: React.FC = () => {
         }}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={viewingOrder || editingOrder ? 640 : 800}
+        width={res.isMobile ? '95vw' : (viewingOrder || editingOrder ? 640 : 800)}
         style={{ top: 20 }}
         styles={{ body: {
           maxHeight: 'calc(100vh - 180px)',
@@ -1601,7 +1687,7 @@ const InboundManagement: React.FC = () => {
         } }}
       >
         <Form form={form} layout="vertical">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item
               name="order_number"
               label="入库单号"
@@ -1621,7 +1707,7 @@ const InboundManagement: React.FC = () => {
               />
             </Form.Item>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item name="warehouse" label="仓库" rules={[{ required: true, message: '请选择仓库' }]}>
               <Select
                 placeholder="请选择仓库"
@@ -1734,7 +1820,7 @@ const InboundManagement: React.FC = () => {
                     </div>
 
                     {/* Row 1: 商品 + 数量 + 单价 + 合计 */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', gap: 12 }}>
+                    <div className="responsive-grid-4">
                       <div style={{ minWidth: 0 }}> {/* 添加 minWidth: 0 防止内容溢出 */}
                         <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>
                           {!isAccessory && <span style={{ color: '#ff4d4f', marginRight: 4 }}>*</span>}商品
@@ -1753,7 +1839,7 @@ const InboundManagement: React.FC = () => {
                             }}
                             onSearch={handleProductSearch}
                             filterOption={false} // 禁用本地过滤，使用后端搜索
-                            onDropdownVisibleChange={(open) => {
+                            onOpenChange={(open) => {
                               if (open) {
                                 // 下拉框打开时，如果有搜索关键字，清空并重新加载初始产品列表
                                 if (productSearchKeyword) {
@@ -1883,10 +1969,21 @@ const InboundManagement: React.FC = () => {
                             // 已关联但不在待收货列表中的采购单（查看/编辑时）
                             ...(item.purchase_order_item_ids || [])
                               .filter(id => !(pendingPurchaseMap[item.product_id!] || []).some((pp: PendingPurchaseItem) => pp.poi_id === id))
-                              .map(id => ({
-                                label: `${linkedPOMap[id] || `采购单#${id}`} | 已关联`,
-                                value: id,
-                              })),
+                              .map(id => {
+                                const po = linkedPOMap[id]
+                                if (po) {
+                                  const remaining = po.ordered_qty - po.received_qty
+                                  const finishedInfo = po.finished_name ? `成品: ${po.finished_code} ${po.finished_name} | ` : ''
+                                  return {
+                                    label: `${po.order_number} | ${po.approved_at ? po.approved_at.split(' ')[0] : ''} | ${finishedInfo}采购${po.ordered_qty}件 已收${po.received_qty}件 剩余${remaining}件`,
+                                    value: id,
+                                  }
+                                }
+                                return {
+                                  label: `采购单#${id} | 已关联`,
+                                  value: id,
+                                }
+                              }),
                           ]}
                           notFoundContent={<span style={{ color: '#999', fontSize: 12 }}>该产品暂无待收货的采购单</span>}
                         />
@@ -1894,7 +1991,7 @@ const InboundManagement: React.FC = () => {
                     )}
 
                     {/* Row 3: 货架号 + 备注 */}
-                    <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12 }}>
+                    <div className="responsive-grid-2" style={{ marginTop: 12 }}>
                       <div>
                         <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>货架号</div>
                         <Input
@@ -1952,16 +2049,18 @@ const InboundManagement: React.FC = () => {
       />
 
       <Modal
+        className="responsive-modal"
         title="导入预览"
         open={previewModalOpen}
         onOk={handleConfirmImport}
         onCancel={() => setPreviewModalOpen(false)}
-        width={800}
+        width={res.isMobile ? '95vw' : 800}
       >
         <Table
           dataSource={previewItems}
           pagination={false}
-          rowKey={(_record, index) => (index ?? 0).toString()}
+          scroll={{ x: res.isMobile ? true : false }}
+          rowKey={(_record) => (_record.product_id?.toString() || _record.product_code || Math.random().toString())}
           columns={[
             {
               title: '商品编码',

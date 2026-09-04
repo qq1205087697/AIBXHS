@@ -2,10 +2,97 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
+
+def acquire_distributed_lock(db, lock_key: str, timeout_minutes: int = 30) -> bool:
+    """获取分布式锁，防止多进程同时执行
+    返回 True 表示成功获取锁，可以执行任务
+    """
+    from sqlalchemy import text
+    lock_expires_at = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+    
+    try:
+        # 先检查锁表是否存在，不存在直接返回 True（允许执行）
+        check_table_sql = text("SHOW TABLES LIKE 'scheduler_locks'")
+        table_exists = db.execute(check_table_sql).fetchone() is not None
+        if not table_exists:
+            logger.warning(f"scheduler_locks 表不存在，不使用锁: {lock_key}")
+            return True
+        
+        # 尝试获取锁：插入记录
+        insert_sql = text("""
+            INSERT INTO scheduler_locks (lock_key, acquired_at, expires_at, is_active)
+            VALUES (:key, NOW(), :expires, TRUE)
+            ON DUPLICATE KEY UPDATE
+                acquired_at = IF(is_active = FALSE OR expires_at < NOW(), NOW(), acquired_at),
+                expires_at = IF(is_active = FALSE OR expires_at < NOW(), :expires, expires_at),
+                is_active = IF(is_active = FALSE OR expires_at < NOW(), TRUE, is_active)
+        """)
+        result = db.execute(insert_sql, {"key": lock_key, "expires": lock_expires_at})
+        
+        # 检查是否真的获取到了锁（影响行数 > 0 说明是第一个）
+        if result.rowcount > 0:
+            db.commit()
+            logger.info(f"✅ 成功获取分布式锁: {lock_key}")
+            return True
+        
+        # 如果没有插入行，检查是否是锁已过期被我们自动续期了
+        check_sql = text("""
+            SELECT 1 FROM scheduler_locks
+            WHERE lock_key = :key
+              AND is_active = TRUE
+              AND expires_at > NOW()
+        """)
+        check_result = db.execute(check_sql, {"key": lock_key}).fetchone()
+        if not check_result:
+            # 锁已过期，我们更新锁
+            update_sql = text("""
+                UPDATE scheduler_locks
+                SET is_active = TRUE,
+                    acquired_at = NOW(),
+                    expires_at = :expires
+                WHERE lock_key = :key
+            """)
+            db.execute(update_sql, {"key": lock_key, "expires": lock_expires_at})
+            db.commit()
+            logger.info(f"🔄 锁已过期，重新获取: {lock_key}")
+            return True
+        
+        db.commit()
+        logger.info(f"🔒 其他进程正在执行该任务，跳过: {lock_key}")
+        return False
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"获取分布式锁失败: {e}")
+        # 出错时允许执行任务（不阻塞）
+        return True
+
+
+def release_distributed_lock(db, lock_key: str):
+    """释放分布式锁"""
+    from sqlalchemy import text
+    try:
+        # 检查锁表是否存在
+        check_table_sql = text("SHOW TABLES LIKE 'scheduler_locks'")
+        table_exists = db.execute(check_table_sql).fetchone() is not None
+        if not table_exists:
+            return
+        
+        update_sql = text("""
+            UPDATE scheduler_locks
+            SET is_active = FALSE
+            WHERE lock_key = :key
+        """)
+        db.execute(update_sql, {"key": lock_key})
+        db.commit()
+        logger.info(f"🔓 释放分布式锁: {lock_key}")
+    except Exception as e:
+        logger.error(f"释放分布式锁失败: {e}")
 
 
 def init_scheduler():
@@ -36,6 +123,16 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        translate_untranslated_reviews_job,
+        trigger="cron",
+        hour=6,
+        minute=30,
+        id="daily_review_translation",
+        name="每日翻译未翻译差评",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         analyze_unanalyzed_reviews_job,
         trigger="cron",
         hour=7,
@@ -56,6 +153,16 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        recalc_product_selection_scores_job,
+        trigger="cron",
+        hour=7,
+        minute=0,
+        id="daily_product_selection_recalc",
+        name="每日选品数据评分计算",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         check_overdue_purchase_orders_job,
         trigger="cron",
         hour=9,
@@ -70,15 +177,108 @@ def init_scheduler():
 
 
 def check_inventory_job():
-    logger.info("执行库存检查任务...")
+    from database.database import SessionLocal
+    LOCK_KEY = "inventory_check"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("执行库存检查任务...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def check_reviews_job():
-    logger.info("执行差评监控任务...")
+    from database.database import SessionLocal
+    LOCK_KEY = "reviews_check"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("执行差评监控任务...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def send_daily_report_job():
-    logger.info("发送每日运营报告...")
+    from database.database import SessionLocal
+    LOCK_KEY = "daily_report"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        logger.info("发送每日运营报告...")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def translate_untranslated_reviews_job():
+    """每天早上6点30分：批量翻译所有未翻译的差评（含已有分析但无翻译的历史数据）"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    from services.translate_service import translate_review
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+
+        # 查询所有需要翻译的差评（translated_content 为空或等于原文）
+        query = text("""
+            SELECT id, tenant_id, title, content, translated_content
+            FROM reviews
+            WHERE (translated_content IS NULL OR translated_content = '') AND content IS NOT NULL
+            LIMIT 200
+        """)
+        result = db.execute(query)
+        untranslated = result.fetchall()
+
+        if not untranslated:
+            logger.info("没有需要翻译的差评")
+            return
+
+        logger.info(f"发现 {len(untranslated)} 条需要翻译的差评，开始翻译...")
+        success_count = 0
+        fail_count = 0
+
+        for row in untranslated:
+            review_id = row[0]
+            title = row[2] or ""
+            content = row[3] or ""
+            try:
+                translated_title, translated_content = translate_review(title, content)
+                if translated_content:
+                    db.execute(text("""
+                        UPDATE reviews
+                        SET translated_title = :tt, translated_content = :tc
+                        WHERE id = :rid
+                    """), {
+                        "tt": translated_title,
+                        "tc": translated_content,
+                        "rid": review_id,
+                    })
+                    db.commit()
+                    success_count += 1
+                    logger.info(f"翻译成功 review_id={review_id}")
+                else:
+                    fail_count += 1
+                    logger.warning(f"翻译返回空值 review_id={review_id}")
+            except Exception as e:
+                fail_count += 1
+                db.rollback()
+                logger.error(f"翻译失败 review_id={review_id}: {e}")
+
+        logger.info(f"差评翻译任务完成：成功 {success_count} 条，失败 {fail_count} 条")
+    except Exception as e:
+        logger.error(f"每日差评翻译任务失败: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def analyze_unanalyzed_reviews_job():
@@ -87,8 +287,13 @@ def analyze_unanalyzed_reviews_job():
     from sqlalchemy import text
     import json
 
+    LOCK_KEY = "daily_review_analysis"
     db = SessionLocal()
     try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
 
         # 查询所有未分析的差评（review_analyses中不存在的差评）
@@ -134,10 +339,15 @@ def analyze_unanalyzed_reviews_job():
                 if not translated_content:
                     try:
                         from services.translate_service import translate_review
+                        logger.info(f"开始翻译 review_id={review_id}")
                         _, translated_content = translate_review(title, content)
-                        thread_db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
-                                   {"tc": translated_content, "rid": review_id})
-                        thread_db.commit()
+                        if translated_content:
+                            thread_db.execute(text("UPDATE reviews SET translated_content=:tc WHERE id=:rid"),
+                                       {"tc": translated_content, "rid": review_id})
+                            thread_db.commit()
+                            logger.info(f"翻译成功并保存 review_id={review_id}")
+                        else:
+                            logger.warning(f"翻译返回空值 review_id={review_id}")
                     except Exception as te:
                         logger.error(f"翻译失败 review_id={review_id}: {te}")
 
@@ -153,7 +363,14 @@ def analyze_unanalyzed_reviews_job():
 2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
 3. low（第三级）：其他所有场景
 
-输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low"}}"""
+部门板块分类规则（department字段，必须输出以下四个之一）：
+- operations（运营板块）：文案问题、产品货不对板
+- purchasing（采购板块）：质量不好、字母/印刷出错
+- warehouse（仓库板块）：损坏
+- design（美工板块）：尺寸、颜色、图片、夸大
+根据评论内容判断最符合的板块，无法判断时归入operations。
+
+输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}"""
 
                 response = client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -175,23 +392,24 @@ def analyze_unanalyzed_reviews_job():
 
                 # 保存AI分析结果（使用ON DUPLICATE KEY UPDATE避免并发重复插入）
                 thread_db.execute(text("""
-                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response)
-                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw)
-                    ON DUPLICATE KEY UPDATE 
+                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department)
+                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw, :dept)
+                    ON DUPLICATE KEY UPDATE
                         sentiment = VALUES(sentiment),
                         sentiment_score = VALUES(sentiment_score),
                         key_points = VALUES(key_points),
                         topics = VALUES(topics),
                         suggestions = VALUES(suggestions),
                         summary = VALUES(summary),
-                        raw_response = VALUES(raw_response)
+                        raw_response = VALUES(raw_response),
+                        department = VALUES(department)
                 """), {
                     "tid": tenant_id, "rid": review_id, "model": settings.OPENAI_MODEL,
                     "sentiment": ar.get("sentiment", "negative"), "score": ar.get("sentiment_score", 3),
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
-                    "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc
+                    "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc,
+                    "dept": ar.get("department", "")
                 })
-
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
                 if importance_level not in ["high", "medium", "low"]:
@@ -228,6 +446,7 @@ def analyze_unanalyzed_reviews_job():
     except Exception as e:
         logger.error(f"每日AI分析任务失败: {e}")
     finally:
+        release_distributed_lock(db, LOCK_KEY)
         db.close()
 
 
@@ -237,10 +456,16 @@ def push_daily_review_notifications_job():
     from sqlalchemy import text
     from datetime import datetime, date
 
-    logger.info("========== 开始推送每日差评通知 ==========")
+    LOCK_KEY = "daily_review_notifications"
     
     db = SessionLocal()
     try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+        
+        logger.info("========== 开始推送每日差评通知 ==========")
+        
         db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
         logger.info("数据库连接成功")
         
@@ -437,6 +662,213 @@ def push_daily_review_notifications_job():
         logger.error(traceback.format_exc())
         db.rollback()
     finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def recalc_product_selection_scores_job():
+    """每天早上7点：检查是否有新抓取的选品数据，有则自动计算评分"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    import math
+    import statistics
+    import ast
+    import json
+
+    LOCK_KEY = "daily_product_selection_recalc"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY):
+            db.close()
+            return
+
+        logger.info("========== 开始每日选品数据评分计算 ==========")
+
+        # 查找未计算过评分的记录（traffic_score IS NULL 或 traffic_score_result IS NULL）
+        query = text("""
+            SELECT id, rating, review_count, monthly_sales, traffic_trend
+            FROM product_selections
+            WHERE deleted_at IS NULL
+              AND (traffic_score IS NULL OR traffic_score_result IS NULL)
+        """)
+        rows = db.execute(query).fetchall()
+
+        if not rows:
+            logger.info("没有需要计算评分的新选品数据")
+            release_distributed_lock(db, LOCK_KEY)
+            db.close()
+            return
+
+        logger.info(f"发现 {len(rows)} 条待计算的选品记录")
+
+        def r2(x):
+            return round(float(x), 2)
+
+        def calc_rating(rating, review_count):
+            if rating is None:
+                return 20.0
+            r = round(rating, 1)
+            # 只按星级评分（抓取数据评论数普遍<10条，不再按评论数分档）
+            if r >= 4.8: base = 18.0
+            elif r >= 4.5: base = 16.0
+            elif r >= 4.2: base = 13.0
+            elif r >= 4.0: base = 10.0
+            else: base = 5.0
+            # 评论极少(≤3条)时参考价值低，打9折
+            if (review_count or 0) <= 3:
+                base = round(base * 0.9, 1)
+            return base
+
+        def calc_sales(s):
+            s = s or 0
+            if s == 0: return 0.0
+            if 1 <= s <= 5: return 3.0
+            if 6 <= s <= 10: return 6.0
+            if 11 <= s <= 15: return 9.0
+            if 16 <= s <= 20: return 12.0
+            if 21 <= s <= 25: return 15.0
+            if 26 <= s <= 30: return 18.0
+            return 20.0
+
+        def calc_penalty(rs):
+            # 阈值与新星级阶梯对齐
+            if rs >= 16: return 1.00
+            elif rs >= 13: return 0.95
+            elif rs >= 10: return 0.85
+            elif rs >= 5: return 0.70
+            else: return 0.50
+
+        def calc_composite(pf, ts, ss):
+            return round(pf * ts * 0.6 + ss * 5 * 0.4, 2)
+
+        def calc_traffic(traffic_trend_str):
+            if not traffic_trend_str:
+                return 0.0, ""
+            try:
+                month_volume = ast.literal_eval(traffic_trend_str)
+            except Exception:
+                return 0.0, ""
+            if not isinstance(month_volume, dict) or not month_volume:
+                return 0.0, ""
+
+            values = [v for v in month_volume.values() if isinstance(v, (int, float))]
+            n = len(values)
+            if n == 0:
+                return 0.0, ""
+
+            result = {
+                "趋势方向强度分": 0.0,
+                "趋势一致性分": 0.0,
+                "相对增长倍数分": 0.0,
+                "月均增长率分": 0.0,
+                "趋势连续性分": 0.0,
+                "波动惩罚分": 0.0,
+                "趋势总分": 0.0,
+                "历史最低值": r2(min(values)),
+                "最新月份值": r2(values[-1]),
+                "增长倍数": 0.0,
+                "月均增长率": 0.0,
+                "波动系数CV": 0.0,
+            }
+
+            if n >= 6:
+                last_avg = sum(values[-3:]) / 3
+                prev_avg = sum(values[-6:-3]) / 3
+                R = last_avg / prev_avg if prev_avg > 0 else 0
+                result["趋势方向强度分"] = r2(max(0, min(25, (R - 1) * 18)))
+
+            if n >= 6:
+                up = sum(1 for i in range(1, 6) if values[-6 + i] > values[-7 + i])
+                result["趋势一致性分"] = r2((up / 5) * 10)
+
+            if n >= 2 and min(values) > 0:
+                G = values[-1] / min(values)
+                result["增长倍数"] = r2(G)
+                result["相对增长倍数分"] = r2(max(0, min(20, math.log2(G) * 6)))
+
+            if n >= 4 and values[-4] > 0:
+                M = (values[-1] / values[-4]) ** (1 / 4) - 1
+                result["月均增长率"] = r2(M)
+                result["月均增长率分"] = r2(max(0, min(10, M * 120)))
+
+            if n >= 2:
+                cur = max_streak = 0
+                for i in range(1, n):
+                    if values[i] > values[i - 1]:
+                        cur += 1
+                        max_streak = max(max_streak, cur)
+                    else:
+                        cur = 0
+                mapping = {2: 3, 3: 6, 4: 9, 5: 12}
+                result["趋势连续性分"] = 15 if max_streak >= 6 else mapping.get(max_streak, 0)
+
+            if n >= 6:
+                last_6 = values[-6:]
+                mean = statistics.mean(last_6)
+                std = statistics.pstdev(last_6)
+                CV = std / mean if mean > 0 else 0
+                result["波动系数CV"] = r2(CV)
+                if CV <= 0.25: result["波动惩罚分"] = 10
+                elif CV <= 0.35: result["波动惩罚分"] = 7
+                elif CV <= 0.50: result["波动惩罚分"] = 4
+
+            total = (
+                result["趋势方向强度分"]
+                + result["趋势一致性分"]
+                + result["相对增长倍数分"]
+                + result["月均增长率分"]
+                + result["趋势连续性分"]
+                + result["波动惩罚分"]
+            )
+            raw_total = max(0, total)
+            result["趋势总分"] = r2(raw_total)
+
+            # 放大到满分100
+            max_possible = 90
+            final_score = round((raw_total / max_possible) * 100, 2) if max_possible > 0 else 0.0
+
+            return final_score, json.dumps(result, ensure_ascii=False)
+
+        updated = 0
+        for row in rows:
+            rid = row[0]
+            rating_score = calc_rating(row[1], row[2])
+            sales_score = calc_sales(row[3])
+            penalty_factor = calc_penalty(rating_score)
+            traffic_score, traffic_result_json = calc_traffic(row[4])
+            composite_score = calc_composite(penalty_factor, traffic_score, sales_score)
+
+            db.execute(text("""
+                UPDATE product_selections SET
+                    traffic_score = :ts,
+                    traffic_score_result = :tsr,
+                    sales_score = :ss,
+                    rating_score = :rs,
+                    penalty_factor = :pf,
+                    composite_score = :cs,
+                    updated_at = NOW()
+                WHERE id = :id
+            """), {
+                "id": rid,
+                "ts": traffic_score,
+                "tsr": traffic_result_json,
+                "ss": sales_score,
+                "rs": rating_score,
+                "pf": penalty_factor,
+                "cs": composite_score,
+            })
+            updated += 1
+
+        db.commit()
+        logger.info(f"========== 选品评分计算完成：共更新 {updated} 条记录 ==========")
+
+    except Exception as e:
+        logger.error(f"每日选品评分计算任务失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        db.rollback()
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
         db.close()
 
 
@@ -547,7 +979,7 @@ def check_overdue_purchase_orders_job():
             # 构建通知内容
             status_label = {
                 'approved': '已审批',
-                'ordered': '已下单',
+                'purchased': '已采购',
                 'partial_received': '部分收货',
             }.get(status, status)
 

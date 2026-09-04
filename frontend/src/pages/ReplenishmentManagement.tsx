@@ -5,6 +5,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { replenishmentOrdersApi, productsApi, productBindingsApi, storeGroupsApi } from '../api'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { useResponsive } from '../hooks/useResponsive'
 import dayjs from 'dayjs'
 import type { MenuProps } from 'antd'
 
@@ -73,6 +74,7 @@ interface FormItemState {
   product_id: number | null
   quantity: number
   notes: string
+  sku?: string  // 当前店铺分组下的SKU（只读，自动带出）
   parent_product_id?: number | null
   parentKey?: string  // 配件行关联的成品行key
   base_quantity_per_product?: number  // 每1个成品需要的配件基础数量
@@ -147,12 +149,44 @@ const createEmptyFormItem = (): FormItemState => ({
   product_id: null,
   quantity: 1,
   notes: '',
+  sku: '',
   parent_product_id: null,
 })
+
+// 根据后端返回的明细重建前端成品/配件关系
+const buildLoadedFormItems = (detailItems: any[]): FormItemState[] => {
+  const items: FormItemState[] = detailItems.map((item: any) => ({
+    key: generateItemKey(),
+    product_id: Number(item.product_id) || null,
+    quantity: item.quantity,
+    notes: item.notes || '',
+    sku: '',
+    parent_product_id: item.parent_product_id ?? null,
+  }))
+
+  const finishedKeyByProductId = new Map<number, string>()
+  items.forEach((item) => {
+    if (!item.parent_product_id && item.product_id) {
+      finishedKeyByProductId.set(item.product_id, item.key)
+    }
+  })
+
+  items.forEach((item) => {
+    if (item.parent_product_id) {
+      const parentKey = finishedKeyByProductId.get(item.parent_product_id)
+      if (parentKey) {
+        item.parentKey = parentKey
+      }
+    }
+  })
+
+  return items
+}
 
 const ReplenishmentManagement: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission, isAdmin } = useAuth()
+  const res = useResponsive()
   const [orders, setOrders] = useState<ReplenishmentOrder[]>([])
   const [productList, setProductList] = useState<Product[]>([])
   const [storeGroups, setStoreGroups] = useState<any[]>([]) // 店铺分组列表
@@ -192,6 +226,10 @@ const ReplenishmentManagement: React.FC = () => {
   // 转换结果弹窗
   const [convertResultOpen, setConvertResultOpen] = useState(false)
   const [convertResult, setConvertResult] = useState<any>(null)
+  // 产品利润率数据 { productId: [{ account, country, gross_margin, sku }] }
+  const [profitMargins, setProfitMargins] = useState<Record<number, { account: string; country: string; gross_margin: number; sku: string }[]>>({})
+  // 产品店铺分组 SKU 数据 { productId: { sku, asin, store_group_id, store_group_name } }
+  const [productSkuMap, setProductSkuMap] = useState<Record<number, { sku: string; asin: string; store_group_id: number | null; store_group_name: string }>>({})
 
   useEffect(() => {
     fetchData()
@@ -231,13 +269,14 @@ const ReplenishmentManagement: React.FC = () => {
     }
   }
 
-  const fetchProducts = async (keyword: string = '', page: number = 1, append: boolean = false) => {
+  const fetchProducts = async (keyword: string = '', page: number = 1, append: boolean = false, aroundProductId?: number) => {
     setProductsLoading(true)
     try {
       const res = await productsApi.getList({
         page: page,
         page_size: productPagination.pageSize,
         search: keyword || undefined, // 支持搜索参数
+        around_product_id: aroundProductId,
       })
       if (res.data.success) {
         const newProducts = res.data.data || []
@@ -245,8 +284,12 @@ const ReplenishmentManagement: React.FC = () => {
           // 滚动加载更多：追加到现有列表
           setProductList(prev => [...prev, ...newProducts])
         } else {
-          // 搜索或首次加载：替换现有列表
-          setProductList(newProducts)
+          // 搜索或首次加载：替换现有列表，但保留已选产品
+          setProductList(prev => {
+            const selectedInList = new Set(newProducts.map(p => p.id))
+            const keepItems = prev.filter(p => !selectedInList.has(p.id) && formItems.some(f => f.product_id === p.id))
+            return [...keepItems, ...newProducts]
+          })
         }
         setProductPagination(prev => ({
           ...prev,
@@ -351,7 +394,8 @@ const ReplenishmentManagement: React.FC = () => {
   const handleCreate = () => {
     setEditingOrder(null)
     setViewingOrder(null)
-    const orderNumber = `RO${dayjs().format('YYYYMMDDHHmmss')}`
+    // 新建时前端预生成单号并展示，格式与后端保持一致：RO + 年月日时分秒 + 3位毫秒
+    const orderNumber = `RO${dayjs().format('YYYYMMDDHHmmssSSS')}`
     form.setFieldsValue({
       order_number: orderNumber,
       store_group_id: undefined,
@@ -359,6 +403,8 @@ const ReplenishmentManagement: React.FC = () => {
     })
     setFormItems([createEmptyFormItem()])
     setExpandedAccessories(new Set())
+    setProfitMargins({})
+    setProductSkuMap({})
 
     // 重置产品搜索状态
     setProductSearchKeyword('')
@@ -388,14 +434,12 @@ const ReplenishmentManagement: React.FC = () => {
             product_code: item.product_code || '',
           }))
           setProductList(orderProducts)
-          const items = detail.items.map((item: any) => ({
-            key: generateItemKey(),
-            product_id: Number(item.product_id) || null,
-            quantity: item.quantity,
-            notes: item.notes || '',
-            parent_product_id: item.parent_product_id ?? null,
-          }))
+          const items = buildLoadedFormItems(detail.items)
           setFormItems(items)
+          // 批量加载已有产品的利润率和店铺分组SKU
+          const productIds = items.map((i: any) => i.product_id).filter(Boolean) as number[]
+          fetchProfitMarginsBatch(productIds)
+          fetchStoreGroupSkusBatch(productIds)
         } else {
           setProductList([])
           setFormItems([createEmptyFormItem()])
@@ -433,14 +477,12 @@ const ReplenishmentManagement: React.FC = () => {
             product_code: item.product_code || '',
           }))
           setProductList(orderProducts)
-          const items = detail.items.map((item: any) => ({
-            key: generateItemKey(),
-            product_id: Number(item.product_id) || null,
-            quantity: item.quantity,
-            notes: item.notes || '',
-            parent_product_id: item.parent_product_id ?? null,
-          }))
+          const items = buildLoadedFormItems(detail.items)
           setFormItems(items)
+          // 批量加载已有产品的利润率和店铺分组SKU
+          const productIds = items.map((i: any) => i.product_id).filter(Boolean) as number[]
+          fetchProfitMarginsBatch(productIds)
+          fetchStoreGroupSkusBatch(productIds)
         } else {
           setFormItems([createEmptyFormItem()])
         }
@@ -578,10 +620,25 @@ const ReplenishmentManagement: React.FC = () => {
 
   const handleFormItemChange = (key: string, field: keyof FormItemState, value: any) => {
     setFormItems((prev) => {
-      const updated = prev.map((item) => {
+      let updated = prev.map((item) => {
         if (item.key !== key) return item
+        // 清空产品时同步清空SKU
+        if (field === 'product_id' && !value) {
+          return { ...item, [field]: value, sku: '' }
+        }
         return { ...item, [field]: value }
       })
+
+      // 切换产品时，删除该成品行之前的配件行并清空SKU
+      if (field === 'product_id' && value) {
+        const oldItem = prev.find((item) => item.key === key)
+        if (oldItem && oldItem.product_id && oldItem.product_id !== value) {
+          updated = updated.filter((item) => item.parentKey !== key)
+        }
+        updated = updated.map((item) =>
+          item.key === key ? { ...item, sku: '' } : item
+        )
+      }
 
       // 成品数量变化时，同步更新其配件数量
       if (field === 'quantity') {
@@ -599,9 +656,97 @@ const ReplenishmentManagement: React.FC = () => {
       return updated
     })
 
-    // 选择产品时自动带出配件
+    // 选择产品时自动带出配件、利润率和店铺分组SKU
     if (field === 'product_id' && value) {
       fetchAccessoriesAndAdd(key, value)
+      fetchProfitMargins(value)
+      fetchStoreGroupSku(value)
+    }
+  }
+
+  const fetchProfitMargins = async (productId: number) => {
+    // 已获取过则不再重复请求
+    if (profitMargins[productId]) return
+    try {
+      const res = await productsApi.getProfitMargins(productId)
+      if (res.data.success && res.data.data) {
+        setProfitMargins(prev => ({ ...prev, [productId]: res.data.data }))
+      }
+    } catch (e) {
+      console.error('获取利润率失败', e)
+    }
+  }
+
+  const fetchProfitMarginsBatch = async (productIds: number[]) => {
+    const uniqueIds = Array.from(new Set(productIds)).filter(id => id && !profitMargins[id])
+    if (uniqueIds.length === 0) return
+    try {
+      const res = await productsApi.getProfitMarginsBatch(uniqueIds)
+      if (res.data.success && res.data.data) {
+        setProfitMargins(prev => ({ ...prev, ...res.data.data }))
+      }
+    } catch (e) {
+      console.error('批量获取利润率失败', e)
+    }
+  }
+
+  // 获取产品在当前账号店铺分组下的 SKU，并同步写入对应明细行
+  const fetchStoreGroupSku = async (productId: number) => {
+    if (productSkuMap[productId]) {
+      setFormItems(prev => prev.map(item =>
+        item.product_id === productId ? { ...item, sku: productSkuMap[productId].sku || '' } : item
+      ))
+      return
+    }
+    try {
+      const storeGroupId = form.getFieldValue('store_group_id')
+      const res = await productsApi.getStoreGroupSku(productId, storeGroupId)
+      if (res.data.success && res.data.data) {
+        setProductSkuMap(prev => ({ ...prev, [productId]: res.data.data }))
+        setFormItems(prev => prev.map(item =>
+          item.product_id === productId ? { ...item, sku: res.data.data.sku || '' } : item
+        ))
+      }
+    } catch (e) {
+      console.error('获取店铺分组SKU失败', e)
+    }
+  }
+
+  // 批量获取店铺分组 SKU，并同步写入对应明细行
+  const fetchStoreGroupSkusBatch = async (productIds: number[]) => {
+    const uniqueIds = Array.from(new Set(productIds)).filter(id => id && !productSkuMap[id])
+    if (uniqueIds.length === 0) {
+      setFormItems(prev => prev.map(item =>
+        item.product_id && productSkuMap[item.product_id]
+          ? { ...item, sku: productSkuMap[item.product_id].sku || '' }
+          : item
+      ))
+      return
+    }
+    try {
+      const storeGroupId = form.getFieldValue('store_group_id')
+      const res = await productsApi.getStoreGroupSkusBatch(uniqueIds, storeGroupId)
+      if (res.data.success && res.data.data) {
+        setProductSkuMap(prev => ({ ...prev, ...res.data.data }))
+        setFormItems(prev => prev.map(item => {
+          if (!item.product_id || !res.data.data[item.product_id]) return item
+          return { ...item, sku: res.data.data[item.product_id].sku || '' }
+        }))
+      }
+    } catch (e) {
+      console.error('批量获取店铺分组SKU失败', e)
+    }
+  }
+
+  // 监听表单值变化，店铺分组切换时重新获取所有已选产品的SKU
+  const handleFormValuesChange = (changedValues: any) => {
+    if ('store_group_id' in changedValues) {
+      const productIds = formItems.map(item => item.product_id).filter(Boolean) as number[]
+      setProductSkuMap({})
+      setFormItems(prev => prev.map(item => ({ ...item, sku: '' })))
+      if (productIds.length > 0) {
+        fetchStoreGroupSkusBatch(productIds)
+      }
     }
   }
 
@@ -662,6 +807,12 @@ const ReplenishmentManagement: React.FC = () => {
         })
 
         setExpandedAccessories((prev) => new Set(prev).add(parentKey))
+
+        // 获取新增配件的店铺分组 SKU
+        const accessoryProductIds = accessories.map((acc: any) => acc.accessory_product_id).filter(Boolean)
+        if (accessoryProductIds.length > 0) {
+          fetchStoreGroupSkusBatch(accessoryProductIds)
+        }
       }
     } catch (e) {
       console.error('获取成品配件失败:', e)
@@ -716,46 +867,47 @@ const ReplenishmentManagement: React.FC = () => {
     }
   }
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = async () => {
     setPreviewModalOpen(false)
-    handleCreate()
-    setTimeout(() => {
-      const newItems: FormItemState[] = []
-      const newExpandedKeys = new Set<string>()
-      for (const item of previewItems) {
-        const parentKey = generateItemKey()
-        // 成品行
-        newItems.push({
-          key: parentKey,
-          product_id: item.product_id || null,
-          quantity: item.quantity || 1,
+    // 构建批量导入数据
+    const groups = previewItems.map((group: any) => ({
+      store_group_id: group.store_group_id || null,
+      store_group_name: group.store_group_name || '',
+      items: (group.items || []).flatMap((item: any) => {
+        const finishedItem = {
+          product_id: item.product_id,
+          quantity: item.quantity,
           notes: item.notes || '',
           parent_product_id: null,
-        })
-        // 配件行
-        const bindings = item.bindings || []
-        if (bindings.length > 0) {
-          newExpandedKeys.add(parentKey)
-          for (const b of bindings) {
-            newItems.push({
-              key: generateItemKey(),
-              product_id: b.accessory_product_id || null,
-              quantity: (item.quantity || 1) * (b.qty || 1),
-              notes: '',
-              parent_product_id: item.product_id || null,
-              parentKey: parentKey,
-              base_quantity_per_product: b.qty || 1,
-            })
-          }
         }
+        const accessoryItems = (item.bindings || []).map((b: any) => ({
+          product_id: b.accessory_product_id,
+          quantity: (item.quantity || 1) * (b.qty || 1),
+          notes: '',
+          parent_product_id: item.product_id,
+        }))
+        return [finishedItem, ...accessoryItems]
+      }),
+    }))
+
+    if (groups.length === 0) {
+      message.warning('无导入数据')
+      return
+    }
+
+    try {
+      const res = await replenishmentOrdersApi.batchImport(groups)
+      if (res.data.success) {
+        const data = res.data.data || []
+        message.success(res.data.message || `成功导入 ${data.length} 张补货单`)
+        fetchData()
+      } else {
+        message.error(res.data.message || '导入失败')
       }
-      if (newItems.length === 0) {
-        newItems.push(createEmptyFormItem())
-      }
-      setFormItems(newItems)
-      setExpandedAccessories(newExpandedKeys)
-      message.success('导入成功，请选择平台后提交')
-    }, 100)
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || '导入失败'
+      message.error(msg, 8)
+    }
   }
 
   // 选中的已审批补货单（只有已审批才能转采购单）
@@ -763,6 +915,12 @@ const ReplenishmentManagement: React.FC = () => {
     (order) => selectedRowKeys.includes(order.id)
       && (order.status === 'approved' || order.status === 'APPROVED')
       && !order.purchase_order_id
+  )
+
+  // 选中的待审批补货单（用于批量审批）
+  const selectedPendingOrders = orders.filter(
+    (order) => selectedRowKeys.includes(order.id)
+      && (order.status === 'pending' || order.status === 'PENDING')
   )
 
   // 审批补货单
@@ -783,6 +941,35 @@ const ReplenishmentManagement: React.FC = () => {
           }
         } catch (e: any) {
           const msg = e?.response?.data?.detail || e?.message || '审批失败'
+          message.error(msg)
+        }
+      },
+    })
+  }
+
+  // 批量审批补货单
+  const handleBatchApprove = () => {
+    if (selectedPendingOrders.length === 0) {
+      message.warning('选中的补货单中没有可审批的（需为待审批状态）')
+      return
+    }
+    Modal.confirm({
+      title: '确认批量审批',
+      content: `确定要审批选中的 ${selectedPendingOrders.length} 条补货单吗？`,
+      okText: '确定',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await replenishmentOrdersApi.batchApprove(selectedPendingOrders.map((o) => o.id))
+          if (res.data.success) {
+            message.success(res.data.message || '批量审批成功')
+            setSelectedRowKeys([])
+            fetchData()
+          } else {
+            message.error(res.data.message || '批量审批失败')
+          }
+        } catch (e: any) {
+          const msg = e?.response?.data?.detail || e?.message || '批量审批失败'
           message.error(msg)
         }
       },
@@ -849,7 +1036,7 @@ const ReplenishmentManagement: React.FC = () => {
     }
     convertForm.resetFields()
     setConvertModalOpen(true)
-    message.info(`已选 ${selectedApprovedOrders.length} 条补货单，同店铺分组将合并为同一张采购单`)
+    message.info(`已选 ${selectedApprovedOrders.length} 条补货单，将转为一张采购单，不同分组在明细中保留`)
   }
 
   const handleBatchConvert = async () => {
@@ -1063,7 +1250,7 @@ const ReplenishmentManagement: React.FC = () => {
     },
   ]
 
-  const productOptions = productList.map((p) => ({
+  let productOptions = productList.map((p) => ({
     label: `${p.product_code ? `[${p.product_code}] ` : ''}${p.name}`,
     value: p.id,
   }))
@@ -1111,7 +1298,7 @@ const ReplenishmentManagement: React.FC = () => {
           </Space>
         }
         extra={
-          <Space>
+          <Space wrap>
             {hasPermission('replenishment:create') && (
               <>
                 <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>
@@ -1122,9 +1309,16 @@ const ReplenishmentManagement: React.FC = () => {
                 </Button>
               </>
             )}
-            {(hasPermission('replenishment:convert') || hasPermission('replenishment:delete')) && (
+            {(hasPermission('replenishment:approve') || hasPermission('replenishment:convert') || hasPermission('replenishment:delete')) && (
               <Dropdown menu={{
                 items: [
+                  hasPermission('replenishment:approve') ? {
+                    key: 'approve',
+                    icon: <CheckOutlined />,
+                    label: '批量审批',
+                    disabled: selectedPendingOrders.length === 0,
+                    onClick: handleBatchApprove,
+                  } : null,
                   hasPermission('replenishment:convert') ? {
                     key: 'convert',
                     icon: <CheckOutlined />,
@@ -1191,7 +1385,7 @@ const ReplenishmentManagement: React.FC = () => {
         onCancel={() => setModalOpen(false)}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={850}
+        width={res.isMobile ? '95vw' : 850}
         style={{ top: 20 }}
         styles={{ body: {
           maxHeight: 'calc(100vh - 180px)',
@@ -1199,7 +1393,7 @@ const ReplenishmentManagement: React.FC = () => {
           paddingRight: 8,
         } }}
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" onValuesChange={handleFormValuesChange}>
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="order_number" label="补货单号">
@@ -1229,9 +1423,10 @@ const ReplenishmentManagement: React.FC = () => {
         <Divider orientation="left">补货明细</Divider>
 
         {(() => {
-          // 分离成品和配件
-          const finishedItems = formItems.filter(item => !item.parentKey)
+          // 分离成品和配件：parentKey 是编辑时用的，parent_product_id 是后端返回的
+          const finishedItems = formItems.filter(item => !item.parentKey && !item.parent_product_id)
           const accessoryMap = new Map<string, FormItemState[]>()
+          const accessoryMapByProductId = new Map<number, FormItemState[]>()
           formItems.forEach(item => {
             if (item.parentKey) {
               if (!accessoryMap.has(item.parentKey)) {
@@ -1239,49 +1434,50 @@ const ReplenishmentManagement: React.FC = () => {
               }
               accessoryMap.get(item.parentKey)!.push(item)
             }
+            if (item.parent_product_id) {
+              if (!accessoryMapByProductId.has(item.parent_product_id)) {
+                accessoryMapByProductId.set(item.parent_product_id, [])
+              }
+              accessoryMapByProductId.get(item.parent_product_id)!.push(item)
+            }
           })
 
           // 渲染单个商品项的函数
           const renderItem = (item: FormItemState, isAccessory: boolean = false) => {
             const product = productList.find((p) => p.id === item.product_id)
-            const hasAccessories = accessoryMap.has(item.key) && accessoryMap.get(item.key)!.length > 0
+            // 同时兼容编辑模式(parentKey)和查看模式(parent_product_id)
+            const itemIsAccessory = isAccessory || !!item.parentKey || !!item.parent_product_id
+            const accessoriesByKey = accessoryMap.has(item.key) ? accessoryMap.get(item.key)! : []
+            const accessoriesByProductId = item.product_id && accessoryMapByProductId.has(item.product_id) ? accessoryMapByProductId.get(item.product_id)! : []
+            const hasAccessories = !itemIsAccessory && (accessoriesByKey.length > 0 || accessoriesByProductId.length > 0)
             const isExpanded = expandedAccessories.has(item.key)
-
-            // 根据产品实际类型判断标签
-            const productType = product?.product_type
-            const typeList = Array.isArray(productType) ? productType : (productType ? productType.split(',') : [])
-            const isFinishedProduct = typeList.includes('finished')
 
             return (
               <div key={item.key}>
                 <div
                   style={{
-                    marginBottom: isAccessory ? 0 : 16,
+                    marginBottom: itemIsAccessory ? 0 : 16,
                     padding: 16,
                     borderRadius: 8,
-                    background: isAccessory ? '#faf7f0' : '#ffffff',
-                    border: isAccessory ? '1px dashed #d9d9d9' : '1px solid #e8e8e8',
-                    marginLeft: isAccessory ? 40 : 0,
-                    boxShadow: isAccessory ? 'none' : '0 1px 2px rgba(0,0,0,0.06)',
+                    background: itemIsAccessory ? '#faf7f0' : '#ffffff',
+                    border: itemIsAccessory ? '1px dashed #d9d9d9' : '1px solid #e8e8e8',
+                    marginLeft: itemIsAccessory ? 40 : 0,
+                    boxShadow: itemIsAccessory ? 'none' : '0 1px 2px rgba(0,0,0,0.06)',
                   }}
                 >
                   {/* 头部区域：标签 + 展开按钮 + 删除按钮 */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {isAccessory ? (
+                      {itemIsAccessory ? (
                         <Tag icon={<LinkOutlined />} color="orange" style={{ fontSize: 12 }}>
                           配件
                         </Tag>
-                      ) : isFinishedProduct ? (
+                      ) : (
                         <Tag icon={<AppstoreOutlined />} color="blue" style={{ fontSize: 12 }}>
                           成品
                         </Tag>
-                      ) : (
-                        <Tag icon={<AppstoreOutlined />} color="default" style={{ fontSize: 12 }}>
-                          商品
-                        </Tag>
                       )}
-                      {hasAccessories && !isAccessory && (
+                      {hasAccessories && (
                         <Button
                           type="text"
                           size="small"
@@ -1290,7 +1486,7 @@ const ReplenishmentManagement: React.FC = () => {
                           style={{ padding: '0 4px', height: 22, fontSize: 12 }}
                         >
                           <Tag color="blue" style={{ fontSize: 11, marginRight: 0 }}>
-                            {accessoryMap.get(item.key)!.length}个配件
+                            {(accessoriesByKey.length || accessoriesByProductId.length)}个配件
                           </Tag>
                         </Button>
                       )}
@@ -1307,8 +1503,55 @@ const ReplenishmentManagement: React.FC = () => {
                     )}
                   </div>
 
+                  {/* 利润率小标签：去重并在卡片整行横向排列 */}
+                  {item.product_id && profitMargins[item.product_id] && profitMargins[item.product_id].length > 0 && (
+                    <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {(() => {
+                        const seen = new Set<string>()
+                        return profitMargins[item.product_id]!.map((m, idx) => {
+                          // 用 account+country+sku 去重，避免相同店铺不同SKU但利润率相同的记录被误去重
+                          const key = `${m.account}|${m.country}|${m.sku}`
+                          if (seen.has(key)) return null
+                          seen.add(key)
+                          // gross_margin 是小数，如 0.25 表示 25%，需要乘以 100
+                          const marginValue = m.gross_margin * 100
+                          const displayValue = marginValue.toFixed(1) // 保留一位小数
+                          let color = '#87d068' // 绿色 - 利润率高
+                          if (marginValue < 0) color = '#ff4d4f' // 红色 - 亏损
+                          else if (marginValue < 10) color = '#faad14' // 黄色 - 利润率低
+                          else if (marginValue < 30) color = '#1677ff' // 蓝色 - 利润率中等
+                          const label = `${m.account}${m.country ? `(${m.country})` : ''}`
+                          return (
+                            <Tag key={idx} color={color} style={{
+                              fontSize: 11,
+                              lineHeight: '18px',
+                              padding: '0 6px',
+                              margin: 0,
+                              maxWidth: 140,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              overflow: 'hidden',
+                              whiteSpace: 'nowrap',
+                            }}>
+                              <span style={{
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                flex: 1,
+                                minWidth: 0,
+                              }} title={label}>
+                                {label}
+                              </span>
+                              <span style={{ flexShrink: 0, marginLeft: 4 }}>: {displayValue}%</span>
+                            </Tag>
+                          )
+                        }).filter(Boolean)
+                      })()}
+                    </div>
+                  )}
+
                   {/* 表单字段区域 */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1.5fr', gap: 12, alignItems: 'end' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1.5fr', gap: 12, alignItems: 'end' }}>
                     <div>
                       <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>产品</div>
                       {isAccessory || viewingOrder ? (
@@ -1332,15 +1575,14 @@ const ReplenishmentManagement: React.FC = () => {
                             }}
                             onSearch={handleProductSearch}
                             filterOption={false} // 禁用本地过滤，使用后端搜索
-                            onDropdownVisibleChange={(open) => {
+                            onOpenChange={(open) => {
                               if (open) {
-                                // 下拉框打开时，如果有搜索关键字，清空并重新加载初始产品列表
-                                if (productSearchKeyword) {
-                                  setProductSearchKeyword('')
-                                  setProductPagination({ current: 1, pageSize: 50, total: 0 })
-                                  fetchProducts('', 1, false)
-                                } else if (productList.length === 0) {
-                                  // 如果没有搜索关键字且产品列表为空，加载初始产品列表
+                                setProductPagination({ current: 1, pageSize: 50, total: 0 })
+                                setProductSearchKeyword('')
+                                // 如果已有选中产品，以该产品ID为中心加载前后产品
+                                if (item.product_id) {
+                                  fetchProducts('', 1, false, item.product_id)
+                                } else {
                                   fetchProducts('', 1, false)
                                 }
                               }
@@ -1394,6 +1636,15 @@ const ReplenishmentManagement: React.FC = () => {
                       )}
                     </div>
                     <div>
+                      <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>SKU</div>
+                      <Input
+                        value={item.sku || (item.product_id ? productSkuMap[item.product_id]?.sku : '') || ''}
+                        disabled
+                        placeholder={item.product_id ? '该产品无当前店铺分组SKU' : '选择产品自动带出'}
+                        style={{ width: '100%', height: 32, background: '#fafafa' }}
+                      />
+                    </div>
+                    <div>
                       <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>补货数量</div>
                       <InputNumber
                         min={1}
@@ -1421,15 +1672,20 @@ const ReplenishmentManagement: React.FC = () => {
           }
 
           // 遍历所有成品并渲染
-          return finishedItems.map((item) => (
-            <React.Fragment key={item.key}>
-              {renderItem(item, false)}
-              {/* 如果成品有配件且展开了，渲染配件 */}
-              {accessoryMap.has(item.key) && expandedAccessories.has(item.key) &&
-                accessoryMap.get(item.key)!.map((accessory) => renderItem(accessory, true))
-              }
-            </React.Fragment>
-          ))
+          return finishedItems.map((item) => {
+            const childAccessories = accessoryMap.has(item.key)
+              ? accessoryMap.get(item.key)!
+              : (item.product_id && accessoryMapByProductId.has(item.product_id) ? accessoryMapByProductId.get(item.product_id)! : [])
+            return (
+              <React.Fragment key={item.key}>
+                {renderItem(item, false)}
+                {/* 如果成品有配件且展开了，渲染配件 */}
+                {childAccessories.length > 0 && expandedAccessories.has(item.key) &&
+                  childAccessories.map((accessory) => renderItem(accessory, true))
+                }
+              </React.Fragment>
+            )
+          })
         })()}
 
         {!viewingOrder && (
@@ -1451,53 +1707,64 @@ const ReplenishmentManagement: React.FC = () => {
         onCancel={() => setPreviewModalOpen(false)}
         okText="确认导入"
         cancelText="取消"
-        width={900}
+        width={res.isMobile ? '95vw' : 1000}
       >
-        <Table
-          dataSource={previewItems}
-          rowKey={(record, index) => String(index)}
-          pagination={false}
-          size="small"
-          expandable={{
-            rowExpandable: (record: any) => record.bindings && record.bindings.length > 0,
-            expandedRowRender: (record: any) => (
-              <div style={{ margin: 0 }}>
-                {(!record.bindings || record.bindings.length === 0) ? (
-                  <div style={{ padding: '12px 0', color: '#999' }}>无绑定配件</div>
-                ) : (
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ background: '#fafafa' }}>
-                        <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>配件编码</th>
-                        <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>配件名称</th>
-                        <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>绑定数量</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {record.bindings.map((b: any, bi: number) => (
-                        <tr key={bi} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                          <td style={{ padding: '6px 8px' }}>{b.code || '-'}</td>
-                          <td style={{ padding: '6px 8px' }}>{b.name || '-'}</td>
-                          <td style={{ padding: '6px 8px' }}>{b.qty || 0} × {(record.quantity || 0)} = {(b.qty || 0) * (record.quantity || 0)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            ),
-          }}
-          columns={[
-            { title: '商品编码', dataIndex: 'product_code', key: 'product_code', width: 140 },
-            { title: '商品名称', dataIndex: 'product_name', key: 'product_name', ellipsis: true },
-            {
-              title: '配件', dataIndex: 'bindings', key: 'bindings', width: 80,
-              render: (v: any[]) => v && v.length > 0 ? <Tag color="orange">{v.length}个配件</Tag> : <span style={{ color: '#999' }}>-</span>,
-            },
-            { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 90 },
-            { title: '备注', dataIndex: 'notes', key: 'notes', width: 140, render: (v: string) => v || '-' },
-          ]}
-        />
+        {previewItems.map((group: any, gIdx: number) => (
+          <div key={gIdx} style={{ marginBottom: gIdx < previewItems.length - 1 ? 16 : 0 }}>
+            <div style={{ marginBottom: 8, fontWeight: 600, fontSize: 14 }}>
+              <Tag color="purple" style={{ fontSize: 12, marginRight: 4 }}>
+                {group.store_group_name || '未分组'}
+              </Tag>
+              ({(group.items || []).length} 个商品)
+            </div>
+            <Table
+              dataSource={group.items || []}
+              rowKey={(record: any) => `${gIdx}-${record.product_id || Math.random()}`}
+              pagination={false}
+              size="small"
+              scroll={{ x: res.isMobile ? true : false }}
+              expandable={{
+                rowExpandable: (record: any) => record.bindings && record.bindings.length > 0,
+                expandedRowRender: (record: any) => (
+                  <div style={{ margin: 0 }}>
+                    {(!record.bindings || record.bindings.length === 0) ? (
+                      <div style={{ padding: '12px 0', color: '#999' }}>无绑定配件</div>
+                    ) : (
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr style={{ background: '#fafafa' }}>
+                            <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>配件编码</th>
+                            <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>配件名称</th>
+                            <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 600 }}>绑定数量</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {record.bindings.map((b: any, bi: number) => (
+                            <tr key={bi} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                              <td style={{ padding: '6px 8px' }}>{b.code || '-'}</td>
+                              <td style={{ padding: '6px 8px' }}>{b.name || '-'}</td>
+                              <td style={{ padding: '6px 8px' }}>{b.qty || 0} × {record.quantity || 0} = {(b.qty || 0) * (record.quantity || 0)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                ),
+              }}
+              columns={[
+                { title: '商品编码', dataIndex: 'product_code', key: 'product_code', width: 140 },
+                { title: '商品名称', dataIndex: 'product_name', key: 'product_name', ellipsis: true },
+                {
+                  title: '配件', dataIndex: 'bindings', key: 'bindings', width: 80,
+                  render: (v: any[]) => v && v.length > 0 ? <Tag color="orange">{v.length}个配件</Tag> : <span style={{ color: '#999' }}>-</span>,
+                },
+                { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 90 },
+                { title: '备注', dataIndex: 'notes', key: 'notes', width: 140, render: (v: string) => v || '-' },
+              ]}
+            />
+          </div>
+        ))}
       </Modal>
 
       <Modal
@@ -1508,7 +1775,7 @@ const ReplenishmentManagement: React.FC = () => {
         confirmLoading={converting}
         okText="确认生成"
         cancelText="取消"
-        width={600}
+        width={res.isMobile ? '95vw' : 600}
       >
         <div style={{ marginBottom: 16 }}>
           <div style={{ marginBottom: 8, fontWeight: 500 }}>选中的补货单（{selectedApprovedOrders.length} 条）：</div>
@@ -1527,7 +1794,7 @@ const ReplenishmentManagement: React.FC = () => {
                 width: 120,
                 render: (name: string) => name || '-',
               },
-              { title: '明细数', key: 'item_count', width: 80, align: 'center' as const, render: (_: any, r: ReplenishmentOrder) => r.items?.length || 0 },
+              { title: '明细数', dataIndex: 'item_count', key: 'item_count', width: 80, align: 'center' as const },
             ]}
           />
         </div>
@@ -1543,7 +1810,7 @@ const ReplenishmentManagement: React.FC = () => {
         open={convertResultOpen}
         onCancel={() => setConvertResultOpen(false)}
         footer={[<Button key="ok" type="primary" onClick={() => setConvertResultOpen(false)}>确定</Button>]}
-        width={600}
+        width={res.isMobile ? '95vw' : 600}
       >
         <div style={{ marginBottom: 12 }}>
           已成功生成 {convertResult?.po_count || ''} 张采购单，采购单审批后补货单将自动变为已采购：

@@ -356,6 +356,11 @@ async def create_user_for_tenant(
         
         # 获取角色信息
         role_id = user_data.role_id
+        # role_code = None
+        # if role_id:
+        #     role_result = db.execute(text("SELECT code FROM roles WHERE id = :role_id AND tenant_id = :tid AND deleted_at IS NULL"), {"role_id": role_id, "tid": current_user.tenant_id}).fetchone()
+        #     if role_result:
+        #         role_code = role_result[0]
         
         # 默认密码123456
         default_password = "123456"

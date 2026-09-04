@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import List
+from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 from database.database import SessionLocal, get_db
 from services.chat_service import process_chat, create_session_id, save_message, get_conversation_history

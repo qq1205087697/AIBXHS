@@ -1,0 +1,1292 @@
+import json
+import logging
+import asyncio
+import uuid
+import requests
+from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from datetime import datetime
+from database.database import get_db
+from dependencies import get_current_user, PermissionChecker
+from models.user import User
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/product-selection", tags=["product-selection"])
+
+# 批量AI分析后台任务进度表 {batch_id: {status, total, completed, success, failed, results}}
+_batch_analyze_tasks: Dict[str, Dict[str, Any]] = {}
+# 批量分析并发数上限
+BATCH_ANALYZE_CONCURRENCY = 3
+
+# 汇率API（1人民币兑外币）
+EXCHANGE_RATE_API = "https://api.frankfurter.dev/v2/rates?base=CNY"
+
+
+def _get_cny_rates() -> dict:
+    """获取实时汇率：1人民币兑各外币，如 {"USD": 0.1389, "EUR": 0.127, "GBP": 0.109}"""
+    try:
+        resp = requests.get(EXCHANGE_RATE_API, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        # 返回格式: [{"date": "...", "base": "CNY", "quote": "USD", "rate": 0.1389}, ...]
+        result = {}
+        for item in data if isinstance(data, list) else []:
+            quote = item.get("quote")
+            rate = item.get("rate")
+            if quote in ("USD", "EUR", "GBP") and rate:
+                result[quote] = float(rate)
+        return result
+    except Exception as e:
+        logger.error(f"获取实时汇率失败: {e}")
+        return {}
+
+
+def _site_currency(site: str | None) -> str:
+    """根据站点名称推断币种"""
+    s = (site or "").lower()
+    if "德" in s or "de" in s:
+        return "EUR"
+    if "英" in s or "uk" in s or "gb" in s:
+        return "GBP"
+    return "USD"
+
+
+def _freight_fee_per_kg(site: str | None) -> float:
+    """货代费用（元/kg）：美国站30，德国和英国25"""
+    s = (site or "")
+    if ("德" in s or "de" in s.lower()) or ("英" in s or "uk" in s.lower() or "gb" in s.lower()):
+        return 25.0
+    return 30.0
+
+
+def _calc_costs_by_rate(price, weight_kg, last_mile_cost, commission, rate, site) -> tuple:
+    """按公式计算 (头程, 进货价)：
+    头程 = 重量 * 货代费用 * 汇率（保留3位小数，外币）
+    进货价 = (售价 - 头程 - 尾程 - 佣金 - 售价*58%) / 汇率（人民币）
+      其中58% = 广告15% + 毛利15% + 仓储2% + 退货6% + 税金20%
+    """
+    first_leg = None
+    cost = None
+    if rate and rate > 0 and weight_kg:
+        first_leg = round(float(weight_kg) * _freight_fee_per_kg(site) * float(rate), 3)
+    if rate and rate > 0 and price:
+        numerator = (
+            float(price) * (1 - 0.15 - 0.15 - 0.02 - 0.06 - 0.20)
+            - (first_leg or 0)
+            - (float(last_mile_cost) if last_mile_cost else 0)
+            - (float(commission) if commission else 0)
+        )
+        cost = round(numerator / float(rate), 2)
+    return first_leg, cost
+
+
+class ProductSelectionCreate(BaseModel):
+    product_title: str
+    url: Optional[str] = None
+    asin: Optional[str] = None
+    image_url: Optional[str] = None
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    keywords: Optional[str] = None
+    price: Optional[float] = None
+    commission: Optional[float] = None
+    first_leg_cost: Optional[float] = None
+    last_mile_cost: Optional[float] = None
+    weight_kg: Optional[float] = None
+    cost_at_15_profit: Optional[float] = None
+    product_type: Optional[str] = None
+    site: Optional[str] = None
+    monthly_sales: Optional[int] = None
+    traffic_trend: Optional[str] = None
+    category: Optional[List[str]] = None
+
+class ProductSelectionUpdate(BaseModel):
+    product_title: Optional[str] = None
+    url: Optional[str] = None
+    asin: Optional[str] = None
+    image_url: Optional[str] = None
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    keywords: Optional[str] = None
+    price: Optional[float] = None
+    commission: Optional[float] = None
+    first_leg_cost: Optional[float] = None
+    last_mile_cost: Optional[float] = None
+    weight_kg: Optional[float] = None
+    cost_at_15_profit: Optional[float] = None
+    product_type: Optional[str] = None
+    site: Optional[str] = None
+    monthly_sales: Optional[int] = None
+    traffic_trend: Optional[str] = None
+    category: Optional[List[str]] = None
+
+
+def _parse_category(v) -> list | None:
+    """解析类目JSON字符串为列表"""
+    if not v:
+        return None
+    try:
+        parsed = json.loads(v)
+        return parsed if isinstance(parsed, list) else None
+    except Exception:
+        return None
+
+
+def _row_to_dict(row) -> dict:
+    return {
+        "id": row[0],
+        "tenant_id": row[1],
+        "product_title": row[2],
+        "url": row[3] or "",
+        "asin": row[4] or "",
+        "image_url": row[5] or "",
+        "rating": float(row[6]) if row[6] is not None else None,
+        "review_count": row[7],
+        "keywords": row[8] or "",
+        "price": float(row[9]) if row[9] is not None else None,
+        "commission": float(row[10]) if row[10] is not None else None,
+        "first_leg_cost": float(row[11]) if row[11] is not None else None,
+        "last_mile_cost": float(row[12]) if row[12] is not None else None,
+        "weight_kg": float(row[13]) if row[13] is not None else None,
+        "cost_at_15_profit": float(row[14]) if row[14] is not None else None,
+        "scrape_rate": float(row[31]) if row[31] is not None else None,
+        "realtime_rate": float(row[32]) if row[32] is not None else None,
+        "category": _parse_category(row[33]),
+        "product_type": row[15] or "",
+        "site": row[16] or "",
+        "monthly_sales": row[17],
+        "traffic_trend": row[18] or "",
+        "seasonality": row[19] or "",
+        "infringement_analysis": row[20] or "",
+        "infringement_conclusion": row[21] or "",
+        "traffic_score_result": row[22] or "",
+        "traffic_score": float(row[23]) if row[23] is not None else None,
+        "sales_score": float(row[24]) if row[24] is not None else None,
+        "rating_score": float(row[25]) if row[25] is not None else None,
+        "penalty_factor": float(row[26]) if row[26] is not None else None,
+        "composite_score": float(row[27]) if row[27] is not None else None,
+        "status": row[28] or "",
+        "created_at": row[29].strftime("%Y-%m-%d %H:%M:%S") if row[29] else "",
+        "updated_at": row[30].strftime("%Y-%m-%d %H:%M:%S") if row[30] else "",
+    }
+
+
+@router.get("/types")
+async def get_product_types(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取当前租户已有的产品类型列表"""
+    try:
+        query = text("""
+            SELECT DISTINCT product_type
+            FROM product_selections
+            WHERE tenant_id = :tenant_id AND deleted_at IS NULL AND product_type IS NOT NULL AND product_type != ''
+            ORDER BY product_type
+        """)
+        result = db.execute(query, {"tenant_id": current_user.tenant_id})
+        types = [row[0] for row in result]
+        return {"success": True, "data": types}
+    except Exception as e:
+        logger.error(f"获取产品类型列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取产品类型列表失败: {str(e)}")
+
+
+@router.get("/dates")
+async def get_product_dates(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取当前租户已有的选品日期列表（去重，倒序）"""
+    try:
+        query = text("""
+            SELECT DISTINCT DATE(created_at) AS dt
+            FROM product_selections
+            WHERE tenant_id = :tenant_id AND deleted_at IS NULL
+            ORDER BY dt DESC
+        """)
+        result = db.execute(query, {"tenant_id": current_user.tenant_id})
+        dates = [row[0].strftime("%Y-%m-%d") if hasattr(row[0], 'strftime') else str(row[0]) for row in result]
+        return {"success": True, "data": dates}
+    except Exception as e:
+        logger.error(f"获取选品日期列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取选品日期列表失败: {str(e)}")
+
+
+@router.get("/sites")
+async def get_product_sites(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取当前租户已有的站点列表"""
+    try:
+        query = text("""
+            SELECT DISTINCT site
+            FROM product_selections
+            WHERE tenant_id = :tenant_id AND deleted_at IS NULL AND site IS NOT NULL AND site != ''
+            ORDER BY site
+        """)
+        result = db.execute(query, {"tenant_id": current_user.tenant_id})
+        sites = [row[0] for row in result]
+        return {"success": True, "data": sites}
+    except Exception as e:
+        logger.error(f"获取站点列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取站点列表失败: {str(e)}")
+
+
+@router.get("/")
+async def get_product_selections(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = None,
+    product_type: Optional[str] = None,
+    site: Optional[str] = None,
+    date_filter: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
+    status: Optional[List[str]] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        where_conditions = ["ps.tenant_id = :tenant_id", "ps.deleted_at IS NULL"]
+        params = {"tenant_id": current_user.tenant_id}
+
+        if search:
+            where_conditions.append(
+                "(ps.asin LIKE :search OR ps.product_title LIKE :search OR ps.keywords LIKE :search)"
+            )
+            params["search"] = f"%{search}%"
+
+        if product_type:
+            where_conditions.append("ps.product_type = :product_type")
+            params["product_type"] = product_type
+
+        if site:
+            where_conditions.append("ps.site = :site")
+            params["site"] = site
+
+        if date_filter:
+            where_conditions.append("DATE(ps.created_at) = :date_filter")
+            params["date_filter"] = date_filter
+
+        if status:
+            status_filters = []
+            for idx, s in enumerate(status):
+                if s == "empty":
+                    status_filters.append("(ps.status IS NULL OR ps.status = '')")
+                elif s in ("pending", "approved"):
+                    param_name = f"status_{idx}"
+                    status_filters.append(f"ps.status = :{param_name}")
+                    params[param_name] = s
+            if status_filters:
+                where_conditions.append(f"({' OR '.join(status_filters)})")
+
+        where_clause = " AND ".join(where_conditions)
+
+        count_query = text(f"SELECT COUNT(*) FROM product_selections ps WHERE {where_clause}")
+        total = db.execute(count_query, params).scalar() or 0
+
+        order_column = "ps.created_at"
+        if sort_by and sort_by in [
+            "composite_score", "rating", "price", "monthly_sales", "created_at",
+            "product_title", "asin", "product_type", "site", "commission",
+            "first_leg_cost", "last_mile_cost", "weight_kg", "cost_at_15_profit",
+            "review_count"
+        ]:
+            order_column = f"ps.{sort_by}"
+        order_dir = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+        offset = (page - 1) * page_size
+        params["offset"] = offset
+        params["limit"] = page_size
+
+        query = text(f"""
+            SELECT ps.id, ps.tenant_id, ps.product_title, ps.url, ps.asin, ps.image_url,
+                   ps.rating, ps.review_count, ps.keywords, ps.price, ps.commission,
+                   ps.first_leg_cost, ps.last_mile_cost, ps.weight_kg, ps.cost_at_15_profit,
+                   ps.product_type, ps.site, ps.monthly_sales, ps.traffic_trend,
+                   ps.seasonality, ps.infringement_analysis, ps.infringement_conclusion, ps.traffic_score_result,
+                   ps.traffic_score, ps.sales_score, ps.rating_score, ps.penalty_factor, ps.composite_score,
+                   ps.status, ps.created_at, ps.updated_at,
+                   ps.scrape_rate, ps.realtime_rate, ps.category
+            FROM product_selections ps
+            WHERE {where_clause}
+            ORDER BY {order_column} {order_dir}
+            LIMIT :limit OFFSET :offset
+        """)
+        result = db.execute(query, params)
+        items = [_row_to_dict(row) for row in result]
+
+        return {
+            "success": True,
+            "data": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size if total > 0 else 0
+        }
+    except Exception as e:
+        logger.error(f"获取选品列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取选品列表失败: {str(e)}")
+
+
+@router.get("/{selection_id}")
+async def get_product_selection(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        query = text("""
+            SELECT ps.id, ps.tenant_id, ps.product_title, ps.url, ps.asin, ps.image_url,
+                   ps.rating, ps.review_count, ps.keywords, ps.price, ps.commission,
+                   ps.first_leg_cost, ps.last_mile_cost, ps.weight_kg, ps.cost_at_15_profit,
+                   ps.product_type, ps.site, ps.monthly_sales, ps.traffic_trend,
+                   ps.seasonality, ps.infringement_analysis, ps.infringement_conclusion, ps.traffic_score_result,
+                   ps.traffic_score, ps.sales_score, ps.rating_score, ps.penalty_factor, ps.composite_score,
+                   ps.status, ps.created_at, ps.updated_at,
+                   ps.scrape_rate, ps.realtime_rate, ps.category
+            FROM product_selections ps
+            WHERE ps.id = :id AND ps.tenant_id = :tid AND ps.deleted_at IS NULL
+        """)
+        row = db.execute(query, {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        return {"success": True, "data": _row_to_dict(row)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取选品详情失败: {str(e)}")
+
+
+@router.post("/")
+async def create_product_selection(
+    data: ProductSelectionCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # 抓取时汇率：按站点币种获取当前汇率并固定保存
+        scrape_rate = None
+        try:
+            rates = _get_cny_rates()
+            scrape_rate = rates.get(_site_currency(data.site))
+        except Exception as e:
+            logger.warning(f"创建选品时获取汇率失败: {e}")
+
+        insert_sql = text("""
+            INSERT INTO product_selections (
+                tenant_id, product_title, url, asin, image_url, rating, review_count,
+                keywords, price, commission, first_leg_cost, last_mile_cost, weight_kg,
+                cost_at_15_profit, product_type, site, monthly_sales, traffic_trend, scrape_rate, category
+            ) VALUES (
+                :tenant_id, :product_title, :url, :asin, :image_url, :rating, :review_count,
+                :keywords, :price, :commission, :first_leg_cost, :last_mile_cost, :weight_kg,
+                :cost_at_15_profit, :product_type, :site, :monthly_sales, :traffic_trend, :scrape_rate, :category
+            )
+        """)
+        result = db.execute(insert_sql, {
+            "tenant_id": current_user.tenant_id,
+            "product_title": data.product_title,
+            "url": data.url,
+            "asin": data.asin,
+            "image_url": data.image_url,
+            "rating": data.rating,
+            "review_count": data.review_count,
+            "keywords": data.keywords,
+            "price": data.price,
+            "commission": data.commission,
+            "first_leg_cost": data.first_leg_cost,
+            "last_mile_cost": data.last_mile_cost,
+            "weight_kg": data.weight_kg,
+            "cost_at_15_profit": data.cost_at_15_profit,
+            "product_type": data.product_type,
+            "site": data.site,
+            "monthly_sales": data.monthly_sales,
+            "traffic_trend": data.traffic_trend,
+            "scrape_rate": scrape_rate,
+            "category": json.dumps(data.category, ensure_ascii=False) if data.category else None,
+        })
+        db.commit()
+        return {"success": True, "message": "选品记录创建成功", "data": {"id": result.lastrowid}}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"创建选品记录失败: {str(e)}")
+
+
+@router.put("/{selection_id}")
+async def update_product_selection(
+    selection_id: int,
+    data: ProductSelectionUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        check = text("SELECT id FROM product_selections WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL")
+        if not db.execute(check, {"id": selection_id, "tid": current_user.tenant_id}).fetchone():
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        updates = []
+        params = {"id": selection_id}
+        field_mapping = {
+            "product_title": "product_title", "url": "url", "asin": "asin",
+            "image_url": "image_url", "rating": "rating", "review_count": "review_count",
+            "keywords": "keywords", "price": "price", "commission": "commission",
+            "first_leg_cost": "first_leg_cost", "last_mile_cost": "last_mile_cost",
+            "weight_kg": "weight_kg", "cost_at_15_profit": "cost_at_15_profit",
+            "product_type": "product_type", "site": "site",
+            "monthly_sales": "monthly_sales", "traffic_trend": "traffic_trend",
+            "category": "category"
+        }
+
+        for field, col in field_mapping.items():
+            value = getattr(data, field, None)
+            if value is not None:
+                updates.append(f"{col} = :{field}")
+                params[field] = value
+
+        # 类目为列表，需序列化为JSON存储
+        if "category" in params and isinstance(params["category"], list):
+            params["category"] = json.dumps(params["category"], ensure_ascii=False)
+
+        if updates:
+            update_sql = text(f"UPDATE product_selections SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id")
+            db.execute(update_sql, params)
+            db.commit()
+
+        return {"success": True, "message": "选品记录更新成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新选品记录失败: {str(e)}")
+
+
+@router.delete("/{selection_id}")
+async def delete_product_selection(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        check = text("SELECT id FROM product_selections WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL")
+        if not db.execute(check, {"id": selection_id, "tid": current_user.tenant_id}).fetchone():
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        db.execute(text("UPDATE product_selections SET deleted_at = NOW() WHERE id = :id"), {"id": selection_id})
+        db.commit()
+        return {"success": True, "message": "选品记录删除成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除选品记录失败: {str(e)}")
+
+
+def _calc_rating_score(rating: float | None, review_count: int | None) -> float:
+    """根据产品评分和评论数计算星级评分"""
+    if rating is None:
+        return 20.0
+
+    r = round(rating, 1)
+
+    # 只按星级评分（抓取数据评论数普遍<10条，不再按评论数分档）
+    if r >= 4.8: base = 18.0
+    elif r >= 4.5: base = 16.0
+    elif r >= 4.2: base = 13.0
+    elif r >= 4.0: base = 10.0
+    else: base = 5.0
+
+    # 评论极少(≤3条)时参考价值低，打9折
+    if (review_count or 0) <= 3:
+        base = round(base * 0.9, 1)
+    return base
+
+
+def _calc_sales_score(monthly_sales: int | None) -> float:
+    """根据近一个月销量计算销量评分"""
+    s = monthly_sales or 0
+    if s == 0: return 0.0
+    if 1 <= s <= 5: return 3.0
+    if 6 <= s <= 10: return 6.0
+    if 11 <= s <= 15: return 9.0
+    if 16 <= s <= 20: return 12.0
+    if 21 <= s <= 25: return 15.0
+    if 26 <= s <= 30: return 18.0
+    return 20.0
+
+
+def _calc_penalty_factor(rating_score: float) -> float:
+    """根据星级评分计算惩罚因子（阈值与新星级阶梯对齐）"""
+    if rating_score >= 16: return 1.00
+    elif rating_score >= 13: return 0.95
+    elif rating_score >= 10: return 0.85
+    elif rating_score >= 5: return 0.70
+    else: return 0.50
+
+
+def _calc_composite_score(penalty_factor: float, traffic_score: float, sales_score: float) -> float:
+    """根据公式计算综合评分：(惩罚因子 * 流量评分 * 0.6 + 销量评分 * 5 * 0.4).ROUND(2)"""
+    return round(penalty_factor * traffic_score * 0.6 + sales_score * 5 * 0.4, 2)
+
+
+def _calc_traffic_score(traffic_trend_str: str | None) -> tuple[float, str]:
+    """根据流量趋势数据公式化计算流量评分（满分100），返回(评分, 详细结果JSON)"""
+    import math
+    import statistics
+    import ast
+
+    def r2(x):
+        return round(float(x), 2)
+
+    if not traffic_trend_str:
+        return 0.0, ""
+
+    try:
+        month_volume = ast.literal_eval(traffic_trend_str)
+    except Exception:
+        return 0.0, ""
+
+    if not isinstance(month_volume, dict) or not month_volume:
+        return 0.0, ""
+
+    values = [v for v in month_volume.values() if isinstance(v, (int, float))]
+    n = len(values)
+
+    if n == 0:
+        return 0.0, ""
+
+    result = {
+        "趋势方向强度分": 0.0,
+        "趋势一致性分": 0.0,
+        "相对增长倍数分": 0.0,
+        "月均增长率分": 0.0,
+        "趋势连续性分": 0.0,
+        "波动惩罚分": 0.0,
+        "趋势总分": 0.0,
+        "最近3个月均值": 0.0,
+        "之前3个月均值": 0.0,
+        "趋势比值": 0.0,
+        "历史最低值": r2(min(values)),
+        "最新月份值": r2(values[-1]),
+        "增长倍数": 0.0,
+        "月均增长率": 0.0,
+        "波动系数CV": 0.0,
+    }
+
+    # 一、趋势方向强度
+    if n >= 6:
+        last_avg = sum(values[-3:]) / 3
+        prev_avg = sum(values[-6:-3]) / 3
+        R = last_avg / prev_avg if prev_avg > 0 else 0
+        score = max(0, min(25, (R - 1) * 18))
+        result["最近3个月均值"] = r2(last_avg)
+        result["之前3个月均值"] = r2(prev_avg)
+        result["趋势比值"] = r2(R)
+        result["趋势方向强度分"] = r2(score)
+
+    # 二、趋势一致性
+    if n >= 6:
+        up = sum(1 for i in range(1, 6) if values[-6 + i] > values[-7 + i])
+        result["趋势一致性分"] = r2((up / 5) * 10)
+
+    # 三、相对增长倍数
+    if n >= 2 and min(values) > 0:
+        G = values[-1] / min(values)
+        score = max(0, min(20, math.log2(G) * 6))
+        result["增长倍数"] = r2(G)
+        result["相对增长倍数分"] = r2(score)
+
+    # 四、月均增长率
+    if n >= 4 and values[-4] > 0:
+        M = (values[-1] / values[-4]) ** (1 / 4) - 1
+        score = max(0, min(10, M * 120))
+        result["月均增长率"] = r2(M)
+        result["月均增长率分"] = r2(score)
+
+    # 五、趋势连续性
+    if n >= 2:
+        cur = max_streak = 0
+        for i in range(1, n):
+            if values[i] > values[i - 1]:
+                cur += 1
+                max_streak = max(max_streak, cur)
+            else:
+                cur = 0
+        mapping = {2: 3, 3: 6, 4: 9, 5: 12}
+        result["趋势连续性分"] = 15 if max_streak >= 6 else mapping.get(max_streak, 0)
+
+    # 六、波动惩罚
+    if n >= 6:
+        last_6 = values[-6:]
+        mean = statistics.mean(last_6)
+        std = statistics.pstdev(last_6)
+        CV = std / mean if mean > 0 else 0
+        result["波动系数CV"] = r2(CV)
+        if CV <= 0.25:
+            result["波动惩罚分"] = 10
+        elif CV <= 0.35:
+            result["波动惩罚分"] = 7
+        elif CV <= 0.50:
+            result["波动惩罚分"] = 4
+
+    total = (
+        result["趋势方向强度分"]
+        + result["趋势一致性分"]
+        + result["相对增长倍数分"]
+        + result["月均增长率分"]
+        + result["趋势连续性分"]
+        + result["波动惩罚分"]
+    )
+
+    result["趋势总分"] = r2(max(0, total))
+
+    # 映射到满分100：原始总分约90分上限，线性放大到100
+    raw_score = max(0, total)
+    final_score = round(min(100, raw_score * (100 / 90)), 2)
+
+    return final_score, json.dumps(result, ensure_ascii=False)
+
+
+@router.post("/{selection_id}/analyze")
+async def analyze_product_selection(
+    selection_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    # 1. 查询产品数据后立即释放数据库连接，避免AI分析期间占用连接池
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+        query = text("""
+            SELECT id, product_title, url, asin, image_url, rating, review_count, keywords,
+                   price, commission, first_leg_cost, last_mile_cost, weight_kg,
+                   cost_at_15_profit, product_type, monthly_sales, traffic_trend
+            FROM product_selections
+            WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
+        """)
+        row = db.execute(query, {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        product_data = {
+            "product_title": row[1],
+            "url": row[2] or "",
+            "asin": row[3] or "",
+            "image_url": row[4] or "",
+            "rating": row[5],
+            "review_count": row[6],
+            "keywords": row[7] or "",
+            "price": float(row[8]) if row[8] is not None else None,
+            "commission": float(row[9]) if row[9] is not None else None,
+            "first_leg_cost": float(row[10]) if row[10] is not None else None,
+            "last_mile_cost": float(row[11]) if row[11] is not None else None,
+            "weight_kg": float(row[12]) if row[12] is not None else None,
+            "cost_at_15_profit": float(row[13]) if row[13] is not None else None,
+            "product_type": row[14] or "",
+            "monthly_sales": row[15],
+            "traffic_trend": row[16] or "",
+        }
+        product_rating = float(row[5]) if row[5] is not None else None
+        product_review_count = row[6]
+        product_monthly_sales = row[15]
+    finally:
+        db.close()
+
+    # 2. AI分析（在线程池中运行，不阻塞事件循环，不占用数据库连接）
+    from services.ai_analysis_service import analyze_product_selection as do_analyze
+    ai_result = await do_analyze(product_data)
+
+    if not ai_result:
+        raise HTTPException(status_code=500, detail="AI分析失败，请稍后重试")
+
+    # 3. 计算评分并写入数据库（新连接）
+    rating_score = _calc_rating_score(product_rating, product_review_count)
+    sales_score = _calc_sales_score(product_monthly_sales)
+    penalty_factor = _calc_penalty_factor(rating_score)
+    traffic_score, traffic_score_result = _calc_traffic_score(product_data.get("traffic_trend"))
+    composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+        update_sql = text("""
+            UPDATE product_selections SET
+                seasonality = :seasonality,
+                infringement_analysis = :infringement_analysis,
+                infringement_conclusion = :infringement_conclusion,
+                traffic_score_result = :traffic_score_result,
+                traffic_score = :traffic_score,
+                sales_score = :sales_score,
+                rating_score = :rating_score,
+                penalty_factor = :penalty_factor,
+                composite_score = :composite_score,
+                ai_raw_response = :ai_raw_response,
+                updated_at = NOW()
+            WHERE id = :id
+        """)
+        db.execute(update_sql, {
+            "seasonality": ai_result.get("seasonality", ""),
+            "infringement_analysis": ai_result.get("infringement_analysis", ""),
+            "infringement_conclusion": ai_result.get("infringement_conclusion", ""),
+            "traffic_score_result": traffic_score_result,
+            "traffic_score": traffic_score,
+            "sales_score": sales_score,
+            "rating_score": rating_score,
+            "penalty_factor": penalty_factor,
+            "composite_score": composite_score,
+            "ai_raw_response": json.dumps(ai_result, ensure_ascii=False),
+            "id": selection_id,
+        })
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"AI分析结果写入数据库失败: {e}")
+        raise HTTPException(status_code=500, detail=f"AI分析结果保存失败: {str(e)}")
+    finally:
+        db.close()
+
+    return {"success": True, "message": "AI分析完成", "data": {
+        **ai_result, "rating_score": rating_score, "sales_score": sales_score,
+        "penalty_factor": penalty_factor, "composite_score": composite_score
+    }}
+
+
+async def _analyze_one_product(selection_id: int, tenant_id: int) -> Dict[str, Any]:
+    """分析单条选品：查数据(短连接) → AI分析 → 算分 → 写入(短连接)"""
+    from database.database import SessionLocal
+    from services.ai_analysis_service import analyze_product_selection as do_analyze
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+            query = text("""
+                SELECT id, product_title, url, asin, image_url, rating, review_count, keywords,
+                       price, commission, first_leg_cost, last_mile_cost, weight_kg,
+                       cost_at_15_profit, product_type, monthly_sales, traffic_trend
+                FROM product_selections
+                WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
+            """)
+            row = db.execute(query, {"id": selection_id, "tid": tenant_id}).fetchone()
+            if not row:
+                return {"id": selection_id, "success": False, "message": "记录不存在"}
+
+            product_data = {
+                "product_title": row[1], "url": row[2] or "", "asin": row[3] or "",
+                "image_url": row[4] or "", "rating": row[5], "review_count": row[6],
+                "keywords": row[7] or "", "price": float(row[8]) if row[8] is not None else None,
+                "commission": float(row[9]) if row[9] is not None else None,
+                "first_leg_cost": float(row[10]) if row[10] is not None else None,
+                "last_mile_cost": float(row[11]) if row[11] is not None else None,
+                "weight_kg": float(row[12]) if row[12] is not None else None,
+                "cost_at_15_profit": float(row[13]) if row[13] is not None else None,
+                "product_type": row[14] or "", "monthly_sales": row[15],
+                "traffic_trend": row[16] or "",
+            }
+            product_rating = float(row[5]) if row[5] is not None else None
+            product_review_count = row[6]
+            product_monthly_sales = row[15]
+        finally:
+            db.close()
+
+        # AI分析（不占用数据库连接）
+        ai_result = await do_analyze(product_data)
+        if not ai_result:
+            return {"id": selection_id, "success": False, "message": "AI分析失败"}
+
+        rating_score = _calc_rating_score(product_rating, product_review_count)
+        sales_score = _calc_sales_score(product_monthly_sales)
+        penalty_factor = _calc_penalty_factor(rating_score)
+        traffic_score, traffic_score_result = _calc_traffic_score(product_data.get("traffic_trend"))
+        composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+
+        db = SessionLocal()
+        try:
+            db.execute(text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+            update_sql = text("""
+                UPDATE product_selections SET
+                    seasonality = :seasonality,
+                    infringement_analysis = :infringement_analysis,
+                    infringement_conclusion = :infringement_conclusion,
+                    traffic_score_result = :traffic_score_result,
+                    traffic_score = :traffic_score,
+                    sales_score = :sales_score,
+                    rating_score = :rating_score,
+                    penalty_factor = :penalty_factor,
+                    composite_score = :composite_score,
+                    ai_raw_response = :ai_raw_response,
+                    updated_at = NOW()
+                WHERE id = :id
+            """)
+            db.execute(update_sql, {
+                "seasonality": ai_result.get("seasonality", ""),
+                "infringement_analysis": ai_result.get("infringement_analysis", ""),
+                "infringement_conclusion": ai_result.get("infringement_conclusion", ""),
+                "traffic_score_result": traffic_score_result,
+                "traffic_score": traffic_score,
+                "sales_score": sales_score,
+                "rating_score": rating_score,
+                "penalty_factor": penalty_factor,
+                "composite_score": composite_score,
+                "ai_raw_response": json.dumps(ai_result, ensure_ascii=False),
+                "id": selection_id,
+            })
+            db.commit()
+        finally:
+            db.close()
+
+        return {"id": selection_id, "success": True, "data": {
+            **ai_result, "rating_score": rating_score, "sales_score": sales_score,
+            "penalty_factor": penalty_factor, "composite_score": composite_score
+        }}
+    except Exception as e:
+        logger.error(f"分析ID={selection_id}失败: {e}")
+        return {"id": selection_id, "success": False, "message": str(e)}
+
+
+async def _run_batch_analyze(batch_id: str, ids: List[int], tenant_id: int):
+    """后台并发执行批量分析，实时更新进度"""
+    progress = _batch_analyze_tasks[batch_id]
+    semaphore = asyncio.Semaphore(BATCH_ANALYZE_CONCURRENCY)
+
+    async def worker(sid: int):
+        async with semaphore:
+            result = await _analyze_one_product(sid, tenant_id)
+        progress["completed"] += 1
+        if result.get("success"):
+            progress["success"] += 1
+        else:
+            progress["failed"] += 1
+        progress["results"].append(result)
+
+    try:
+        await asyncio.gather(*(worker(sid) for sid in ids))
+    except Exception as e:
+        logger.error(f"批量分析任务{batch_id}异常: {e}")
+    progress["status"] = "done"
+
+
+def _cleanup_old_batch_tasks():
+    """清理超过2小时的已完成任务"""
+    now = datetime.now()
+    expired = []
+    for bid, task in _batch_analyze_tasks.items():
+        if task.get("status") == "done" and (now - task.get("created_at", now)).total_seconds() > 7200:
+            expired.append(bid)
+    for bid in expired:
+        _batch_analyze_tasks.pop(bid, None)
+
+
+@router.post("/batch-analyze")
+async def batch_analyze_product_selections(
+    ids: List[int],
+    current_user: User = Depends(get_current_user)
+):
+    """批量AI分析：立即返回任务ID，后台异步并发处理，通过进度接口查询结果"""
+    if not ids:
+        raise HTTPException(status_code=400, detail="请提供要分析的选品ID列表")
+
+    _cleanup_old_batch_tasks()
+
+    batch_id = uuid.uuid4().hex
+    _batch_analyze_tasks[batch_id] = {
+        "status": "running",
+        "total": len(ids),
+        "completed": 0,
+        "success": 0,
+        "failed": 0,
+        "results": [],
+        "created_at": datetime.now(),
+    }
+    task = asyncio.create_task(_run_batch_analyze(batch_id, ids, current_user.tenant_id))
+    _batch_analyze_tasks[batch_id]["_task"] = task  # 持有引用防止被GC
+
+    return {"success": True, "data": {"batch_id": batch_id, "total": len(ids)}}
+
+
+@router.get("/batch-analyze/progress/{batch_id}")
+async def get_batch_analyze_progress(
+    batch_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """查询批量分析任务进度"""
+    task = _batch_analyze_tasks.get(batch_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return {
+        "success": True,
+        "data": {
+            "status": task["status"],
+            "total": task["total"],
+            "completed": task["completed"],
+            "success": task["success"],
+            "failed": task["failed"],
+            "results": task["results"],
+        }
+    }
+
+
+@router.post("/switch-rate")
+async def switch_exchange_rate(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """切换实时汇率/抓取时汇率，并按公式重新计算头程、进货价
+    - use_realtime=true：抓取实时汇率存入realtime_rate并按其重算
+    - use_realtime=false：按抓取时汇率(scrape_rate)重算
+    """
+    use_realtime = bool(payload.get("use_realtime", True))
+    try:
+        realtime_rates = {}
+        if use_realtime:
+            realtime_rates = _get_cny_rates()
+            if not realtime_rates:
+                raise HTTPException(status_code=502, detail="获取实时汇率失败，请稍后重试")
+
+        rows = db.execute(text("""
+            SELECT id, site, price, weight_kg, last_mile_cost, commission, scrape_rate
+            FROM product_selections
+            WHERE tenant_id = :tid AND deleted_at IS NULL
+        """), {"tid": current_user.tenant_id}).fetchall()
+
+        updated = 0
+        for row in rows:
+            rid, site, price, weight_kg, last_mile_cost, commission, scrape_rate = row
+            currency = _site_currency(site)
+            if use_realtime:
+                rate = realtime_rates.get(currency)
+                if rate:
+                    db.execute(text(
+                        "UPDATE product_selections SET realtime_rate = :rate WHERE id = :id"
+                    ), {"rate": rate, "id": rid})
+            else:
+                rate = float(scrape_rate) if scrape_rate is not None else None
+
+            first_leg, cost = _calc_costs_by_rate(
+                price, weight_kg, last_mile_cost, commission, rate, site
+            )
+            if first_leg is not None or cost is not None:
+                db.execute(text("""
+                    UPDATE product_selections SET
+                        first_leg_cost = COALESCE(:fl, first_leg_cost),
+                        cost_at_15_profit = COALESCE(:cost, cost_at_15_profit),
+                        updated_at = NOW()
+                    WHERE id = :id
+                """), {"fl": first_leg, "cost": cost, "id": rid})
+            updated += 1
+
+        db.commit()
+        return {"success": True, "data": updated, "rates": realtime_rates}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"切换汇率失败: {e}")
+        raise HTTPException(status_code=500, detail=f"切换汇率失败: {str(e)}")
+
+
+@router.post("/recalc-scores")
+async def recalc_all_scores(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """重新计算所有选品记录的评分"""
+    try:
+        rows = db.execute(text("""
+            SELECT id, rating, review_count, monthly_sales, traffic_trend
+            FROM product_selections
+            WHERE tenant_id = :tid AND deleted_at IS NULL
+        """), {"tid": current_user.tenant_id}).fetchall()
+
+        updated = 0
+        for row in rows:
+            rid = row[0]
+            rating_score = _calc_rating_score(row[1], row[2])
+            sales_score = _calc_sales_score(row[3])
+            penalty_factor = _calc_penalty_factor(rating_score)
+            traffic_score, traffic_result_json = _calc_traffic_score(row[4])
+            composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+
+            db.execute(text("""
+                UPDATE product_selections SET
+                    traffic_score = :ts,
+                    traffic_score_result = :tsr,
+                    sales_score = :ss,
+                    rating_score = :rs,
+                    penalty_factor = :pf,
+                    composite_score = :cs,
+                    updated_at = NOW()
+                WHERE id = :id
+            """), {
+                "id": rid,
+                "ts": traffic_score,
+                "tsr": traffic_result_json,
+                "ss": sales_score,
+                "rs": rating_score,
+                "pf": penalty_factor,
+                "cs": composite_score,
+            })
+            updated += 1
+
+        db.commit()
+        return {"success": True, "data": updated}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"重新计算评分失败: {e}")
+        raise HTTPException(status_code=500, detail=f"重新计算评分失败: {str(e)}")
+
+
+@router.post("/{selection_id}/submit-for-approval")
+async def submit_for_approval(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """提交选品审批（状态变更为 pending）"""
+    try:
+        row = db.execute(text(
+            "SELECT id, status, product_title FROM product_selections WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        current_status = row[1] or ""
+        if current_status == "pending":
+            raise HTTPException(status_code=400, detail="该选品已处于待审批状态")
+        if current_status == "approved":
+            raise HTTPException(status_code=400, detail="该选品已审批通过")
+
+        db.execute(text(
+            "UPDATE product_selections SET status = 'pending', updated_at = NOW() WHERE id = :id"
+        ), {"id": selection_id})
+        db.commit()
+        return {"success": True, "message": "已提交审批"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"提交选品审批失败: {e}")
+        raise HTTPException(status_code=500, detail=f"提交审批失败: {str(e)}")
+
+
+@router.post("/{selection_id}/approve")
+async def approve_selection(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("product_selection:approve"))
+):
+    """审批选品（状态 pending -> approved）"""
+    try:
+        row = db.execute(text(
+            "SELECT id, status, product_title FROM product_selections WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        current_status = row[1] or ""
+        if current_status != "pending":
+            raise HTTPException(status_code=400, detail="只能审批待审批状态的选品")
+
+        db.execute(text(
+            "UPDATE product_selections SET status = 'approved', updated_at = NOW() WHERE id = :id"
+        ), {"id": selection_id})
+        db.commit()
+        return {"success": True, "message": "审批通过"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"审批选品失败: {e}")
+        raise HTTPException(status_code=500, detail=f"审批失败: {str(e)}")
+
+
+@router.post("/{selection_id}/cancel-approval-application")
+async def cancel_approval_application(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """取消申请选品（状态 pending -> 空）"""
+    try:
+        row = db.execute(text(
+            "SELECT id, status, product_title FROM product_selections WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        current_status = row[1] or ""
+        if current_status != "pending":
+            raise HTTPException(status_code=400, detail="只能取消待审批状态的选品")
+
+        db.execute(text(
+            "UPDATE product_selections SET status = NULL, updated_at = NOW() WHERE id = :id"
+        ), {"id": selection_id})
+        db.commit()
+        return {"success": True, "message": "已取消申请"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"取消申请选品失败: {e}")
+        raise HTTPException(status_code=500, detail=f"取消申请失败: {str(e)}")
+
+
+@router.post("/{selection_id}/generate-purchase-order")
+async def generate_purchase_order(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("purchase:create"))
+):
+    """根据已审批选品生成采购单"""
+    try:
+        row = db.execute(text(
+            "SELECT id, product_title, asin, cost_at_15_profit, price, status FROM product_selections "
+            "WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="选品记录不存在")
+
+        if (row[5] or "") != "approved":
+            raise HTTPException(status_code=400, detail="只有已审批的选品才能生成采购单")
+
+        asin = row[2] or ""
+        product_title = row[1] or ""
+        unit_price = float(row[3]) if row[3] is not None else (float(row[4]) if row[4] is not None else 0)
+
+        # 根据 ASIN 查找对应产品
+        product_row = None
+        if asin:
+            product_row = db.execute(text(
+                "SELECT id FROM products WHERE tenant_id = :tid AND asin = :asin AND deleted_at IS NULL "
+                "ORDER BY id ASC LIMIT 1"
+            ), {"tid": current_user.tenant_id, "asin": asin}).fetchone()
+
+        if not product_row:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未找到 ASIN '{asin}' 对应的产品，请先在产品管理中创建该产品"
+            )
+
+        product_id = product_row[0]
+        order_number = f"PO{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        total_price = round(unit_price * 1, 2)
+
+        db.execute(text("""
+            INSERT INTO purchase_orders (tenant_id, order_number, warehouse, store_group_id, platform, total_amount, status, notes, created_by, created_at, updated_at)
+            VALUES (:tenant_id, :order_number, NULL, NULL, NULL, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
+        """), {
+            "tenant_id": current_user.tenant_id,
+            "order_number": order_number,
+            "total_amount": total_price,
+            "notes": f"由选品生成：{product_title}",
+            "created_by": current_user.id,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now(),
+        })
+        order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+
+        db.execute(text("""
+            INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, created_at, updated_at)
+            VALUES (:oid, :pid, 1, :up, :tp, :notes, :created_at, :updated_at)
+        """), {
+            "oid": order_id, "pid": product_id, "up": unit_price, "tp": total_price,
+            "notes": f"ASIN: {asin}",
+            "created_at": datetime.now(), "updated_at": datetime.now(),
+        })
+
+        db.commit()
+        return {"success": True, "message": "采购单生成成功", "data": {"id": order_id, "order_number": order_number}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"生成采购单失败: {e}")
+        raise HTTPException(status_code=500, detail=f"生成采购单失败: {str(e)}")
+
+
+@router.post("/batch-generate-purchase-orders")
+async def batch_generate_purchase_orders(
+    ids: List[int],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("purchase:create"))
+):
+    """批量根据已审批选品生成采购单（每个选品生成一个独立采购单）"""
+    if not ids:
+        raise HTTPException(status_code=400, detail="请选择要生成采购单的选品")
+
+    results = []
+    errors = []
+    for selection_id in ids:
+        try:
+            row = db.execute(text(
+                "SELECT id, product_title, asin, cost_at_15_profit, price, status FROM product_selections "
+                "WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
+            if not row:
+                errors.append({"id": selection_id, "message": "选品记录不存在"})
+                continue
+
+            if (row[5] or "") != "approved":
+                errors.append({"id": selection_id, "message": "只有已审批的选品才能生成采购单"})
+                continue
+
+            asin = row[2] or ""
+            product_title = row[1] or ""
+            unit_price = float(row[3]) if row[3] is not None else (float(row[4]) if row[4] is not None else 0)
+
+            product_row = None
+            if asin:
+                product_row = db.execute(text(
+                    "SELECT id FROM products WHERE tenant_id = :tid AND asin = :asin AND deleted_at IS NULL "
+                    "ORDER BY id ASC LIMIT 1"
+                ), {"tid": current_user.tenant_id, "asin": asin}).fetchone()
+
+            if not product_row:
+                errors.append({"id": selection_id, "message": f"未找到 ASIN '{asin}' 对应的产品"})
+                continue
+
+            product_id = product_row[0]
+            order_number = f"PO{datetime.now().strftime('%Y%m%d%H%M%S')}{selection_id}"
+            total_price = round(unit_price * 1, 2)
+
+            db.execute(text("""
+                INSERT INTO purchase_orders (tenant_id, order_number, warehouse, store_group_id, platform, total_amount, status, notes, created_by, created_at, updated_at)
+                VALUES (:tenant_id, :order_number, NULL, NULL, NULL, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
+            """), {
+                "tenant_id": current_user.tenant_id,
+                "order_number": order_number,
+                "total_amount": total_price,
+                "notes": f"由选品生成：{product_title}",
+                "created_by": current_user.id,
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+            })
+            order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+
+            db.execute(text("""
+                INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, created_at, updated_at)
+                VALUES (:oid, :pid, 1, :up, :tp, :notes, :created_at, :updated_at)
+            """), {
+                "oid": order_id, "pid": product_id, "up": unit_price, "tp": total_price,
+                "notes": f"ASIN: {asin}",
+                "created_at": datetime.now(), "updated_at": datetime.now(),
+            })
+
+            results.append({"id": selection_id, "order_id": order_id, "order_number": order_number})
+        except Exception as e:
+            errors.append({"id": selection_id, "message": str(e)})
+
+    if results:
+        db.commit()
+    if errors and not results:
+        raise HTTPException(status_code=400, detail=f"生成失败：{errors[0]['message']}")
+
+    return {"success": True, "data": {"created": results, "errors": errors}}
