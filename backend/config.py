@@ -28,10 +28,17 @@ class Settings(BaseSettings):
     FEISHU_INVENTORY_TABLE_ID: str = ""
     FEISHU_REVIEW_BASE_TOKEN: str = ""
     FEISHU_REVIEW_TABLE_ID: str = ""
+    # 飞书 webhook - 开广告提交地址
+    FEISHU_AD_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 编辑基础信息提交地址
+    FEISHU_EDIT_WEBHOOK_URL: str = ""
     
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
+    # AI 调用参数（可按需在 .env 调整）
+    OPENAI_TEMPERATURE: float = 0.7
+    OPENAI_TIMEOUT: int = 60
     
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"

@@ -6,18 +6,33 @@ from pydantic import BaseModel
 from database.database import get_db
 from models.product_page_info import ProductPageInfo
 from models.store import Store
+from models.restock import InventorySnapshot
 from models.department import UserDepartment
 from dependencies import get_current_user
 from models.user import User
+from config import get_settings
+from openai import OpenAI
 import httpx
 import asyncio
 import openpyxl
 import io
 import logging
+import os
+import json
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/product-page-info", tags=["product-page-info"])
+
+# 初始化AI客户端（用于AI编写功能）
+settings = get_settings()
+try:
+    ai_client = OpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        base_url=settings.OPENAI_API_BASE
+    ) if settings.OPENAI_API_KEY else None
+except Exception:
+    ai_client = None
 
 
 def is_admin_user(user: User, db: Session) -> bool:
@@ -55,11 +70,15 @@ def parse_string_score(val: Optional[str]) -> Optional[float]:
     except ValueError:
         return None
 
-def calc_star_rating_score(val: Optional[float]) -> Optional[int]:
+def calc_star_rating_score(val) -> Optional[int]:
     """将星级评分转换为分数：
     0.1-3.9 → 0分, 4-4.9 → 8分, 0 → 6分, 5 → 10分
     """
     if val is None:
+        return None
+    try:
+        val = float(val)
+    except (ValueError, TypeError):
         return None
     if val == 0:
         return 6
@@ -366,12 +385,19 @@ async def get_product_page_info_list(
         return {"success": True, "data": result, "total": total}
 
     total = query.count()
-    items = (
-        query.order_by(ProductPageInfo.updated_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
+    # 使用原生SQL替代ORM查询，避免ORM懒加载导致性能问题
+    raw_sql = text("""
+        SELECT * FROM product_page_info WHERE tenant_id = :tid
+        ORDER BY updated_at DESC LIMIT :limit OFFSET :offset
+    """)
+    raw_rows = db.execute(raw_sql, {
+        "tid": current_user.tenant_id,
+        "limit": page_size,
+        "offset": (page - 1) * page_size
+    }).fetchall()
+    # 转换为SimpleNamespace对象，保持属性访问方式兼容
+    from types import SimpleNamespace
+    items = [SimpleNamespace(**dict(row._mapping)) for row in raw_rows]
 
     result = []
     # 查询stores表，建立 inventory_name -> "shop_abbr-site" 映射
@@ -570,11 +596,30 @@ async def get_product_page_info_detail(
         Store.inventory_name.isnot(None)
     ).all()
     store_abbr_map = {}
+    store_country_map = {}
     for r in store_rows:
         if r.inventory_name:
             parts = [p for p in [r.shop_abbr, r.site] if p]
             store_abbr_map[r.inventory_name] = "-".join(parts) if parts else r.inventory_name
+            if r.site:
+                store_country_map[r.inventory_name] = r.site.strip().upper()
     display_store = store_abbr_map.get(item.store, item.store) if item.store else item.store
+
+    # 查询库存快照表获取毛利率（带国家筛选）
+    gross_margin = None
+    if item.asin:
+        store_country = store_country_map.get(item.store) if item.store else None
+        query = db.query(InventorySnapshot.gross_margin).filter(
+            InventorySnapshot.tenant_id == current_user.tenant_id,
+            InventorySnapshot.asin == item.asin,
+            InventorySnapshot.gross_margin.isnot(None),
+        )
+        if store_country:
+            query = query.filter(InventorySnapshot.country == store_country)
+        snapshot = query.order_by(InventorySnapshot.snapshot_date.desc()).first()
+        if snapshot:
+            # 数据库存储为小数（如0.1953表示19.53%），转为百分比数值返回
+            gross_margin = float(snapshot[0]) * 100 if snapshot[0] is not None else None
 
     return {
         "success": True,
@@ -606,6 +651,7 @@ async def get_product_page_info_detail(
             "total_score": total_score,
             "traffic_keywords": item.traffic_keywords,
             "updated_at": item.updated_at.strftime('%Y-%m-%d %H:%M:%S') if item.updated_at else None,
+            "gross_margin": gross_margin,
         },
     }
 
@@ -716,15 +762,17 @@ async def delete_competitor_price(
         has_aplus_val = 1 if item.has_aplus else 0
 
     star_score = calc_star_rating_score(item.star_rating)
+    has_ad_val = int(item.has_ad) if item.has_ad is not None else None
+    has_video_val = bool(item.has_video) if item.has_video is not None else False
     total_score = calc_total_score(
         item.title_rating,
         item.description_rating,
         item.keywords_rating,
         item.image_rating,
         star_score,
-        item.has_ad,
+        has_ad_val,
         has_aplus_val,
-        item.has_video,
+        has_video_val,
         competitor_score,
     )
 
@@ -992,10 +1040,14 @@ async def submit_edit(
         return {"success": False, "message": "记录不存在"}
 
     # 发送飞书webhook
+    webhook_url = settings.FEISHU_EDIT_WEBHOOK_URL
+    if not webhook_url:
+        logger.warning("未配置 FEISHU_EDIT_WEBHOOK_URL，跳过飞书通知")
+        return {"success": False, "message": "未配置编辑基础信息提交的飞书webhook地址"}
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
-                "https://pcn4p6l5do51.feishu.cn/base/automation/webhook/event/AnnPaHjm1wTDvohfMnDc4A2Wnlg",
+                webhook_url,
                 json={
                     "店铺": store,
                     "选择填写类型": field_type,
@@ -1014,6 +1066,179 @@ async def submit_edit(
         db.commit()
 
     return {"success": True, "message": "提交成功"}
+
+
+@router.post("/ai-write")
+async def ai_write_content(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """AI编写 - 根据流量词和原始内容重新生成字段内容
+
+    支持通过根目录 ai_write_templates.json 配置不同站点(UK/EU/US)和
+    不同字段(title/product_description/keywords/bullet_points)的指令模板。
+    模板留空时回退到默认指令。模板中可用占位符：
+      {content} - 原始字段内容
+      {traffic_keywords} - 流量关键词（空格分隔）
+    """
+    body = await request.json()
+    item_id = body.get("item_id")
+    field_type = body.get("field_type", "")
+    content = body.get("content", "")
+
+    if not item_id:
+        return {"success": False, "message": "缺少item_id参数"}
+
+    if not content or not content.strip():
+        return {"success": False, "message": "字段内容为空，无法进行AI编写"}
+
+    if not ai_client:
+        return {"success": False, "message": "AI服务未配置，请检查.env中的OPENAI_API_KEY"}
+
+    # 获取记录及其流量词
+    item = db.query(ProductPageInfo).filter(
+        ProductPageInfo.id == item_id,
+        ProductPageInfo.tenant_id == current_user.tenant_id,
+    ).first()
+
+    if not item:
+        return {"success": False, "message": "记录不存在"}
+
+    traffic_keywords = (item.traffic_keywords or "").strip()
+    if not traffic_keywords:
+        return {"success": False, "message": "当前记录无参考流量词，无法进行AI编写"}
+
+    field_label_map = {
+        'title': '标题',
+        'product_description': '产品描述',
+        'keywords': '关键词',
+        'bullet_points': '五点描述',
+    }
+    field_label = field_label_map.get(field_type, field_type)
+
+    # ====== 读取站点对应的指令模板 ======
+    # 通过 Store 表 site 字段(中文国家名)映射到区域码 UK/EU/US
+    site_region_map = {
+        "英国": "UK", "美国": "US", "加拿大": "US",
+        "德国": "EU", "法国": "EU", "意大利": "EU", "西班牙": "EU",
+        "荷兰": "EU", "比利时": "EU", "爱尔兰": "EU", "波兰": "EU", "瑞典": "EU",
+    }
+    region = None
+    if item.store:
+        store_row = db.query(Store.site).filter(
+            Store.inventory_name == item.store,
+            Store.tenant_id == current_user.tenant_id,
+        ).first()
+        if store_row and store_row[0]:
+            region = site_region_map.get(store_row[0].strip())
+
+    # 加载配置文件
+    templates = {}
+    template_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "ai_write_templates.json",
+    )
+    try:
+        if os.path.exists(template_path):
+            with open(template_path, "r", encoding="utf-8") as f:
+                templates = json.load(f)
+    except Exception as e:
+        logger.warning(f"加载AI指令模板配置失败: {e}")
+
+    # 查找当前 站点+字段 对应的模板
+    custom_template = ""
+    if region and region in templates and field_type in templates.get(region, {}):
+        custom_template = (templates[region].get(field_type) or "").strip()
+
+    # 通用规则（无论是否使用模板都追加，保证输出格式一致）
+    # 五点描述(bullet_points)需要保留标点符号，且格式与原内容相同，其他字段去除标点
+    is_bullet = field_type == "bullet_points"
+
+    # 根据站点区域确定输出语言
+    region_language_map = {
+        "UK": "英语（英式拼写）",
+        "US": "英语（美式拼写）",
+        "EU": "德语（如原始内容为德语）或对应欧洲站点语言（法语/意大利语/西班牙语/荷兰语等），与原始内容语言保持一致",
+    }
+    output_language = region_language_map.get(region, "与原始内容相同的语言")
+
+    if is_bullet:
+        punctuation_rule = (
+            "2. 保持正常的标点符号使用（句号、逗号、冒号等可正常使用）\n"
+            "3. 生成的五点描述格式必须与原始内容完全一致：使用相同的分隔符（如换行、分号等）、相同的层级结构和排列方式，仅替换/扩展文字内容\n"
+            "4. 不要出现段落标号（如1. 2. 3.等数字编号），开头不要使用*号或其他符号标记\n"
+            f"5. 生成内容必须使用{output_language}"
+        )
+        output_rule_index = "6"
+    else:
+        punctuation_rule = (
+            "2. 不要加入任何标点符号（如句号、逗号、冒号、分号、感叹号、问号、引号等），保持原内容用空格隔开的格式\n"
+            f"3. 生成内容必须使用{output_language}"
+        )
+        output_rule_index = "4"
+    common_rules = (
+        "\n\n通用输出规则（必须严格遵守）：\n"
+        "1. 根据原始内容决定流量词的插入位置，使内容通顺自然，不能直接追加在末尾\n"
+        f"{punctuation_rule}\n"
+        f"{output_rule_index}. 只输出最终生成的内容，不要添加任何说明、解释或多余字符"
+    )
+
+    if custom_template:
+        # 使用自定义模板，替换占位符
+        system_prompt = custom_template.replace("{content}", content).replace("{traffic_keywords}", traffic_keywords)
+        system_prompt += common_rules
+        user_prompt = "请根据上述指令生成内容。"
+    else:
+        # 回退到默认指令
+        length_constraint = ""
+        if field_type == "title":
+            length_constraint = "\n4. 最终生成的内容不能超过75个字符（含空格），如超出请精简"
+        if is_bullet:
+            default_punctuation_rules = (
+                "4. 保持正常的标点符号使用（句号、逗号、冒号等可正常使用）\n"
+                "6. 生成的五点描述格式必须与原始内容完全一致：使用相同的分隔符（如换行、分号等）、相同的层级结构和排列方式，仅替换/扩展文字内容\n"
+                "7. 不要出现段落标号（如1. 2. 3.等数字编号），开头不要使用*号或其他符号标记\n"
+                f"8. 生成内容必须使用{output_language}"
+            )
+            output_rule = "5. 只输出最终生成的内容，不要添加任何说明、解释或多余字符"
+        else:
+            default_punctuation_rules = (
+                "4. 不要加入任何标点符号，保持原内容用空格隔开的格式\n"
+                f"5. 生成内容必须使用{output_language}"
+            )
+            output_rule = "6. 只输出最终生成的内容，不要添加任何说明、解释或多余字符"
+        system_prompt = (
+            "你是专业的跨境电商文案优化助手。请根据原始内容和参考流量词，将流量词自然地融入原始内容中。\n\n"
+            "要求：\n"
+            "1. 根据原始内容决定流量词的插入位置，使内容通顺自然，不能直接追加在末尾\n"
+            "2. 保持原文的核心意思和结构\n"
+            "3. 优先选择最相关的流量词进行融入，无需全部使用\n"
+            f"{default_punctuation_rules}\n"
+            f"{output_rule}"
+            + length_constraint
+        )
+        user_prompt = f"字段类型：{field_label}\n参考流量词：{traffic_keywords}\n原始内容：\n{content}"
+
+    logger.info(f"[AI编写] 用户={current_user.username} item_id={item_id} field={field_type} store={item.store} region={region} use_template={bool(custom_template)}")
+
+    try:
+        response = ai_client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=settings.OPENAI_TEMPERATURE,
+            timeout=settings.OPENAI_TIMEOUT
+        )
+        generated = response.choices[0].message.content.strip() if response.choices else ""
+        if not generated:
+            return {"success": False, "message": "AI生成内容为空"}
+        return {"success": True, "data": {"content": generated}}
+    except Exception as e:
+        logger.error(f"AI编写失败: {e}")
+        return {"success": False, "message": f"AI生成失败: {str(e)}"}
 
 
 @router.put("/{item_id}/rating-status")
@@ -1040,3 +1265,115 @@ async def update_rating_status(
     item.rating_status = rating_status
     db.commit()
     return {"success": True, "message": "评分状态已更新"}
+
+
+# ==================== 开广告提交接口 ====================
+
+# 开广告字段中文名映射（用于发送到飞书）
+AD_FIELD_LABEL_MAP = {
+    "ad_type": "广告选择",
+    "keyword_asin_source": "广告关键词ASIN来源",
+    "bid_strategy": "竞价策略",
+    "sku": "SKU",
+    "site": "站点",
+    "manual_exact_bid": "精准竞价",
+    "manual_broad_bid": "广泛竞价",
+    "manual_phrase_bid": "词组竞价",
+    "related_exact_bid": "关联精准竞价",
+    "related_expanded_bid": "关联扩展竞价",
+    "strongest_related_asin": "最强关联竞品ASIN",
+    "key_keyword": "最关键的关键词",
+    "limit_word": "限定词",
+    "ad_asin": "广告ASIN",
+    "ad_keyword": "广告关键词",
+}
+
+# 广告选择值映射为中文
+AD_TYPE_VALUE_MAP = {
+    "auto": "自动",
+    "manual": "手动",
+    "related": "关联",
+}
+
+# 关键词ASIN来源值映射为中文
+KEYWORD_ASIN_SOURCE_MAP = {
+    "operation": "运营填写",
+    "h10": "H10查询",
+}
+
+# 竞价策略值映射为中文
+BID_STRATEGY_MAP = {
+    "dynamic_down": "动态竞价-仅降低",
+    "dynamic_up_down": "动态竞价-提高和降低",
+    "fixed": "固定竞价",
+}
+
+
+class AdSubmitRequest(BaseModel):
+    """开广告提交请求体"""
+    ad_type: List[str] = []
+    keyword_asin_source: str = ""
+    bid_strategy: str = ""
+    sku: str = ""
+    site: str = ""
+    manual_exact_bid: str = ""
+    manual_broad_bid: str = ""
+    manual_phrase_bid: str = ""
+    related_exact_bid: str = ""
+    related_expanded_bid: str = ""
+    strongest_related_asin: str = ""
+    key_keyword: str = ""
+    limit_word: str = ""
+    ad_asin: str = ""
+    ad_keyword: str = ""
+
+
+@router.post("/ad-submit")
+async def submit_ad(
+    request: AdSubmitRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """开广告提交：将表单数据发送到飞书 webhook"""
+    # 1. 构建字典（字段名:字段内容），多选/代码值转为中文
+    data_dict = {
+        "广告选择": "、".join([AD_TYPE_VALUE_MAP.get(t, t) for t in request.ad_type]) if request.ad_type else "",
+        "广告关键词ASIN来源": KEYWORD_ASIN_SOURCE_MAP.get(request.keyword_asin_source, request.keyword_asin_source),
+        "竞价策略": BID_STRATEGY_MAP.get(request.bid_strategy, request.bid_strategy),
+        "SKU": request.sku,
+        "站点": request.site,
+        "精准竞价": request.manual_exact_bid,
+        "广泛竞价": request.manual_broad_bid,
+        "词组竞价": request.manual_phrase_bid,
+        "关联精准竞价": request.related_exact_bid,
+        "关联扩展竞价": request.related_expanded_bid,
+        "最强关联竞品ASIN": request.strongest_related_asin,
+        "最关键的关键词": request.key_keyword,
+        "限定词": request.limit_word,
+        "广告ASIN": request.ad_asin,
+        "广告关键词": request.ad_keyword,
+    }
+
+    # 输出到后端终端
+    print(f"\n[开广告提交] 用户: {current_user.username} (tenant_id={current_user.tenant_id})")
+    print(f"[开广告提交] 数据字典: {data_dict}")
+
+    # 2. 发送到飞书 webhook
+    webhook_url = settings.FEISHU_AD_WEBHOOK_URL
+    if not webhook_url:
+        print("[开广告提交] 未配置 FEISHU_AD_WEBHOOK_URL，跳过发送")
+        return {"success": False, "message": "未配置开广告 webhook 地址"}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                webhook_url,
+                json=data_dict,
+                headers={"Content-Type": "application/json"},
+                timeout=10.0,
+            )
+            print(f"[开广告提交] 飞书响应: {response.status_code}, 内容: {response.text}")
+        return {"success": True, "message": "广告配置已提交", "data": data_dict}
+    except Exception as e:
+        print(f"[开广告提交] 飞书请求失败: {str(e)}")
+        return {"success": False, "message": f"发送到飞书失败: {str(e)}"}

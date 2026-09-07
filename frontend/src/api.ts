@@ -398,8 +398,27 @@ export const productPageInfoApi = {
     apiClient.post("/product-page-info/cancel-import", { import_ids: importIds }),
   submitEdit: (data: { item_id: number; store: string; field_type: string; sku: string; content: string; reset_rating: boolean }) =>
     apiClient.post("/product-page-info/submit-edit", data),
+  aiWrite: (data: { item_id: number; field_type: string; content: string }) =>
+    apiClient.post("/product-page-info/ai-write", data),
   updateRatingStatus: (id: number, ratingStatus: number) =>
     apiClient.put(`/product-page-info/${id}/rating-status`, { rating_status: ratingStatus }),
+  adSubmit: (data: {
+    ad_type: string[];
+    keyword_asin_source: string;
+    bid_strategy: string;
+    sku: string;
+    site: string;
+    manual_exact_bid: string;
+    manual_broad_bid: string;
+    manual_phrase_bid: string;
+    related_exact_bid: string;
+    related_expanded_bid: string;
+    strongest_related_asin: string;
+    key_keyword: string;
+    limit_word: string;
+    ad_asin: string;
+    ad_keyword: string;
+  }) => apiClient.post("/product-page-info/ad-submit", data),
 };
 // ========== Stores API ==========
 export const storesApi = {

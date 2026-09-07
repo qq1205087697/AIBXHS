@@ -1,12 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Card, Button, Input, Select, Space, Tag, message, Modal, Descriptions, Spin, Row, Col, Pagination, Radio, Checkbox, Dropdown, Upload as AntUpload } from 'antd'
+import { Card, Button, Input, Select, Space, Tag, message, Modal, Descriptions, Spin, Row, Col, Pagination, Radio, Checkbox, Dropdown, Upload as AntUpload, Tooltip } from 'antd'
 import {
   Search,
   RefreshCw,
   Eye,
   Upload,
+  Sparkles,
 } from 'lucide-react'
+import { QuestionCircleOutlined } from '@ant-design/icons'
 import { productPageInfoApi } from '../api'
+import { useAuth } from '../contexts/AuthContext'
 
 interface RatingItem {
   id: number
@@ -37,6 +40,7 @@ interface RatingItem {
   total_score: number
   traffic_keywords?: string | null
   updated_at?: string | null
+  gross_margin?: number | null
 }
 
 interface RatingDetail extends RatingItem {
@@ -50,6 +54,7 @@ interface CacheData {
 }
 
 const RatingOptimizationBot: React.FC = () => {
+  const { hasPermission } = useAuth()
   const [data, setData] = useState<RatingItem[]>([])
   const [loading, setLoading] = useState(false)
   const [total, setTotal] = useState(0)
@@ -76,6 +81,36 @@ const RatingOptimizationBot: React.FC = () => {
   const [editForm, setEditForm] = useState({ title: '', product_description: '', keywords: '', bullet_points: '', image_count: '' })
   const [editField, setEditField] = useState<string>('title')
   const [editDirty, setEditDirty] = useState(false)
+  // 图片上传文件列表（多张，不覆盖）
+  const [uploadedImages, setUploadedImages] = useState<any[]>([])
+  const [aiWriting, setAiWriting] = useState(false)
+  // 同步锁：防止用户快速连续点击 AI 编写导致并发请求
+  const aiWritingLockRef = useRef(false)
+
+  // 开广告表单
+  const [adVisible, setAdVisible] = useState(false)
+  const [adForm, setAdForm] = useState({
+    ad_type: [] as string[],             // 广告选择（多选）：auto/manual/related
+    keyword_asin_source: 'operation',   // 广告关键词ASIN来源：operation/h10，默认运营填写
+    bid_strategy: '',                    // 竞价策略
+    sku: '',                              // SKU
+    site: '',                             // 站点
+    // 手动竞价（弹出子表单）
+    manual_exact_bid: '',                // 精准竞价
+    manual_broad_bid: '',                // 广泛竞价
+    manual_phrase_bid: '',               // 词组竞价
+    // 关联竞价（弹出子表单）
+    related_exact_bid: '',               // 关联精准竞价
+    related_expanded_bid: '',            // 关联扩展竞价
+    strongest_related_asin: '',          // 最强关联竞品ASIN
+    key_keyword: '',                    // 最关键的关键词
+    limit_word: '',                     // 限定词
+    ad_asin: '',                         // 广告ASIN
+    ad_keyword: '',                      // 广告关键词
+  })
+  // 手动竞价/关联竞价子表单弹窗
+  const [manualBidVisible, setManualBidVisible] = useState(false)
+  const [relatedBidVisible, setRelatedBidVisible] = useState(false)
 
   // 批量选择
   const [selectedIds, setSelectedIds] = useState<number[]>([])
@@ -459,7 +494,7 @@ const RatingOptimizationBot: React.FC = () => {
             >
               <Radio.Button value="all">全部</Radio.Button>
               <Radio.Button value="rated">已评分</Radio.Button>
-              <Radio.Button value="low_score">低分</Radio.Button>
+              <Radio.Button value="low_score"><Tooltip title="低于60分记录">低分</Tooltip></Radio.Button>
               <Radio.Button value="unrated">未评分</Radio.Button>
             </Radio.Group>
             <Button type="primary" icon={<Search size={14} />} onClick={handleSearch}>
@@ -469,15 +504,17 @@ const RatingOptimizationBot: React.FC = () => {
               刷新
             </Button>
           </Space>
-          <Button
-            icon={<Upload size={14} />}
-            onClick={handleImportClick}
-            loading={importing}
-            title="只支持Excel表格（.xlsx/.xls），需包含SKU和店铺列"
-          >
-            导入表格
-          </Button>
-          {lastImportIds.length > 0 && (
+          {hasPermission('robot:rating:import') && (
+            <Button
+              icon={<Upload size={14} />}
+              onClick={handleImportClick}
+              loading={importing}
+              title="只支持Excel表格（.xlsx/.xls），需包含SKU和店铺列"
+            >
+              导入表格
+            </Button>
+          )}
+          {hasPermission('robot:rating:import') && lastImportIds.length > 0 && (
             <Button
               danger
               onClick={handleCancelImport}
@@ -789,11 +826,39 @@ const RatingOptimizationBot: React.FC = () => {
                   })
                   setEditField('title')
                   setEditDirty(false)
+                  setUploadedImages([])
                   setEditVisible(true)
                 }}
               >
                 编辑基础信息
               </Button>
+              {hasPermission('robot:rating:ad') && (
+                <Button
+                  onClick={() => {
+                    // 打开开广告表单，预填SKU和站点信息
+                    setAdForm({
+                    ad_type: [],
+                    keyword_asin_source: 'operation',
+                    bid_strategy: '',
+                    sku: selectedRecord.sku || '',
+                    site: '',
+                    manual_exact_bid: '',
+                    manual_broad_bid: '',
+                    manual_phrase_bid: '',
+                    related_exact_bid: '',
+                    related_expanded_bid: '',
+                    strongest_related_asin: '',
+                    key_keyword: selectedRecord.keywords || '',
+                    limit_word: '',
+                    ad_asin: selectedRecord.asin || '',
+                    ad_keyword: '',
+                  })
+                    setAdVisible(true)
+                  }}
+                >
+                  开广告
+                </Button>
+              )}
             </Space>
 
             {/* 产品信息详情 */}
@@ -862,10 +927,6 @@ const RatingOptimizationBot: React.FC = () => {
             {/* 评分详情 */}
             {detailTab === 'score' && (
               <>
-                {/* 评分标准提示 */}
-                <div style={{ marginBottom: 12, padding: '8px 12px', background: '#e6f7ff', borderRadius: 4, border: '1px solid #91d5ff', fontSize: 12, color: '#096dd9' }}>
-                  评分标准：标题、描述、关键词、图片均为星拓反查流量词中前五流量词对比评分，广告按数量得分（{'≥3'}为10分，2为8分，1为6分），视频为含有即得分，A+区分普通和高级，价格按排名得分
-                </div>
                 {/* 检测空白字段 */}
                 {(() => {
                   const emptyFields = []
@@ -901,46 +962,46 @@ const RatingOptimizationBot: React.FC = () => {
                     {selectedRecord.total_score}/100
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="参考流量词" span={2}>
+                <Descriptions.Item label="参考关键词" span={2}>
                   <div style={{ whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>
                     {selectedRecord.traffic_keywords || '暂无'}
                   </div>
                 </Descriptions.Item>
 
-                <Descriptions.Item label="标题评分" span={1}>
+                <Descriptions.Item label={<>标题评分 <Tooltip title="满分15分。星拓反查流量词中前五流量词对比评分，标题包含的流量词越多得分越高"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color="blue">{selectedRecord.title_rating ?? '字段为空'}/15</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="描述评分" span={1}>
+                <Descriptions.Item label={<>描述评分 <Tooltip title="满分10分。星拓反查流量词中前五流量词对比评分，描述包含的流量词越多得分越高"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color="blue">{selectedRecord.description_rating ?? '字段为空'}/10</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="关键词评分" span={1}>
+                <Descriptions.Item label={<>关键词评分 <Tooltip title="满分10分。星拓反查流量词中前五流量词对比评分，关键词包含的流量词越多得分越高"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color="blue">{selectedRecord.keywords_rating ?? '字段为空'}/10</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="图片评分" span={1}>
+                <Descriptions.Item label={<>图片评分 <Tooltip title="满分15分。星拓反查流量词中前五流量词对比评分，图片数量越多得分越高"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color="blue">{selectedRecord.image_rating ?? '字段为空'}/15</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="星级评分" span={1}>
+                <Descriptions.Item label={<>星级评分 <Tooltip title="满分10分。5星=10分，4-4.9星=8分，0星=6分，0.1-3.9星=0分"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Space>
                     <span>{selectedRecord.star_rating ?? '字段为空'}</span>
                     <Tag color="blue">{selectedRecord.star_rating_score ?? '字段为空'}/10</Tag>
                   </Space>
                 </Descriptions.Item>
-                <Descriptions.Item label="广告" span={1}>
+                <Descriptions.Item label={<>广告 <Tooltip title="满分10分。按广告数量计分：≥3个=10分，2个=8分，1个=6分，0个或空=0分"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color="blue">
                     {selectedRecord.has_ad !== null && selectedRecord.has_ad >= 3 ? '10/10' : selectedRecord.has_ad === 2 ? '8/10' : selectedRecord.has_ad === 1 ? '6/10' : '0/10'}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="A+页面" span={1}>
+                <Descriptions.Item label={<>A+页面 <Tooltip title="满分10分。高级A+=10分，普通A+=5分，无A+=0分"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color={selectedRecord.has_aplus === 2 ? 'green' : selectedRecord.has_aplus === 1 ? 'blue' : 'default'}>
                     {selectedRecord.has_aplus === 2 ? '10/10' : selectedRecord.has_aplus === 1 ? '5/10' : '0/10'}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="视频" span={1}>
+                <Descriptions.Item label={<>视频 <Tooltip title="满分5分。含有视频即得5分，无视频为0分"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Tag color="blue">
                     {selectedRecord.has_video ? '5/5' : '0/5'}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="竞品价格" span={1}>
+                <Descriptions.Item label={<>竞品价格 <Tooltip title="满分15分。按价格排名计分：第1名=15分，第2名=12分，第3名=8分，第4名=4分，第5名及以后=0分"><QuestionCircleOutlined style={{ color: '#999', fontSize: 12, cursor: 'help' }} /></Tooltip></>} span={1}>
                   <Space direction="vertical" style={{ width: '100%' }}>
                     <span style={{ color: '#999', fontSize: 12 }}>
                       如该产品不是竞品则可点击删除，重新排名计算得分
@@ -997,6 +1058,15 @@ const RatingOptimizationBot: React.FC = () => {
                     )}
                   </Space>
                 </Descriptions.Item>
+                <Descriptions.Item label="毛利率" span={2}>
+                  {selectedRecord.gross_margin !== null && selectedRecord.gross_margin !== undefined ? (
+                    <Tag color={selectedRecord.gross_margin >= 30 ? 'green' : selectedRecord.gross_margin >= 15 ? 'blue' : 'red'}>
+                      {selectedRecord.gross_margin.toFixed(2)}%
+                    </Tag>
+                  ) : (
+                    <span style={{ color: '#999' }}>暂无毛利率</span>
+                  )}
+                </Descriptions.Item>
               </Descriptions>
 
                 {/* 产品建议 */}
@@ -1043,6 +1113,334 @@ const RatingOptimizationBot: React.FC = () => {
         )}
       </Modal>
 
+      {/* 开广告弹窗 */}
+      <Modal
+        title="开广告"
+        open={adVisible}
+        onCancel={() => setAdVisible(false)}
+        width={720}
+        footer={[
+          <Button key="cancel" onClick={() => setAdVisible(false)}>取消</Button>,
+          <Button key="submit" type="primary" onClick={async () => {
+            // 校验必填项
+            if (adForm.ad_type.length === 0) { message.warning('请选择广告选择'); return }
+            if (!adForm.sku) { message.warning('请填写SKU'); return }
+            if (!adForm.site) { message.warning('请选择站点'); return }
+
+            // 生成字典输出到终端
+            const adDict = {
+              ad_type: adForm.ad_type,
+              keyword_asin_source: adForm.keyword_asin_source,
+              bid_strategy: adForm.bid_strategy,
+              sku: adForm.sku,
+              site: adForm.site,
+              manual_exact_bid: adForm.manual_exact_bid,
+              manual_broad_bid: adForm.manual_broad_bid,
+              manual_phrase_bid: adForm.manual_phrase_bid,
+              related_exact_bid: adForm.related_exact_bid,
+              related_expanded_bid: adForm.related_expanded_bid,
+              strongest_related_asin: adForm.strongest_related_asin,
+              key_keyword: adForm.key_keyword,
+              limit_word: adForm.limit_word,
+              ad_asin: adForm.ad_asin,
+              ad_keyword: adForm.ad_keyword,
+            }
+            console.log('开广告提交内容字典：', adDict)
+
+            // 调用后端接口发送到飞书 webhook
+            try {
+              const res = await productPageInfoApi.adSubmit(adDict)
+              if (res.data.success) {
+                message.success('广告配置已提交')
+                setAdVisible(false)
+              } else {
+                message.error(res.data.message || '提交失败')
+              }
+            } catch (error: any) {
+              console.error('开广告提交失败:', error)
+              message.error(error?.response?.data?.message || error?.message || '提交失败')
+            }
+          }}>提交</Button>,
+        ]}
+      >
+        {(() => {
+          const hasManual = adForm.ad_type.includes('manual')
+          const hasRelated = adForm.ad_type.includes('related')
+          const hasManualOrRelated = hasManual || hasRelated
+          const isH10 = adForm.keyword_asin_source === 'h10'
+          const isOperation = adForm.keyword_asin_source === 'operation'
+          // 手动竞价子表单填写状态摘要
+          const manualBidSummary = [
+            adForm.manual_exact_bid && `精准:${adForm.manual_exact_bid}`,
+            adForm.manual_broad_bid && `广泛:${adForm.manual_broad_bid}`,
+            adForm.manual_phrase_bid && `词组:${adForm.manual_phrase_bid}`,
+          ].filter(Boolean).join(' / ') || '未填写（点击设置）'
+          // 关联竞价子表单填写状态摘要
+          const relatedBidSummary = [
+            adForm.related_exact_bid && `精准:${adForm.related_exact_bid}`,
+            adForm.related_expanded_bid && `扩展:${adForm.related_expanded_bid}`,
+          ].filter(Boolean).join(' / ') || '未填写（点击设置）'
+          return (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 24px' }}>
+              <div>
+                <div style={{ marginBottom: 4 }}><span style={{ color: '#ff4d4f' }}>*</span> 广告选择</div>
+                <Select
+                  mode="multiple"
+                  style={{ width: '100%' }}
+                  value={adForm.ad_type}
+                  onChange={(v) => setAdForm({ ...adForm, ad_type: v })}
+                  placeholder="请选择广告类型（可多选）"
+                  options={[
+                    { label: '自动', value: 'auto' },
+                    { label: '手动', value: 'manual' },
+                    { label: '关联', value: 'related' },
+                  ]}
+                />
+              </div>
+
+              {/* 广告关键词ASIN来源：仅当包含手动或关联时出现 */}
+              {hasManualOrRelated && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>广告关键词ASIN来源</div>
+                  <Select
+                    style={{ width: '100%' }}
+                    value={adForm.keyword_asin_source || undefined}
+                    onChange={(v) => setAdForm({ ...adForm, keyword_asin_source: v })}
+                    placeholder="请选择ASIN来源"
+                    options={[
+                      { label: '运营填写', value: 'operation' },
+                      { label: 'H10查询', value: 'h10' },
+                    ]}
+                  />
+                </div>
+              )}
+
+              <div>
+                <div style={{ marginBottom: 4 }}>竞价策略</div>
+                <Select
+                  style={{ width: '100%' }}
+                  value={adForm.bid_strategy || undefined}
+                  onChange={(v) => setAdForm({ ...adForm, bid_strategy: v })}
+                  placeholder="请选择竞价策略"
+                  options={[
+                    { label: '动态竞价-仅降低', value: 'dynamic_down' },
+                    { label: '动态竞价-提高和降低', value: 'dynamic_up_down' },
+                    { label: '固定竞价', value: 'fixed' },
+                  ]}
+                />
+              </div>
+              <div>
+                <div style={{ marginBottom: 4 }}><span style={{ color: '#ff4d4f' }}>*</span> SKU</div>
+                <Input
+                  value={adForm.sku}
+                  onChange={(e) => setAdForm({ ...adForm, sku: e.target.value })}
+                  placeholder="请填写SKU"
+                />
+              </div>
+              <div>
+                <div style={{ marginBottom: 4 }}><span style={{ color: '#ff4d4f' }}>*</span> 站点</div>
+                <Select
+                  style={{ width: '100%' }}
+                  value={adForm.site || undefined}
+                  onChange={(v) => setAdForm({ ...adForm, site: v })}
+                  placeholder="请选择站点"
+                  showSearch
+                  optionFilterProp="label"
+                  options={[
+                    'Knana SC [德国]', 'Knana SC [法国]', 'Knana SC [美国]', 'Knana SC [加拿大]', 'Knana SC [英国]',
+                    'F SC [德国]', 'F SC [法国]', 'F SC [美国]', 'F SC [加拿大]', 'F SC [英国]',
+                    'G SC [德国]', 'G SC [法国]', 'G SC [美国]', 'G SC [加拿大]', 'G SC [英国]',
+                    'E SC [德国]', 'E SC [法国]', 'E SC [美国]', 'E SC [加拿大]', 'E SC [英国]',
+                    'D SC [德国]', 'D SC [法国]', 'D SC [美国]', 'D SC [加拿大]', 'D SC [英国]',
+                    'A SC [德国]', 'A SC [法国]', 'A SC [美国]', 'A SC [加拿大]', 'A SC [英国]',
+                    'B SC [德国]', 'B SC [法国]', 'B SC [美国]', 'B SC [加拿大]', 'B SC [英国]',
+                    'C SC [德国]', 'C SC [法国]', 'C SC [美国]', 'C SC [加拿大]', 'C SC [英国]',
+                  ].map(s => ({ label: s, value: s }))}
+                />
+              </div>
+
+              {/* 手动竞价：仅当广告选择包含手动时出现 */}
+              {hasManual && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>手动竞价</div>
+                  <Input
+                    value={manualBidSummary}
+                    readOnly
+                    onClick={() => setManualBidVisible(true)}
+                    placeholder="点击设置手动竞价"
+                    style={{ cursor: 'pointer', color: manualBidSummary.startsWith('未填写') ? '#999' : undefined }}
+                    suffix={<span style={{ color: '#999', fontSize: 12 }}>点击配置</span>}
+                  />
+                  <div style={{ marginTop: 4, fontSize: 12, color: '#999' }}>
+                    对应竞价未填写则不开
+                  </div>
+                </div>
+              )}
+
+              {/* 关联竞价：仅当广告选择包含关联时出现 */}
+              {hasRelated && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>关联竞价</div>
+                  <Input
+                    value={relatedBidSummary}
+                    readOnly
+                    onClick={() => setRelatedBidVisible(true)}
+                    placeholder="点击设置关联竞价"
+                    style={{ cursor: 'pointer', color: relatedBidSummary.startsWith('未填写') ? '#999' : undefined }}
+                    suffix={<span style={{ color: '#999', fontSize: 12 }}>点击配置</span>}
+                  />
+                  <div style={{ marginTop: 4, fontSize: 12, color: '#999' }}>
+                    对应竞价未填写则不开
+                  </div>
+                </div>
+              )}
+
+              {/* 最强关联竞品ASIN：仅当来源为H10查询时显示 */}
+              {isH10 && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>最强关联竞品ASIN</div>
+                  <Input
+                    value={adForm.strongest_related_asin}
+                    onChange={(e) => setAdForm({ ...adForm, strongest_related_asin: e.target.value })}
+                    placeholder="如 B08XXXXXXX"
+                  />
+                </div>
+              )}
+
+              {/* 最关键的关键词：仅当来源=H10查询 且 包含关联时显示 */}
+              {isH10 && hasRelated && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>最关键的关键词</div>
+                  <Input
+                    value={adForm.key_keyword}
+                    onChange={(e) => setAdForm({ ...adForm, key_keyword: e.target.value })}
+                    placeholder="请填写最关键的关键词"
+                  />
+                </div>
+              )}
+
+              {/* 限定词：仅当来源=H10查询 且 包含关联时显示 */}
+              {isH10 && hasRelated && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>限定词</div>
+                  <Input
+                    value={adForm.limit_word}
+                    onChange={(e) => setAdForm({ ...adForm, limit_word: e.target.value })}
+                    placeholder="请填写限定词"
+                  />
+                </div>
+              )}
+
+              {/* 广告ASIN：仅当来源=运营填写 且 包含关联时显示 */}
+              {isOperation && hasRelated && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>广告ASIN</div>
+                  <Input
+                    value={adForm.ad_asin}
+                    onChange={(e) => setAdForm({ ...adForm, ad_asin: e.target.value })}
+                    placeholder="如 B08XXXXXXX"
+                  />
+                </div>
+              )}
+
+              {/* 广告关键词：仅当来源=运营填写 且 包含手动时显示 */}
+              {isOperation && hasManual && (
+                <div>
+                  <div style={{ marginBottom: 4 }}>广告关键词</div>
+                  <Input
+                    value={adForm.ad_keyword}
+                    onChange={(e) => setAdForm({ ...adForm, ad_keyword: e.target.value })}
+                    placeholder="请填写广告关键词"
+                  />
+                </div>
+              )}
+            </div>
+          )
+        })()}
+      </Modal>
+
+      {/* 手动竞价子表单弹窗 */}
+      <Modal
+        title="手动竞价配置"
+        open={manualBidVisible}
+        onCancel={() => setManualBidVisible(false)}
+        width={480}
+        footer={[
+          <Button key="cancel" onClick={() => setManualBidVisible(false)}>取消</Button>,
+          <Button key="submit" type="primary" onClick={() => {
+            setManualBidVisible(false)
+            message.success('手动竞价已保存')
+          }}>保存</Button>,
+        ]}
+      >
+        <div style={{ marginBottom: 12, color: '#999', fontSize: 12 }}>
+          以下竞价均为非必填，未填写的竞价类型将不会开启
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
+          <div>
+            <div style={{ marginBottom: 4 }}>精准竞价</div>
+            <Input
+              value={adForm.manual_exact_bid}
+              onChange={(e) => setAdForm({ ...adForm, manual_exact_bid: e.target.value })}
+              placeholder="如 0.85"
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>广泛竞价</div>
+            <Input
+              value={adForm.manual_broad_bid}
+              onChange={(e) => setAdForm({ ...adForm, manual_broad_bid: e.target.value })}
+              placeholder="如 0.75"
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>词组竞价</div>
+            <Input
+              value={adForm.manual_phrase_bid}
+              onChange={(e) => setAdForm({ ...adForm, manual_phrase_bid: e.target.value })}
+              placeholder="如 0.65"
+            />
+          </div>
+        </div>
+      </Modal>
+
+      {/* 关联竞价子表单弹窗 */}
+      <Modal
+        title="关联竞价配置"
+        open={relatedBidVisible}
+        onCancel={() => setRelatedBidVisible(false)}
+        width={480}
+        footer={[
+          <Button key="cancel" onClick={() => setRelatedBidVisible(false)}>取消</Button>,
+          <Button key="submit" type="primary" onClick={() => {
+            setRelatedBidVisible(false)
+            message.success('关联竞价已保存')
+          }}>保存</Button>,
+        ]}
+      >
+        <div style={{ marginBottom: 12, color: '#999', fontSize: 12 }}>
+          以下竞价均为非必填，未填写的竞价类型将不会开启
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
+          <div>
+            <div style={{ marginBottom: 4 }}>关联精准竞价</div>
+            <Input
+              value={adForm.related_exact_bid}
+              onChange={(e) => setAdForm({ ...adForm, related_exact_bid: e.target.value })}
+              placeholder="如 0.85"
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 4 }}>关联扩展竞价</div>
+            <Input
+              value={adForm.related_expanded_bid}
+              onChange={(e) => setAdForm({ ...adForm, related_expanded_bid: e.target.value })}
+              placeholder="如 0.75"
+            />
+          </div>
+        </div>
+      </Modal>
+
       {/* 编辑基础信息弹窗 */}
       <Modal
         title="编辑基础信息"
@@ -1059,7 +1457,9 @@ const RatingOptimizationBot: React.FC = () => {
               bullet_points: '五点描述',
               image: '图片',
             }
-            const fieldValue = editForm[editField as keyof typeof editForm] as string
+            const fieldValue = editField === 'image'
+              ? uploadedImages.map(f => f.name).join(', ')
+              : (editForm[editField as keyof typeof editForm] as string)
             const confirmModal = Modal.confirm({
               title: '确认提交',
               content: (
@@ -1136,22 +1536,40 @@ const RatingOptimizationBot: React.FC = () => {
                 { label: '产品描述', value: 'product_description' },
                 { label: '关键词', value: 'keywords' },
                 { label: '五点描述', value: 'bullet_points' },
-                { label: '图片（待开发）', value: 'image', disabled: true },
+                { label: '图片', value: 'image' },
               ]}
             />
           </div>
           <div>
             {editField === 'image' ? (
-              <AntUpload
-                listType="picture-card"
-                beforeUpload={() => false}
-                maxCount={1}
-              >
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: 20 }}>+</div>
-                  <div style={{ fontSize: 12 }}>上传图片</div>
+              <div>
+                <AntUpload
+                  listType="picture-card"
+                  multiple
+                  fileList={uploadedImages}
+                  beforeUpload={(file) => {
+                    // 校验图片名：去除扩展名后必须为纯数字
+                    const name = file.name.replace(/\.[^.]+$/, '')
+                    if (!/^\d+$/.test(name)) {
+                      message.error('上传失败，图片命名不规范，请重新上传')
+                      return AntUpload.LIST_IGNORE
+                    }
+                    return false
+                  }}
+                  onChange={({ fileList }) => {
+                    setUploadedImages(fileList)
+                    setEditDirty(fileList.length > 0)
+                  }}
+                >
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 20 }}>+</div>
+                    <div style={{ fontSize: 12 }}>上传图片</div>
+                  </div>
+                </AntUpload>
+                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+                  图片命名规范：以数字命名，数字则代表第几张图片替换
                 </div>
-              </AntUpload>
+              </div>
             ) : (
               <Input.TextArea
                 value={editForm[editField as keyof typeof editForm] as string}
@@ -1164,6 +1582,83 @@ const RatingOptimizationBot: React.FC = () => {
               />
             )}
           </div>
+          {editField !== 'image' && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button
+                icon={<Sparkles size={14} />}
+                loading={aiWriting}
+                disabled={
+                  !((editForm[editField as keyof typeof editForm] as string) || '').trim() ||
+                  !((editForm.title || '').trim()) ||
+                  !((editForm.keywords || '').trim())
+                }
+                onClick={async () => {
+                  // 同步锁：立即拦截重复点击（React 状态更新是异步的，loading 来不及生效）
+                  if (aiWritingLockRef.current) return
+                  if (!selectedRecord) return
+                  const currentContent = (editForm[editField as keyof typeof editForm] as string) || ''
+                  if (!currentContent.trim()) {
+                    message.warning('字段内容为空，无法进行AI编写')
+                    return
+                  }
+                  if (!(editForm.title || '').trim() || !(editForm.keywords || '').trim()) {
+                    message.warning('标题或关键词原始内容为空，无法进行AI编写')
+                    return
+                  }
+                  aiWritingLockRef.current = true
+                  setAiWriting(true)
+                  try {
+                    const res = await productPageInfoApi.aiWrite({
+                      item_id: selectedRecord.id,
+                      field_type: editField,
+                      content: currentContent,
+                    })
+                    if (res.data.success) {
+                      const generated = res.data.data.content
+                      const fieldLabelMap: Record<string, string> = {
+                        title: '标题', product_description: '产品描述',
+                        keywords: '关键词', bullet_points: '五点描述',
+                      }
+                      Modal.confirm({
+                        title: 'AI 编写建议',
+                        content: (
+                          <div>
+                            <div style={{ marginBottom: 8, color: '#999', fontSize: 12 }}>
+                              以下为 AI 生成的{fieldLabelMap[editField] || editField}内容，是否采纳并覆盖原内容？
+                            </div>
+                            <div style={{
+                              padding: 12, background: '#f5f5f5', borderRadius: 6,
+                              maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap',
+                              border: '1px solid #e8e8e8',
+                            }}>
+                              {generated}
+                            </div>
+                          </div>
+                        ),
+                        okText: '采纳',
+                        cancelText: '取消',
+                        onOk: () => {
+                          setEditForm({ ...editForm, [editField]: generated })
+                          setEditDirty(true)
+                          message.success('已采纳 AI 生成内容')
+                        },
+                      })
+                    } else {
+                      message.error(res.data.message || 'AI编写失败')
+                    }
+                  } catch (error: any) {
+                    console.error('AI编写失败:', error)
+                    message.error(error?.response?.data?.message || error?.message || 'AI编写失败')
+                  } finally {
+                    aiWritingLockRef.current = false
+                    setAiWriting(false)
+                  }
+                }}
+              >
+                AI编写
+              </Button>
+            </div>
+          )}
         </div>
       </Modal>
     </div>
