@@ -198,6 +198,13 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass
+
+            # products 表新增无配件标记字段（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE products ADD COLUMN no_accessory TINYINT(1) NOT NULL DEFAULT 0 COMMENT '无配件标记(是:数据补齐不再提示未绑配件)'"))
+                conn.commit()
+            except Exception:
+                pass
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:

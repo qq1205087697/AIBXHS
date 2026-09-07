@@ -48,13 +48,14 @@ import {
   ChevronRight,
   Star,
   AlertTriangle,
-} from "lucide-react";
-import { useAuth } from "../../contexts/AuthContext";
-import { useTheme } from "../../contexts/ThemeContext";
-import ThemeSwitcher from "../ThemeSwitcher";
-import ChangePasswordModal from "../ChangePasswordModal";
-import { notificationsApi } from "../../api";
-import dayjs from "dayjs";
+  Table2,
+} from 'lucide-react'
+import { useAuth } from '../../contexts/AuthContext'
+import { useTheme } from '../../contexts/ThemeContext'
+import ThemeSwitcher from '../ThemeSwitcher'
+import ChangePasswordModal from '../ChangePasswordModal'
+import { notificationsApi } from '../../api'
+import dayjs from 'dayjs'
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -192,6 +193,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/stock-transfer",
     "/shipment",
     "/warehouses",
+    "/suppliers",
+    "/base-table",
   ];
   const systemPaths = [
     "/org",
@@ -326,78 +329,60 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <Boxes size={20} />,
       label: "进销存",
       children: [
-        ...(hasPermission("replenishment:view")
-          ? [
-              {
-                key: "/replenishment",
-                icon: <PackagePlus size={18} />,
-                label: "补货管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("purchase:view")
-          ? [
-              {
-                key: "/purchase",
-                icon: <Truck size={18} />,
-                label: "采购管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("inbound:view")
-          ? [
-              {
-                key: "/inbound",
-                icon: <ArrowDownCircle size={18} />,
-                label: "入库管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("outbound:view")
-          ? [
-              {
-                key: "/outbound",
-                icon: <ArrowUpCircle size={18} />,
-                label: "出库管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("stock_transfer:view")
-          ? [
-              {
-                key: "/stock-transfer",
-                icon: <ArrowLeftRight size={18} />,
-                label: "挪货管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("shipment:view")
-          ? [
-              {
-                key: "/shipment",
-                icon: <Ship size={18} />,
-                label: "发货管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("warehouse:view")
-          ? [
-              {
-                key: "/warehouses",
-                icon: <Warehouse size={18} />,
-                label: "仓库管理",
-              },
-            ]
-          : []),
-        ...(hasPermission("supplier:view")
-          ? [
-              {
-                key: "/suppliers",
-                icon: <Contact size={18} />,
-                label: "供应商管理",
-              },
-            ]
-          : []),
+        ...(hasPermission('replenishment:view')
+          ? [{
+              key: '/replenishment',
+              icon: <PackagePlus size={18} />,
+              label: '补货管理',
+            }] : []),
+        ...(hasPermission('purchase:view')
+          ? [{
+              key: '/purchase',
+              icon: <Truck size={18} />,
+              label: '采购管理',
+            }] : []),
+        ...(hasPermission('inbound:view')
+          ? [{
+              key: '/inbound',
+              icon: <ArrowDownCircle size={18} />,
+              label: '入库管理',
+            }] : []),
+        ...(hasPermission('outbound:view')
+          ? [{
+              key: '/outbound',
+              icon: <ArrowUpCircle size={18} />,
+              label: '出库管理',
+            }] : []),
+        ...(hasPermission('stock_transfer:view')
+          ? [{
+              key: '/stock-transfer',
+              icon: <ArrowLeftRight size={18} />,
+              label: '挪货管理',
+            }] : []),
+        ...(hasPermission('shipment:view')
+          ? [{
+              key: '/shipment',
+              icon: <Ship size={18} />,
+              label: '发货管理',
+            }] : []),
+        ...(hasPermission('warehouse:view')
+          ? [{
+              key: '/warehouses',
+              icon: <Warehouse size={18} />,
+              label: '仓库管理',
+            }] : []),
+        ...(hasPermission('supplier:view')
+          ? [{
+              key: '/suppliers',
+              icon: <Contact size={18} />,
+              label: '供应商管理',
+            }] : []),
+        ...(hasPermission('warehouse:view')
+          ? [{
+              key: '/base-table',
+              icon: <Table2 size={18} />,
+              label: '底表管理',
+            }] : []),
       ] as any[],
     },
     {
@@ -484,6 +469,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/shipment": "发货管理",
       "/suppliers": "供应商管理",
       "/warehouses": "仓库管理",
+      '/base-table': '底表管理',
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
       "/product-selection": "选品机器人",

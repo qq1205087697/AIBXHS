@@ -612,6 +612,12 @@ export const productsApi = {
   batchImport: (data: any) => apiClient.post("/products/batch-import", data),
   getImportRecordStatus: (recordId: number) =>
     apiClient.get(`/products/import-records/${recordId}/status`),
+  getIncompleteList: (params: {
+    page?: number;
+    page_size?: number;
+    issue?: string;
+    keyword?: string;
+  }) => apiClient.get("/products/incomplete-list", { params }),
   batchUpdateMissing: (items: any[]) =>
     apiClient.post("/products/batch-update-missing", { items }),
   exportProducts: (params?: {
@@ -1446,6 +1452,28 @@ export const shipmentsApi = {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },
+};
+
+// ========== Base Table (底表管理) API ==========
+export const baseTableApi = {
+  getSummary: (params?: {
+    page?: number;
+    page_size?: number;
+    issue?: string;
+    keyword?: string;
+    product_type?: string;
+    sort_by?: string;
+    sort_order?: string;
+  }) =>
+    apiClient.get("/base-table/summary", {
+      params,
+    }),
+  getProductWarehouses: (productId: number) =>
+    apiClient.get(`/base-table/${productId}/warehouses`),
+  getProductPurchaseOrders: (productId: number) =>
+    apiClient.get(`/base-table/${productId}/purchase-orders`),
+  getProductReplenishmentOrders: (productId: number) =>
+    apiClient.get(`/base-table/${productId}/replenishment-orders`),
 };
 
 // ========== Suppliers API ==========

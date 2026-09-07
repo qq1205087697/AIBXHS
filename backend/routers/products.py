@@ -10,7 +10,8 @@ import json
 from database.database import get_db
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
-from services.excel_helper import create_product_excel_template, parse_product_excel
+from services.excel_helper import create_product_excel_template, parse_product_excel, get_custom_platforms
+from services import excel_helper
 from services.operation_log import (
     log_product_create, log_product_update, log_product_delete,
     log_platform_product_create, log_platform_product_update, log_platform_product_delete
@@ -61,6 +62,7 @@ class ProductCreate(BaseModel):
     height: Optional[float] = None
     status: str = "active"
     is_robot_monitored: bool = True
+    no_accessory: bool = False
     local_quantity: Optional[int] = 0
     local_warehouse: Optional[str] = None
     local_inbound_date: Optional[str] = None
@@ -87,6 +89,7 @@ class ProductUpdate(BaseModel):
     height: Optional[float] = None
     status: Optional[str] = None
     is_robot_monitored: Optional[bool] = None
+    no_accessory: Optional[bool] = None
     local_quantity: Optional[int] = None
     local_warehouse: Optional[str] = None
     local_inbound_date: Optional[str] = None
@@ -156,6 +159,108 @@ class PlatformProductUpdate(BaseModel):
     status: Optional[str] = None
     store_ids: Optional[list[int]] = None
     extra_data: Optional[dict] = None
+
+
+@router.get("/next-code")
+async def get_next_product_code(
+    product_type: str = Query(..., description="产品类型 finished/accessory"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """根据产品类型生成下一个产品编码（成品 BXHS-CP-##### / 配件 BXHS-PJ-#####）。"""
+    prefix = "BXHS-CP-" if product_type == "finished" else "BXHS-PJ-"
+    row = db.execute(
+        text("""
+            SELECT product_code FROM products
+            WHERE tenant_id = :tid AND deleted_at IS NULL AND product_code LIKE :pat
+            ORDER BY CAST(SUBSTRING(product_code, :pl) AS UNSIGNED) DESC
+            LIMIT 1
+        """),
+        {"tid": current_user.tenant_id, "pat": f"{prefix}%", "pl": len(prefix) + 1},
+    ).fetchone()
+    next_num = 1
+    if row and row[0]:
+        suffix = str(row[0])[len(prefix):]
+        digits = "".join(ch for ch in suffix if ch.isdigit())
+        if digits:
+            next_num = int(digits) + 1
+    return {"code": f"{prefix}{next_num:05d}"}
+
+
+@router.get("/incomplete-list")
+async def get_incomplete_products(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    issue: str = Query("all", description="问题类型: all/missing_accessory/missing_price/missing_size"),
+    keyword: str = Query("", max_length=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("product:read"))
+):
+    """数据补齐列表：缺采购价/尺寸或未绑配件的成品（服务端分页，只查必要字段）"""
+    base_where = ["p.deleted_at IS NULL", "p.tenant_id = :tid"]
+    params: dict = {"tid": current_user.tenant_id}
+    if keyword:
+        base_where.append("(p.product_code LIKE :kw OR p.name LIKE :kw)")
+        params["kw"] = f"%{keyword}%"
+
+    cond_price = "p.purchase_price IS NULL"
+    cond_size = "(p.weight IS NULL OR p.length IS NULL OR p.width IS NULL OR p.height IS NULL)"
+    cond_acc = """(
+        p.product_type LIKE '%finished%'
+        AND (p.no_accessory IS NULL OR p.no_accessory = 0)
+        AND NOT EXISTS (
+            SELECT 1 FROM product_bindings pb
+            JOIN products acc ON acc.id = pb.accessory_product_id
+            WHERE pb.finished_product_id = p.id AND pb.deleted_at IS NULL AND acc.deleted_at IS NULL
+        )
+    )"""
+    issue_map = {
+        "missing_price": cond_price,
+        "missing_size": cond_size,
+        "missing_accessory": cond_acc,
+        "all": f"({cond_price} OR {cond_size} OR {cond_acc})",
+    }
+    where_sql = " AND ".join(base_where) + f" AND {issue_map.get(issue, issue_map['all'])}"
+
+    try:
+        total = db.execute(
+            text(f"SELECT COUNT(*) FROM products p WHERE {where_sql}"), params
+        ).scalar() or 0
+
+        rows = db.execute(text(f"""
+            SELECT p.id, p.product_code, p.name, p.product_type,
+                   p.purchase_price, p.weight, p.length, p.width, p.height,
+                   EXISTS (
+                       SELECT 1 FROM product_bindings pb
+                       JOIN products acc ON acc.id = pb.accessory_product_id
+                       WHERE pb.finished_product_id = p.id AND pb.deleted_at IS NULL AND acc.deleted_at IS NULL
+                   ) AS has_accessory
+            FROM products p
+            WHERE {where_sql}
+            ORDER BY p.id DESC
+            LIMIT :limit OFFSET :offset
+        """), {**params, "limit": page_size, "offset": (page - 1) * page_size}).fetchall()
+
+        items = [
+            {
+                "id": r.id,
+                "product_code": r.product_code,
+                "name": r.name,
+                "product_type": r.product_type,
+                "purchase_price": r.purchase_price,
+                "weight": r.weight,
+                "length": r.length,
+                "width": r.width,
+                "height": r.height,
+                "has_accessory": bool(r.has_accessory),
+            }
+            for r in rows
+        ]
+        return {"success": True, "data": {"items": items, "total": total, "page": page, "page_size": page_size}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取数据补齐列表失败: {str(e)}")
 
 
 @router.get("/")
@@ -382,7 +487,8 @@ async def get_products(
                             {sg_quantity_expr},
                             p.local_warehouse, p.local_inbound_date, p.local_stock_age,
                             COALESCE((SELECT SUM(ri.quantity) FROM replenishment_items ri JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id WHERE ri.product_id = p.id AND ro.tenant_id = p.tenant_id AND ri.deleted_at IS NULL AND ro.deleted_at IS NULL AND ro.status IN ('pending','purchased')), 0) as replenishment_quantity,
-                            COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity
+                            COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity,
+                            p.no_accessory
                      FROM products p
                      WHERE {where_clause} AND p.product_code >= :around_code
                      ORDER BY p.product_code ASC
@@ -397,7 +503,8 @@ async def get_products(
                             {sg_quantity_expr},
                             p.local_warehouse, p.local_inbound_date, p.local_stock_age,
                             COALESCE((SELECT SUM(ri.quantity) FROM replenishment_items ri JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id WHERE ri.product_id = p.id AND ro.tenant_id = p.tenant_id AND ri.deleted_at IS NULL AND ro.deleted_at IS NULL AND ro.status IN ('pending','purchased')), 0) as replenishment_quantity,
-                            COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity
+                            COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity,
+                            p.no_accessory
                      FROM products p
                      WHERE {where_clause} AND p.product_code < :around_code
                      ORDER BY p.product_code DESC
@@ -446,7 +553,8 @@ async def get_products(
                        {sg_quantity_expr},
                        p.local_warehouse, p.local_inbound_date, p.local_stock_age,
                        COALESCE((SELECT SUM(ri.quantity) FROM replenishment_items ri JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id WHERE ri.product_id = p.id AND ro.tenant_id = p.tenant_id AND ri.deleted_at IS NULL AND ro.deleted_at IS NULL AND ro.status IN ('pending','purchased')), 0) as replenishment_quantity,
-                       COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity
+                       COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity,
+                       p.no_accessory
                 FROM products p
                 WHERE {where_clause}
                 {order_by_clause}
@@ -498,6 +606,7 @@ async def get_products(
                 "local_value": float(local_value) if local_value is not None else None,
                 "replenishment_quantity": int(row[27]) if row[27] else 0,
                 "purchased_quantity": int(row[28]) if row[28] else 0,
+                "no_accessory": bool(row[29]) if row[29] is not None else False,
             })
         
         # 计算筛选后所有数据的货值总合计
@@ -2135,7 +2244,7 @@ async def get_product(
                    p.main_image, p.images, p.video_url, p.weight, p.length, p.width, p.height,
                    p.status, p.is_robot_monitored, p.created_at, p.config,
                    COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
-                   p.local_warehouse, p.local_inbound_date, p.local_stock_age
+                   p.local_warehouse, p.local_inbound_date, p.local_stock_age, p.no_accessory
             FROM products p
             WHERE p.id = :product_id AND p.tenant_id = :tenant_id AND p.deleted_at IS NULL
         """)
@@ -2263,6 +2372,7 @@ async def get_product(
             "local_inbound_date": row[24].strftime("%Y-%m-%d") if row[24] else "",
             "local_stock_age": int(row[25]) if row[25] else None,
             "local_value": float(local_value) if local_value is not None else None,
+            "no_accessory": bool(row[26]) if row[26] is not None else False,
             "platform_products": platform_products,
         }
         return {"success": True, "data": product}
@@ -2299,10 +2409,10 @@ async def create_product(
         insert_sql = text("""
             INSERT INTO products (tenant_id, product_code, name, name_en, product_type, product_attribute, category, brand, supplier,
                                   purchase_price, sale_price, main_image, images, video_url, weight, length, width, height,
-                                  status, is_robot_monitored, local_quantity, local_warehouse, local_inbound_date, local_stock_age)
+                                  status, is_robot_monitored, no_accessory, local_quantity, local_warehouse, local_inbound_date, local_stock_age)
             VALUES (:tenant_id, :product_code, :name, :name_en, :product_type, :product_attribute, :category, :brand, :supplier,
                     :purchase_price, :sale_price, :main_image, :images, :video_url, :weight, :length, :width, :height,
-                    :status, :is_robot_monitored, :local_quantity, :local_warehouse, :local_inbound_date, :local_stock_age)
+                    :status, :is_robot_monitored, :no_accessory, :local_quantity, :local_warehouse, :local_inbound_date, :local_stock_age)
         """)
         result = db.execute(insert_sql, {
             "tenant_id": current_user.tenant_id,
@@ -2325,6 +2435,7 @@ async def create_product(
             "height": product_data.height,
             "status": product_data.status,
             "is_robot_monitored": product_data.is_robot_monitored,
+            "no_accessory": product_data.no_accessory,
             "local_quantity": product_data.local_quantity,
             "local_warehouse": product_data.local_warehouse,
             "local_inbound_date": product_data.local_inbound_date,
@@ -2383,7 +2494,7 @@ async def update_product(
                 SELECT id, product_code, name, name_en, product_type, product_attribute,
                        category, brand, supplier, purchase_price, sale_price, main_image,
                        images, video_url, weight, length, width, height, status, is_robot_monitored,
-                       local_quantity, local_warehouse, local_inbound_date, local_stock_age
+                       no_accessory, local_quantity, local_warehouse, local_inbound_date, local_stock_age
                 FROM products WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
             """),
             {"id": product_id, "tid": current_user.tenant_id}
@@ -2426,6 +2537,7 @@ async def update_product(
             "height": product_data.height,
             "status": product_data.status,
             "is_robot_monitored": product_data.is_robot_monitored,
+            "no_accessory": product_data.no_accessory,
             "local_quantity": product_data.local_quantity,
             "local_warehouse": product_data.local_warehouse,
             "local_inbound_date": product_data.local_inbound_date,
@@ -2463,10 +2575,11 @@ async def update_product(
                 "height": float(product_row[17]) if product_row[17] is not None else None,
                 "status": product_row[18],
                 "is_robot_monitored": product_row[19],
-                "local_quantity": product_row[20],
-                "local_warehouse": product_row[21],
-                "local_inbound_date": product_row[22],
-                "local_stock_age": product_row[23],
+                "no_accessory": product_row[20],
+                "local_quantity": product_row[21],
+                "local_warehouse": product_row[22],
+                "local_inbound_date": product_row[23],
+                "local_stock_age": product_row[24],
             }
 
             # 准备日志的 after_data（合并新值）
@@ -2996,11 +3109,8 @@ async def create_platform_product(
         if not data.store_ids:
             raise HTTPException(status_code=400, detail="至少需要一个店铺")
 
-        # 验证并标准化平台
-        valid_platforms = {
-            "amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other",
-            "temu_half", "temu_full", "shein_half", "shein_full", "aliexpress_half", "aliexpress_full"
-        }
+        # 验证并标准化平台（标准平台 + 本租户自定义平台）
+        valid_platforms = excel_helper.STANDARD_PLATFORMS | get_custom_platforms(db, current_user.tenant_id)
         platform_aliases = {
             "tiktok shop": "tiktok",
             "temu": "temu",
