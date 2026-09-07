@@ -3,14 +3,14 @@
 
 条件: CPC > $1.5 且 clicks >= 10
 优先级: 中
-数据源: AdCampaignDaily
+数据源: AdReportSnapshot
 """
 import logging
 from typing import List
 from datetime import date
 from sqlalchemy.orm import Session
 
-from models.ad_daily import AdCampaignDaily
+from models.ad_report import AdReportSnapshot
 from services.ad_rules.constants import RuleThresholds
 from services.ad_rules.rule_base import BaseOptimizationRule, RuleResult
 
@@ -32,18 +32,34 @@ class CpcTooHighRule(BaseOptimizationRule):
     def description(self) -> str:
         return "CPC 超过 $1.5 且点击量达到 10 门槛，单次点击成本偏高"
 
+    @property
+    def rule_type(self) -> str:
+        return "adjust_bid"
+
+    @property
+    def conditions(self) -> List[dict]:
+        return [
+            {"metric": "cpc", "operator": ">", "threshold": RuleThresholds.CPC_TOO_HIGH_THRESHOLD, "unit": "$"},
+            {"metric": "clicks", "operator": ">=", "threshold": RuleThresholds.CPC_TOO_HIGH_MIN_CLICKS, "unit": ""},
+        ]
+
+    @property
+    def actions(self) -> List[str]:
+        return ["降低竞价", "优化关键词", "调整匹配类型"]
+
     def evaluate(self, db: Session, tenant_id: int, evaluation_date: date) -> List[RuleResult]:
         """评估规则，返回触发结果列表"""
         results: List[RuleResult] = []
         try:
             # clicks 为 Integer 类型，可在 SQL 中过滤
             records = (
-                db.query(AdCampaignDaily)
+                db.query(AdReportSnapshot)
                 .filter(
-                    AdCampaignDaily.tenant_id == tenant_id,
-                    AdCampaignDaily.date == evaluation_date,
-                    AdCampaignDaily.deleted_at.is_(None),
-                    AdCampaignDaily.clicks >= RuleThresholds.CPC_TOO_HIGH_MIN_CLICKS,
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.deleted_at.is_(None),
+                    AdReportSnapshot.clicks >= RuleThresholds.CPC_TOO_HIGH_MIN_CLICKS,
                 )
                 .all()
             )
@@ -67,7 +83,7 @@ class CpcTooHighRule(BaseOptimizationRule):
                             rule_name=self.name,
                             rule_priority=self.priority,
                             target_type="campaign",
-                            target_id=str(record.campaign_id) if record.campaign_id else "",
+                            target_id=str(record.campaign_name) if record.campaign_name else "",
                             target_name=record.campaign_name or "",
                             triggered=True,
                             current_value=round(cpc, 4),
@@ -82,11 +98,11 @@ class CpcTooHighRule(BaseOptimizationRule):
                                 f"且点击量 {clicks} 达到门槛 {min_clicks}，"
                                 f"点击成本偏高"
                             ),
-                            store_id=record.store_id,
+                            store_id=None,
                         ))
                 except Exception as row_err:
                     logger.warning(
-                        f"[{self.name}] 处理记录 campaign_id={record.campaign_id} 失败: {row_err}"
+                        f"[{self.name}] 处理记录 campaign_name={record.campaign_name} 失败: {row_err}"
                     )
                     continue
 

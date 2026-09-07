@@ -65,6 +65,16 @@ def init_scheduler():
         replace_existing=True
     )
 
+    scheduler.add_job(
+        cleanup_expired_ad_data_job,
+        trigger="cron",
+        hour=3,
+        minute=0,
+        id="ad_data_cleanup",
+        name="广告数据清理任务",
+        replace_existing=True
+    )
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
 
@@ -618,3 +628,38 @@ def check_overdue_purchase_orders_job():
         db.rollback()
     finally:
         db.close()
+
+
+def cleanup_expired_ad_data_job():
+    """每天凌晨3点：清理超过保留期的广告数据（7张表分批硬删除）
+
+    - 通过 ad_retention_service.cleanup_expired_data 执行
+    - 使用独立 db session，异常仅记录日志
+    - 不传 tenant_id，清理所有租户的过期数据
+    """
+    from database.database import SessionLocal
+
+    logger.info("========== 开始执行广告数据清理任务 ==========")
+    db = SessionLocal()
+    try:
+        from services.ad_retention_service import cleanup_expired_data
+        result = cleanup_expired_data(db, tenant_id=None)
+        logger.info(
+            f"广告数据清理任务完成 cutoff_date={result.get('cutoff_date')} "
+            f"total_deleted={result.get('total_deleted', 0)} "
+            f"success={result.get('success_count', 0)} "
+            f"failed={result.get('failed_count', 0)}"
+        )
+        for tbl in result.get("tables", []):
+            err_msg = tbl.get("error")
+            logger.info(
+                f"  表 {tbl.get('table')}: 删除 {tbl.get('deleted', 0)} 条 "
+                + (f"错误: {err_msg}" if err_msg else "成功")
+            )
+    except Exception as e:
+        logger.error(f"广告数据清理任务失败: {e}", exc_info=True)
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        db.close()
+        logger.info("========== 广告数据清理任务执行结束 ==========")

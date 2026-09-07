@@ -8,6 +8,7 @@ import InventoryBot from "./pages/InventoryBot";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
+import AdBotPage from "./pages/AdBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
 import ProductManagement from "./pages/ProductManagement";
@@ -21,6 +22,7 @@ import ShipmentManagement from './pages/ShipmentManagement'
 import WarehouseManagement from './pages/WarehouseManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
+import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -105,6 +107,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <EmailBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/ads"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AdBotPage />
             </MainLayout>
           </ProtectedRoute>
         }
@@ -235,6 +247,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <PermissionManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/inventory/allocate-test"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AllocateShipmentTest />
             </MainLayout>
           </ProtectedRoute>
         }

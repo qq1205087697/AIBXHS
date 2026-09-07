@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 import numpy as np
 from datetime import date, datetime, timedelta
@@ -979,7 +980,14 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
     latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
     if not latest:
         return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
-                "snapshot_date": None, "stockout_top10": [], "overstock_top10": []}
+                "snapshot_date": None, "latest_updated_at": None, "stockout_top10": [], "overstock_top10": []}
+
+    # 最新快照的最近更新时间（运营据此判断数据新鲜度）
+    latest_updated_at = db.query(func.max(InventorySnapshot.updated_at)).filter(
+        InventorySnapshot.tenant_id == tenant_id,
+        InventorySnapshot.snapshot_date == latest,
+        InventorySnapshot.deleted_at.is_(None),
+    ).scalar()
 
     # 构建基础查询（排除共享库存、节日产品和停售产品）
     base_query = db.query(InventorySnapshot).filter(
@@ -1015,7 +1023,9 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
             base_query = base_query.filter(or_(*store_conditions)) if store_conditions else base_query
         else:
             return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
-                    "snapshot_date": latest.isoformat(), "stockout_top10": [], "overstock_top10": []}
+                    "snapshot_date": latest.isoformat(), 
+                    "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None,
+                    "stockout_top10": [], "overstock_top10": []}
 
     # 统计
     total = base_query.count()
@@ -1089,6 +1099,7 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
 
     return {
         "snapshot_date": latest.isoformat(),
+        "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None,
         "total_sku": total,
         "red_count": red,
         "yellow_count": yellow,
@@ -1755,3 +1766,197 @@ def export_inventory_to_excel(items: list, fields: list = None):
     wb.save(output)
     output.seek(0)
     return output
+
+
+def _get_demand_multiplier(country: str) -> float:
+    """根据国家返回需求倍数：美国1.0，其他国家1.5（保守放大）"""
+    if not country:
+        return 1.5
+    c = country.lower()
+    us_keywords = ["美国", "us", "usa"]
+    if any(k in c for k in us_keywords):
+        return 1.0
+    return 1.5
+
+
+def _round_up_to_5(n) -> int:
+    """进一法取整到5的倍数；n<=0返回0"""
+    if n is None or n <= 0:
+        return 0
+    return math.ceil(n / 5) * 5
+
+
+def _fetch_latest_snapshot_metrics(db, tenant_id, asin, country, user_id=None, user_role=None, sku=None) -> dict:
+    """查询最新快照数据，返回销量/现货/在途指标
+
+    asin 与 sku 二选一，均按 标识+country 聚合（SUM）所有店铺数据：
+    - 传 asin：按 asin+country 聚合所有同 ASIN 店铺数据
+    - 传 sku：按 sku+country 聚合所有同 SKU 店铺数据
+    """
+    empty = {"sales_30d": 0, "spot_qty": 0, "inbound_qty": 0, "found": False}
+    if not asin and not sku:
+        return empty
+
+    # 查最新 snapshot_date（按 asin 或 sku 定位）
+    date_filter = [InventorySnapshot.tenant_id == tenant_id]
+    if sku:
+        date_filter.append(InventorySnapshot.sku == sku)
+    else:
+        date_filter.append(InventorySnapshot.asin == asin)
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(*date_filter).scalar()
+    if not latest:
+        return empty
+
+    # 构建过滤条件
+    filters = [
+        InventorySnapshot.tenant_id == tenant_id,
+        InventorySnapshot.snapshot_date == latest,
+        InventorySnapshot.deleted_at.is_(None),
+        InventorySnapshot.summary_flag != "是",
+    ]
+    if sku:
+        filters.append(InventorySnapshot.sku == sku)
+    else:
+        filters.append(InventorySnapshot.asin == asin)
+
+    # country 模糊匹配（country 字段可能是"美国、英国"集合值）
+    if country:
+        filters.append(or_(
+            InventorySnapshot.country == country,
+            InventorySnapshot.country.like(f"%{country}%"),
+        ))
+
+    # 权限隔离：非 admin 用户通过 user_stores JOIN stores 获取可见 inventory_name
+    if user_id and user_role and user_role != "admin":
+        user_store_rows = db.execute(
+            text("""
+                SELECT s.inventory_name
+                FROM user_stores us
+                JOIN stores s ON us.store_id = s.id
+                WHERE us.user_id = :uid AND us.tenant_id = :tid
+                AND s.status = 'active'
+                AND s.inventory_name IS NOT NULL
+                AND s.inventory_name != ''
+            """),
+            {"uid": user_id, "tid": tenant_id}
+        ).fetchall()
+        user_stores = [s[0] for s in user_store_rows]
+        if not user_stores:
+            return empty
+        store_conditions = _build_account_filter(user_stores)
+        if store_conditions:
+            filters.append(or_(*store_conditions))
+
+    # 聚合 SUM
+    row = db.query(
+        func.sum(InventorySnapshot.sales_30d),
+        func.sum(InventorySnapshot.fba_available),
+        func.sum(InventorySnapshot.fba_pending_transfer),
+        func.sum(InventorySnapshot.fba_inbound),
+        func.sum(InventorySnapshot.fba_inbound_processing),
+    ).filter(*filters).first()
+
+    if not row:
+        return empty
+
+    s30 = row[0] or 0
+    fba_available_sum = row[1] or 0
+    fba_pending_transfer_sum = row[2] or 0
+    fba_inbound_sum = row[3] or 0
+    fba_inbound_processing_sum = row[4] or 0
+
+    spot_qty = (fba_available_sum or 0) + (fba_pending_transfer_sum or 0)
+    inbound_qty = (fba_inbound_sum or 0) - (fba_inbound_processing_sum or 0)
+
+    return {
+        "sales_30d": s30,
+        "spot_qty": spot_qty,
+        "inbound_qty": inbound_qty,
+        "found": True,
+    }
+
+
+def allocate_shipment(db, tenant_id, items, user_id=None, user_role=None) -> list:
+    """分货计算：根据最新快照数据为每个 item 计算红单/海运分配量
+
+    每个 item 可传 asin 或 sku（二选一）：传 sku 时精确匹配，传 asin 时按 asin+country 聚合。
+    """
+    results = []
+    for item in items:
+        asin = item.get("asin")
+        sku = item.get("sku")
+        country = item.get("country")
+        purchase_qty = item.get("purchase_qty") or 0
+
+        metrics = _fetch_latest_snapshot_metrics(
+            db, tenant_id, asin, country,
+            user_id=user_id, user_role=user_role,
+            sku=sku,
+        )
+        s30 = metrics.get("sales_30d", 0) or 0
+        spot = metrics.get("spot_qty", 0) or 0
+        inbound = metrics.get("inbound_qty", 0) or 0
+        found = metrics.get("found", False)
+
+        red = 0
+        sea = 0
+        apply_rounding = False
+        red_raw = 0
+
+        # 标识符：优先显示 sku，其次 asin（用于结果回显）
+        identifier = sku or asin
+
+        if (not found) or not identifier:
+            judgment = "SKU为空"
+        elif s30 == 0 and spot == 0 and inbound == 0:
+            judgment = "全为0"
+        elif spot > 0:
+            multiplier = _get_demand_multiplier(country)
+            demand = s30 * multiplier
+            if demand <= spot:
+                judgment = "全部海运"
+                red_raw = 0
+                apply_rounding = True
+            elif inbound == 0:
+                judgment = "红单补差额"
+                red_raw = demand - spot
+                apply_rounding = True
+            else:
+                judgment = "运营自行判断"
+        elif spot == 0 and inbound > 0:
+            multiplier = _get_demand_multiplier(country)
+            demand = s30 * multiplier
+            if demand <= inbound:
+                judgment = "全部海运"
+                red_raw = 0
+                apply_rounding = True
+            else:
+                judgment = "红单补差额"
+                red_raw = demand - inbound
+                apply_rounding = True
+        else:
+            # spot == 0 and inbound == 0 and s30 > 0
+            judgment = "无库存无在途"
+
+        if apply_rounding:
+            red = _round_up_to_5(red_raw)
+            if red > purchase_qty:
+                red = (purchase_qty // 5) * 5
+                sea = 0
+            else:
+                sea = purchase_qty - red
+
+        results.append({
+            "asin": asin or "",
+            "sku": sku or "",
+            "country": country,
+            "purchase_qty": purchase_qty,
+            "sales_30d": s30,
+            "spot_qty": spot,
+            "inbound_qty": inbound,
+            "judgment": judgment,
+            "red_qty": int(red),
+            "sea_qty": int(sea),
+        })
+
+    return results

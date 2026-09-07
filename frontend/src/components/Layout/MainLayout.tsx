@@ -664,7 +664,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         </Header>
         <Content
           style={{
-            margin: "16px",
+            margin: "16px 16px 0 16px",
             padding: 0,
             background: colorBgContainer,
             borderRadius: borderRadiusLG,

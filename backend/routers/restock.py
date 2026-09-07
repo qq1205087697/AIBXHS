@@ -5,6 +5,7 @@ import os
 import logging
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Request
 from typing import Optional, List
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database.database import get_db
@@ -718,4 +719,50 @@ async def mark_product_status(
             "updated_count": len(all_ids_list)
         }
     }
+
+
+# ==================== 14. 分货计算 ====================
+
+class AllocateItem(BaseModel):
+    asin: Optional[str] = None
+    sku: Optional[str] = None
+    country: str
+    purchase_qty: int
+
+class AllocateRequest(BaseModel):
+    items: List[AllocateItem]
+
+class AllocateResult(BaseModel):
+    asin: str
+    sku: str
+    country: str
+    purchase_qty: int
+    sales_30d: float
+    spot_qty: float
+    inbound_qty: float
+    judgment: str
+    red_qty: int
+    sea_qty: int
+
+
+@router.post("/allocate-shipment")
+async def allocate_shipment(
+    request: AllocateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """分货计算接口 - 根据SKU、国家、进货数量计算红单/海运分货结果"""
+    try:
+        from services.inventory_service import allocate_shipment as allocate_service
+        results = allocate_service(
+            db,
+            tenant_id=current_user.tenant_id,
+            items=[item.dict() for item in request.items],
+            user_id=current_user.id,
+            user_role=get_user_role_code(current_user, db)
+        )
+        return {"success": True, "data": results}
+    except Exception as e:
+        logger.error(f"分货计算失败: {e}")
+        raise HTTPException(status_code=500, detail=f"分货计算失败: {str(e)}")
 

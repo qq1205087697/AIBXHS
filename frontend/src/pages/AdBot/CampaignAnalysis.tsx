@@ -10,7 +10,7 @@ import {
   Spin,
   message,
 } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, DownloadOutlined } from "@ant-design/icons";
 import { adsApi } from "../../api";
 import { useTheme } from "../../contexts/ThemeContext";
 import dayjs from "dayjs";
@@ -204,6 +204,36 @@ const CampaignAnalysis: React.FC = () => {
     }
   };
 
+  const [exporting, setExporting] = useState(false);
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const params: any = { report_type: "campaign" };
+      if (selectedCountries.length) params.country = selectedCountries;
+      if (selectedStores.length) params.account = selectedStores;
+      if (dateRange?.[0]) params.date_from = dateRange[0].format("YYYY-MM-DD");
+      if (dateRange?.[1]) params.date_to = dateRange[1].format("YYYY-MM-DD");
+      const res = await adsApi.export(params);
+      const blob = new Blob([res.data as unknown as BlobPart], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `campaign_${dayjs().format("YYYYMMDD_HHmmss")}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      message.success("导出成功");
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || "未知错误";
+      message.error(`导出失败: ${detail}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <Spin spinning={loading}>
       <Card style={{ marginBottom: 16 }}>
@@ -249,6 +279,13 @@ const CampaignAnalysis: React.FC = () => {
             style={{ background: currentTheme.primary }}
           >
             刷新
+          </Button>
+          <Button
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            onClick={handleExport}
+          >
+            导出
           </Button>
         </Space>
       </Card>
