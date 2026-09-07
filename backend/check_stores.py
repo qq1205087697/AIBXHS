@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from sqlalchemy import create_engine, text
 
 DB_HOST = 'rm-cn-xr3l4w83m0010v9o.rwlb.rds.aliyuncs.com'
@@ -19,17 +18,15 @@ with engine.connect() as conn:
     print('\n非amazon的店铺示例:')
     for row in result2:
         print(f'  id={row[0]}, shop_abbr={row[1]}, platform={row[3]}')
-=======
-from database.database import SessionLocal
-from sqlalchemy import text
+# from database.database import SessionLocal
+# from sqlalchemy import text
 
-db = SessionLocal()
-r = db.execute(text("SELECT inventory_name, shop_abbr, site FROM stores WHERE inventory_name LIKE '%JeVenis%' LIMIT 5")).fetchall()
-for x in r:
-    print(f"inventory_name={x[0]}, shop_abbr={x[1]}, site={x[2]}")
-print("---")
-r = db.execute(text("SELECT inventory_name, shop_abbr, site FROM stores LIMIT 10")).fetchall()
-for x in r:
-    print(f"inventory_name={x[0]}, shop_abbr={x[1]}, site={x[2]}")
-db.close()
->>>>>>> master
+# db = SessionLocal()
+# r = db.execute(text("SELECT inventory_name, shop_abbr, site FROM stores WHERE inventory_name LIKE '%JeVenis%' LIMIT 5")).fetchall()
+# for x in r:
+#     print(f"inventory_name={x[0]}, shop_abbr={x[1]}, site={x[2]}")
+# print("---")
+# r = db.execute(text("SELECT inventory_name, shop_abbr, site FROM stores LIMIT 10")).fetchall()
+# for x in r:
+#     print(f"inventory_name={x[0]}, shop_abbr={x[1]}, site={x[2]}")
+# db.close()
