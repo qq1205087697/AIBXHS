@@ -11,7 +11,8 @@ import {
 import { storesApi, departmentsApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useResponsive } from '../hooks/useResponsive'
-import { CSSProperties } from 'react'
+import { CSSProperties, useMemo } from 'react'
+import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
 
 interface Store {
   id: number
@@ -84,6 +85,8 @@ const StoreManagement: React.FC = () => {
   const [addStoreModalOpen, setAddStoreModalOpen] = useState(false)
   const [transferTargetKeys, setTransferTargetKeys] = useState<string[]>([])
   const [allStores, setAllStores] = useState<Store[]>([])
+  const [customPlatforms, setCustomPlatforms] = useState<string[]>(() => loadCustomPlatforms())
+  const watchPlatform = Form.useWatch('platform', form)
 
   const platformOptions = [
     { label: 'Amazon', value: 'amazon' },
@@ -118,6 +121,15 @@ const StoreManagement: React.FC = () => {
     aliexpress_full: '速卖通全托',
     other: 'Other',
   }
+
+  // 标准平台 + 自定义平台（localStorage）+ 已有店铺中出现过的非标准平台
+  const dynamicPlatformOptions = useMemo(() => {
+    const stdValues = new Set(platformOptions.map((o) => o.value))
+    const extra = new Set<string>()
+    customPlatforms.forEach((p) => { if (p && !stdValues.has(p)) extra.add(p) })
+    allStores.forEach((s) => { if (s.platform && !stdValues.has(s.platform)) extra.add(s.platform) })
+    return [...platformOptions, ...Array.from(extra).map((p) => ({ label: p, value: p }))]
+  }, [customPlatforms, allStores])
 
   const statusOptions = [
     { label: 'Active', value: 'active' },
@@ -269,6 +281,13 @@ const StoreManagement: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields()
+      if (values.platform === 'other') {
+        const name = (values.custom_platform_name || '').trim()
+        if (!name) return
+        values.platform = name
+        setCustomPlatforms(saveCustomPlatform(name))
+      }
+      delete values.custom_platform_name
       if (editingStore) {
         await storesApi.update(editingStore.id, values)
         message.success('店铺更新成功')
@@ -701,8 +720,22 @@ const StoreManagement: React.FC = () => {
             <Input placeholder="可选，不填则自动使用店铺名" />
           </Form.Item>
           <Form.Item name="platform" label="平台" rules={[{ required: true, message: '请选择平台' }]} initialValue="amazon">
-            <Select placeholder="请选择平台" options={platformOptions} />
+            <Select
+              placeholder="请选择平台"
+              options={dynamicPlatformOptions}
+              onChange={(v) => { if (v !== 'other') form.setFieldValue('custom_platform_name', undefined) }}
+            />
           </Form.Item>
+          {watchPlatform === 'other' && (
+            <Form.Item
+              name="custom_platform_name"
+              label="自定义平台名称"
+              rules={[{ required: true, message: '请输入平台名称' }]}
+              preserve={false}
+            >
+              <Input placeholder="请输入平台名称，如：Noon" maxLength={30} />
+            </Form.Item>
+          )}
           <Form.Item name="site" label="站点">
             <Input placeholder="请输入站点，如US、UK等" />
           </Form.Item>
@@ -814,10 +847,20 @@ const StoreManagement: React.FC = () => {
           titles={['所有店铺', '分组内店铺']}
           targetKeys={transferTargetKeys}
           onChange={(nextTargetKeys) => setTransferTargetKeys(nextTargetKeys as string[])}
-          render={(item) => item.title}
+          render={(item) => (
+            <span>
+              {item.title}
+              {item.description && (
+                <Tag color="blue" style={{ marginLeft: 8 }}>
+                  {platformLabelMap[item.description as string] || item.description}
+                </Tag>
+              )}
+            </span>
+          )}
           showSearch
           filterOption={(inputValue, item) =>
-            item.title.toLowerCase().includes(inputValue.toLowerCase())
+            item.title.toLowerCase().includes(inputValue.toLowerCase()) ||
+            (item.description && String(item.description).toLowerCase().includes(inputValue.toLowerCase()))
           }
           listStyle={{ width: 280, height: 400 }}
         />

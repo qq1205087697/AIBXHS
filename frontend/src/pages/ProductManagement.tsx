@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
 import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
 import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi } from '../api'
+import apiClient from '../api'
+import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import TosUpload from '../components/TosUpload'
@@ -33,6 +35,7 @@ interface Product {
   height: number | null
   status: string
   is_robot_monitored: boolean
+  no_accessory?: boolean
   created_at: string
   platform_count: number
   local_quantity: number
@@ -305,10 +308,12 @@ const ProductManagement: React.FC = () => {
   const initialFilterSession = loadProductFilterSession()
   const [products, setProducts] = useState<Product[]>([])
   const [stores, setStores] = useState<Store[]>([])
+  const [customPlatforms, setCustomPlatforms] = useState<string[]>(() => loadCustomPlatforms())
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [form] = Form.useForm()
+  const watchProductType = Form.useWatch('product_type', form)
   const [searchText, setSearchText] = useState(initialFilterSession?.searchText || '')
   const [productTypeFilter, setProductTypeFilter] = useState<string[] | undefined>(initialFilterSession?.productTypeFilter)
   const [productAttributeFilter, setProductAttributeFilter] = useState<string | undefined>(initialFilterSession?.productAttributeFilter)
@@ -353,6 +358,15 @@ const ProductManagement: React.FC = () => {
   const [ppLoading, setPpLoading] = useState(false)
   const [ppDrawerOpen, setPpDrawerOpen] = useState(false)
   const [ppForm] = Form.useForm()
+  const watchPpPlatform = Form.useWatch('platform', ppForm)
+  // 标准平台 + 自定义平台（localStorage）+ 已有店铺中出现过的非标准平台
+  const ppPlatformOptions = useMemo(() => {
+    const stdValues = new Set(platformOptions.map((o) => o.value))
+    const extra = new Set<string>()
+    customPlatforms.forEach((p) => { if (p && !stdValues.has(p)) extra.add(p) })
+    stores.forEach((s) => { if (s.platform && !stdValues.has(s.platform)) extra.add(s.platform) })
+    return [...platformOptions, ...Array.from(extra).map((p) => ({ label: p, value: p }))]
+  }, [customPlatforms, stores])
   const [groups, setGroups] = useState<StoreGroup[]>([])
   const [ppTransferOpen, setPpTransferOpen] = useState(false)
   const [ppTransferTargetKeys, setPpTransferTargetKeys] = useState<string[]>([])
@@ -388,9 +402,14 @@ const ProductManagement: React.FC = () => {
   const [importErrors, setImportErrors] = useState<string[]>([])
   
   const [dataFixOpen, setDataFixOpen] = useState(false)
-  const [dataFixProducts, setDataFixProducts] = useState<Product[]>([])
+  const [dataFixProducts, setDataFixProducts] = useState<any[]>([])
   const [dataFixLoading, setDataFixLoading] = useState(false)
   const [dataFixEditingId, setDataFixEditingId] = useState<number | null>(null)
+  const [dataFixIssue, setDataFixIssue] = useState('all')
+  const [dataFixKeyword, setDataFixKeyword] = useState('')
+  const [dataFixPage, setDataFixPage] = useState(1)
+  const [dataFixPageSize, setDataFixPageSize] = useState(20)
+  const [dataFixTotal, setDataFixTotal] = useState(0)
   
   const [shelfEditBatchId, setShelfEditBatchId] = useState<number | null>(null)
   const [shelfEditValue, setShelfEditValue] = useState('')
@@ -623,6 +642,21 @@ const productAttributeLabelMap: Record<string, string> = {
     setModalOpen(true)
   }
 
+  // 新增商品时，选择商品类型后自动带出最新编码
+  const handleProductTypeChangeForCode = async (vals: string[]) => {
+    if (editingProduct) return
+    const t = vals?.[0]
+    if (!t) return
+    try {
+      const res = await apiClient.get('/products/next-code', { params: { product_type: t } })
+      if (res.data?.code) {
+        form.setFieldsValue({ product_code: res.data.code })
+      }
+    } catch {
+      // 获取失败时保持手动输入
+    }
+  }
+
   const fillProductForm = (product: Product) => {
     form.setFieldsValue({
       product_code: product.product_code,
@@ -645,6 +679,7 @@ const productAttributeLabelMap: Record<string, string> = {
       height: product.height,
       status: product.status,
       is_robot_monitored: product.is_robot_monitored,
+      no_accessory: product.no_accessory ?? false,
       local_quantity: product.local_quantity,
       local_warehouse: product.local_warehouse,
       local_inbound_date: product.local_inbound_date,
@@ -1002,6 +1037,13 @@ const productAttributeLabelMap: Record<string, string> = {
     try {
       const values = await ppForm.validateFields()
       console.log('handlePpSubmit values', values)
+      if (values.platform === 'other') {
+        const name = (values.custom_platform_name || '').trim()
+        if (!name) return
+        values.platform = name
+        setCustomPlatforms(saveCustomPlatform(name))
+      }
+      delete values.custom_platform_name
       const submitData = {
         ...values,
         store_ids: ppTransferTargetKeys.map(Number),
@@ -1150,7 +1192,8 @@ const productAttributeLabelMap: Record<string, string> = {
       }
       try {
         const statusRes = await productsApi.getImportRecordStatus(recordId)
-        if (statusRes.data.success && statusRes.data.data.preview_status === 'success') {
+        const previewStatus = statusRes.data.data?.preview_status
+        if (previewStatus === 'success') {
           clearInterval(timer)
           message.success({
             content: (
@@ -1163,6 +1206,20 @@ const productAttributeLabelMap: Record<string, string> = {
             ),
             key: `preview-ready-${recordId}`,
             duration: 10,
+          })
+        } else if (previewStatus === 'failed') {
+          clearInterval(timer)
+          message.error({
+            content: (
+              <span>
+                文件解析失败！{' '}
+                <a onClick={() => { message.destroy(`preview-ready-${recordId}`); setImportRecordModalOpen(true); fetchImportRecords() }} style={{ fontWeight: 600 }}>
+                  查看错误详情 →
+                </a>
+              </span>
+            ),
+            key: `preview-ready-${recordId}`,
+            duration: 15,
           })
         }
       } catch { /* 静默 */ }
@@ -1391,63 +1448,40 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
-  const openDataFix = useCallback(async () => {
-    setDataFixOpen(true)
+  const fetchDataFix = useCallback(async (page = dataFixPage, issue = dataFixIssue, keyword = dataFixKeyword, pageSize = dataFixPageSize) => {
     setDataFixLoading(true)
     try {
-      const res = await productsApi.getList({
-        page: 1,
-        page_size: 10000,
+      const res = await productsApi.getIncompleteList({
+        page,
+        page_size: pageSize,
+        issue,
+        keyword: keyword.trim(),
       })
       if (res.data.success) {
-        const allProducts: Product[] = res.data.data
-        const missingProducts = allProducts.filter((p: Product) => {
-          const hasMissingPrice = p.purchase_price == null
-          const hasMissingSize = p.weight == null || p.length == null || p.width == null || p.height == null
-          return hasMissingPrice || hasMissingSize
-        })
-        if (missingProducts.length === 0) {
-          message.info('没有需要补齐数据的产品')
-          setDataFixOpen(false)
-          return
-        }
-        setDataFixProducts(missingProducts)
+        setDataFixProducts(res.data.data.items || [])
+        setDataFixTotal(res.data.data.total || 0)
+        setDataFixPage(page)
+        setDataFixPageSize(pageSize)
       }
     } catch (e: any) {
-      message.error('获取产品数据失败')
+      message.error(e.response?.data?.detail || '获取数据补齐列表失败')
     } finally {
       setDataFixLoading(false)
     }
-  }, [])
+  }, [dataFixPage, dataFixIssue, dataFixKeyword, dataFixPageSize])
 
-  const handleDataFixEdit = (product: Product) => {
-    setDataFixOpen(false)
-    setEditingProduct(product)
-    form.setFieldsValue({
-      product_code: product.product_code,
-      name: product.name,
-      name_en: product.name_en,
-      product_type: Array.isArray(product.product_type) ? product.product_type :
-                   (product.product_type ? product.product_type.split(',') : []),
-      product_attribute: product.product_attribute,
-      category: product.category,
-      brand: product.brand,
-      purchase_price: product.purchase_price,
-      sale_price: product.sale_price,
-      main_image: product.main_image,
-      images: product.images?.length ? product.images : (product.main_image ? [product.main_image] : []),
-      weight: product.weight,
-      length: product.length,
-      width: product.width,
-      height: product.height,
-      status: product.status,
-      is_robot_monitored: product.is_robot_monitored,
-      local_quantity: product.local_quantity,
-      local_warehouse: product.local_warehouse,
-      local_inbound_date: product.local_inbound_date,
-      local_stock_age: product.local_stock_age,
-    })
-    setModalOpen(true)
+  const openDataFix = useCallback(() => {
+    setDataFixOpen(true)
+    setDataFixIssue('all')
+    setDataFixKeyword('')
+    setDataFixPage(1)
+    fetchDataFix(1, 'all', '')
+  }, [fetchDataFix])
+
+  const handleDataFixEdit = (product: any) => {
+    // 打开产品信息查看弹窗（弹窗内可再切换编辑）
+    setDetailModalProduct(product)
+    setDetailModalOpen(true)
   }
 
   // 成品配件绑定管理
@@ -2761,7 +2795,7 @@ const productAttributeLabelMap: Record<string, string> = {
       >
         <Form form={form} layout="vertical">
           <Form.Item name="product_code" label="商品编码" rules={[{ required: true, message: '请输入商品编码' }]}>
-            <Input placeholder="请输入商品编码（唯一）" />
+            <Input placeholder="选择商品类型后自动带出最新编码" />
           </Form.Item>
           <Form.Item name="name" label="商品名称" rules={[{ required: true, message: '请输入商品名称' }]}>
             <Input placeholder="请输入商品名称" />
@@ -2769,9 +2803,25 @@ const productAttributeLabelMap: Record<string, string> = {
           <Form.Item name="name_en" label="英文名称">
             <Input placeholder="请输入英文名称" />
           </Form.Item>
-          <Form.Item name="product_type" label="商品类型">
-            <Select placeholder="请选择商品类型" options={productTypeOptions} allowClear mode="multiple" />
+          <Form.Item name="product_type" label="商品类型" rules={[{ required: true, message: '请选择商品类型' }]}>
+            <Select
+              placeholder="请选择商品类型"
+              options={productTypeOptions}
+              allowClear
+              mode="multiple"
+              onChange={handleProductTypeChangeForCode}
+            />
           </Form.Item>
+          {(watchProductType || []).includes('finished') && (
+            <Form.Item name="no_accessory" label="无配件" initialValue={false} tooltip={'标记为"无配件"的成品，即使未绑定配件也不会出现在数据补齐弹窗中'}>
+              <Select
+                options={[
+                  { label: '否', value: false },
+                  { label: '是', value: true },
+                ]}
+              />
+            </Form.Item>
+          )}
           <Form.Item name="product_attribute" label="产品属性" initialValue="general">
             <Select placeholder="请选择产品属性" options={productAttributeOptions} />
           </Form.Item>
@@ -2980,12 +3030,23 @@ const productAttributeLabelMap: Record<string, string> = {
           >
             <Select
               placeholder="请选择平台"
-              options={platformOptions}
-              onChange={() => {
+              options={ppPlatformOptions}
+              onChange={(v) => {
+                if (v !== 'other') ppForm.setFieldValue('custom_platform_name', undefined)
                 setPpTransferTargetKeys([])
               }}
             />
           </Form.Item>
+          {watchPpPlatform === 'other' && (
+            <Form.Item
+              name="custom_platform_name"
+              label="自定义平台名称"
+              rules={[{ required: true, message: '请输入平台名称' }]}
+              preserve={false}
+            >
+              <Input placeholder="请输入平台名称，如：Noon" maxLength={30} />
+            </Form.Item>
+          )}
 
           <Form.Item label="选择店铺">
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -3388,10 +3449,18 @@ const productAttributeLabelMap: Record<string, string> = {
                   <Button
                     type="primary"
                     icon={<EditOutlined />}
-                    onClick={() => {
+                    onClick={async () => {
                       if (detailModalProduct) {
-                        setEditingProduct(detailModalProduct)
-                        fillProductForm(detailModalProduct)
+                        try {
+                          // 拉取完整数据再回填，避免来源列表字段不全时编辑清空其他字段
+                          const res = await productsApi.getById(detailModalProduct.id)
+                          const full = res.data?.success ? res.data.data : detailModalProduct
+                          setEditingProduct(full)
+                          fillProductForm(full)
+                        } catch {
+                          setEditingProduct(detailModalProduct)
+                          fillProductForm(detailModalProduct)
+                        }
                         fetchSuppliers()
                         setDetailEditMode(true)
                       }
@@ -3485,6 +3554,16 @@ const productAttributeLabelMap: Record<string, string> = {
                         <Select placeholder="请选择产品属性" options={productAttributeOptions} />
                       </Form.Item>
                     </div>
+                    {(watchProductType || []).includes('finished') && (
+                      <Form.Item name="no_accessory" label="无配件" tooltip={'标记为"无配件"的成品，即使未绑定配件也不会出现在数据补齐弹窗中'}>
+                        <Select
+                          options={[
+                            { label: '否', value: false },
+                            { label: '是', value: true },
+                          ]}
+                        />
+                      </Form.Item>
+                    )}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                       <Form.Item name="category" label="分类">
                         <Input placeholder="请输入分类" />
@@ -3569,6 +3648,13 @@ const productAttributeLabelMap: Record<string, string> = {
                         <div><strong>长:</strong> {detailModalProduct.length != null ? `${detailModalProduct.length} cm` : '-'}</div>
                         <div><strong>宽:</strong> {detailModalProduct.width != null ? `${detailModalProduct.width} cm` : '-'}</div>
                         <div><strong>高:</strong> {detailModalProduct.height != null ? `${detailModalProduct.height} cm` : '-'}</div>
+                        {(() => {
+                          const types = Array.isArray(detailModalProduct.product_type)
+                            ? detailModalProduct.product_type
+                            : (detailModalProduct.product_type ? detailModalProduct.product_type.split(',') : []);
+                          if (!types.includes('finished')) return null
+                          return <div><strong>无配件:</strong> {detailModalProduct.no_accessory ? <Tag color="orange">是</Tag> : '否'}</div>
+                        })()}
                       </div>
                     </div>
                     {(() => {
@@ -3885,28 +3971,64 @@ const productAttributeLabelMap: Record<string, string> = {
         )}
       </Modal>
 
-      <Drawer
+      <Modal
         title="数据缺失补齐"
         open={dataFixOpen}
-        onClose={() => { setDataFixOpen(false); setDataFixEditingId(null) }}
-        width={700}
-        loading={dataFixLoading}
+        onCancel={() => { setDataFixOpen(false); setDataFixEditingId(null) }}
+        width={res.isMobile ? '95vw' : 1100}
+        footer={null}
+        styles={{ body: { maxHeight: 'calc(100vh - 240px)', overflowY: 'auto' } }}
       >
-        <div style={{ marginBottom: 16, color: '#999' }}>
+        <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Select
+            value={dataFixIssue}
+            style={{ width: 170 }}
+            onChange={(v) => { setDataFixIssue(v); setDataFixPage(1); fetchDataFix(1, v, dataFixKeyword) }}
+            options={[
+              { label: '全部问题', value: 'all' },
+              { label: '未绑配件（成品）', value: 'missing_accessory' },
+              { label: '未填采购价', value: 'missing_price' },
+              { label: '未填尺寸', value: 'missing_size' },
+            ]}
+          />
+          <Input.Search
+            allowClear
+            placeholder="搜索编码/名称"
+            style={{ width: 220 }}
+            onSearch={(v) => { setDataFixKeyword(v); setDataFixPage(1); fetchDataFix(1, dataFixIssue, v) }}
+          />
+          <span style={{ color: '#999', fontSize: 13 }}>共 {dataFixTotal} 条</span>
+        </div>
+        <div style={{ marginBottom: 8, color: '#999' }}>
           以下产品存在数据缺失，点击"编辑"进入产品编辑页补充
         </div>
         <Table
           dataSource={dataFixProducts}
           rowKey="id"
           size="small"
-          pagination={false}
+          loading={dataFixLoading}
           scroll={{ x: res.isMobile ? true : false }}
+          pagination={{
+            current: dataFixPage,
+            pageSize: dataFixPageSize,
+            total: dataFixTotal,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (p, ps) => fetchDataFix(p, dataFixIssue, dataFixKeyword, ps),
+          }}
           columns={[
-            { title: '产品编码', dataIndex: 'product_code', width: 120 },
-            { title: '产品名称', dataIndex: 'name', width: 200 },
-            { title: '缺失项', width: 200,
-              render: (_: any, record: Product) => (
-                <Space size={4}>
+            { title: '产品编码', dataIndex: 'product_code', width: 130 },
+            { title: '产品名称', dataIndex: 'name', width: 220, ellipsis: true },
+            { title: '类型', width: 80, align: 'center' as const,
+              render: (_: any, record: any) => (
+                record.product_type?.includes('finished') ? <Tag color="blue">成品</Tag> : <Tag color="green">配件</Tag>
+              )
+            },
+            { title: '缺失项', width: 230,
+              render: (_: any, record: any) => (
+                <Space size={4} wrap>
+                  {!record.has_accessory && record.product_type?.includes('finished') && <Tag color="red">未绑配件</Tag>}
                   {record.purchase_price == null && <Tag color="red">采购价</Tag>}
                   {record.weight == null && <Tag color="orange">重量</Tag>}
                   {record.length == null && <Tag color="orange">长</Tag>}
@@ -3915,8 +4037,8 @@ const productAttributeLabelMap: Record<string, string> = {
                 </Space>
               )
             },
-            { title: '操作', width: 100,
-              render: (_: any, record: Product) => (
+            { title: '操作', width: 90, align: 'center' as const,
+              render: (_: any, record: any) => (
                 <Button
                   type="link"
                   size="small"
@@ -3929,7 +4051,7 @@ const productAttributeLabelMap: Record<string, string> = {
             },
           ]}
         />
-      </Drawer>
+      </Modal>
 
       <input
         ref={countFileRef}

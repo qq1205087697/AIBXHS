@@ -23,6 +23,7 @@ import StockTransferManagement from './pages/StockTransferManagement'
 import ShipmentManagement from './pages/ShipmentManagement'
 import SupplierManagement from './pages/SupplierManagement'
 import WarehouseManagement from './pages/WarehouseManagement'
+import BaseTableManagement from './pages/BaseTableManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from './pages/PermissionManagement'
 import ProductSelection from './pages/ProductSelection'
@@ -251,6 +252,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <WarehouseManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/base-table"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <BaseTableManagement />
             </MainLayout>
           </ProtectedRoute>
         }

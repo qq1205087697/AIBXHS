@@ -48,6 +48,7 @@ import {
   ChevronRight,
   Star,
   AlertTriangle,
+  Table2,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -192,6 +193,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/stock-transfer",
     "/shipment",
     "/warehouses",
+    "/suppliers",
+    "/base-table",
   ];
   const systemPaths = [
     "/org",
@@ -371,6 +374,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               icon: <Contact size={18} />,
               label: '供应商管理',
             }] : []),
+        ...(hasPermission('warehouse:view')
+          ? [{
+              key: '/base-table',
+              icon: <Table2 size={18} />,
+              label: '底表管理',
+            }] : []),
       ] as any[],
     },
     {
@@ -451,6 +460,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/shipment": "发货管理",
       '/suppliers': '供应商管理',
       "/warehouses": "仓库管理",
+      '/base-table': '底表管理',
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
       '/product-selection': '选品机器人',
