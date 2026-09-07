@@ -43,6 +43,41 @@ class RuleEngine:
             BudgetUtilizationLowRule(),
         ]
 
+    def get_rule_metadata(self) -> List[Dict[str, Any]]:
+        """
+        返回每条规则的完整元信息（用于前端展示与编辑）
+
+        每条规则包含:
+        - id: 序号（1-based，用于前端 update 调用）
+        - name: 规则名（唯一标识）
+        - rule_type: 规则类型
+        - priority: 优先级（高/中）
+        - description: 描述
+        - conditions: 触发条件列表 [{metric, operator, threshold, unit}]
+        - actions: 执行动作列表
+        - is_enabled: 是否启用（默认 True）
+        """
+        metadata: List[Dict[str, Any]] = []
+        for idx, rule in enumerate(self.RULES):
+            metadata.append({
+                "id": idx + 1,
+                "name": rule.name,
+                "rule_type": rule.rule_type,
+                "priority": rule.priority,
+                "description": rule.description,
+                "conditions": rule.conditions,
+                "actions": rule.actions,
+                "is_enabled": True,  # 默认启用，后续从 business_settings 读取覆盖
+            })
+        return metadata
+
+    def get_rule_by_name(self, name: str) -> Optional[BaseOptimizationRule]:
+        """根据规则名获取规则实例"""
+        for rule in self.RULES:
+            if rule.name == name:
+                return rule
+        return None
+
     def run_all_rules(
         self,
         db: Session,

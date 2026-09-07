@@ -52,6 +52,25 @@ class AdReportSnapshot(BaseModel):
     cvr = Column(DECIMAL(8, 4), comment="转化率 (orders/clicks)")
     cpa = Column(DECIMAL(12, 4), comment="单次转化成本 (spend/orders)")
 
+    # 扩展字段（来自 Excel 原始数据）
+    cpo = Column(DECIMAL(12, 4), comment="单次订单成本 (spend/orders)")
+    spend_ratio = Column(DECIMAL(8, 4), comment="广告花费占比")
+    top_of_search_impressions = Column(DECIMAL(8, 4), comment="搜索结果首页首位(IS)比例")
+    aba_rank = Column(Integer, comment="ABA日排名")
+    suggested_bid = Column(DECIMAL(12, 4), comment="建议竞价")
+    budget_utilization = Column(DECIMAL(8, 4), comment="预算使用比例（Excel原始值）")
+    start_date = Column(Date, comment="活动开始时间")
+    portfolio_name = Column(String(255), comment="广告组合")
+    listing_views = Column(Integer, comment="listing浏览量")
+    price = Column(DECIMAL(12, 2), comment="商品价格")
+    rating = Column(DECIMAL(4, 2), comment="商品评分")
+    rating_count = Column(Integer, comment="评分数")
+    fbm_available = Column(Integer, comment="FBM可售")
+    fba_stock = Column(Integer, comment="FBA可用库存")
+    search_term_source = Column(String(255), comment="搜索词来源")
+    service_status = Column(String(100), comment="服务状态")
+    status = Column(String(20), comment="状态（开启/暂停/归档）")
+
     # 导入批次
     batch_id = Column(String(50), index=True, comment="导入批次号（格式: ad_import_YYYYMMDD_HHmmss）")
 

@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-08-07
+
+### [文档] 重写 CODE_WIKI.md 为结构化完整版（以真实代码为准）
+- **操作**：基于三个 Explore 代理对 backend/frontend/database 的真实代码交叉核对，全面重写 CODE_WIKI.md
+- **执行详情**：
+  - 修正过时技术栈：README 写 Node.js/Express/MongoDB 实为 FastAPI/MySQL；统一端口为前端 3000 / 后端 8002（旧文档 5173/8000 有误）
+  - 补全后端 33 router、22 service、19 model 文件/52 表、7 条广告规则、RBAC 鉴权链、7 个定时任务
+  - 补全前端 Provider/路由/api.ts（31 模块）、22 页面、6 套主题、useStreamingChat 死代码说明
+  - 补全数据库多租户隔离策略、软删除、无 Alembic 迁移方式、`schema.sql` 已过时说明
+  - 新增「已知问题与技术债」13 项（含 `AI_SEMAPHORE` 未定义、`.env` 明文凭据、`store_groups` 无 DDL、`AdRetention` 调用缺失方法等）
+  - 新增顶层脚本（inventory.py 原型 / _reset_ids.py 高危 / _verify_gross_margin.py）与 Excel 数据资产说明
+- **涉及文件**：`CODE_WIKI.md`（重写）
+
 ## 2026-05-26
 
 ### [文档] 创建项目 Code Wiki 与操作日志

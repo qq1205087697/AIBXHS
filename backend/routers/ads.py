@@ -2,8 +2,10 @@
 广告管理API路由
 """
 import logging
-from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+import os
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Depends
 from typing import Optional, List
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from database.database import get_db
 from dependencies import get_current_user, get_current_user_department_ids
@@ -14,11 +16,56 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ads", tags=["ads"])
 
 
+# ==================== 文件上传校验常量 ====================
+# 广告报表通常较大（关键词/搜索词报告常超过 10MB），放宽到 50MB
+ALLOWED_EXTENSIONS = {".xlsx", ".xls"}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+def _validate_upload_file(filename: Optional[str], content: bytes) -> None:
+    """校验上传的 Excel 文件：扩展名、大小、非空。
+
+    Args:
+        filename: 文件名（用于扩展名校验）
+        content: 文件二进制内容
+
+    Raises:
+        HTTPException(400): 校验失败时抛出
+    """
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    # 取最后一个扩展名（防止 report.xlsx.exe 这种双扩展名伪装）
+    _, ext = os.path.splitext(filename)
+    ext_lower = ext.lower()
+    if ext_lower not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: {ext_lower or '(无扩展名)'}，仅支持 .xlsx 和 .xls 文件",
+        )
+
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件过大: {len(content) / 1024 / 1024:.1f}MB，最大支持 10MB",
+        )
+
+
+# ==================== 数据保留策略请求模型 ====================
+
+class RetentionConfigRequest(BaseModel):
+    retention_days: int = Field(..., description="广告数据保留天数（7-365）")
+
+
 # ==================== 1. 导入广告报表Excel ====================
 
 @router.post("/import")
 async def import_ad_report(
     file: UploadFile = File(...),
+    date: Optional[str] = Query(None, description="报告日期，格式YYYY-MM-DD，默认从文件名提取或当天"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -26,12 +73,17 @@ async def import_ad_report(
     try:
         from services.ad_import_service import start_ad_import_async
         content = await file.read()
+        # 文件校验：扩展名、大小、非空（防止无效/恶意文件进入导入服务）
+        _validate_upload_file(file.filename, content)
         result = start_ad_import_async(
             file_content=content,
             filename=file.filename,
-            tenant_id=current_user.tenant_id
+            tenant_id=current_user.tenant_id,
+            report_date=date
         )
         return {"success": True, "data": result}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"启动广告导入任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"启动导入失败: {str(e)}")
@@ -41,10 +93,11 @@ async def import_ad_report(
 async def get_ad_import_status(
     current_user: User = Depends(get_current_user)
 ):
-    """获取广告导入任务状态"""
+    """获取广告导入任务状态（按当前租户隔离）"""
     try:
         from services.ad_import_service import get_ad_import_status
-        return {"success": True, "data": get_ad_import_status()}
+        # 项目约束：tenant_id 必须从认证端点传入，service 不可硬编码
+        return {"success": True, "data": get_ad_import_status(tenant_id=current_user.tenant_id)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取状态失败: {str(e)}")
 
@@ -439,3 +492,81 @@ async def sync_rpa_data(
     except Exception as e:
         logger.error(f"影刀RPA数据同步失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"影刀RPA数据同步失败: {str(e)}")
+
+
+# ==================== 12. 广告数据保留策略管理 ====================
+
+@router.get("/retention/status")
+async def get_ad_retention_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    获取广告数据保留策略状态。
+
+    返回：
+    - retention_days: 当前保留天数
+    - tables: 各表数据量与最早数据日期
+    - total_count: 数据总量
+    - next_cleanup_at: 预计下次清理时间（次日 03:00）
+    """
+    try:
+        from services.ad_retention_service import get_retention_status
+        data = get_retention_status(db, tenant_id=current_user.tenant_id)
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"获取广告保留策略状态失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取保留策略状态失败: {str(e)}")
+
+
+@router.put("/retention/config")
+async def update_ad_retention_config(
+    body: RetentionConfigRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    更新广告数据保留天数配置。
+
+    请求体：
+    - retention_days: 保留天数（7-365）
+
+    越界返回 400，成功返回更新后的配置。
+    """
+    try:
+        from services.ad_retention_service import set_retention_days
+        result = set_retention_days(db, tenant_id=current_user.tenant_id, days=body.retention_days)
+        return {"success": True, "data": result, "message": f"保留天数已更新为 {body.retention_days} 天"}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"更新广告保留策略配置失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"更新保留策略配置失败: {str(e)}")
+
+
+@router.post("/retention/cleanup")
+async def trigger_ad_retention_cleanup(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    手动触发广告数据清理。
+
+    立即执行清理任务，返回各表删除数量统计。
+    用于调试或紧急清理场景。
+    """
+    try:
+        from services.ad_retention_service import cleanup_expired_data
+        result = cleanup_expired_data(db, tenant_id=current_user.tenant_id)
+        return {
+            "success": True,
+            "data": result,
+            "message": (
+                f"清理完成：共删除 {result.get('total_deleted', 0)} 条记录"
+                f"（成功 {result.get('success_count', 0)} 表"
+                f"，失败 {result.get('failed_count', 0)} 表）"
+            ),
+        }
+    except Exception as e:
+        logger.error(f"手动触发广告数据清理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"手动清理失败: {str(e)}")

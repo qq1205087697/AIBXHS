@@ -79,6 +79,9 @@ class DataWarning(BaseModel):
     acos = Column(Float, nullable=False)
     cargo_value = Column(Float, nullable=False)
     gmv = Column(Float, nullable=False)
+    ad_spend = Column(Float, nullable=False, default=0)
+    storage_fee = Column(Float, nullable=False, default=0)
+    sales_amount = Column(Float, nullable=False, default=0)
     storage_ratio = Column(Float, nullable=True)
     gross_profit = Column(Float, nullable=True)
     gross_margin = Column(Float, nullable=True)
@@ -143,6 +146,9 @@ def sync_data(data_dict):
                 acos = get_float('ACOS')
                 cargo_value = get_float('货值¥')
                 gmv = get_float('GMV')
+                ad_spend = get_float('广告费用')
+                storage_fee = get_float('仓储费用')
+                sales_amount = get_float('利润报表_销售额')
                 storage_ratio = get_float_null('仓储占比')
                 gross_profit = get_float_null('毛利润')
                 gross_margin = get_float_null('毛利率')
@@ -154,6 +160,9 @@ def sync_data(data_dict):
                     existing.acos = acos
                     existing.cargo_value = cargo_value
                     existing.gmv = gmv
+                    existing.ad_spend = ad_spend
+                    existing.storage_fee = storage_fee
+                    existing.sales_amount = sales_amount
                     existing.storage_ratio = storage_ratio
                     existing.gross_profit = gross_profit
                     existing.gross_margin = gross_margin
@@ -169,6 +178,9 @@ def sync_data(data_dict):
                         acos=acos,
                         cargo_value=cargo_value,
                         gmv=gmv,
+                        ad_spend=ad_spend,
+                        storage_fee=storage_fee,
+                        sales_amount=sales_amount,
                         storage_ratio=storage_ratio,
                         gross_profit=gross_profit,
                         gross_margin=gross_margin,
