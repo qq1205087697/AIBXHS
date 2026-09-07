@@ -48,13 +48,13 @@ import {
   ChevronRight,
   Star,
   AlertTriangle,
-} from 'lucide-react'
-import { useAuth } from '../../contexts/AuthContext'
-import { useTheme } from '../../contexts/ThemeContext'
-import ThemeSwitcher from '../ThemeSwitcher'
-import ChangePasswordModal from '../ChangePasswordModal'
-import { notificationsApi } from '../../api'
-import dayjs from 'dayjs'
+} from "lucide-react";
+import { useAuth } from "../../contexts/AuthContext";
+import { useTheme } from "../../contexts/ThemeContext";
+import ThemeSwitcher from "../ThemeSwitcher";
+import ChangePasswordModal from "../ChangePasswordModal";
+import { notificationsApi } from "../../api";
+import dayjs from "dayjs";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -243,7 +243,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/chat",
             icon: <Bot size={20} />,
             label: "AI聊天助手",
-            shortLabel: 'AI',
+            shortLabel: "AI",
           },
         ]
       : []),
@@ -253,7 +253,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/inventory",
             icon: <Package size={20} />,
             label: "库存机器人",
-            shortLabel: '库存',
+            shortLabel: "库存",
           },
         ]
       : []),
@@ -263,7 +263,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/review",
             icon: <MessageSquare size={20} />,
             label: "差评机器人",
-            shortLabel: '差评',
+            shortLabel: "差评",
           },
         ]
       : []),
@@ -273,7 +273,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/email",
             icon: <Mail size={20} />,
             label: "邮件机器人",
-            shortLabel: '邮件',
+            shortLabel: "邮件",
           },
         ]
       : []),
@@ -283,7 +283,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/rating-optimization",
             icon: <Star size={20} />,
             label: "页面优化机器人",
-            shortLabel: '页面优化',
+            shortLabel: "页面优化",
           },
         ]
       : []),
@@ -293,20 +293,23 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/ads",
             icon: <Megaphone size={20} />,
             label: "广告机器人",
-            shortLabel: '广告',
+            shortLabel: "广告",
           },
         ]
-      : []),     
-    ...(hasPermission('product_selection:view')
-      ? [{
-          key: '/product-selection',
-          icon: <Target size={20} />,
-          label: '选品机器人',
-        }] : []),
+      : []),
+    ...(hasPermission("product_selection:view")
+      ? [
+          {
+            key: "/product-selection",
+            icon: <Target size={20} />,
+            label: "选品机器人",
+          },
+        ]
+      : []),
     {
-      key: '/data-alert',
+      key: "/data-alert",
       icon: <AlertTriangle size={20} />,
-      label: '数据驾驶舱',
+      label: "数据驾驶舱",
     },
     ...(hasPermission("product:view")
       ? [
@@ -314,7 +317,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             key: "/products",
             icon: <ShoppingBag size={20} />,
             label: "产品管理",
-            shortLabel: '产品',
+            shortLabel: "产品",
           },
         ]
       : []),
@@ -323,61 +326,85 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <Boxes size={20} />,
       label: "进销存",
       children: [
-        ...(hasPermission('replenishment:view')
-          ? [{
-              key: '/replenishment',
-              icon: <PackagePlus size={18} />,
-              label: '补货管理',
-            }] : []),
-        ...(hasPermission('purchase:view')
-          ? [{
-              key: '/purchase',
-              icon: <Truck size={18} />,
-              label: '采购管理',
-            }] : []),
-        ...(hasPermission('inbound:view')
-          ? [{
-              key: '/inbound',
-              icon: <ArrowDownCircle size={18} />,
-              label: '入库管理',
-            }] : []),
-        ...(hasPermission('outbound:view')
-          ? [{
-              key: '/outbound',
-              icon: <ArrowUpCircle size={18} />,
-              label: '出库管理',
-            }] : []),
-        ...(hasPermission('stock_transfer:view')
-          ? [{
-              key: '/stock-transfer',
-              icon: <ArrowLeftRight size={18} />,
-              label: '挪货管理',
-            }] : []),
-        ...(hasPermission('shipment:view')
-          ? [{
-              key: '/shipment',
-              icon: <Ship size={18} />,
-              label: '发货管理',
-            }] : []),
-        ...(hasPermission('warehouse:view')
-          ? [{
-              key: '/warehouses',
-              icon: <Warehouse size={18} />,
-              label: '仓库管理',
-            }] : []),
-        ...(hasPermission('supplier:view')
-          ? [{
-              key: '/suppliers',
-              icon: <Contact size={18} />,
-              label: '供应商管理',
-            }] : []),
+        ...(hasPermission("replenishment:view")
+          ? [
+              {
+                key: "/replenishment",
+                icon: <PackagePlus size={18} />,
+                label: "补货管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("purchase:view")
+          ? [
+              {
+                key: "/purchase",
+                icon: <Truck size={18} />,
+                label: "采购管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("inbound:view")
+          ? [
+              {
+                key: "/inbound",
+                icon: <ArrowDownCircle size={18} />,
+                label: "入库管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("outbound:view")
+          ? [
+              {
+                key: "/outbound",
+                icon: <ArrowUpCircle size={18} />,
+                label: "出库管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("stock_transfer:view")
+          ? [
+              {
+                key: "/stock-transfer",
+                icon: <ArrowLeftRight size={18} />,
+                label: "挪货管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("shipment:view")
+          ? [
+              {
+                key: "/shipment",
+                icon: <Ship size={18} />,
+                label: "发货管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("warehouse:view")
+          ? [
+              {
+                key: "/warehouses",
+                icon: <Warehouse size={18} />,
+                label: "仓库管理",
+              },
+            ]
+          : []),
+        ...(hasPermission("supplier:view")
+          ? [
+              {
+                key: "/suppliers",
+                icon: <Contact size={18} />,
+                label: "供应商管理",
+              },
+            ]
+          : []),
       ] as any[],
     },
     {
       key: "system-group",
       icon: <Settings size={20} />,
-      label: '系统设置',
-      shortLabel: '系统',
+      label: "系统设置",
+      shortLabel: "系统",
       children: [
         ...(hasPermission("org:view")
           ? [
@@ -407,22 +434,28 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             ]
           : []),
         {
-            key: '/tenants',
-            icon: <Building2 size={18} />,
-            label: '公司设置',
-          },
-          ...(hasPermission('robot:inventory:settings')
-          ? [{
-            key: '/business-settings',
-            icon: <Settings size={20} />,
-            label: '业务设置',
-          }] : []),
-        ...(hasPermission('store:view')
-          ? [{
-              key: '/stores',
-              icon: <Store size={18} />,
-              label: '店铺管理',
-            }] : []),
+          key: "/tenants",
+          icon: <Building2 size={18} />,
+          label: "公司设置",
+        },
+        ...(hasPermission("robot:inventory:settings")
+          ? [
+              {
+                key: "/business-settings",
+                icon: <Settings size={20} />,
+                label: "业务设置",
+              },
+            ]
+          : []),
+        ...(hasPermission("store:view")
+          ? [
+              {
+                key: "/stores",
+                icon: <Store size={18} />,
+                label: "店铺管理",
+              },
+            ]
+          : []),
       ] as any[],
     },
   ].filter((item) => !item.children || item.children.length > 0);
@@ -438,7 +471,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/email": "邮件机器人",
       "/ads": "广告机器人",
       "/rating-optimization": "页面优化机器人",
-      '/data-alert': '数据驾驶舱',
+      "/data-alert": "数据驾驶舱",
       "/org": "组织管理",
       "/permissions": "权限管理",
       "/stores": "店铺管理",
@@ -449,11 +482,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/replenishment": "补货管理",
       "/stock-transfer": "挪货管理",
       "/shipment": "发货管理",
-      '/suppliers': '供应商管理',
+      "/suppliers": "供应商管理",
       "/warehouses": "仓库管理",
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
-      '/product-selection': '选品机器人',
+      "/product-selection": "选品机器人",
     };
     return pathMap[location.pathname] || "未知页面";
   };
@@ -578,44 +611,62 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   );
 
   // 折叠菜单项：图标 + 小字标题
-  const CollapsedMenuItem = ({ icon, label, shortLabel, active, onClick, children }: {
-    icon: React.ReactNode
-    label: string
-    shortLabel?: string
-    active?: boolean
-    onClick?: () => void
-    children?: React.ReactNode
+  const CollapsedMenuItem = ({
+    icon,
+    label,
+    shortLabel,
+    active,
+    onClick,
+    children,
+  }: {
+    icon: React.ReactNode;
+    label: string;
+    shortLabel?: string;
+    active?: boolean;
+    onClick?: () => void;
+    children?: React.ReactNode;
   }) => {
     const itemContent = (
       <div
         onClick={onClick}
         style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '8px 0',
-          cursor: 'pointer',
-          color: active ? currentTheme.primary : '#666',
-          background: active ? currentTheme.selectedBg : 'transparent',
-          transition: 'all 0.2s',
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "8px 0",
+          cursor: "pointer",
+          color: active ? currentTheme.primary : "#666",
+          background: active ? currentTheme.selectedBg : "transparent",
+          transition: "all 0.2s",
           height: 56,
-          width: '100%',
-          borderRight: active ? `2px solid ${currentTheme.primary}` : 'none',
+          width: "100%",
+          borderRight: active ? `2px solid ${currentTheme.primary}` : "none",
         }}
       >
         {icon}
-        <span style={{ fontSize: 10, marginTop: 3, lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 64, textAlign: 'center' }}>
+        <span
+          style={{
+            fontSize: 10,
+            marginTop: 3,
+            lineHeight: 1.2,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            maxWidth: 64,
+            textAlign: "center",
+          }}
+        >
           {shortLabel || label}
         </span>
       </div>
-    )
+    );
 
     if (children) {
       return (
         <Dropdown
           menu={{
-            items: (children as any[]).map(child => ({
+            items: (children as any[]).map((child) => ({
               key: child.key,
               icon: child.icon,
               label: child.label,
@@ -629,15 +680,15 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         >
           {itemContent}
         </Dropdown>
-      )
+      );
     }
 
-    return itemContent
-  }
+    return itemContent;
+  };
 
   // 构建折叠状态的菜单列表
   const renderCollapsedMenu = () => (
-    <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
+    <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
       {menuItems.map((item: any) => {
         if (item.children && item.children.length > 0) {
           // 子菜单组：图标+小字，hover显示Dropdown
@@ -650,7 +701,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             >
               {item.children}
             </CollapsedMenuItem>
-          )
+          );
         }
         // 普通菜单项
         return (
@@ -662,201 +713,292 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             active={location.pathname === item.key}
             onClick={() => navigate(item.key as string)}
           />
-        )
+        );
       })}
     </div>
-  )
+  );
 
   return (
-    <div style={{ height: '100vh', overflow: 'auto' }}>
-    <Layout style={{ minWidth: 1480, minHeight: '100vh' }}>
-      {/* 固定侧边栏：小屏也保持桌面布局，通过整体横向滚动查看 */}
-      <Sider
-        collapsible
-        collapsed={collapsed}
-        onCollapse={setCollapsed}
-        trigger={null}
-        theme="light"
-        width={200}
-        collapsedWidth={80}
-        style={{ height: '100vh', position: 'sticky', top: 0, flexShrink: 0, overflow: 'visible' }}
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'visible' }}>
-          {/* Logo */}
-          <div style={{ height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: collapsed ? 8 : 16, flexShrink: 0 }}>
-            <Bot size={collapsed ? 28 : 32} color={currentTheme.primary} />
-            {!collapsed && <span style={{ marginLeft: 8, fontSize: 18, fontWeight: 'bold', color: currentTheme.primary }}>宝鑫华盛AI</span>}
-          </div>
-
-          {/* 菜单区域 */}
-          {collapsed ? renderCollapsedMenu() : (
-            <Menu
-              mode="inline"
-              selectedKeys={[location.pathname]}
-              openKeys={openKeys}
-              onOpenChange={(keys) => setOpenKeys(keys)}
-              items={menuItems.map(({ shortLabel, ...rest }: any) => rest)}
-              onClick={({ key }) => navigate(key)}
-              style={{
-                flex: 1,
-                overflowY: 'auto',
-                overflowX: 'visible',
-                '--ant-menu-item-selected-bg': currentTheme.selectedBg,
-                '--ant-menu-item-selected-color': currentTheme.primary,
-                '--ant-menu-item-color': currentTheme.primary,
-                '--ant-color-primary': currentTheme.primary,
-              } as React.CSSProperties}
-            />
-          )}
-
-          {/* 折叠/展开按钮 */}
-          <div
-            onClick={() => setCollapsed(!collapsed)}
-            style={{
-              height: 48,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              borderTop: '1px solid #f0f0f0',
-              color: '#999',
-              transition: 'color 0.2s',
-              flexShrink: 0,
-            }}
-            onMouseEnter={e => (e.currentTarget.style.color = '#333')}
-            onMouseLeave={e => (e.currentTarget.style.color = '#999')}
-          >
-            {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
-          </div>
-        </div>
-      </Sider>
-      <Layout style={{ display: 'flex', flexDirection: 'column', minWidth: 1280, flexShrink: 0 }}>
-        <Header style={{ padding: '0 24px', background: colorBgContainer, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, height: 56 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <Title level={4} style={{ margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {getPageTitle()}
-            </Title>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
-            <Popover
-              content={notificationContent}
-              trigger="click"
-              open={notifOpen}
-              onOpenChange={handleNotifOpen}
-              placement="bottomRight"
-            >
-              <Badge count={unreadCount} size="small" offset={[-2, 2]}>
-                <Button
-                  type="text"
-                  icon={<Bell size={20} />}
-                  style={{ color: "#666" }}
-                />
-              </Badge>
-            </Popover>
-            <ThemeSwitcher />
-            <Dropdown menu={{ items: userMenuItems }} placement="bottomRight">
-              <Space style={{ cursor: 'pointer' }}>
-                <Avatar
-                  size="default"
-                  style={{ backgroundColor: currentTheme.avatarBg }}
-                  icon={<User size={16} />}
-                />
-                <span>{user?.nickname || user?.username}</span>
-              </Space>
-            </Dropdown>
-          </div>
-        </Header>
-        <Content
+    <div style={{ height: "100vh", overflowX: "auto", overflowY: "hidden" }}>
+      <Layout style={{ minWidth: 1480, height: "100%" }}>
+        {/* 固定侧边栏：小屏也保持桌面布局，通过整体横向滚动查看 */}
+        <Sider
+          collapsible
+          collapsed={collapsed}
+          onCollapse={setCollapsed}
+          trigger={null}
+          theme="light"
+          width={200}
+          collapsedWidth={80}
           style={{
-            margin: 16,
-            padding: 0,
-            background: colorBgContainer,
-            borderRadius: borderRadiusLG,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'auto',
-            flex: 1,
-            minHeight: 0,
-            minWidth: 1280,
+            height: "100vh",
+            position: "sticky",
+            top: 0,
+            flexShrink: 0,
+            overflow: "visible",
           }}
         >
-          {children}
-        </Content>
-      </Layout>
-      <ChangePasswordModal
-        open={changePasswordOpen}
-        onCancel={() => setChangePasswordOpen(false)}
-      />
-      <Modal
-        title="通知详情"
-        open={detailModalOpen}
-        onCancel={() => setDetailModalOpen(false)}
-        footer={
-          selectedNotification &&
-          (selectedNotification.title?.includes("未处理差评") ||
-            selectedNotification.type === "warning") ? (
-            <div
-              style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-            >
-              <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
-              <Button type="primary" onClick={handleGoToReview}>
-                前往处理
-              </Button>
-            </div>
-          ) : (
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
-            </div>
-          )
-        }
-        width={500}
-      >
-        {selectedNotification && (
-          <div style={{ padding: "8px 0" }}>
-            <div style={{ marginBottom: 16 }}>
-              <Text strong style={{ fontSize: 16 }}>
-                {selectedNotification.title}
-              </Text>
-            </div>
-
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              height: "100%",
+              overflow: "visible",
+            }}
+          >
+            {/* Logo */}
             <div
               style={{
-                background: "#f5f5f5",
-                padding: 16,
-                borderRadius: 8,
-                marginBottom: 16,
-                lineHeight: 1.8,
+                height: 64,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: collapsed ? 8 : 16,
+                flexShrink: 0,
               }}
             >
-              <Text style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                {selectedNotification.content}
-              </Text>
+              <Bot size={collapsed ? 28 : 32} color={currentTheme.primary} />
+              {!collapsed && (
+                <span
+                  style={{
+                    marginLeft: 8,
+                    fontSize: 18,
+                    fontWeight: "bold",
+                    color: currentTheme.primary,
+                  }}
+                >
+                  宝鑫华盛AI
+                </span>
+              )}
             </div>
 
+            {/* 菜单区域 */}
+            {collapsed ? (
+              renderCollapsedMenu()
+            ) : (
+              <Menu
+                mode="inline"
+                selectedKeys={[location.pathname]}
+                openKeys={openKeys}
+                onOpenChange={(keys) => setOpenKeys(keys)}
+                items={menuItems.map(({ shortLabel, ...rest }: any) => rest)}
+                onClick={({ key }) => navigate(key)}
+                style={
+                  {
+                    flex: 1,
+                    overflowY: "auto",
+                    overflowX: "visible",
+                    "--ant-menu-item-selected-bg": currentTheme.selectedBg,
+                    "--ant-menu-item-selected-color": currentTheme.primary,
+                    "--ant-menu-item-color": currentTheme.primary,
+                    "--ant-color-primary": currentTheme.primary,
+                  } as React.CSSProperties
+                }
+              />
+            )}
+
+            {/* 折叠/展开按钮 */}
+            <div
+              onClick={() => setCollapsed(!collapsed)}
+              style={{
+                height: 48,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                borderTop: "1px solid #f0f0f0",
+                color: "#999",
+                transition: "color 0.2s",
+                flexShrink: 0,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "#333")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "#999")}
+            >
+              {collapsed ? (
+                <ChevronRight size={18} />
+              ) : (
+                <ChevronLeft size={18} />
+              )}
+            </div>
+          </div>
+        </Sider>
+        <Layout
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            minWidth: 1280,
+            flexShrink: 0,
+          }}
+        >
+          <Header
+            style={{
+              padding: "0 24px",
+              background: colorBgContainer,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexShrink: 0,
+              height: 56,
+            }}
+          >
             <div
               style={{
                 display: "flex",
-                justifyContent: "space-between",
-                color: "#999",
-                fontSize: 13,
+                alignItems: "center",
+                gap: 8,
+                minWidth: 0,
               }}
             >
-              <span>
-                <Bell size={14} style={{ marginRight: 4, display: "inline" }} />
-                {selectedNotification.type === "warning" ? "警告" : "通知"}
-              </span>
-              <span>
-                {dayjs(selectedNotification.created_at).format(
-                  "YYYY年MM月DD日 HH:mm",
-                )}
-              </span>
+              <Title
+                level={4}
+                style={{
+                  margin: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {getPageTitle()}
+              </Title>
             </div>
-          </div>
-        )}
-      </Modal>
-    </Layout>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 16,
+                flexShrink: 0,
+              }}
+            >
+              <Popover
+                content={notificationContent}
+                trigger="click"
+                open={notifOpen}
+                onOpenChange={handleNotifOpen}
+                placement="bottomRight"
+              >
+                <Badge count={unreadCount} size="small" offset={[-2, 2]}>
+                  <Button
+                    type="text"
+                    icon={<Bell size={20} />}
+                    style={{ color: "#666" }}
+                  />
+                </Badge>
+              </Popover>
+              <ThemeSwitcher />
+              <Dropdown menu={{ items: userMenuItems }} placement="bottomRight">
+                <Space style={{ cursor: "pointer" }}>
+                  <Avatar
+                    size="default"
+                    style={{ backgroundColor: currentTheme.avatarBg }}
+                    icon={<User size={16} />}
+                  />
+                  <span>{user?.nickname || user?.username}</span>
+                </Space>
+              </Dropdown>
+            </div>
+          </Header>
+          <Content
+            style={{
+              margin: "16px 16px 0 16px",
+              padding: 0,
+              background: colorBgContainer,
+              borderRadius: borderRadiusLG,
+              display: "flex",
+              flexDirection: "column",
+              /* 必须 hidden（与合并前一致）：本布局高度链被 100vh 锁死，
+                 Content 是一个「高度=视口剩余」的固定滚动容器。子页面
+                 （如库存页）根 div 为 height:100% + overflowY:auto，
+                 其 position:sticky 分页控件相对它吸附，才能恒贴视口底。
+                 改成 visible/auto 会让页面根 div 随内容撑高、自身永不
+                 滚动，sticky 失效，分页掉到内容底部（合并后的回归根因）。 */
+              overflow: "hidden",
+              flex: 1,
+              minHeight: 0,
+              minWidth: 1280,
+            }}
+          >
+            {children}
+          </Content>
+        </Layout>
+        <ChangePasswordModal
+          open={changePasswordOpen}
+          onCancel={() => setChangePasswordOpen(false)}
+        />
+        <Modal
+          title="通知详情"
+          open={detailModalOpen}
+          onCancel={() => setDetailModalOpen(false)}
+          footer={
+            selectedNotification &&
+            (selectedNotification.title?.includes("未处理差评") ||
+              selectedNotification.type === "warning") ? (
+              <div
+                style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
+              >
+                <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
+                <Button type="primary" onClick={handleGoToReview}>
+                  前往处理
+                </Button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
+              </div>
+            )
+          }
+          width={500}
+        >
+          {selectedNotification && (
+            <div style={{ padding: "8px 0" }}>
+              <div style={{ marginBottom: 16 }}>
+                <Text strong style={{ fontSize: 16 }}>
+                  {selectedNotification.title}
+                </Text>
+              </div>
+
+              <div
+                style={{
+                  background: "#f5f5f5",
+                  padding: 16,
+                  borderRadius: 8,
+                  marginBottom: 16,
+                  lineHeight: 1.8,
+                }}
+              >
+                <Text
+                  style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                >
+                  {selectedNotification.content}
+                </Text>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  color: "#999",
+                  fontSize: 13,
+                }}
+              >
+                <span>
+                  <Bell
+                    size={14}
+                    style={{ marginRight: 4, display: "inline" }}
+                  />
+                  {selectedNotification.type === "warning" ? "警告" : "通知"}
+                </span>
+                <span>
+                  {dayjs(selectedNotification.created_at).format(
+                    "YYYY年MM月DD日 HH:mm",
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
+        </Modal>
+      </Layout>
     </div>
-  )
-}
+  );
+};
 
 export default MainLayout;

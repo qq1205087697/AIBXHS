@@ -6,11 +6,11 @@ interface SuggestionStatusTagProps {
 }
 
 const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
-  pending: { color: "orange", label: "待处理" },
-  confirmed: { color: "blue", label: "已确认" },
-  executed: { color: "green", label: "已执行" },
-  ignored: { color: "default", label: "已忽略" },
-  expired: { color: "red", label: "已失效" },
+  "待处理": { color: "orange", label: "待处理" },
+  "已确认": { color: "blue", label: "已确认" },
+  "已执行": { color: "green", label: "已执行" },
+  "已忽略": { color: "default", label: "已忽略" },
+  "已失效": { color: "red", label: "已失效" },
 };
 
 const SuggestionStatusTag: React.FC<SuggestionStatusTagProps> = ({ status }) => {

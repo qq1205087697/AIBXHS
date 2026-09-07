@@ -16,15 +16,33 @@
 - 差:   <50
 """
 import logging
+import math
 from datetime import date
 from typing import Dict, Any, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from models.ad_daily import AdCampaignDaily
+from models.ad_report import AdReportSnapshot
 from services.ad_rules.constants import HealthScoreThresholds
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """将 value 转 float，遇到 None/NaN/Inf 时返回 default。
+
+    用于清洗上游 ETL 可能写入的脏数据（NaN/Inf），保证下游计算与
+    JSON 序列化不污染。
+    """
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(f) or math.isinf(f):
+        return default
+    return f
 
 
 class AdHealthScoreService:
@@ -59,12 +77,13 @@ class AdHealthScoreService:
         """
         try:
             record = (
-                db.query(AdCampaignDaily)
+                db.query(AdReportSnapshot)
                 .filter(
-                    AdCampaignDaily.tenant_id == tenant_id,
-                    AdCampaignDaily.campaign_id == campaign_id,
-                    AdCampaignDaily.date == evaluation_date,
-                    AdCampaignDaily.deleted_at.is_(None),
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.campaign_name == campaign_id,  # campaign_id 参数实际传入 campaign_name
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.deleted_at.is_(None),
                 )
                 .first()
             )
@@ -90,7 +109,6 @@ class AdHealthScoreService:
             result["campaign_id"] = campaign_id
             result["campaign_name"] = record.campaign_name or ""
             result["evaluation_date"] = str(evaluation_date)
-            result["store_id"] = record.store_id
 
             logger.info(
                 f"活动健康分计算完成 campaign_id={campaign_id} "
@@ -131,20 +149,40 @@ class AdHealthScoreService:
         try:
             result = (
                 db.query(
-                    func.coalesce(func.sum(AdCampaignDaily.spend), 0).label("total_spend"),
-                    func.coalesce(func.sum(AdCampaignDaily.sales), 0).label("total_sales"),
-                    func.coalesce(func.sum(AdCampaignDaily.impressions), 0).label("total_impressions"),
-                    func.coalesce(func.sum(AdCampaignDaily.clicks), 0).label("total_clicks"),
-                    func.coalesce(func.sum(AdCampaignDaily.orders), 0).label("total_orders"),
-                    func.coalesce(func.sum(AdCampaignDaily.budget), 0).label("total_budget"),
+                    func.coalesce(func.sum(AdReportSnapshot.spend), 0).label("total_spend"),
+                    func.coalesce(func.sum(AdReportSnapshot.sales), 0).label("total_sales"),
+                    func.coalesce(func.sum(AdReportSnapshot.impressions), 0).label("total_impressions"),
+                    func.coalesce(func.sum(AdReportSnapshot.clicks), 0).label("total_clicks"),
+                    func.coalesce(func.sum(AdReportSnapshot.orders), 0).label("total_orders"),
                 )
                 .filter(
-                    AdCampaignDaily.tenant_id == tenant_id,
-                    AdCampaignDaily.date == evaluation_date,
-                    AdCampaignDaily.deleted_at.is_(None),
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.deleted_at.is_(None),
                 )
                 .first()
             )
+
+            # 反推总预算：spend / budget_utilization（仅当 budget_utilization > 0 时有效）
+            budget_records = (
+                db.query(
+                    func.sum(AdReportSnapshot.spend).label("spend_sum"),
+                    func.avg(AdReportSnapshot.budget_utilization).label("avg_util"),
+                )
+                .filter(
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.budget_utilization > 0,
+                    AdReportSnapshot.deleted_at.is_(None),
+                )
+                .first()
+            )
+            total_budget = 0.0
+            if budget_records and budget_records.avg_util and float(budget_records.avg_util) > 0:
+                total_spend_for_budget = float(budget_records.spend_sum or 0)
+                total_budget = total_spend_for_budget / float(budget_records.avg_util)
 
             if not result:
                 logger.warning(
@@ -164,7 +202,6 @@ class AdHealthScoreService:
             total_impressions = int(result.total_impressions or 0)
             total_clicks = int(result.total_clicks or 0)
             total_orders = int(result.total_orders or 0)
-            total_budget = float(result.total_budget or 0)
 
             # 计算聚合派生指标
             metrics = {
@@ -217,36 +254,39 @@ class AdHealthScoreService:
         :param metrics: 包含 acos, roas, ctr, cvr, budget_utilization, cpc 的 dict
         :return: 健康分结果 dict
         """
+        # 防御性清洗：保证 NaN/Inf 不进入评分与结果（防止 JSON 序列化失败）
+        safe_metrics = {k: _safe_float(v) for k, v in metrics.items()}
+
         dimensions = {
             "acos": {
-                "score": self._score_acos(metrics.get("acos", 0.0)),
+                "score": self._score_acos(safe_metrics.get("acos", 0.0)),
                 "max": self.DIMENSION_MAX["acos"],
-                "value": round(metrics.get("acos", 0.0), 4),
+                "value": round(safe_metrics.get("acos", 0.0), 4),
             },
             "roas": {
-                "score": self._score_roas(metrics.get("roas", 0.0)),
+                "score": self._score_roas(safe_metrics.get("roas", 0.0)),
                 "max": self.DIMENSION_MAX["roas"],
-                "value": round(metrics.get("roas", 0.0), 4),
+                "value": round(safe_metrics.get("roas", 0.0), 4),
             },
             "ctr": {
-                "score": self._score_ctr(metrics.get("ctr", 0.0)),
+                "score": self._score_ctr(safe_metrics.get("ctr", 0.0)),
                 "max": self.DIMENSION_MAX["ctr"],
-                "value": round(metrics.get("ctr", 0.0), 4),
+                "value": round(safe_metrics.get("ctr", 0.0), 4),
             },
             "cvr": {
-                "score": self._score_cvr(metrics.get("cvr", 0.0)),
+                "score": self._score_cvr(safe_metrics.get("cvr", 0.0)),
                 "max": self.DIMENSION_MAX["cvr"],
-                "value": round(metrics.get("cvr", 0.0), 4),
+                "value": round(safe_metrics.get("cvr", 0.0), 4),
             },
             "budget_utilization": {
-                "score": self._score_budget_util(metrics.get("budget_utilization", 0.0)),
+                "score": self._score_budget_util(safe_metrics.get("budget_utilization", 0.0)),
                 "max": self.DIMENSION_MAX["budget_utilization"],
-                "value": round(metrics.get("budget_utilization", 0.0), 4),
+                "value": round(safe_metrics.get("budget_utilization", 0.0), 4),
             },
             "cpc": {
-                "score": self._score_cpc(metrics.get("cpc", 0.0)),
+                "score": self._score_cpc(safe_metrics.get("cpc", 0.0)),
                 "max": self.DIMENSION_MAX["cpc"],
-                "value": round(metrics.get("cpc", 0.0), 4),
+                "value": round(safe_metrics.get("cpc", 0.0), 4),
             },
         }
 
@@ -257,7 +297,7 @@ class AdHealthScoreService:
             "score": total_score,
             "level": level,
             "dimensions": dimensions,
-            "metrics": {k: round(v, 4) for k, v in metrics.items()},
+            "metrics": {k: round(v, 4) for k, v in safe_metrics.items()},
         }
 
     def _get_level(self, score: float) -> str:
@@ -397,34 +437,39 @@ class AdHealthScoreService:
 
     # ==================== 辅助方法 ====================
 
-    def _extract_metrics(self, record: AdCampaignDaily) -> Dict[str, float]:
-        """从 AdCampaignDaily 记录中提取 6 维度指标，DECIMAL 转 float"""
-        spend = float(record.spend) if record.spend is not None else 0.0
-        sales = float(record.sales) if record.sales is not None else 0.0
-        clicks = int(record.clicks) if record.clicks is not None else 0
-        impressions = int(record.impressions) if record.impressions is not None else 0
-        orders = int(record.orders) if record.orders is not None else 0
-        budget = float(record.budget) if record.budget is not None else 0.0
+    def _extract_metrics(self, record: AdReportSnapshot) -> Dict[str, float]:
+        """从 AdReportSnapshot 记录中提取 6 维度指标，DECIMAL 转 float。
 
-        # 优先使用表中已计算的派生指标，若为空则实时计算
-        acos = float(record.acos) if record.acos is not None else (
+        使用 _safe_float 清洗 NaN/Inf，防止上游 ETL 脏数据污染结果。
+        """
+        spend = _safe_float(record.spend)
+        sales = _safe_float(record.sales)
+        clicks = int(_safe_float(record.clicks))
+        impressions = int(_safe_float(record.impressions))
+        orders = int(_safe_float(record.orders))
+        # AdReportSnapshot 没有 budget 字段，使用 budget_utilization 反推
+        budget_utilization_val = _safe_float(record.budget_utilization)
+        budget = (spend / budget_utilization_val) if budget_utilization_val > 0 else 0.0
+
+        # 优先使用表中已计算的派生指标，若为空则实时计算（_safe_float 处理 None/NaN/Inf）
+        acos = _safe_float(record.acos) if record.acos is not None else (
             (spend / sales) if sales > 0 else 0.0
         )
-        roas = float(record.roas) if record.roas is not None else (
+        roas = _safe_float(record.roas) if record.roas is not None else (
             (sales / spend) if spend > 0 else 0.0
         )
-        ctr = float(record.ctr) if record.ctr is not None else (
+        ctr = _safe_float(record.ctr) if record.ctr is not None else (
             (clicks / impressions) if impressions > 0 else 0.0
         )
-        cvr = float(record.cvr) if record.cvr is not None else (
+        cvr = _safe_float(record.cvr) if record.cvr is not None else (
             (orders / clicks) if clicks > 0 else 0.0
         )
         budget_utilization = (
-            float(record.budget_utilization)
+            _safe_float(record.budget_utilization)
             if record.budget_utilization is not None
             else ((spend / budget) if budget > 0 else 0.0)
         )
-        cpc = float(record.cpc) if record.cpc is not None else (
+        cpc = _safe_float(record.cpc) if record.cpc is not None else (
             (spend / clicks) if clicks > 0 else 0.0
         )
 
