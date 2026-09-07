@@ -597,6 +597,14 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             platform_sheet_name = name
             break
     
+    # 预加载所有产品，用于平台商品页签查找产品名称
+    all_products = db.execute(text("""
+        SELECT id, product_code, name, purchase_price
+        FROM products
+        WHERE tenant_id = :tid AND deleted_at IS NULL
+        ORDER BY product_code
+    """), {"tid": tenant_id}).fetchall()
+
     if platform_sheet_name:
         df = pd.read_excel(excel_file, sheet_name=platform_sheet_name)
         df.columns = df.columns.str.strip()
@@ -642,7 +650,10 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
                 raise ValueError(f"平台商品页签缺少必需列: {col}")
         
         status_map = {"启用": "active", "停用": "inactive", "归档": "archived"}
-        valid_platforms = {"amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other"}
+        valid_platforms = {
+            "amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other",
+            "temu_half", "temu_full", "shein_half", "shein_full", "aliexpress_half", "aliexpress_full"
+        }
         platform_aliases = {
             "amazon": "amazon",
             "ebay": "ebay",
@@ -654,6 +665,13 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
             "tiktok shop": "tiktok",
             "temu": "temu",
             "other": "other",
+            # 新平台类型中文别名
+            "temu半托": "temu_half",
+            "temu全托": "temu_full",
+            "shein半托": "shein_half",
+            "shein全托": "shein_full",
+            "速卖通半托": "aliexpress_half",
+            "速卖通全托": "aliexpress_full",
         }
         
         for idx, row in df.iterrows():

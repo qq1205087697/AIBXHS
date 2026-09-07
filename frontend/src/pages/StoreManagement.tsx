@@ -10,6 +10,7 @@ import {
 } from '@ant-design/icons'
 import { storesApi, departmentsApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
+import { useResponsive } from '../hooks/useResponsive'
 import { CSSProperties } from 'react'
 
 interface Store {
@@ -42,6 +43,7 @@ interface StoreGroup {
 
 const StoreManagement: React.FC = () => {
   const { currentTheme } = useTheme()
+  const resp = useResponsive()
 
   const [stores, setStores] = useState<Store[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
@@ -91,9 +93,31 @@ const StoreManagement: React.FC = () => {
     { label: 'Shopee', value: 'shopee' },
     { label: 'Lazada', value: 'lazada' },
     { label: 'TikTok', value: 'tiktok' },
-    { label: 'Temu', value: 'temu' },
+    { label: 'Temu半托', value: 'temu_half' },
+    { label: 'Temu全托', value: 'temu_full' },
+    { label: 'SHEIN半托', value: 'shein_half' },
+    { label: 'SHEIN全托', value: 'shein_full' },
+    { label: '速卖通半托', value: 'aliexpress_half' },
+    { label: '速卖通全托', value: 'aliexpress_full' },
     { label: 'Other', value: 'other' },
   ]
+
+  const platformLabelMap: Record<string, string> = {
+    amazon: 'Amazon',
+    ebay: 'eBay',
+    walmart: 'Walmart',
+    shopify: 'Shopify',
+    shopee: 'Shopee',
+    lazada: 'Lazada',
+    tiktok: 'TikTok',
+    temu_half: 'Temu半托',
+    temu_full: 'Temu全托',
+    shein_half: 'SHEIN半托',
+    shein_full: 'SHEIN全托',
+    aliexpress_half: '速卖通半托',
+    aliexpress_full: '速卖通全托',
+    other: 'Other',
+  }
 
   const statusOptions = [
     { label: 'Active', value: 'active' },
@@ -435,7 +459,7 @@ const StoreManagement: React.FC = () => {
       title: '平台',
       dataIndex: 'platform',
       key: 'platform',
-      render: (v: string) => <Tag color="blue">{v}</Tag>,
+      render: (v: string) => <Tag color="blue">{platformLabelMap[v] || v}</Tag>,
     },
     { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account' },
     { title: '站点', dataIndex: 'site', key: 'site' },
@@ -592,7 +616,7 @@ const StoreManagement: React.FC = () => {
                       placeholder="搜索紫鸟账号、店铺名、站点..."
                       prefix={<SearchOutlined />}
                       allowClear
-                      style={{ width: 400 }}
+                      style={{ width: resp.isMobile ? '100%' : 400 }}
                       value={searchText}
                       onChange={(e) => handleSearch(e.target.value)}
                     />
@@ -651,6 +675,7 @@ const StoreManagement: React.FC = () => {
                   columns={groupColumns}
                   rowKey="id"
                   pagination={false}
+                  scroll={{ x: resp.isMobile ? true : false }}
                 />
               </Card>
             ),
@@ -663,7 +688,7 @@ const StoreManagement: React.FC = () => {
         open={modalOpen}
         onOk={handleSubmit}
         onCancel={() => setModalOpen(false)}
-        width={600}
+        width={resp.isMobile ? '95vw' : 600}
       >
         <Form form={form} layout="vertical">
           <Form.Item name="inventory_name" label="店铺名" rules={[{ required: true, message: '请输入店铺名' }]}>
@@ -704,6 +729,7 @@ const StoreManagement: React.FC = () => {
         open={batchModalOpen}
         onOk={handleBatchSubmit}
         onCancel={() => setBatchModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={batchForm} layout="vertical">
           <Form.Item name="department_id" label="选择部门">
@@ -724,6 +750,7 @@ const StoreManagement: React.FC = () => {
         open={groupModalOpen}
         onOk={handleGroupSubmit}
         onCancel={() => setGroupModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={groupForm} layout="vertical">
           <Form.Item name="name" label="分组名称" rules={[{ required: true, message: '请输入分组名称' }]}>
@@ -751,13 +778,14 @@ const StoreManagement: React.FC = () => {
           rowKey="id"
           size="small"
           pagination={false}
+          scroll={{ x: resp.isMobile ? true : false }}
           columns={[
             { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
             {
               title: '平台',
               dataIndex: 'platform',
               key: 'platform',
-              render: (v: string) => <Tag color="blue">{v}</Tag>,
+              render: (v: string) => <Tag color="blue">{platformLabelMap[v] || v}</Tag>,
             },
             { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account' },
             { title: '站点', dataIndex: 'site', key: 'site' },
@@ -779,7 +807,7 @@ const StoreManagement: React.FC = () => {
         open={addStoreModalOpen}
         onOk={handleAddStoreSubmit}
         onCancel={() => setAddStoreModalOpen(false)}
-        width={700}
+        width={resp.isMobile ? '95vw' : 700}
       >
         <Transfer
           dataSource={transferDataSource}
@@ -801,7 +829,7 @@ const StoreManagement: React.FC = () => {
         open={assignGroupModalOpen}
         onOk={handleSaveAssignGroup}
         onCancel={() => setAssignGroupModalOpen(false)}
-        width={400}
+        width={resp.isMobile ? '95vw' : 400}
       >
         <Form form={assignGroupForm} layout="vertical">
           <Form.Item name="group_id" label="选择店铺分组">
@@ -821,7 +849,7 @@ const StoreManagement: React.FC = () => {
         onOk={handleSaveMembers}
         onCancel={() => setMemberModalOpen(false)}
         confirmLoading={memberLoading}
-        width={600}
+        width={resp.isMobile ? '95vw' : 600}
       >
         <Transfer
           dataSource={allUsers.map((u: any) => ({

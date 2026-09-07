@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
@@ -94,12 +95,12 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 async def login(user_data: UserLogin, db: Session = Depends(get_db)):
-    """登录"""
+    """登录（支持用户名或邮箱）"""
     user = authenticate_user(db, user_data.username, user_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误"
+            detail="用户名/邮箱或密码错误"
         )
     
     access_token = create_access_token(data={"sub": user.username, "uid": user.id, "tid": user.tenant_id})

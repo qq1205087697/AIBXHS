@@ -100,10 +100,102 @@ async def get_all_stores(
         raise HTTPException(status_code=500, detail=f"获取店铺列表失败: {str(e)}")
 
 
+@router.get("/my-stores")
+async def get_my_stores(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取当前用户可访问的店铺列表（用于数据驾驶舱）
+    逻辑：先通过user_stores获取用户可访问的inventory_name（与其他机器人一致），
+    再从这些store记录中提取shop_abbr去重后用于数据驾驶舱展示
+    """
+    try:
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+        # 兜底：username为admin的用户也视为管理员
+        if not is_admin and current_user.username == "admin":
+            is_admin = True
+
+        # 第一步：获取用户可访问的store_id列表（与其他机器人逻辑一致）
+        if is_admin:
+            # admin看全部active的store
+            store_rows = db.execute(
+                text("SELECT id FROM stores WHERE tenant_id = :tid AND deleted_at IS NULL AND status = 'active' AND platform = 'amazon'"),
+                {"tid": current_user.tenant_id}
+            ).fetchall()
+        else:
+            # 非admin按user_stores过滤
+            store_rows = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
+            ).fetchall()
+        store_id_list = [s[0] for s in store_rows if s[0]]
+
+        if not store_id_list:
+            return {"success": True, "data": {"stores": [], "regions": []}}
+
+        # 第二步：从这些store中获取inventory_name和shop_abbr
+        placeholders = ",".join([f":sid_{i}" for i in range(len(store_id_list))])
+        params = {f"sid_{i}": sid for i, sid in enumerate(store_id_list)}
+
+        query = text(f"""
+            SELECT s.id, s.shop_abbr, s.inventory_name, s.name, s.site
+            FROM stores s
+            WHERE s.id IN ({placeholders}) AND s.platform = 'amazon' AND s.status = 'active'
+            ORDER BY s.shop_abbr ASC, s.site ASC
+        """)
+        result = db.execute(query, params)
+
+        # 第三步：按shop_abbr去重，同时记录每个shop_abbr对应的inventory_name列表
+        stores = []
+        abbr_map = {}  # shop_abbr -> {inventory_names, sites, ...}
+        for row in result:
+            store_id, shop_abbr, inventory_name, name, site = row
+            shop_abbr = shop_abbr or ""
+            inventory_name = inventory_name or ""
+            if not shop_abbr:
+                continue
+            if shop_abbr not in abbr_map:
+                abbr_map[shop_abbr] = {
+                    "id": store_id,
+                    "shop_abbr": shop_abbr,
+                    "name": name or "",
+                    "inventory_names": [],
+                    "sites": [],
+                }
+            if inventory_name and inventory_name not in abbr_map[shop_abbr]["inventory_names"]:
+                abbr_map[shop_abbr]["inventory_names"].append(inventory_name)
+            if site and site not in abbr_map[shop_abbr]["sites"]:
+                abbr_map[shop_abbr]["sites"].append(site)
+
+        for abbr, info in sorted(abbr_map.items(), key=lambda x: x[0]):
+            stores.append({
+                "id": info["id"],
+                "shop_abbr": info["shop_abbr"],
+                "name": info["name"],
+                "site": info["sites"][0] if info["sites"] else "",
+                "inventory_names": info["inventory_names"],
+            })
+
+        # 提取唯一的地区列表
+        regions = sorted(set(s["site"] for s in stores if s["site"]))
+
+        return {"success": True, "data": {"stores": stores, "regions": regions}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取店铺列表失败: {str(e)}")
+
 @router.get("/")
 async def get_stores(
     page: int = 1,
     page_size: int = 20,
+    # name_search: Optional[str] = None,
+    # site_search: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

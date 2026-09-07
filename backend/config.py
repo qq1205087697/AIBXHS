@@ -8,7 +8,6 @@ class Settings(BaseSettings):
     """应用配置"""
     PORT: int = 8000
     
-    # 数据库配置
     DB_HOST: str = "localhost"
     DB_PORT: int = 3306
     DB_USER: str = "root"
@@ -23,7 +22,6 @@ class Settings(BaseSettings):
     DEMO_DB_PASSWORD: str = "123456"
     DEMO_DB_NAME: str = "bxhs_ai_assistance_demo"
     
-    # 飞书配置
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_INVENTORY_BASE_TOKEN: str = ""
@@ -31,11 +29,27 @@ class Settings(BaseSettings):
     FEISHU_REVIEW_BASE_TOKEN: str = ""
     FEISHU_REVIEW_TABLE_ID: str = ""
     
-    # OpenAI配置
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
-    
+    OPENAI_VISION_MODEL: str = ""
+    OPENAI_VISION_RESPONSE_FORMAT: str = ""
+
+    # 火山引擎 TOS 对象存储配置
+    # 获取方式：
+    # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建
+    #    https://console.volcengine.com/iam/keymanage/
+    # 2. Endpoint/Region/Bucket: 在 TOS 控制台创建桶后获取
+    #    https://console.volcengine.com/tos
+    TOS_ACCESS_KEY: str = ""
+    TOS_SECRET_KEY: str = ""
+    TOS_ENDPOINT: str = ""            # 如: tos-cn-beijing.volces.com
+    TOS_REGION: str = ""              # 如: cn-beijing
+    TOS_BUCKET: str = ""              # 桶名称
+    TOS_PREFIX: str = "uploads/"      # 对象前缀（目录）
+    # 桶访问域名（用于拼接公网访问URL，若为空则使用 https://{bucket}.{endpoint} 形式）
+    TOS_CUSTOM_DOMAIN: str = ""
+
     # JWT配置
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"
@@ -59,9 +73,7 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
-    class Config:
-        env_file = os.path.join(os.path.dirname(__file__), ".env")
-        extra = "ignore"
+    model_config = {"env_file": os.path.join(os.path.dirname(__file__), ".env")}
 
 
 def get_settings() -> Settings:

@@ -4,6 +4,7 @@ import { Lock, User, Globe, Package, MessageSquare, Mail } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate, Link } from 'react-router-dom';
 import { useTheme } from '../contexts/ThemeContext';
+import { useResponsive } from '../hooks/useResponsive';
 
 const { Title, Text } = Typography;
 
@@ -12,6 +13,7 @@ const Login: React.FC = () => {
   const [error, setError] = useState('');
   const { login } = useAuth();
   const { currentTheme } = useTheme();
+  const res = useResponsive();
   const navigate = useNavigate();
 
   const onFinish = async (values: { username: string; password: string }) => {
@@ -40,7 +42,7 @@ const Login: React.FC = () => {
       <div style={{
         flex: 1,
         background: `linear-gradient(135deg, ${currentTheme.primaryDark} 0%, ${currentTheme.primary} 100%)`,
-        display: 'flex',
+        display: res.isMobile ? 'none' : 'flex',
         flexDirection: 'column',
         justifyContent: 'center',
         alignItems: 'center',
@@ -146,11 +148,11 @@ const Login: React.FC = () => {
         justifyContent: 'center',
         alignItems: 'center',
         background: '#f8fafc',
-        padding: '40px'
+        padding: res.isMobile ? '16px' : '40px'
       }}>
-        <Card 
-          style={{ 
-            width: '100%', 
+        <Card
+          style={{
+            width: res.isMobile ? '90vw' : 400,
             maxWidth: 450,
             boxShadow: '0 20px 60px rgba(0,0,0,0.08)',
             borderRadius: '20px',

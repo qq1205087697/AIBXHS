@@ -37,8 +37,12 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def get_user(db: Session, username: str) -> Optional[User]:
-    """根据用户名获取用户"""
-    return db.query(User).filter(User.username == username).first()
+    """根据用户名或邮箱获取用户"""
+    user = db.query(User).filter(User.username == username).first()
+    if user:
+        return user
+    # 如果没有找到用户，尝试通过邮箱查找
+    return db.query(User).filter(User.email == username).first()
 
 
 def get_user_by_identity(
@@ -235,6 +239,8 @@ def _init_tenant_permissions_and_admin_role(db: Session, tenant_id: int):
         {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
         {"name": "管理邮件状态", "code": "robot:email:manage", "type": "function", "module": "邮件机器人", "sort_order": 59},
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
+        # 页面优化机器人
+        {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
         # 挪货管理
         {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 55},
         {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 56},
