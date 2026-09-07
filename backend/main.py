@@ -51,7 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging
 from config import get_settings
 
 settings = get_settings()
