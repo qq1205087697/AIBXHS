@@ -3669,6 +3669,14 @@ const InventoryBot: React.FC = () => {
         .inv-detail-hscroll .ant-table-cell-fix-right {
           will-change: transform;
         }
+        /* 隐藏 rc-table 在「scroll.x + 冻结列」时渲染的原生底部横向滚动条
+           （.ant-table-sticky-scroll，内含 .ant-table-sticky-scroll-bar）。
+           横向滑动统一由分页上方的自定义滚动条 .table-h-scroll 承担，
+           否则冻结列场景会出现第二条横向滑条。
+           注：本规则此前仅存在于工作区、从未提交，合并时被丢弃。 */
+        .inv-detail-hscroll .ant-table-sticky-scroll {
+          display: none;
+        }
         /* height 控制横向滚动条厚度 → 0 即隐藏横向条，保留纵向条。
            故意不写 width：纵向滚动条保持浏览器默认厚度，避免与 rc-table 的
            scrollbarSize 补偿值不一致，导致表头 / 表体列错位。 */

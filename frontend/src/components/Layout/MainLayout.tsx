@@ -719,8 +719,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   );
 
   return (
-    <div style={{ height: "100vh", overflow: "auto" }}>
-      <Layout style={{ minWidth: 1480, minHeight: "100vh" }}>
+    <div style={{ height: "100vh", overflowX: "auto", overflowY: "hidden" }}>
+      <Layout style={{ minWidth: 1480, height: "100%" }}>
         {/* 固定侧边栏：小屏也保持桌面布局，通过整体横向滚动查看 */}
         <Sider
           collapsible
@@ -905,7 +905,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               borderRadius: borderRadiusLG,
               display: "flex",
               flexDirection: "column",
-              overflow: "auto",
+              /* 必须 hidden（与合并前一致）：本布局高度链被 100vh 锁死，
+                 Content 是一个「高度=视口剩余」的固定滚动容器。子页面
+                 （如库存页）根 div 为 height:100% + overflowY:auto，
+                 其 position:sticky 分页控件相对它吸附，才能恒贴视口底。
+                 改成 visible/auto 会让页面根 div 随内容撑高、自身永不
+                 滚动，sticky 失效，分页掉到内容底部（合并后的回归根因）。 */
+              overflow: "hidden",
               flex: 1,
               minHeight: 0,
               minWidth: 1280,
