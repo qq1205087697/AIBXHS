@@ -172,7 +172,7 @@ async def get_next_product_code(
     row = db.execute(
         text("""
             SELECT product_code FROM products
-            WHERE tenant_id = :tid AND deleted_at IS NULL AND product_code LIKE :pat
+            WHERE tenant_id = :tid AND product_code LIKE :pat
             ORDER BY CAST(SUBSTRING(product_code, :pl) AS UNSIGNED) DESC
             LIMIT 1
         """),
@@ -2394,7 +2394,8 @@ async def create_product(
 
         if product_data.product_code:
             exists = db.execute(
-                text("SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid AND deleted_at IS NULL"),
+                # 包含已软删除的记录，其编码仍占用唯一索引 uk_product_code
+                text("SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid"),
                 {"code": product_data.product_code, "tid": current_user.tenant_id}
             ).fetchone()
             if exists:
