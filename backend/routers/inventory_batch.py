@@ -22,22 +22,30 @@ async def get_product_batches(
     try:
         summary = get_product_stock_summary(db, current_user.tenant_id, product_id)
 
-        # 查询该产品在各平台的库存件数（通过platform_products关联stores表获取平台信息）
-        # 修复: 使用 SUM(DISTINCT ib.current_quantity) 避免因多条platform_products导致的重复计算
+        # 查询该产品在各平台的库存件数
+        # 逻辑：库存批次属于某个店铺分组，分组下可能有多个平台店铺
+        # 同一批库存不应因分组下有多个店铺而重复计算，所以用子查询取分组下不同的平台
         platform_rows = db.execute(text("""
-            SELECT s.platform, SUM(DISTINCT ib.current_quantity) as quantity
-            FROM inventory_batches ib
-            LEFT JOIN platform_products pp ON pp.product_id = ib.product_id AND pp.deleted_at IS NULL
-            LEFT JOIN stores s ON JSON_CONTAINS(pp.store_id, CAST(s.id AS CHAR), '$') AND s.deleted_at IS NULL
-            WHERE ib.product_id = :pid
-              AND ib.tenant_id = :tid
-              AND ib.current_quantity > 0
-              AND ib.status = 'active'
-              AND ib.deleted_at IS NULL
-              AND s.platform IS NOT NULL
-            GROUP BY s.platform
-            HAVING SUM(DISTINCT ib.current_quantity) > 0
-            ORDER BY s.platform
+            SELECT platforms.platform, SUM(sub.qty) as quantity
+            FROM (
+                SELECT ib.store_group_id, SUM(ib.current_quantity) as qty
+                FROM inventory_batches ib
+                WHERE ib.product_id = :pid
+                  AND ib.tenant_id = :tid
+                  AND ib.current_quantity > 0
+                  AND ib.status = 'active'
+                  AND ib.deleted_at IS NULL
+                  AND ib.store_group_id IS NOT NULL
+                GROUP BY ib.store_group_id
+            ) sub
+            JOIN (
+                SELECT DISTINCT sg.id as group_id, s.platform
+                FROM store_groups sg
+                JOIN stores s ON s.group_id = sg.id AND s.deleted_at IS NULL
+                WHERE sg.deleted_at IS NULL AND s.platform IS NOT NULL
+            ) platforms ON platforms.group_id = sub.store_group_id
+            GROUP BY platforms.platform
+            ORDER BY platforms.platform
         """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
 
         platform_stock = []
@@ -47,34 +55,42 @@ async def get_product_batches(
                 "quantity": int(row[1]),
             })
 
-        # 查询该产品在各平台各店铺分组的库存件数（通过platform_products获取平台信息）
-        # 修复: 使用 SUM(DISTINCT ib.current_quantity) 避免因多条platform_products导致的重复计算
+        # 查询该产品在各店铺分组的库存件数（同一分组的多个平台合并为一行，platforms为数组）
         group_rows = db.execute(text("""
             SELECT
                 sg.id as group_id,
                 sg.name as group_name,
-                pp.platform,
-                SUM(DISTINCT ib.current_quantity) as group_quantity
-            FROM inventory_batches ib
-            LEFT JOIN store_groups sg ON sg.id = ib.store_group_id AND sg.deleted_at IS NULL
-            LEFT JOIN platform_products pp ON pp.product_id = ib.product_id AND pp.deleted_at IS NULL AND pp.platform IS NOT NULL
-            WHERE ib.product_id = :pid
-              AND ib.tenant_id = :tid
-              AND ib.current_quantity > 0
-              AND ib.status = 'active'
-              AND ib.deleted_at IS NULL
-            GROUP BY sg.id, sg.name, pp.platform
-            HAVING SUM(DISTINCT ib.current_quantity) > 0
-            ORDER BY pp.platform, sg.name
+                sub.qty as group_quantity
+            FROM (
+                SELECT ib.store_group_id, SUM(ib.current_quantity) as qty
+                FROM inventory_batches ib
+                WHERE ib.product_id = :pid
+                  AND ib.tenant_id = :tid
+                  AND ib.current_quantity > 0
+                  AND ib.status = 'active'
+                  AND ib.deleted_at IS NULL
+                  AND ib.store_group_id IS NOT NULL
+                GROUP BY ib.store_group_id
+            ) sub
+            JOIN store_groups sg ON sg.id = sub.store_group_id AND sg.deleted_at IS NULL
+            ORDER BY sg.name
         """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
 
         group_stock = []
         for row in group_rows:
+            group_id = row[0]
+            # 查询该分组下的所有平台
+            platform_list = db.execute(text("""
+                SELECT DISTINCT s.platform
+                FROM stores s
+                WHERE s.group_id = :gid AND s.deleted_at IS NULL AND s.platform IS NOT NULL
+                ORDER BY s.platform
+            """), {"gid": group_id}).fetchall()
             group_stock.append({
-                "group_id": row[0],
+                "group_id": group_id,
                 "group_name": row[1] or "未分组",
-                "platform": row[2] or "",
-                "quantity": int(row[3]),
+                "platforms": [p[0] for p in platform_list],
+                "quantity": int(row[2]),
             })
 
         return {
@@ -115,6 +131,22 @@ async def get_product_stock_history(
                 ORDER BY io.created_at DESC
                 LIMIT 100
             """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
+
+        # 查询成品组装入库记录（inventory_batches中batch_type='assembly'的记录）
+        assembly_inbound_rows = []
+        try:
+            assembly_inbound_rows = db.execute(text("""
+                SELECT ib.id, ib.inbound_order_id, ib.batch_number, ib.initial_quantity,
+                       ib.warehouse, ib.created_at, ib.inbound_date, io.order_number
+                FROM inventory_batches ib
+                LEFT JOIN inbound_orders io ON io.id = ib.inbound_order_id AND io.deleted_at IS NULL
+                WHERE ib.product_id = :pid AND ib.tenant_id = :tid
+                  AND ib.batch_type = 'assembly' AND ib.deleted_at IS NULL
+                ORDER BY ib.created_at DESC
+                LIMIT 100
+            """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
+        except Exception as e:
+            print(f"查询组装入库记录失败: {e}")
 
         # 查询组装扣减记录（配件被组装消耗的记录）
         # 通过inventory_batches表查询：batch_type='purchase'的批次，如果initial_quantity > current_quantity，说明有扣减
@@ -203,7 +235,8 @@ async def get_product_stock_history(
             "transfer": "调拨出库",
             "scrap": "报废出库",
             "adjustment": "调整出库",
-            "other": "其他出库"
+            "other": "其他出库",
+            "shipment_fba": "发FBA仓",
         }
 
         records = []
@@ -245,6 +278,19 @@ async def get_product_stock_history(
                 "created_at": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else "",
                 "type": row[8],
                 "sub_type": sub_type,
+            })
+        # 添加成品组装入库记录
+        for row in assembly_inbound_rows:
+            order_number = row[7] or f"入库单#{row[1]}"
+            records.append({
+                "order_number": order_number,
+                "date": row[6].strftime("%Y-%m-%d") if row[6] else "",
+                "quantity": int(row[3]),
+                "warehouse": row[4] or "",
+                "batch_number": row[2] or "",
+                "created_at": row[5].strftime("%Y-%m-%d %H:%M:%S") if row[5] else "",
+                "type": "inbound",
+                "sub_type": "组装入库",
             })
         for row in outbound_rows:
             has_outbound_type = len(row) > 9

@@ -3,6 +3,7 @@ import { Card, Table, Button, Modal, Form, Input, Select, message, Space, Popcon
 import { EditOutlined, DeleteOutlined, CopyOutlined, LinkOutlined } from "@ant-design/icons"
 import { tenantsApi } from "../api"
 import { useAuth } from "../contexts/AuthContext"
+import { useResponsive } from "../hooks/useResponsive"
 
 const { Text } = Typography
 
@@ -19,6 +20,7 @@ interface Tenant {
 
 const TenantManagement: React.FC = () => {
   const { user, isAdmin, refreshUser } = useAuth()
+  const resp = useResponsive()
   const [tenants, setTenants] = useState<Tenant[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
@@ -307,7 +309,7 @@ const TenantManagement: React.FC = () => {
         onOk={handleSubmit}
         onCancel={() => setModalOpen(false)}
         confirmLoading={submitting}
-        width={500}
+        width={resp.isMobile ? '95vw' : 500}
       >
         <Form form={form} layout="vertical">
           <Form.Item
@@ -342,6 +344,7 @@ const TenantManagement: React.FC = () => {
         confirmLoading={bindLoading}
         okText="确认绑定"
         cancelText="取消"
+        width={resp.isMobile ? '95vw' : 520}
       >
         <div style={{ marginBottom: 16 }}>
           <Text type="secondary">

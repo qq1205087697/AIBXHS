@@ -3,14 +3,14 @@
 
 条件: CTR < 0.2% 且 impressions >= 1000
 优先级: 中
-数据源: AdCampaignDaily
+数据源: AdReportSnapshot
 """
 import logging
 from typing import List
 from datetime import date
 from sqlalchemy.orm import Session
 
-from models.ad_daily import AdCampaignDaily
+from models.ad_report import AdReportSnapshot
 from services.ad_rules.constants import RuleThresholds
 from services.ad_rules.rule_base import BaseOptimizationRule, RuleResult
 
@@ -32,18 +32,34 @@ class CtrLowRule(BaseOptimizationRule):
     def description(self) -> str:
         return "CTR 低于 0.2% 且曝光量达到 1000 门槛，广告点击率偏低"
 
+    @property
+    def rule_type(self) -> str:
+        return "optimization"
+
+    @property
+    def conditions(self) -> List[dict]:
+        return [
+            {"metric": "ctr", "operator": "<", "threshold": RuleThresholds.CTR_LOW_THRESHOLD, "unit": "%"},
+            {"metric": "impressions", "operator": ">=", "threshold": RuleThresholds.CTR_LOW_MIN_IMPRESSIONS, "unit": ""},
+        ]
+
+    @property
+    def actions(self) -> List[str]:
+        return ["优化广告创意", "调整关键词匹配类型", "优化主图"]
+
     def evaluate(self, db: Session, tenant_id: int, evaluation_date: date) -> List[RuleResult]:
         """评估规则，返回触发结果列表"""
         results: List[RuleResult] = []
         try:
             # impressions 为 Integer 类型，可在 SQL 中过滤
             records = (
-                db.query(AdCampaignDaily)
+                db.query(AdReportSnapshot)
                 .filter(
-                    AdCampaignDaily.tenant_id == tenant_id,
-                    AdCampaignDaily.date == evaluation_date,
-                    AdCampaignDaily.deleted_at.is_(None),
-                    AdCampaignDaily.impressions >= RuleThresholds.CTR_LOW_MIN_IMPRESSIONS,
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.deleted_at.is_(None),
+                    AdReportSnapshot.impressions >= RuleThresholds.CTR_LOW_MIN_IMPRESSIONS,
                 )
                 .all()
             )
@@ -67,7 +83,7 @@ class CtrLowRule(BaseOptimizationRule):
                             rule_name=self.name,
                             rule_priority=self.priority,
                             target_type="campaign",
-                            target_id=str(record.campaign_id) if record.campaign_id else "",
+                            target_id=str(record.campaign_name) if record.campaign_name else "",
                             target_name=record.campaign_name or "",
                             triggered=True,
                             current_value=round(ctr, 4),
@@ -82,11 +98,11 @@ class CtrLowRule(BaseOptimizationRule):
                                 f"且曝光量 {impressions} 达到门槛 {min_impressions}，"
                                 f"广告点击率偏低"
                             ),
-                            store_id=record.store_id,
+                            store_id=None,
                         ))
                 except Exception as row_err:
                     logger.warning(
-                        f"[{self.name}] 处理记录 campaign_id={record.campaign_id} 失败: {row_err}"
+                        f"[{self.name}] 处理记录 campaign_name={record.campaign_name} 失败: {row_err}"
                     )
                     continue
 

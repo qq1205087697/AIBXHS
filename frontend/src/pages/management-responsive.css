@@ -1,0 +1,131 @@
+/* 响应式管理页面样式 */
+
+.shipment-page {
+  padding: 16px;
+}
+
+.page-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.filter-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.responsive-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.pagination-wrapper {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 弹窗内表单项网格布局 */
+.responsive-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.responsive-grid-4 {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.responsive-grid-3 {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.responsive-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+/* 小屏适配 */
+@media (max-width: 768px) {
+  .responsive-form-grid,
+  .responsive-grid-4,
+  .responsive-grid-3,
+  .responsive-grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .shipment-page {
+    padding: 8px;
+  }
+
+  .page-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-item {
+    width: 100%;
+  }
+
+  .filter-item > * {
+    width: 100% !important;
+  }
+
+  .action-bar {
+    justify-content: flex-start;
+  }
+
+  .pagination-wrapper {
+    justify-content: center;
+  }
+}
+
+/* 响应式弹窗 */
+.responsive-modal {
+  max-width: 95vw;
+}
+
+@media (max-width: 768px) {
+  .responsive-modal {
+    width: 95vw !important;
+  }
+
+  .responsive-modal .ant-modal-body {
+    max-height: calc(100vh - 160px);
+    overflow: auto;
+  }
+}

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, JSON
 from sqlalchemy.orm import relationship
 from models.base import BaseModel
 
@@ -14,6 +14,7 @@ class ConversationHistory(BaseModel):
     content = Column(Text, nullable=False, comment="内容")
     function_name = Column(String(100), nullable=True, comment="函数名称")
     chat_type = Column(String(20), default="review", index=True, comment="对话类型: review/inventory")
+    meta = Column(JSON, nullable=True, comment="额外元数据，如补货候选列表")
     is_deleted = Column(Boolean, default=False, nullable=False, index=True, comment="是否已删除")
 
     user = relationship("User")

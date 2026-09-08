@@ -4,6 +4,7 @@ import { PlusOutlined, DeleteOutlined, EditOutlined, TeamOutlined, UserOutlined,
 import { departmentsApi, permissionsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
+import { useResponsive } from '../hooks/useResponsive'
 import type { TableProps } from 'antd'
 
 const { Title } = Typography
@@ -42,6 +43,7 @@ interface Role {
 const OrgManagement: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission } = useAuth()
+  const resp = useResponsive()
   const [departments, setDepartments] = useState<Department[]>([])
   const [users, setUsers] = useState<UserItem[]>([])
   const [roles, setRoles] = useState<Role[]>([])
@@ -618,6 +620,7 @@ const OrgManagement: React.FC = () => {
         open={deptModalOpen}
         onOk={handleDeptSubmit}
         onCancel={() => setDeptModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={deptForm} layout="vertical">
           <Form.Item name="name" label="部门名称" rules={[{ required: true, message: '请输入部门名称' }]}>
@@ -634,6 +637,7 @@ const OrgManagement: React.FC = () => {
         open={deptUserModalOpen}
         onCancel={() => setDeptUserModalOpen(false)}
         footer={null}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Table
           dataSource={deptMembers}
@@ -645,6 +649,7 @@ const OrgManagement: React.FC = () => {
           rowKey="id"
           pagination={false}
           size="small"
+          scroll={{ x: resp.isMobile ? true : false }}
         />
       </Modal>
 
@@ -653,6 +658,7 @@ const OrgManagement: React.FC = () => {
         open={assignModalOpen}
         onOk={handleAssignSubmit}
         onCancel={() => setAssignModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <p style={{ marginBottom: 12, color: '#666' }}>选择该用户所属的部门（可多选）：</p>
         <Select
@@ -670,7 +676,7 @@ const OrgManagement: React.FC = () => {
         open={userModalOpen}
         onOk={handleUserSubmit}
         onCancel={() => setUserModalOpen(false)}
-        width={500}
+        width={resp.isMobile ? '95vw' : 500}
       >
         <Form form={userForm} layout="vertical">
           <Form.Item
@@ -719,6 +725,7 @@ const OrgManagement: React.FC = () => {
             关闭
           </Button>
         ]}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <div style={{ 
           backgroundColor: '#f5f5f5', 
@@ -738,6 +745,7 @@ const OrgManagement: React.FC = () => {
         open={passwordModalOpen}
         onOk={handleChangePassword}
         onCancel={() => setPasswordModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={passwordForm} layout="vertical">
           <Form.Item
@@ -755,7 +763,7 @@ const OrgManagement: React.FC = () => {
         open={batchAssignModalOpen}
         onOk={handleBatchAssignSubmit}
         onCancel={() => setBatchAssignModalOpen(false)}
-        width={500}
+        width={resp.isMobile ? '95vw' : 500}
       >
         <p style={{ marginBottom: 16, color: '#666' }}>选择要分配的部门（可多选）：</p>
         <Select
@@ -773,7 +781,7 @@ const OrgManagement: React.FC = () => {
         open={batchPasswordModalOpen}
         onOk={handleBatchPasswordSubmit}
         onCancel={() => setBatchPasswordModalOpen(false)}
-        width={500}
+        width={resp.isMobile ? '95vw' : 500}
       >
         <Form form={batchPasswordForm} layout="vertical">
           <Form.Item

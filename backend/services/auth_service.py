@@ -37,8 +37,12 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def get_user(db: Session, username: str) -> Optional[User]:
-    """根据用户名获取用户"""
-    return db.query(User).filter(User.username == username).first()
+    """根据用户名或邮箱获取用户"""
+    user = db.query(User).filter(User.username == username).first()
+    if user:
+        return user
+    # 如果没有找到用户，尝试通过邮箱查找
+    return db.query(User).filter(User.email == username).first()
 
 
 def get_user_by_identity(

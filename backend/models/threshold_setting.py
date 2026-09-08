@@ -13,5 +13,7 @@ class ThresholdSetting(BaseModel):
     ad_ratio_threshold = Column(Float, nullable=False, server_default="25.0", comment="广告占比阈值(%)")
     storage_ratio_threshold = Column(Float, nullable=False, server_default="10.0", comment="仓储占比阈值(%)")
     acos_threshold = Column(Float, nullable=False, server_default="30.0", comment="ACOS阈值(%)")
+    overall_trend_threshold = Column(Float, nullable=False, server_default="15.0", comment="总体趋势分组均值差阈值(%)")
+    latest_trend_threshold = Column(Float, nullable=False, server_default="20.0", comment="近期趋势方向变化率阈值(%)")
     
     tenant = relationship("Tenant")

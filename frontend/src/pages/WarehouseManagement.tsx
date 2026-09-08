@@ -4,6 +4,7 @@ import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, HomeOutline
 import type { ColumnsType } from 'antd/es/table'
 import { warehousesApi } from '../api'
 import { useAuth } from '../contexts/AuthContext'
+import { useResponsive } from '../hooks/useResponsive'
 
 const { Title } = Typography
 
@@ -21,6 +22,7 @@ interface Warehouse {
 
 const WarehouseManagement: React.FC = () => {
   const { hasPermission } = useAuth()
+  const resp = useResponsive()
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
@@ -205,7 +207,7 @@ const WarehouseManagement: React.FC = () => {
         onCancel={() => setModalOpen(false)}
         okText="确定"
         cancelText="取消"
-        width={560}
+        width={resp.isMobile ? '95vw' : 560}
       >
         <Form form={form} layout="vertical">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>

@@ -10,6 +10,12 @@ from models.inventory import InventoryRecord, InventoryAlert, InventoryAction
 from models.inventory_management import InventoryBatch, OperationLog
 from models.conversation import ConversationHistory
 
+from models.product_sales import ProductSales
+from models.product_aging_inventory import ProductAgingInventory
+from models.threshold_setting import ThresholdSetting
+from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
+from models.local_inventory import LocalInventory
+
 __all__ = [
     "User",
     "Tenant",
@@ -28,4 +34,11 @@ __all__ = [
     "InventoryBatch",
     "OperationLog",
     "ConversationHistory",
+    "ProductSales",
+    "ProductAgingInventory",
+    "ThresholdSetting",
+    "InventorySnapshot",
+    "InboundShipmentDetail",
+    "ReplenishmentDecision",
+    "LocalInventory",
 ]

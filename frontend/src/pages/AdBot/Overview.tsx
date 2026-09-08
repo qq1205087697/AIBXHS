@@ -44,6 +44,7 @@ interface OverviewData {
 interface HealthScoreData {
   score: number;
   level: string;
+  dimensions?: Record<string, { score: number; max: number; value: number }>;
 }
 
 interface PerformanceItem {
@@ -259,7 +260,11 @@ const Overview: React.FC = () => {
         <Col xs={24} sm={12} md={6} lg={6}>
           <Card>
             {healthScore ? (
-              <HealthScoreCard score={healthScore.score} level={healthScore.level} />
+              <HealthScoreCard
+                score={healthScore.score}
+                level={healthScore.level}
+                dimensions={healthScore.dimensions}
+              />
             ) : (
               <div style={{ textAlign: "center", padding: 40, color: "#999" }}>
                 暂无健康分数据

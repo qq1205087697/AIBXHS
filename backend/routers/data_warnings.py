@@ -3,6 +3,7 @@ from typing import List, Optional
 from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+import time
 from database.database import get_db
 from models.data_warning import DataWarning
 
@@ -37,6 +38,7 @@ async def get_data_warnings(
                 store_list = [s.strip() for s in stores.split(',')]
         
         print(f"Received params: stores={store_list}, start_date={start_date}, end_date={end_date}")
+        _t0 = time.time()
         query = db.query(DataWarning)
         
         # 按店铺筛选
@@ -58,6 +60,8 @@ async def get_data_warnings(
         query = query.order_by(DataWarning.store, DataWarning.date)
         
         results = query.all()
+        _t1 = time.time()
+        print(f"[PERF] data-warnings SQL: {(_t1-_t0)*1000:.0f}ms, rows={len(results)}, stores={len(store_list)}")
         
         # 转换为字典格式
         data = []
@@ -72,6 +76,9 @@ async def get_data_warnings(
                 "acos": row.acos,
                 "cargo_value": row.cargo_value,
                 "gmv": row.gmv,
+                "ad_spend": row.ad_spend,
+                "storage_fee": row.storage_fee,
+                "sales_amount": row.sales_amount,
                 "fba_total_stock": row.fba_total_stock or 0,
                 "storage_ratio": row.storage_ratio or 0,
                 "gross_profit": row.gross_profit or 0
@@ -115,6 +122,9 @@ async def get_daily_summary(
                 "acos": row.acos,
                 "cargo_value": row.cargo_value,
                 "gmv": row.gmv,
+                "ad_spend": row.ad_spend,
+                "storage_fee": row.storage_fee,
+                "sales_amount": row.sales_amount,
                 "fba_total_stock": row.fba_total_stock or 0,
                 "storage_ratio": row.storage_ratio or 0,
                 "gross_profit": row.gross_profit or 0

@@ -5,6 +5,7 @@ import { Mail, Eye, Search, FileEdit, FileText, XCircle, Repeat, Truck, HelpCirc
 import { emailsApi } from '../api'
 import dayjs from 'dayjs'
 import { useAuth } from '../contexts/AuthContext'
+import { useResponsive } from '../hooks/useResponsive'
 
 interface EmailItem {
   id: string
@@ -28,6 +29,7 @@ interface EmailItem {
 
 const EmailBot: React.FC = () => {
   const { hasPermission } = useAuth()
+  const res = useResponsive()
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null)
   const [emails, setEmails] = useState<EmailItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -612,7 +614,7 @@ const EmailBot: React.FC = () => {
               </Button>
             </Space>,
           ]}
-          width={800}
+          width={res.isMobile ? '95vw' : 800}
           styles={{ body: { maxHeight: '60vh', overflowY: 'auto', padding: '16px 24px' } }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -685,6 +687,7 @@ const EmailBot: React.FC = () => {
         onCancel={() => setReplyModalVisible(false)}
         footer={null}
         zIndex={1060}
+        width={res.isMobile ? '95vw' : 520}
       >
         <Form
           form={form}
@@ -736,7 +739,7 @@ const EmailBot: React.FC = () => {
         }}
         footer={null}
         zIndex={1080}
-        width={640}
+        width={res.isMobile ? '95vw' : 640}
       >
         <Form
           form={aiReplyForm}

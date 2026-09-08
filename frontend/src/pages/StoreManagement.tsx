@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, Select, message,
   Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination, Dropdown, Menu,
+  Spin, Empty,
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -10,7 +11,9 @@ import {
 } from '@ant-design/icons'
 import { storesApi, departmentsApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
-import { CSSProperties } from 'react'
+import { useResponsive } from '../hooks/useResponsive'
+import { CSSProperties, useMemo } from 'react'
+import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
 
 interface Store {
   id: number
@@ -42,6 +45,7 @@ interface StoreGroup {
 
 const StoreManagement: React.FC = () => {
   const { currentTheme } = useTheme()
+  const resp = useResponsive()
 
   const [stores, setStores] = useState<Store[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
@@ -73,15 +77,22 @@ const StoreManagement: React.FC = () => {
 
   const [groups, setGroups] = useState<StoreGroup[]>([])
   const [groupLoading, setGroupLoading] = useState(false)
+  const [groupPagination, setGroupPagination] = useState({ current: 1, pageSize: 20 })
   const [groupModalOpen, setGroupModalOpen] = useState(false)
   const [editingGroup, setEditingGroup] = useState<StoreGroup | null>(null)
   const [groupForm] = Form.useForm()
   const [groupDrawerOpen, setGroupDrawerOpen] = useState(false)
   const [currentGroup, setCurrentGroup] = useState<StoreGroup | null>(null)
   const [groupStores, setGroupStores] = useState<Store[]>([])
+  // 分组行展开显示组内店铺
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<React.Key[]>([])
+  const [groupStoresMap, setGroupStoresMap] = useState<Record<number, Store[]>>({})
+  const [groupStoresLoadingIds, setGroupStoresLoadingIds] = useState<number[]>([])
   const [addStoreModalOpen, setAddStoreModalOpen] = useState(false)
   const [transferTargetKeys, setTransferTargetKeys] = useState<string[]>([])
   const [allStores, setAllStores] = useState<Store[]>([])
+  const [customPlatforms, setCustomPlatforms] = useState<string[]>(() => loadCustomPlatforms())
+  const watchPlatform = Form.useWatch('platform', form)
 
   const platformOptions = [
     { label: 'Amazon', value: 'amazon' },
@@ -91,9 +102,40 @@ const StoreManagement: React.FC = () => {
     { label: 'Shopee', value: 'shopee' },
     { label: 'Lazada', value: 'lazada' },
     { label: 'TikTok', value: 'tiktok' },
-    { label: 'Temu', value: 'temu' },
+    { label: 'Temu半托', value: 'temu_half' },
+    { label: 'Temu全托', value: 'temu_full' },
+    { label: 'SHEIN半托', value: 'shein_half' },
+    { label: 'SHEIN全托', value: 'shein_full' },
+    { label: '速卖通半托', value: 'aliexpress_half' },
+    { label: '速卖通全托', value: 'aliexpress_full' },
     { label: 'Other', value: 'other' },
   ]
+
+  const platformLabelMap: Record<string, string> = {
+    amazon: 'Amazon',
+    ebay: 'eBay',
+    walmart: 'Walmart',
+    shopify: 'Shopify',
+    shopee: 'Shopee',
+    lazada: 'Lazada',
+    tiktok: 'TikTok',
+    temu_half: 'Temu半托',
+    temu_full: 'Temu全托',
+    shein_half: 'SHEIN半托',
+    shein_full: 'SHEIN全托',
+    aliexpress_half: '速卖通半托',
+    aliexpress_full: '速卖通全托',
+    other: 'Other',
+  }
+
+  // 标准平台 + 自定义平台（localStorage）+ 已有店铺中出现过的非标准平台
+  const dynamicPlatformOptions = useMemo(() => {
+    const stdValues = new Set(platformOptions.map((o) => o.value))
+    const extra = new Set<string>()
+    customPlatforms.forEach((p) => { if (p && !stdValues.has(p)) extra.add(p) })
+    allStores.forEach((s) => { if (s.platform && !stdValues.has(s.platform)) extra.add(s.platform) })
+    return [...platformOptions, ...Array.from(extra).map((p) => ({ label: p, value: p }))]
+  }, [customPlatforms, allStores])
 
   const statusOptions = [
     { label: 'Active', value: 'active' },
@@ -152,7 +194,15 @@ const StoreManagement: React.FC = () => {
     setGroupLoading(true)
     try {
       const res = await storeGroupsApi.getList()
-      if (res.data.success) setGroups(res.data.data)
+      if (res.data.success) {
+        const list: StoreGroup[] = res.data.data || []
+        setGroups(list)
+        // 删除后当前页可能超范围，自动回退
+        setGroupPagination((prev) => {
+          const maxPage = Math.max(1, Math.ceil(list.length / prev.pageSize))
+          return prev.current > maxPage ? { ...prev, current: maxPage } : prev
+        })
+      }
     } catch (e) {
       console.error(e)
     } finally {
@@ -167,6 +217,29 @@ const StoreManagement: React.FC = () => {
     } catch (e) {
       console.error(e)
     }
+  }
+
+  // 加载并缓存分组内店铺（展开行用）
+  const loadGroupStoresMap = async (groupId: number) => {
+    if (groupStoresLoadingIds.includes(groupId)) return
+    setGroupStoresLoadingIds((prev) => [...prev, groupId])
+    try {
+      const res = await storeGroupsApi.getGroupStores(groupId)
+      if (res.data.success) {
+        setGroupStoresMap((prev) => ({ ...prev, [groupId]: res.data.data }))
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setGroupStoresLoadingIds((prev) => prev.filter((id) => id !== groupId))
+    }
+  }
+
+  const handleGroupExpand = (expanded: boolean, record: StoreGroup) => {
+    setExpandedGroupKeys((prev) =>
+      expanded ? [...prev, record.id] : prev.filter((k) => k !== record.id),
+    )
+    if (expanded) loadGroupStoresMap(record.id)
   }
 
   const handleSearch = (value: string) => {
@@ -245,6 +318,13 @@ const StoreManagement: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields()
+      if (values.platform === 'other') {
+        const name = (values.custom_platform_name || '').trim()
+        if (!name) return
+        values.platform = name
+        setCustomPlatforms(saveCustomPlatform(name))
+      }
+      delete values.custom_platform_name
       if (editingStore) {
         await storesApi.update(editingStore.id, values)
         message.success('店铺更新成功')
@@ -382,6 +462,12 @@ const StoreManagement: React.FC = () => {
     try {
       await storeGroupsApi.delete(id)
       message.success('分组删除成功')
+      setExpandedGroupKeys((prev) => prev.filter((k) => k !== id))
+      setGroupStoresMap((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       fetchGroups()
       fetchAllStores()
     } catch (e) {
@@ -409,6 +495,7 @@ const StoreManagement: React.FC = () => {
       message.success('分组店铺更新成功')
       setAddStoreModalOpen(false)
       await fetchGroupStores(currentGroup.id)
+      loadGroupStoresMap(currentGroup.id)
       fetchGroups()
       fetchAllStores()
     } catch (e) {
@@ -422,6 +509,7 @@ const StoreManagement: React.FC = () => {
       await storeGroupsApi.removeStore(currentGroup.id, storeId)
       message.success('已从分组移除')
       await fetchGroupStores(currentGroup.id)
+      loadGroupStoresMap(currentGroup.id)
       fetchGroups()
       fetchAllStores()
     } catch (e) {
@@ -435,7 +523,7 @@ const StoreManagement: React.FC = () => {
       title: '平台',
       dataIndex: 'platform',
       key: 'platform',
-      render: (v: string) => <Tag color="blue">{v}</Tag>,
+      render: (v: string) => <Tag color="blue">{platformLabelMap[v] || v}</Tag>,
     },
     { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account' },
     { title: '站点', dataIndex: 'site', key: 'site' },
@@ -504,15 +592,16 @@ const StoreManagement: React.FC = () => {
   ]
 
   const groupColumns = [
-    { title: '分组名称', dataIndex: 'name', key: 'name' },
-    { title: '描述', dataIndex: 'description', key: 'description' },
+    { title: '分组名称', dataIndex: 'name', key: 'name', width: 220 },
+    { title: '描述', dataIndex: 'description', key: 'description', width: 380, ellipsis: true },
     {
       title: '店铺数量',
       dataIndex: 'store_count',
       key: 'store_count',
+      width: 150,
       render: (v: number) => <Tag color="blue">{v} 个店铺</Tag>,
     },
-    { title: '创建时间', dataIndex: 'created_at', key: 'created_at' },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 200 },
     {
       title: '操作',
       key: 'actions',
@@ -592,7 +681,7 @@ const StoreManagement: React.FC = () => {
                       placeholder="搜索紫鸟账号、店铺名、站点..."
                       prefix={<SearchOutlined />}
                       allowClear
-                      style={{ width: 400 }}
+                      style={{ width: resp.isMobile ? '100%' : 400 }}
                       value={searchText}
                       onChange={(e) => handleSearch(e.target.value)}
                     />
@@ -638,21 +727,78 @@ const StoreManagement: React.FC = () => {
             key: 'groups',
             label: <span><AppstoreOutlined /> 店铺分组</span>,
             children: (
-              <Card
-                loading={groupLoading}
-                extra={
-                  <Button type="primary" icon={<PlusOutlined />} onClick={handleGroupCreate}>
-                    新建分组
-                  </Button>
-                }
-              >
-                <Table
-                  dataSource={groups}
-                  columns={groupColumns}
-                  rowKey="id"
-                  pagination={false}
+              <>
+                <Card
+                  loading={groupLoading}
+                  extra={
+                    <Button type="primary" icon={<PlusOutlined />} onClick={handleGroupCreate}>
+                      新建分组
+                    </Button>
+                  }
+                >
+                  <Table
+                    dataSource={groups.slice(
+                      (groupPagination.current - 1) * groupPagination.pageSize,
+                      groupPagination.current * groupPagination.pageSize,
+                    )}
+                    columns={groupColumns}
+                    rowKey="id"
+                    pagination={false}
+                    scroll={{ x: 1200, y: 500 }}
+                  expandable={{
+                    expandedRowKeys: expandedGroupKeys,
+                    onExpand: handleGroupExpand,
+                    expandedRowRender: (record: StoreGroup) => {
+                      const list = groupStoresMap[record.id]
+                      if (groupStoresLoadingIds.includes(record.id)) {
+                        return (
+                          <div style={{ textAlign: 'center', padding: 16 }}>
+                            <Spin size="small" />
+                          </div>
+                        )
+                      }
+                      if (!list || list.length === 0) {
+                        return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无店铺" />
+                      }
+                      return (
+                        <Table
+                          dataSource={list}
+                          rowKey="id"
+                          size="small"
+                          pagination={false}
+                          columns={[
+                            { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
+                            {
+                              title: '平台',
+                              dataIndex: 'platform',
+                              key: 'platform',
+                              width: 130,
+                              render: (v: string) => <Tag color="blue">{platformLabelMap[v] || v}</Tag>,
+                            },
+                            { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account', width: 180 },
+                            { title: '站点', dataIndex: 'site', key: 'site', width: 100 },
+                          ]}
+                        />
+                      )
+                    },
+                  }}
                 />
-              </Card>
+                </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16 }}>
+                  <Pagination
+                    current={groupPagination.current}
+                    pageSize={groupPagination.pageSize}
+                    total={groups.length}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setGroupPagination((prev) => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
+              </>
             ),
           },
         ]}
@@ -663,7 +809,7 @@ const StoreManagement: React.FC = () => {
         open={modalOpen}
         onOk={handleSubmit}
         onCancel={() => setModalOpen(false)}
-        width={600}
+        width={resp.isMobile ? '95vw' : 600}
       >
         <Form form={form} layout="vertical">
           <Form.Item name="inventory_name" label="店铺名" rules={[{ required: true, message: '请输入店铺名' }]}>
@@ -676,8 +822,22 @@ const StoreManagement: React.FC = () => {
             <Input placeholder="可选，不填则自动使用店铺名" />
           </Form.Item>
           <Form.Item name="platform" label="平台" rules={[{ required: true, message: '请选择平台' }]} initialValue="amazon">
-            <Select placeholder="请选择平台" options={platformOptions} />
+            <Select
+              placeholder="请选择平台"
+              options={dynamicPlatformOptions}
+              onChange={(v) => { if (v !== 'other') form.setFieldValue('custom_platform_name', undefined) }}
+            />
           </Form.Item>
+          {watchPlatform === 'other' && (
+            <Form.Item
+              name="custom_platform_name"
+              label="自定义平台名称"
+              rules={[{ required: true, message: '请输入平台名称' }]}
+              preserve={false}
+            >
+              <Input placeholder="请输入平台名称，如：Noon" maxLength={30} />
+            </Form.Item>
+          )}
           <Form.Item name="site" label="站点">
             <Input placeholder="请输入站点，如US、UK等" />
           </Form.Item>
@@ -704,6 +864,7 @@ const StoreManagement: React.FC = () => {
         open={batchModalOpen}
         onOk={handleBatchSubmit}
         onCancel={() => setBatchModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={batchForm} layout="vertical">
           <Form.Item name="department_id" label="选择部门">
@@ -724,6 +885,7 @@ const StoreManagement: React.FC = () => {
         open={groupModalOpen}
         onOk={handleGroupSubmit}
         onCancel={() => setGroupModalOpen(false)}
+        width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={groupForm} layout="vertical">
           <Form.Item name="name" label="分组名称" rules={[{ required: true, message: '请输入分组名称' }]}>
@@ -751,13 +913,14 @@ const StoreManagement: React.FC = () => {
           rowKey="id"
           size="small"
           pagination={false}
+          scroll={{ x: resp.isMobile ? true : false }}
           columns={[
             { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
             {
               title: '平台',
               dataIndex: 'platform',
               key: 'platform',
-              render: (v: string) => <Tag color="blue">{v}</Tag>,
+              render: (v: string) => <Tag color="blue">{platformLabelMap[v] || v}</Tag>,
             },
             { title: '紫鸟账号', dataIndex: 'ziniao_account', key: 'ziniao_account' },
             { title: '站点', dataIndex: 'site', key: 'site' },
@@ -779,17 +942,27 @@ const StoreManagement: React.FC = () => {
         open={addStoreModalOpen}
         onOk={handleAddStoreSubmit}
         onCancel={() => setAddStoreModalOpen(false)}
-        width={700}
+        width={resp.isMobile ? '95vw' : 700}
       >
         <Transfer
           dataSource={transferDataSource}
           titles={['所有店铺', '分组内店铺']}
           targetKeys={transferTargetKeys}
           onChange={(nextTargetKeys) => setTransferTargetKeys(nextTargetKeys as string[])}
-          render={(item) => item.title}
+          render={(item) => (
+            <span>
+              {item.title}
+              {item.description && (
+                <Tag color="blue" style={{ marginLeft: 8 }}>
+                  {platformLabelMap[item.description as string] || item.description}
+                </Tag>
+              )}
+            </span>
+          )}
           showSearch
           filterOption={(inputValue, item) =>
-            item.title.toLowerCase().includes(inputValue.toLowerCase())
+            item.title.toLowerCase().includes(inputValue.toLowerCase()) ||
+            (item.description && String(item.description).toLowerCase().includes(inputValue.toLowerCase()))
           }
           listStyle={{ width: 280, height: 400 }}
         />
@@ -801,7 +974,7 @@ const StoreManagement: React.FC = () => {
         open={assignGroupModalOpen}
         onOk={handleSaveAssignGroup}
         onCancel={() => setAssignGroupModalOpen(false)}
-        width={400}
+        width={resp.isMobile ? '95vw' : 400}
       >
         <Form form={assignGroupForm} layout="vertical">
           <Form.Item name="group_id" label="选择店铺分组">
@@ -821,7 +994,7 @@ const StoreManagement: React.FC = () => {
         onOk={handleSaveMembers}
         onCancel={() => setMemberModalOpen(false)}
         confirmLoading={memberLoading}
-        width={600}
+        width={resp.isMobile ? '95vw' : 600}
       >
         <Transfer
           dataSource={allUsers.map((u: any) => ({

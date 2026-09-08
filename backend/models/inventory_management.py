@@ -7,8 +7,9 @@ class PurchaseOrderStatus(str, enum.Enum):
     DRAFT = "draft"
     PENDING = "pending"
     APPROVED = "approved"
-    ORDERED = "ordered"
+    PURCHASED = "purchased"  # 已采购
     PARTIAL_RECEIVED = "partial_received"
+    PENDING_RESHIPMENT = "pending_reshipment"  # 待补发
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
@@ -39,6 +40,8 @@ class OutboundType(str, enum.Enum):
     TRANSFER = "transfer"
     SCRAP = "scrap"
     ADJUSTMENT = "adjustment"
+    SHIPMENT = "shipment"
+    SHIPMENT_FBA = "shipment_fba"
     OTHER = "other"
 
 
@@ -81,6 +84,8 @@ class PurchaseOrderItem(BaseModel):
     unit_price = Column(DECIMAL(12, 2), default=0, comment="采购单价")
     total_price = Column(DECIMAL(12, 2), default=0, comment="小计金额")
     notes = Column(Text, nullable=True, comment="备注")
+    parent_product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True, comment="关联成品ID（配件行）")
+    store_group_id = Column(Integer, ForeignKey("store_groups.id"), nullable=True, index=True, comment="店铺分组ID（明细级）")
 
 
 class InboundOrder(BaseModel):

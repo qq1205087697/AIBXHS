@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Card, Row, Col, Typography, Select, Empty, Modal, Table, Button, Radio, Tag, message, Spin, Space } from 'antd'
-import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship } from 'lucide-react'
+import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi } from '../api'
+import { useResponsive } from '../hooks/useResponsive'
 
 const { Title, Text } = Typography
 
@@ -30,6 +31,9 @@ const Home: React.FC = () => {
   const [purchaseOrderStatusCounts, setPurchaseOrderStatusCounts] = useState<Record<string, number>>({})
   const [realPendingDiffCount, setRealPendingDiffCount] = useState(0) // 实际待处理差异条数（处理完成后才清零）
   const [pendingShipmentCount, setPendingShipmentCount] = useState(0) // 待运营填写的发货单数
+  const [confirmedShipmentCount, setConfirmedShipmentCount] = useState(0) // 已确认发货单数
+  const [cancelledShipmentCount, setCancelledShipmentCount] = useState(0) // 已取消发货单数
+  const [pendingReplenishmentCount, setPendingReplenishmentCount] = useState(0) // 补货单待审批数量
   const [diffModalOpen, setDiffModalOpen] = useState(false)
   const [diffItems, setDiffItems] = useState<any[]>([])
   const [diffLoading, setDiffLoading] = useState(false)
@@ -37,6 +41,7 @@ const Home: React.FC = () => {
   const [selectedDiffKeys, setSelectedDiffKeys] = useState<React.Key[]>([])
   const [filterBot, setFilterBot] = useState<string | undefined>(undefined)
   const fetchedRef = useRef(false) // 防止 StrictMode 双重挂载导致重复请求
+  const resp = useResponsive()
   
   const getGreeting = () => {
     const hour = new Date().getHours()
@@ -111,6 +116,7 @@ const Home: React.FC = () => {
         const data = response.data.data || {}
         setOverduePurchaseCount(data.overduePurchaseOrdersCount || 0)
         setPurchaseOrderStatusCounts(data.purchaseOrderStatusCounts || {})
+        setPendingReplenishmentCount(data.pendingReplenishmentCount || 0)
       }
     } catch (error) {
       console.error('????????:', error)
@@ -148,9 +154,11 @@ const Home: React.FC = () => {
       const res = await shipmentsApi.getKpiCount()
       if (res.data.success) {
         setPendingShipmentCount(res.data.pending_shipments || 0)
+        setConfirmedShipmentCount(res.data.confirmed_shipments || 0)
+        setCancelledShipmentCount(res.data.cancelled_shipments || 0)
       }
     } catch (e) {
-      console.error('????????????:', e)
+      console.error('加载发货单KPI失败:', e)
     }
   }
 
@@ -224,7 +232,7 @@ const Home: React.FC = () => {
       description: '采购单各状态概览（待审批/待补发等）',
       path: '/purchase',
       stats: purchaseOrderStatusCounts,
-      hasPending: (purchaseOrderStatusCounts['ordered'] || 0) + (purchaseOrderStatusCounts['pending_reshipment'] || 0) > 0
+      hasPending: (purchaseOrderStatusCounts['purchased'] || 0) + (purchaseOrderStatusCounts['pending_reshipment'] || 0) > 0
         || (purchaseOrderStatusCounts['approved'] || 0) + (purchaseOrderStatusCounts['partial_received'] || 0) > 0,
       priority: 1,
     },
@@ -242,17 +250,53 @@ const Home: React.FC = () => {
     },
     {
       id: 'pending_shipment',
-      title: '待处理发货单',
+      title: '待运营确认发货单',
       requiredPermission: 'shipment:kpi',
       icon: <Ship size={32} />,
-      color: '#1890ff',
+      color: '#fa8c16',
       description: '等待填写红单、海运、备注信息并确认',
       path: '/shipment',
       stats: pendingShipmentCount,
       hasPending: pendingShipmentCount > 0,
       priority: 1,
     },
-  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount])
+    {
+      id: 'confirmed_shipment',
+      title: '已确认发货单',
+      requiredPermission: 'shipment:kpi',
+      icon: <Ship size={32} />,
+      color: '#52c41a',
+      description: '已确认的发货单，可转出库单',
+      path: '/shipment',
+      stats: confirmedShipmentCount,
+      hasPending: false,
+      priority: 2,
+    },
+    {
+      id: 'cancelled_shipment',
+      title: '已取消发货单',
+      requiredPermission: 'shipment:kpi',
+      icon: <Ship size={32} />,
+      color: '#ff4d4f',
+      description: '已取消的发货单',
+      path: '/shipment',
+      stats: cancelledShipmentCount,
+      hasPending: false,
+      priority: 2,
+    },
+    {
+      id: 'pending_replenishment',
+      title: '补货单待审批',
+      requiredPermission: 'replenishment:approve',
+      icon: <ClipboardList size={32} />,
+      color: '#722ed1',
+      description: '等待审批的补货申请单',
+      path: '/replenishment',
+      stats: pendingReplenishmentCount,
+      hasPending: pendingReplenishmentCount > 0,
+      priority: 1,
+    },
+  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount])
 
   const permittedBots = useMemo(() =>
     allBots.filter(bot => hasPermission(bot.requiredPermission)),
@@ -439,12 +483,41 @@ const Home: React.FC = () => {
     )
   }
 
+  const renderPendingReplenishmentStats = () => {
+    const hasPending = pendingReplenishmentCount > 0
+    return (
+      <div style={{ marginTop: 16 }}>
+        <Row gutter={[8, 8]}>
+          <Col span={24}>
+            <div style={{
+              textAlign: 'center',
+              padding: '12px 0',
+              background: hasPending ? '#f9f0ff' : '#f6ffed',
+              borderRadius: 8
+            }}>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>等待审批的补货申请单</div>
+              <div style={{ fontSize: 28, fontWeight: 'bold', color: hasPending ? '#722ed1' : '#52c41a' }}>
+                {pendingReplenishmentCount} 单
+              </div>
+              {!hasPending && (
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>全部已审批或取消</div>
+              )}
+              {hasPending && (
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>请及时审批</div>
+              )}
+            </div>
+          </Col>
+        </Row>
+      </div>
+    )
+  }
+
   const renderPurchaseStatusStats = () => {
-    const ordered = purchaseOrderStatusCounts['ordered'] || 0
     const approved = purchaseOrderStatusCounts['approved'] || 0
+    const purchased = purchaseOrderStatusCounts['purchased'] || 0
     const partialReceived = purchaseOrderStatusCounts['partial_received'] || 0
     const pendingReshipment = purchaseOrderStatusCounts['pending_reshipment'] || 0
-    const total = ordered + approved + partialReceived + pendingReshipment
+    const total = approved + purchased + partialReceived + pendingReshipment
 
     return (
       <div style={{ marginTop: 16 }}>
@@ -457,19 +530,19 @@ const Home: React.FC = () => {
               </div>
             </Col>
           )}
-          {(approved + partialReceived) > 0 && (
+          {purchased > 0 && (
             <Col span={pendingReshipment > 0 ? 8 : 12}>
-              <div style={{ textAlign: 'center', padding: '8px 0', background: '#e6f7ff', borderRadius: 8 }}>
-                <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>已审批待收货</div>
-                <div style={{ fontSize: 20, fontWeight: 'bold', color: '#1890ff' }}>{approved + partialReceived}</div>
+              <div style={{ textAlign: 'center', padding: '8px 0', background: '#f0f5ff', borderRadius: 8 }}>
+                <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>已采购</div>
+                <div style={{ fontSize: 20, fontWeight: 'bold', color: '#2f54eb' }}>{purchased}</div>
               </div>
             </Col>
           )}
-          {ordered > 0 && (
-            <Col span={pendingReshipment > 0 ? 8 : (approved + partialReceived) > 0 ? 12 : 24}>
-              <div style={{ textAlign: 'center', padding: '8px 0', background: '#f0f5ff', borderRadius: 8 }}>
-                <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>待审批</div>
-                <div style={{ fontSize: 20, fontWeight: 'bold', color: '#2f54eb' }}>{ordered}</div>
+          {(approved + partialReceived) > 0 && (
+            <Col span={(pendingReshipment > 0 || purchased > 0) ? 8 : 12}>
+              <div style={{ textAlign: 'center', padding: '8px 0', background: '#e6f7ff', borderRadius: 8 }}>
+                <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>已审批待收货</div>
+                <div style={{ fontSize: 20, fontWeight: 'bold', color: '#1890ff' }}>{approved + partialReceived}</div>
               </div>
             </Col>
           )}
@@ -521,6 +594,28 @@ const Home: React.FC = () => {
       message.warning('请先勾选要处理的记录')
       return
     }
+
+    // 如果选择厂家补发，需要检查是否有超收的记录
+    if (resolution === 'reshipment') {
+      const overReceiveKeys = selectedDiffKeys.filter(key => {
+        const item = diffItems.find(d => d.inbound_item_id === key)
+        return item && item.diff_type === '超收'
+      })
+      if (overReceiveKeys.length > 0) {
+        message.warning(`有 ${overReceiveKeys.length} 条超收记录无法选择厂家补发，已自动跳过`)
+        // 只对少收的记录设置
+        const newResolutions = { ...resolutions }
+        selectedDiffKeys.forEach(key => {
+          const item = diffItems.find(d => d.inbound_item_id === key)
+          if (item && item.diff_type !== '超收') {
+            newResolutions[key as number] = resolution
+          }
+        })
+        setResolutions(newResolutions)
+        return
+      }
+    }
+
     const newResolutions = { ...resolutions }
     selectedDiffKeys.forEach(key => {
       newResolutions[key as number] = resolution
@@ -614,23 +709,33 @@ const Home: React.FC = () => {
     {
       title: '处理方式',
       key: 'resolution',
-      render: (_: any, record: any) => (
-        <Radio.Group
-          value={resolutions[record.inbound_item_id] || ''}
-          onChange={(e) => setResolutions(prev => ({ ...prev, [record.inbound_item_id]: e.target.value }))}
-          size="small"
-        >
-          <Radio.Button value="reshipment" style={{ marginRight: 4 }}>厂家补发</Radio.Button>
-          <Radio.Button value="reduce_po">减少采购单数量</Radio.Button>
-        </Radio.Group>
-      ),
+      render: (_: any, record: any) => {
+        const isOverReceive = record.diff_type === '超收'
+        return (
+          <Radio.Group
+            value={resolutions[record.inbound_item_id] || ''}
+            onChange={(e) => setResolutions(prev => ({ ...prev, [record.inbound_item_id]: e.target.value }))}
+            size="small"
+          >
+            <Radio.Button
+              value="reshipment"
+              style={{ marginRight: 4 }}
+              disabled={isOverReceive}
+              title={isOverReceive ? '超收订单无法选择补发' : ''}
+            >
+              厂家补发
+            </Radio.Button>
+            <Radio.Button value="reduce_po">平采购单数量</Radio.Button>
+          </Radio.Group>
+        )
+      },
       width: 240,
     },
   ]
 
   return (
     <div style={{ height: '100%', overflowY: 'auto', padding: '24px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <Title level={3} style={{ margin: 0 }}>{user?.username || '用户'}，{getGreeting()}！</Title>
         <Select
           placeholder="选择机器人"
@@ -654,7 +759,7 @@ const Home: React.FC = () => {
         <Row gutter={[24, 24]}>
           {filteredBots.length > 0 ? (
             filteredBots.map(module => (
-              <Col xs={24} sm={12} md={12} lg={8} key={module.id}>
+              <Col xs={24} sm={12} md={8} lg={6} key={module.id}>
               <Card
                 onClick={() => {
                   if (module.id === 'inbound_diff') {
@@ -705,6 +810,7 @@ const Home: React.FC = () => {
                 {module.id === 'purchase_status' && renderPurchaseStatusStats()}
                 {module.id === 'inbound_diff' && renderInboundDiffStats()}
                 {module.id === 'pending_shipment' && renderPendingShipmentStats()}
+                {module.id === 'pending_replenishment' && renderPendingReplenishmentStats()}
               </Card>
             </Col>
             ))
@@ -727,7 +833,7 @@ const Home: React.FC = () => {
           title="入库数量差异处理"
           open={diffModalOpen}
           onCancel={() => setDiffModalOpen(false)}
-          width={1000}
+          width={resp.isMobile ? '95vw' : 1000}
           footer={[
             <Button key="cancel" onClick={() => setDiffModalOpen(false)}>取消</Button>,
             <Button key="submit" type="primary" onClick={handleSubmitDiffs} disabled={diffItems.length === 0}>
@@ -754,13 +860,15 @@ const Home: React.FC = () => {
                     批量设为厂家补发
                   </Button>
                   <Button size="small" type="primary" danger ghost onClick={() => handleBatchSetResolution('reduce_po')}>
-                    批量设为减少采购数量
+                    批量设为平采购数量
                   </Button>
                 </Space>
               </div>
               <div style={{ marginBottom: 8, fontSize: 12, color: '#999', background: '#fafafa', padding: '8px 12px', borderRadius: 4 }}>
-                <div><b>厂家补发</b>：采购单状态将变为「待补发」，入库单可正常审批通过。后续补发到货时再次入库关联该采购单，数量补齐后采购单自动变为「已完成」</div>
-                <div style={{ marginTop: 4 }}><b>减少采购单数量</b>：自动将采购单订购量调整为「已收货+本次入库」，采购单状态自动变为「已完成」</div>
+                <div><b>厂家补发</b>：仅限少收情况，采购单状态将变为「待补发」，入库单可正常审批通过。后续补发到货时再次入库关联该采购单，数量补齐后采购单自动变为「已完成」</div>
+                <div style={{ marginTop: 4 }}><b>平采购单数量</b>：自动将采购单订购量调整为「已收货+本次入库」。</div>
+                <div style={{ marginTop: 2, paddingLeft: 12 }}>• <b>超收时</b>：增加采购单订购量以匹配实际入库</div>
+                <div style={{ marginTop: 2, paddingLeft: 12 }}>• <b>少收时</b>：减少采购单订购量以匹配实际入库</div>
               </div>
               <Table
                 dataSource={diffItems}

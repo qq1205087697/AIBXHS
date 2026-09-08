@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime
 from urllib.parse import quote
+from urllib.request import urlopen
+from io import BytesIO
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,8 @@ class PurchaseItemCreate(BaseModel):
     unit_price: Optional[float] = 0
     notes: Optional[str] = None
     supplier: Optional[str] = None
+    parent_product_id: Optional[int] = None
+    store_group_id: Optional[int] = None
 
 
 class PurchaseOrderCreate(BaseModel):
@@ -131,9 +135,11 @@ async def get_purchase_orders(
         for row in rows:
             items = db.execute(text("""
                 SELECT poi.id, poi.product_id, p.name as product_name, p.product_code,
-                       poi.quantity, poi.received_quantity, poi.unit_price, poi.total_price, poi.notes, poi.supplier
+                       poi.quantity, poi.received_quantity, poi.unit_price, poi.total_price, poi.notes, poi.supplier,
+                       p.product_type, poi.parent_product_id, poi.store_group_id, sg.name as store_group_name
                 FROM purchase_order_items poi
                 LEFT JOIN products p ON p.id = poi.product_id
+                LEFT JOIN store_groups sg ON sg.id = poi.store_group_id AND sg.deleted_at IS NULL
                 WHERE poi.purchase_order_id = :oid AND poi.deleted_at IS NULL
             """), {"oid": row[0]}).fetchall()
 
@@ -228,7 +234,11 @@ async def get_purchase_orders(
                     "total_price": float(item[7]) if item[7] else 0,
                     "notes": item[8] or "",
                     "supplier": item[9] or "",
-                    "assembly_info": assembly_info  # 新增：组装成品信息
+                    "assembly_info": assembly_info,  # 新增：组装成品信息
+                    "product_type": item[10] or "",  # 产品类型：finished/accessory
+                    "parent_product_id": item[11],  # 关联成品ID
+                    "store_group_id": item[12],
+                    "store_group_name": item[13] or "",
                 })
 
             # 计算待入库/已入库件数：含配件的成品不计入，只算配件+独立成品
@@ -352,13 +362,35 @@ async def create_purchase_order(
         for item in data.items:
             total_price = item.quantity * (item.unit_price or 0)
             db.execute(text("""
-                INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, supplier, created_at, updated_at)
-                VALUES (:oid, :pid, :qty, :up, :tp, :notes, :supplier, :created_at, :updated_at)
+                INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, supplier, parent_product_id, store_group_id, created_at, updated_at)
+                VALUES (:oid, :pid, :qty, :up, :tp, :notes, :supplier, :parent_product_id, :store_group_id, :created_at, :updated_at)
             """), {
                 "oid": order_id, "pid": item.product_id, "qty": item.quantity,
                 "up": item.unit_price, "tp": total_price, "notes": item.notes, "supplier": item.supplier,
+                "parent_product_id": item.parent_product_id,
+                "store_group_id": item.store_group_id,
                 "created_at": datetime.now(), "updated_at": datetime.now(),
             })
+            # 更新产品表的供应商字段，并自动创建供应商
+            if item.supplier and item.product_id:
+                db.execute(text("""
+                    UPDATE products SET supplier = :supplier, updated_at = :updated_at
+                    WHERE id = :pid AND tenant_id = :tid
+                """), {
+                    "supplier": item.supplier,
+                    "updated_at": datetime.now(),
+                    "pid": item.product_id,
+                    "tid": current_user.tenant_id,
+                })
+                # 检查供应商是否已存在，不存在则自动创建
+                existing_supplier = db.execute(text("""
+                    SELECT id FROM suppliers WHERE tenant_id = :tid AND name = :name AND deleted_at IS NULL
+                """), {"tid": current_user.tenant_id, "name": item.supplier}).fetchone()
+                if not existing_supplier:
+                    db.execute(text("""
+                        INSERT INTO suppliers (tenant_id, name, created_at, updated_at)
+                        VALUES (:tid, :name, NOW(), NOW())
+                    """), {"tid": current_user.tenant_id, "name": item.supplier})
 
         db.commit()
 
@@ -473,16 +505,44 @@ async def update_purchase_order(
             # 软删除旧的明细
             db.execute(text("UPDATE purchase_order_items SET deleted_at = NOW() WHERE purchase_order_id = :oid"), {"oid": order_id})
             # 插入新的明细
+            total_amt = 0
             for item in data.items:
                 total_price = item.quantity * (item.unit_price or 0)
+                total_amt += total_price
                 db.execute(text("""
-                    INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, supplier, created_at, updated_at)
-                    VALUES (:oid, :pid, :qty, :up, :tp, :notes, :supplier, :created_at, :updated_at)
+                    INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, supplier, parent_product_id, store_group_id, created_at, updated_at)
+                    VALUES (:oid, :pid, :qty, :up, :tp, :notes, :supplier, :parent_product_id, :store_group_id, :created_at, :updated_at)
                 """), {
                     "oid": order_id, "pid": item.product_id, "qty": item.quantity,
                     "up": item.unit_price, "tp": total_price, "notes": item.notes, "supplier": item.supplier,
+                    "parent_product_id": item.parent_product_id,
+                    "store_group_id": item.store_group_id,
                     "created_at": datetime.now(), "updated_at": datetime.now(),
                 })
+                # 更新产品表的供应商字段，并自动创建供应商
+                if item.supplier and item.product_id:
+                    db.execute(text("""
+                        UPDATE products SET supplier = :supplier, updated_at = :updated_at
+                        WHERE id = :pid AND tenant_id = :tid
+                    """), {
+                        "supplier": item.supplier,
+                        "updated_at": datetime.now(),
+                        "pid": item.product_id,
+                        "tid": current_user.tenant_id,
+                    })
+                    # 检查供应商是否已存在，不存在则自动创建
+                    existing_supplier = db.execute(text("""
+                        SELECT id FROM suppliers WHERE tenant_id = :tid AND name = :name AND deleted_at IS NULL
+                    """), {"tid": current_user.tenant_id, "name": item.supplier}).fetchone()
+                    if not existing_supplier:
+                        db.execute(text("""
+                            INSERT INTO suppliers (tenant_id, name, created_at, updated_at)
+                            VALUES (:tid, :name, NOW(), NOW())
+                        """), {"tid": current_user.tenant_id, "name": item.supplier})
+            # 同步更新采购单总金额
+            db.execute(text("""
+                UPDATE purchase_orders SET total_amount = :total_amount, updated_at = NOW() WHERE id = :id
+            """), {"total_amount": total_amt, "id": order_id})
             db.commit()
 
         after_data = {"order_number": row[1], "status": data.status or before_status}
@@ -632,6 +692,272 @@ async def download_purchase_template(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"下载模板失败: {str(e)}")
+
+
+class ExportPurchaseRequest(BaseModel):
+    ids: List[int]
+
+
+@router.post("/export")
+async def export_purchase_orders(
+    data: ExportPurchaseRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """导出采购单Excel，按供应商分页签，每页末尾生成话术"""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+        from openpyxl.drawing.image import Image as XLImage
+        from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+        from openpyxl.drawing.xdr import XDRPositiveSize2D
+        from io import BytesIO
+
+        if not data.ids:
+            raise HTTPException(status_code=400, detail="请选择要导出的采购单")
+
+        # 查询采购单及其明细
+        placeholders = ', '.join(f':id{i}' for i in range(len(data.ids)))
+        id_params = {f'id{i}': v for i, v in enumerate(data.ids)}
+
+        orders = db.execute(text(f"""
+            SELECT po.id, po.order_number, po.warehouse, po.notes, po.created_at,
+                   po.store_group_id, sg.name AS store_group_name
+            FROM purchase_orders po
+            LEFT JOIN store_groups sg ON sg.id = po.store_group_id AND sg.deleted_at IS NULL
+            WHERE po.id IN ({placeholders}) AND po.tenant_id = :tid AND po.deleted_at IS NULL
+            ORDER BY po.created_at DESC
+        """), {**id_params, "tid": current_user.tenant_id}).fetchall()
+
+        if not orders:
+            raise HTTPException(status_code=404, detail="未找到采购单")
+
+        # 收集所有采购单号用于文件名
+        order_numbers = [order[1] for order in orders]
+
+        # 收集所有明细，按供应商分组
+        # supplier_items_map: { supplier_name: [ {order info + item info}, ... ] }
+        supplier_items_map = {}
+        no_supplier_items = []
+
+        for order in orders:
+            order_id, order_number, warehouse, notes, created_at, store_group_id, store_group_name = order
+            items = db.execute(text("""
+                SELECT poi.product_id, p.name as product_name, p.product_code, p.main_image,
+                       poi.quantity, poi.unit_price, poi.total_price, poi.supplier, poi.notes,
+                       poi.store_group_id, sg.name as store_group_name
+                FROM purchase_order_items poi
+                LEFT JOIN products p ON p.id = poi.product_id
+                LEFT JOIN store_groups sg ON sg.id = poi.store_group_id AND sg.deleted_at IS NULL
+                WHERE poi.purchase_order_id = :oid AND poi.deleted_at IS NULL
+            """), {"oid": order_id}).fetchall()
+
+            for item in items:
+                item_data = {
+                    "order_number": order_number,
+                    "warehouse": warehouse or "",
+                    "store_group_name": item[10] or store_group_name or "",
+                    "order_date": created_at.strftime("%Y-%m-%d") if created_at else "",
+                    "product_id": item[0],
+                    "product_code": item[2] or "",
+                    "product_name": item[1] or f"产品#{item[0]}",
+                    "main_image": item[3] or "",
+                    "quantity": int(item[4]),
+                    "unit_price": float(item[5]) if item[5] else 0,
+                    "total_price": float(item[6]) if item[6] else 0,
+                    "supplier": item[7] or "",
+                    "notes": item[8] or "",
+                }
+                supplier_name = item[7] or "未指定供应商"
+                if supplier_name not in supplier_items_map:
+                    supplier_items_map[supplier_name] = []
+                supplier_items_map[supplier_name].append(item_data)
+
+        # 按供应商+产品ID合并相同商品（不同店铺分组聚合到一行）
+        for supplier_name, items in supplier_items_map.items():
+            merged_map = {}
+            for item in items:
+                key = item["product_id"]
+                if key not in merged_map:
+                    merged_map[key] = item
+                else:
+                    existing = merged_map[key]
+                    existing["quantity"] += item["quantity"]
+                    existing["total_price"] += item["total_price"]
+                    # 合并店铺分组（去重）
+                    groups = set(filter(None, existing["store_group_name"].split(", ") + item["store_group_name"].split(", ")))
+                    existing["store_group_name"] = ", ".join(sorted(groups))
+                    # 合并采购单号（去重）
+                    orders = set(filter(None, existing["order_number"].split(", ") + item["order_number"].split(", ")))
+                    existing["order_number"] = ", ".join(sorted(orders))
+                    # 合并仓库（去重）
+                    warehouses = set(filter(None, existing["warehouse"].split(", ") + item["warehouse"].split(", ")))
+                    existing["warehouse"] = ", ".join(sorted(warehouses))
+                    # 合并订单日期（去重）
+                    dates = set(filter(None, existing["order_date"].split(", ") + item["order_date"].split(", ")))
+                    existing["order_date"] = ", ".join(sorted(dates))
+                    # 合并备注
+                    notes = set(filter(None, existing["notes"].split(", ") + item["notes"].split(", ")))
+                    existing["notes"] = ", ".join(sorted(notes))
+            supplier_items_map[supplier_name] = list(merged_map.values())
+
+        # 创建Excel
+        wb = openpyxl.Workbook()
+        # 删除默认的Sheet
+        wb.remove(wb.active)
+
+        # 样式定义
+        header_font = Font(bold=True, size=11)
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font_white = Font(bold=True, size=11, color="FFFFFF")
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        msg_font = Font(bold=True, size=10, color="FF0000")
+        summary_font = Font(bold=True, size=11)
+
+        for supplier_name, items in supplier_items_map.items():
+            # Sheet名称最多31字符，且不能包含特殊字符
+            sheet_name = supplier_name[:31].replace("/", "-").replace("\\", "-").replace(":", "-").replace("?", "-").replace("*", "-").replace("[", "-").replace("]", "-")
+            ws = wb.create_sheet(title=sheet_name)
+
+            # 表头
+            headers = ["采购单号", "店铺分组", "仓库", "订单日期", "产品编码", "产品名称", "产品图", "数量", "单价", "金额", "备注"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = header_font_white
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = thin_border
+
+            # 数据行
+            total_quantity = 0
+            total_amount = 0
+            for row_idx, item in enumerate(items, 2):
+                values = [
+                    item["order_number"],
+                    item["store_group_name"],
+                    item["warehouse"],
+                    item["order_date"],
+                    item["product_code"],
+                    item["product_name"],
+                    "",  # 产品图列，内容由图片填充
+                    item["quantity"],
+                    item["unit_price"],
+                    item["total_price"],
+                    item["notes"],
+                ]
+                for col, val in enumerate(values, 1):
+                    cell = ws.cell(row=row_idx, column=col, value=val)
+                    cell.border = thin_border
+                    cell.alignment = Alignment(vertical='center')
+
+                # 插入产品图（从产品管理 main_image 获取），在单元格内居中显示
+                if item.get("main_image"):
+                    try:
+                        response = urlopen(item["main_image"], timeout=10)
+                        image_bytes = response.read()
+                        img = XLImage(BytesIO(image_bytes))
+                        # 限制图片高度，保持比例
+                        max_height = 80
+                        if img.height > max_height:
+                            ratio = max_height / img.height
+                            img.height = max_height
+                            img.width = int(img.width * ratio)
+
+                        # 根据图片高度设置行高，留出边距
+                        target_row_height = max(img.height + 10, 30)
+                        ws.row_dimensions[row_idx].height = target_row_height
+
+                        # 计算单元格居中偏移量（EMU）
+                        # 近似换算：1 字符宽度 ≈ 7 像素，1 点 ≈ 1.333 像素
+                        col_width_px = ws.column_dimensions['G'].width * 7
+                        row_height_px = target_row_height * 1.333
+                        offset_x = int((col_width_px - img.width) * 9525 / 2)
+                        offset_y = int((row_height_px - img.height) * 9525 / 2)
+
+                        # 使用 OneCellAnchor 将图片锚定到单元格并居中
+                        anchor = OneCellAnchor(
+                            _from=AnchorMarker(
+                                col=6, colOff=max(0, offset_x),
+                                row=row_idx - 1, rowOff=max(0, offset_y)
+                            ),
+                            ext=XDRPositiveSize2D(cx=img.width * 9525, cy=img.height * 9525)
+                        )
+                        img.anchor = anchor
+                        ws._images.append(img)
+                    except Exception:
+                        # 图片下载或处理失败时，单元格保持空白
+                        pass
+
+                total_quantity += item["quantity"]
+                total_amount += item["total_price"]
+
+            # 合计行
+            summary_row = len(items) + 2
+            ws.cell(row=summary_row, column=1, value="合计").font = summary_font
+            ws.cell(row=summary_row, column=1).border = thin_border
+            ws.cell(row=summary_row, column=8, value=total_quantity).font = summary_font
+            ws.cell(row=summary_row, column=8).border = thin_border
+            ws.cell(row=summary_row, column=10, value=round(total_amount, 2)).font = summary_font
+            ws.cell(row=summary_row, column=10).border = thin_border
+
+            # 话术行
+            msg_row = summary_row + 2
+            msg_text = (
+                f"【{supplier_name}】您好，以下是我们公司的采购清单，请按照我司产品编码及数量安排发货，"
+                f"并将产品编码及数量清单随货一起发送，以便我方仓库核对验收。谢谢配合！"
+            )
+            msg_cell = ws.cell(row=msg_row, column=1, value=msg_text)
+            msg_cell.font = msg_font
+            ws.merge_cells(start_row=msg_row, start_column=1, end_row=msg_row, end_column=len(headers))
+
+            # 产品编码+数量清单话术
+            code_list_row = msg_row + 1
+            code_lines = []
+            for item in items:
+                code_lines.append(f"{item['product_code']} × {item['quantity']}")
+            code_text = "产品编码及数量清单：" + "、".join(code_lines)
+            code_cell = ws.cell(row=code_list_row, column=1, value=code_text)
+            code_cell.font = Font(size=10, color="0000FF")
+            ws.merge_cells(start_row=code_list_row, start_column=1, end_row=code_list_row, end_column=len(headers))
+
+            # 列宽调整
+            ws.column_dimensions['A'].width = 22
+            ws.column_dimensions['B'].width = 14
+            ws.column_dimensions['C'].width = 12
+            ws.column_dimensions['D'].width = 12
+            ws.column_dimensions['E'].width = 14
+            ws.column_dimensions['F'].width = 22
+            ws.column_dimensions['G'].width = 14  # 产品图
+            ws.column_dimensions['H'].width = 8
+            ws.column_dimensions['I'].width = 10
+            ws.column_dimensions['J'].width = 12
+            ws.column_dimensions['K'].width = 16
+
+        # 保存到内存
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        # 文件名使用采购单号
+        if len(order_numbers) == 1:
+            filename = f"采购单导出_{order_numbers[0]}.xlsx"
+        else:
+            filename = f"采购单导出_批量.xlsx"
+        encoded_filename = quote(filename)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={encoded_filename}"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"导出采购单失败: {str(e)}")
 
 
 @router.post("/upload/preview")

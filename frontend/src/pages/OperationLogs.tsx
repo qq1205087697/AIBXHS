@@ -4,6 +4,7 @@ import { SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { operationLogsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
+import { useResponsive } from '../hooks/useResponsive'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
 
@@ -237,6 +238,7 @@ const actionOptions = [
 
 const OperationLogs: React.FC = () => {
   const { currentTheme } = useTheme()
+  const resp = useResponsive()
   const [logs, setLogs] = useState<OperationLog[]>([])
   const [loading, setLoading] = useState(false)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
@@ -591,7 +593,7 @@ const OperationLogs: React.FC = () => {
         open={detailOpen}
         onCancel={() => setDetailOpen(false)}
         footer={null}
-        width={720}
+        width={resp.isMobile ? '95vw' : 720}
         destroyOnClose
       >
         {selectedLog && (

@@ -6,9 +6,11 @@ import { outboundOrdersApi, productsApi, inventoryBatchesApi, warehousesApi, pro
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
+import { useResponsive } from '../hooks/useResponsive'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
 import type { MenuProps } from 'antd'
+import './management-responsive.css'
 const { RangePicker } = DatePicker
 
 // CSS样式：悬停删除图标
@@ -80,6 +82,8 @@ interface Product {
 interface OutboundFormItem {
   key: string
   product_id: number | null
+  product_name?: string
+  product_code?: string
   quantity: number
   unit_price: number
   notes: string
@@ -116,6 +120,7 @@ const outboundTypeLabels: Record<string, string> = {
   transfer: '调拨出库',
   scrap: '报废',
   adjustment: '盘点调整',
+  shipment_fba: '发FBA仓',
   other: '其他',
 }
 
@@ -138,6 +143,7 @@ const outboundTypeOptions = [
   { label: '调拨出库', value: 'transfer' },
   { label: '报废', value: 'scrap' },
   { label: '盘点调整', value: 'adjustment' },
+  { label: '发FBA仓', value: 'shipment_fba' },
   { label: '其他', value: 'other' },
 ]
 
@@ -147,6 +153,7 @@ const createOutboundTypeOptions = [
   { label: '调拨出库', value: 'transfer' },
   { label: '报废', value: 'scrap' },
   { label: '盘点调整', value: 'adjustment' },
+  { label: '发FBA仓', value: 'shipment_fba' },
   { label: '其他', value: 'other' },
 ]
 
@@ -175,6 +182,7 @@ const OutboundManagement: React.FC = () => {
   const { user, hasPermission } = useAuth()
   const isAdmin = user?.role === 'admin'
   const navigate = useNavigate()
+  const res = useResponsive()
   const [orders, setOrders] = useState<OutboundOrder[]>([])
   const [productList, setProductList] = useState<Product[]>([])
   const [warehouseList, setWarehouseList] = useState<{ id: number; name: string; code: string; status: string }[]>([])
@@ -482,6 +490,8 @@ const OutboundManagement: React.FC = () => {
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
         product_id: item.product_id,
+        product_name: item.product_name,
+        product_code: item.product_code,
         quantity: item.quantity,
         unit_price: item.unit_price,
         notes: item.notes || '',
@@ -523,6 +533,8 @@ const OutboundManagement: React.FC = () => {
       const items = order.items.map((item: any) => ({
         key: generateItemKey(),
         product_id: item.product_id,
+        product_name: item.product_name,
+        product_code: item.product_code,
         quantity: item.quantity,
         unit_price: item.unit_price,
         notes: item.notes || '',
@@ -651,8 +663,9 @@ const OutboundManagement: React.FC = () => {
             message.success('出库订单已审批，库存已扣减')
           }
           fetchData()
-        } catch {
-          message.error('审批失败')
+        } catch (e: any) {
+          const errorMsg = e.response?.data?.detail || e.message || '审批失败'
+          message.error(errorMsg)
         } finally {
           setConfirmingId(null)
         }
@@ -1137,6 +1150,7 @@ const OutboundManagement: React.FC = () => {
       title: '出库类型',
       dataIndex: 'outbound_type',
       key: 'outbound_type',
+      responsive: ['md'],
       width: 110,
       render: (type: string) => (
         <Tag>{outboundTypeLabels[type] || type}</Tag>
@@ -1146,6 +1160,7 @@ const OutboundManagement: React.FC = () => {
       title: '店铺分组',
       dataIndex: 'store_group_name',
       key: 'store_group_name',
+      responsive: ['md'],
       width: 120,
       render: (name: string) => name || '-',
     },
@@ -1153,36 +1168,42 @@ const OutboundManagement: React.FC = () => {
       title: '仓库',
       dataIndex: 'warehouse',
       key: 'warehouse',
+      responsive: ['md'],
       width: 120,
     },
     {
       title: '发起者',
       dataIndex: 'creator_name',
       key: 'creator_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '审批者',
       dataIndex: 'confirmer_name',
       key: 'confirmer_name',
+      responsive: ['md'],
       width: 100,
     },
     {
       title: '出库日期',
       dataIndex: 'outbound_date',
       key: 'outbound_date',
+      responsive: ['md'],
       width: 120,
     },
     {
       title: '总数量',
       dataIndex: 'total_quantity',
       key: 'total_quantity',
+      responsive: ['md'],
       width: 90,
     },
     {
       title: '总金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
+      responsive: ['md'],
       width: 100,
       render: (amount: number) => amount != null ? `¥${amount.toFixed(2)}` : '-',
     },
@@ -1201,6 +1222,7 @@ const OutboundManagement: React.FC = () => {
       title: '备注',
       dataIndex: 'notes',
       key: 'notes',
+      responsive: ['md'],
       width: 200,
       ellipsis: true,
     },
@@ -1208,12 +1230,14 @@ const OutboundManagement: React.FC = () => {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
+      responsive: ['md'],
       width: 170,
     },
     {
       title: '审批时间',
       dataIndex: 'confirmed_at',
       key: 'confirmed_at',
+      responsive: ['md'],
       width: 170,
     },
     {
@@ -1432,53 +1456,63 @@ const OutboundManagement: React.FC = () => {
   ]
 
   return (
-    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="page-container">
       <Card
         loading={loading}
         title={
-          <Space wrap size="middle">
-            <Input
-              placeholder="搜索出库单号、仓库、经办人..."
-              prefix={<SearchOutlined />}
-              allowClear
-              style={{ width: 300 }}
-              value={searchText}
-              onChange={(e) => handleSearch(e.target.value)}
-            />
-            <Select
-              placeholder="出库类型"
-              allowClear
-              style={{ width: 140 }}
-              value={typeFilter}
-              onChange={handleTypeFilter}
-              options={outboundTypeOptions}
-            />
-            <Select
-              placeholder="店铺分组"
-              allowClear
-              style={{ width: 140 }}
-              value={groupFilter}
-              onChange={handleGroupFilter}
-              options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
-            />
-            <Select
-              placeholder="状态"
-              allowClear
-              style={{ width: 120 }}
-              value={statusFilter}
-              onChange={handleStatusFilter}
-              options={statusOptions}
-            />
-            <RangePicker
-              placeholder={['开始日期', '结束日期']}
-              value={dateRange}
-              onChange={handleDateRangeChange}
-              style={{ width: 300 }}
-            />
-          </Space>
+          <div className="filter-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <div className="filter-item">
+              <Input
+                placeholder="搜索出库单号、仓库、经办人..."
+                prefix={<SearchOutlined />}
+                allowClear
+                style={{ width: 300 }}
+                value={searchText}
+                onChange={(e) => handleSearch(e.target.value)}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="出库类型"
+                allowClear
+                style={{ width: 140 }}
+                value={typeFilter}
+                onChange={handleTypeFilter}
+                options={outboundTypeOptions}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="店铺分组"
+                allowClear
+                style={{ width: 140 }}
+                value={groupFilter}
+                onChange={handleGroupFilter}
+                options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
+              />
+            </div>
+            <div className="filter-item">
+              <Select
+                placeholder="状态"
+                allowClear
+                style={{ width: 120 }}
+                value={statusFilter}
+                onChange={handleStatusFilter}
+                options={statusOptions}
+              />
+            </div>
+            <div className="filter-item">
+              <RangePicker
+                placeholder={['开始日期', '结束日期']}
+                value={dateRange}
+                onChange={handleDateRangeChange}
+                style={{ width: 300 }}
+              />
+            </div>
+          </div>
         }
         extra={
-          <Space>
+          <div className="action-bar" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {hasPermission('outbound:create') && (
               <>
                 <Button icon={<DownloadOutlined />} onClick={downloadTemplate}>
@@ -1501,11 +1535,12 @@ const OutboundManagement: React.FC = () => {
                 新增出库订单
               </Button>
             )}
-          </Space>
+          </div>
         }
         style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
         styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
       >
+<div className="responsive-table-wrapper">
         <Table
           dataSource={orders}
           columns={columns}
@@ -1520,8 +1555,9 @@ const OutboundManagement: React.FC = () => {
             }
           }}
         />
+        </div>
       </Card>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
+      <div className="pagination-wrapper">
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -1536,13 +1572,14 @@ const OutboundManagement: React.FC = () => {
       </div>
 
       <Modal
+        className="responsive-modal"
         title={viewingOrder ? '查看出库订单' : (editingOrder ? '编辑出库订单' : '新增出库订单')}
         open={modalOpen}
         onOk={viewingOrder ? () => setModalOpen(false) : handleSubmit}
         onCancel={() => setModalOpen(false)}
         confirmLoading={submitting}
         okText={viewingOrder ? '确定' : undefined}
-        width={viewingOrder ? 900 : (editingOrder ? 640 : 900)}
+        width={res.isMobile ? '95vw' : (viewingOrder ? 900 : (editingOrder ? 640 : 900))}
         style={{ top: 20 }}
         styles={{ body: {
           maxHeight: 'calc(100vh - 180px)',
@@ -1551,7 +1588,7 @@ const OutboundManagement: React.FC = () => {
         } }}
       >
         <Form form={form} layout="vertical">
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item
               name="order_number"
               label="出库单号"
@@ -1571,7 +1608,7 @@ const OutboundManagement: React.FC = () => {
               />
             </Form.Item>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item name="warehouse" label="仓库" rules={[{ required: true, message: '请选择仓库' }]}>
               <Select
                 placeholder="请选择仓库"
@@ -1599,11 +1636,8 @@ const OutboundManagement: React.FC = () => {
                 }
               />
             </Form.Item>
-            <Form.Item name="handler" label="经办人">
-              <Input placeholder="请输入经办人" disabled={true} />
-            </Form.Item>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="responsive-form-grid">
             <Form.Item name="store_group_id" label="店铺分组">
               <Select
                 placeholder="请选择店铺分组（可选）"
@@ -1709,7 +1743,7 @@ const OutboundManagement: React.FC = () => {
                     </div>
 
                     {/* 表单字段区域 */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 12 }}>
+                    <div className="responsive-grid-3">
                       <div>
                         <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>商品</div>
                         <div className="product-select-wrapper" style={{ position: 'relative' }}>
@@ -1726,7 +1760,7 @@ const OutboundManagement: React.FC = () => {
                             }}
                             onSearch={handleProductSearch}
                             filterOption={false} // 禁用本地过滤，使用后端搜索
-                            onDropdownVisibleChange={(open) => {
+                            onOpenChange={(open) => {
                               if (open) {
                                 // 下拉框打开时，如果有搜索关键字，清空并重新加载初始产品列表
                                 if (productSearchKeyword) {
@@ -1747,6 +1781,11 @@ const OutboundManagement: React.FC = () => {
                               }
                             }}
                             options={[
+                              // 如果当前商品不在 productList 中（查看/编辑模式），添加一个显示项
+                              ...(item.product_id && !productList.find(p => p.id === item.product_id) && (viewingOrder || editingOrder) && item.product_name ? [{
+                                label: `${item.product_code ? `[${item.product_code}] ` : ''}${item.product_name}`,
+                                value: item.product_id,
+                              }] : []),
                               ...productList.map((p) => ({
                                 label: `${p.product_code ? `[${p.product_code}] ` : ''}${p.name}`,
                                 value: p.id,
@@ -1908,6 +1947,7 @@ const OutboundManagement: React.FC = () => {
       </Modal>
 
       <Modal
+        className="responsive-modal"
         title="出库审批 - 库存扣减详情"
         open={confirmModalOpen}
         onCancel={() => setConfirmModalOpen(false)}
@@ -1916,7 +1956,7 @@ const OutboundManagement: React.FC = () => {
             知道了
           </Button>
         }
-        width={700}
+        width={res.isMobile ? '95vw' : 700}
       >
         <Alert
           type="success"
@@ -1928,9 +1968,10 @@ const OutboundManagement: React.FC = () => {
         <Table
           dataSource={deductionResults}
           columns={deductionColumns}
-          rowKey={(record, index) => `${record.batch_id || index}`}
+          rowKey={(record) => `${record.batch_id || Math.random()}`}
           pagination={false}
           size="small"
+          scroll={{ x: res.isMobile ? true : false }}
         />
       </Modal>
 
@@ -1943,16 +1984,18 @@ const OutboundManagement: React.FC = () => {
       />
 
       <Modal
+        className="responsive-modal"
         title="导入预览"
         open={previewModalOpen}
         onOk={handleConfirmImport}
         onCancel={() => setPreviewModalOpen(false)}
-        width={800}
+        width={res.isMobile ? '95vw' : 800}
       >
         <Table
           dataSource={previewItems}
           pagination={false}
-          rowKey={(record, index) => index.toString()}
+          scroll={{ x: res.isMobile ? true : false }}
+          rowKey={(record) => record.product_id?.toString() || Math.random().toString()}
           columns={[
             {
               title: 'SKU',
@@ -1973,6 +2016,7 @@ const OutboundManagement: React.FC = () => {
               title: '备注',
               dataIndex: 'notes',
               key: 'notes',
+      responsive: ['md'],
             },
           ]}
         />

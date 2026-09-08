@@ -3,9 +3,11 @@ from typing import List, Optional
 from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
+import time, logging
 from database.database import get_db
 from models.product_sales import ProductSales
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/product-sales", tags=["product-sales"])
 
 
@@ -166,6 +168,7 @@ async def get_top_skus(
 ):
     """获取销量TOP SKU"""
     try:
+        _t0 = time.time()
         store_list: List[str] = []
         if stores:
             store_list = [s.strip() for s in stores.split(',')]
@@ -193,6 +196,8 @@ async def get_top_skus(
         query = query.limit(limit)
         
         results = query.all()
+        _t1 = time.time()
+        print(f"[PERF] top-skus SQL: {(_t1-_t0)*1000:.0f}ms, rows={len(results)}, stores={len(store_list)}")
         
         data = []
         for row in results:
@@ -201,6 +206,8 @@ async def get_top_skus(
                 "sku": row.sku,
                 "total_sales": row.total_sales
             })
+        _t2 = time.time()
+        print(f"[PERF] top-skus total: {(_t2-_t0)*1000:.0f}ms")
         
         return {
             "success": True,

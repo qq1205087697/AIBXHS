@@ -12,6 +12,7 @@ const ThemedApp: React.FC = () => {
   return (
     <ConfigProvider
       locale={zhCN}
+      getPopupContainer={() => document.body}
       theme={{
         token: {
           colorPrimary: currentTheme.primary,
