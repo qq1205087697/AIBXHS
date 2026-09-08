@@ -860,7 +860,23 @@ const ReplenishmentManagement: React.FC = () => {
       }
     } catch (e: any) {
       const errorMsg = e.response?.data?.detail || e.message || '文件上传失败'
-      message.error(errorMsg, 8)
+      // 多行错误（后端一次返回全部错误行）用弹窗完整展示
+      const lines = String(errorMsg).split('\n').filter(Boolean)
+      if (lines.length > 1) {
+        Modal.error({
+          title: `导入文件存在 ${lines.length} 处错误，请修正后重新上传`,
+          width: 560,
+          content: (
+            <div style={{ maxHeight: 300, overflowY: 'auto', whiteSpace: 'pre-line', marginTop: 8 }}>
+              {lines.map((line, i) => (
+                <div key={i} style={{ padding: '2px 0', color: '#ff4d4f' }}>{line}</div>
+              ))}
+            </div>
+          ),
+        })
+      } else {
+        message.error(errorMsg, 8)
+      }
     } finally {
       setUploading(false)
       e.target.value = ''

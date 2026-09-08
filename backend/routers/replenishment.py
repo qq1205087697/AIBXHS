@@ -165,34 +165,38 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
     group_name_to_id = {str(g[1]).strip().lower(): (g[0], g[1]) for g in store_groups}
 
     items = []
+    row_errors = []
     for idx, row in df.iterrows():
+        row_no = idx + 2
         sku = str(row["sku"]).strip() if pd.notna(row["sku"]) else ""
         quantity = int(row["quantity"]) if pd.notna(row["quantity"]) else 0
 
+        # 收集该行所有错误，最后一次性抛出，避免用户每次只能看到一条
+        errs = []
         if not sku or sku == "nan":
-            raise ValueError(f"第 {idx + 2} 行: 产品编码/SKU不能为空")
+            errs.append("产品编码/SKU不能为空")
         if quantity <= 0:
-            raise ValueError(f"第 {idx + 2} 行: 补货数量必须大于0")
+            errs.append("补货数量必须大于0")
 
         # 先按产品编码匹配，再按平台SKU匹配
         product_id = None
         product_name = ""
         val_lower = sku.lower()
 
-        if val_lower in product_code_map:
-            pid, pname, pprice = product_code_map[val_lower]
-            product_id = pid
-            product_name = pname or ""
-        elif val_lower in platform_sku_map:
-            pid = platform_sku_map[val_lower]
-            product_id = pid
-            for p in all_products:
-                if p[0] == pid:
-                    product_name = p[2] or ""
-                    break
-
-        if not product_id:
-            raise ValueError(f"第 {idx + 2} 行: 产品编码/SKU '{sku}' 不存在")
+        if not errs:
+            if val_lower in product_code_map:
+                pid, pname, pprice = product_code_map[val_lower]
+                product_id = pid
+                product_name = pname or ""
+            elif val_lower in platform_sku_map:
+                pid = platform_sku_map[val_lower]
+                product_id = pid
+                for p in all_products:
+                    if p[0] == pid:
+                        product_name = p[2] or ""
+                        break
+            if not product_id:
+                errs.append(f"产品编码/SKU '{sku}' 不存在")
 
         notes = str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
 
@@ -202,13 +206,16 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
         if "store_group" in df.columns:
             sg_val = str(row["store_group"]).strip() if pd.notna(row.get("store_group")) else ""
             if sg_val and sg_val != "nan":
-                store_group_name = sg_val
                 matched = group_name_to_id.get(sg_val.lower())
                 if matched:
                     store_group_id = matched[0]
                     store_group_name = matched[1]  # 使用数据库中的准确名称
                 else:
-                    raise ValueError(f"第 {idx + 2} 行: 店铺分组 '{sg_val}' 不存在")
+                    errs.append(f"店铺分组 '{sg_val}' 不存在")
+
+        if errs:
+            row_errors.append(f"第 {row_no} 行: " + "；".join(errs))
+            continue
 
         items.append({
             "product_id": product_id,
@@ -219,6 +226,9 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
             "store_group_id": store_group_id,
             "store_group_name": store_group_name,
         })
+
+    if row_errors:
+        raise ValueError("\n".join(row_errors))
 
     # 查询这些产品绑定的配件（成品→配件）
     product_ids = list(set(item["product_id"] for item in items))
