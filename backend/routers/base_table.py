@@ -41,6 +41,37 @@ def _build_summary_query(issue: str, keyword: str, product_type: str):
         WHERE po.status IN {ps} AND poi.deleted_at IS NULL
         GROUP BY poi.product_id
     """.format(ps=PURCHASE_PENDING_STATUS)
+    # 各来源对应的店铺分组名称聚合（库存批次 / 补货单 / 采购单）
+    in_stock_group_agg = """
+        SELECT ib.product_id,
+               GROUP_CONCAT(DISTINCT COALESCE(sg.name, '未分组') SEPARATOR '、') AS groups
+        FROM inventory_batches ib
+        LEFT JOIN store_groups sg ON sg.id = ib.store_group_id
+        WHERE ib.tenant_id = :tid AND ib.status = 'active'
+          AND ib.current_quantity > 0 AND ib.deleted_at IS NULL
+        GROUP BY ib.product_id
+    """
+    to_purchase_group_agg = """
+        SELECT ri.product_id,
+               GROUP_CONCAT(DISTINCT COALESCE(sg.name, '未分组') SEPARATOR '、') AS groups
+        FROM replenishment_items ri
+        JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id
+             AND ro.deleted_at IS NULL AND ro.tenant_id = :tid
+        LEFT JOIN store_groups sg ON sg.id = ro.store_group_id
+        WHERE ro.status IN {rs} AND ro.purchase_order_id IS NULL
+          AND ri.deleted_at IS NULL
+        GROUP BY ri.product_id
+    """.format(rs=REPLENISH_PENDING_STATUS)
+    to_inbound_group_agg = """
+        SELECT poi.product_id,
+               GROUP_CONCAT(DISTINCT COALESCE(sg.name, '未分组') SEPARATOR '、') AS groups
+        FROM purchase_order_items poi
+        JOIN purchase_orders po ON po.id = poi.purchase_order_id
+             AND po.deleted_at IS NULL AND po.tenant_id = :tid
+        LEFT JOIN store_groups sg ON sg.id = po.store_group_id
+        WHERE po.status IN {ps} AND poi.deleted_at IS NULL
+        GROUP BY poi.product_id
+    """.format(ps=PURCHASE_PENDING_STATUS)
 
     base_where = ["p.deleted_at IS NULL", "p.tenant_id = :tid"]
     params: dict = {}
@@ -66,6 +97,9 @@ def _build_summary_query(issue: str, keyword: str, product_type: str):
         LEFT JOIN ({in_stock_agg}) s ON s.product_id = p.id
         LEFT JOIN ({to_purchase_agg}) r ON r.product_id = p.id
         LEFT JOIN ({to_inbound_agg}) b ON b.product_id = p.id
+        LEFT JOIN ({in_stock_group_agg}) isg ON isg.product_id = p.id
+        LEFT JOIN ({to_purchase_group_agg}) rpg ON rpg.product_id = p.id
+        LEFT JOIN ({to_inbound_group_agg}) pog ON pog.product_id = p.id
         WHERE {where_sql}
     """
     return body, params
@@ -118,14 +152,25 @@ async def get_base_table_summary(
             SELECT p.id, p.product_code, p.name, p.product_type,
                    COALESCE(s.qty, 0) AS in_stock_qty,
                    COALESCE(r.qty, 0) AS to_purchase_qty,
-                   COALESCE(b.qty, 0) AS to_inbound_qty
+                   COALESCE(b.qty, 0) AS to_inbound_qty,
+                   isg.groups AS in_stock_groups,
+                   rpg.groups AS rep_groups,
+                   pog.groups AS po_groups
             {body}
             {order_sql}
             LIMIT :limit OFFSET :offset
         """), {**params, "limit": page_size, "offset": (page - 1) * page_size}).fetchall()
 
-        items = [
-            {
+        items = []
+        for r in rows:
+            # 合并三个来源的分组名并去重
+            group_names: list = []
+            for raw in (r.in_stock_groups, r.rep_groups, r.po_groups):
+                if raw:
+                    for name in str(raw).split('、'):
+                        if name and name not in group_names:
+                            group_names.append(name)
+            items.append({
                 "product_id": r.id,
                 "product_code": r.product_code,
                 "name": r.name,
@@ -133,9 +178,8 @@ async def get_base_table_summary(
                 "in_stock_qty": int(r.in_stock_qty or 0),
                 "to_purchase_qty": int(r.to_purchase_qty or 0),
                 "to_inbound_qty": int(r.to_inbound_qty or 0),
-            }
-            for r in rows
-        ]
+                "store_groups": '、'.join(group_names),
+            })
         return {
             "success": True,
             "data": {
@@ -165,18 +209,27 @@ async def get_product_warehouse_stock(
     """某产品在各仓库的在库分布（展开行用）"""
     try:
         rows = db.execute(text("""
-            SELECT COALESCE(ib.warehouse, '未指定仓库') AS warehouse,
+            SELECT COALESCE(sg.name, '未分组') AS store_group_name,
+                   COALESCE(ib.warehouse, '未指定仓库') AS warehouse,
                    SUM(ib.current_quantity) AS qty
             FROM inventory_batches ib
+            LEFT JOIN store_groups sg ON sg.id = ib.store_group_id
             WHERE ib.product_id = :pid AND ib.tenant_id = :tid
               AND ib.status = 'active' AND ib.current_quantity > 0
               AND ib.deleted_at IS NULL
-            GROUP BY COALESCE(ib.warehouse, '未指定仓库')
-            ORDER BY qty DESC
+            GROUP BY ib.store_group_id, sg.name, ib.warehouse
+            ORDER BY store_group_name ASC, qty DESC
         """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
         return {
             "success": True,
-            "data": [{"warehouse": r.warehouse, "qty": int(r.qty or 0)} for r in rows],
+            "data": [
+                {
+                    "store_group_name": r.store_group_name,
+                    "warehouse": r.warehouse,
+                    "qty": int(r.qty or 0),
+                }
+                for r in rows
+            ],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库分布失败: {str(e)}")
@@ -192,14 +245,16 @@ async def get_product_pending_purchase_orders(
     try:
         rows = db.execute(text(f"""
             SELECT po.id, po.order_number, po.warehouse, po.status,
+                   COALESCE(sg.name, '未分组') AS store_group_name,
                    GROUP_CONCAT(DISTINCT NULLIF(poi.supplier, '') SEPARATOR ' / ') AS supplier,
                    SUM(GREATEST(poi.quantity - poi.received_quantity, 0)) AS pending_qty
             FROM purchase_order_items poi
             JOIN purchase_orders po ON po.id = poi.purchase_order_id
                  AND po.deleted_at IS NULL AND po.tenant_id = :tid
+            LEFT JOIN store_groups sg ON sg.id = po.store_group_id
             WHERE poi.product_id = :pid AND po.status IN {PURCHASE_PENDING_STATUS}
               AND poi.deleted_at IS NULL
-            GROUP BY po.id, po.order_number, po.warehouse, po.status
+            GROUP BY po.id, po.order_number, po.warehouse, po.status, sg.name
             HAVING pending_qty > 0
             ORDER BY pending_qty DESC
         """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
@@ -209,6 +264,7 @@ async def get_product_pending_purchase_orders(
                 {
                     "order_id": r.id,
                     "order_number": r.order_number,
+                    "store_group_name": r.store_group_name,
                     "supplier": r.supplier or "",
                     "warehouse": r.warehouse or "",
                     "status": r.status,
@@ -231,13 +287,15 @@ async def get_product_pending_replenishment_orders(
     try:
         rows = db.execute(text(f"""
             SELECT ro.id, ro.order_number, ro.status,
+                   COALESCE(sg.name, '未分组') AS store_group_name,
                    SUM(ri.quantity) AS pending_qty
             FROM replenishment_items ri
             JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id
                  AND ro.deleted_at IS NULL AND ro.tenant_id = :tid
+            LEFT JOIN store_groups sg ON sg.id = ro.store_group_id
             WHERE ri.product_id = :pid AND ro.status IN {REPLENISH_PENDING_STATUS}
               AND ro.purchase_order_id IS NULL AND ri.deleted_at IS NULL
-            GROUP BY ro.id, ro.order_number, ro.status
+            GROUP BY ro.id, ro.order_number, ro.status, sg.name
             HAVING pending_qty > 0
             ORDER BY pending_qty DESC
         """), {"pid": product_id, "tid": current_user.tenant_id}).fetchall()
@@ -247,6 +305,7 @@ async def get_product_pending_replenishment_orders(
                 {
                     "order_id": r.id,
                     "order_number": r.order_number,
+                    "store_group_name": r.store_group_name,
                     "status": r.status,
                     "pending_qty": int(r.pending_qty or 0),
                 }

@@ -555,7 +555,7 @@ const productAttributeLabelMap: Record<string, string> = {
           ...filters,
           ...advFilters,
         }),
-        storesApi.getList({ page: 1, page_size: 1000 }),
+        storesApi.getList({ page: 1, page_size: 1000, assignment_fallback: true }),
         storeGroupsApi.getList(),
       ])
       if (productsRes.data.success) {
@@ -2813,11 +2813,11 @@ const productAttributeLabelMap: Record<string, string> = {
             />
           </Form.Item>
           {(watchProductType || []).includes('finished') && (
-            <Form.Item name="no_accessory" label="无配件" initialValue={false} tooltip={'标记为"无配件"的成品，即使未绑定配件也不会出现在数据补齐弹窗中'}>
+            <Form.Item name="no_accessory" label="有无配件" initialValue={false} tooltip={'选择"无"的成品，即使未绑定配件也不会出现在数据补齐弹窗中'}>
               <Select
                 options={[
-                  { label: '否', value: false },
-                  { label: '是', value: true },
+                  { label: '有', value: false },
+                  { label: '无', value: true },
                 ]}
               />
             </Form.Item>
@@ -3555,11 +3555,11 @@ const productAttributeLabelMap: Record<string, string> = {
                       </Form.Item>
                     </div>
                     {(watchProductType || []).includes('finished') && (
-                      <Form.Item name="no_accessory" label="无配件" tooltip={'标记为"无配件"的成品，即使未绑定配件也不会出现在数据补齐弹窗中'}>
+                      <Form.Item name="no_accessory" label="有无配件" tooltip={'选择"无"的成品，即使未绑定配件也不会出现在数据补齐弹窗中'}>
                         <Select
                           options={[
-                            { label: '否', value: false },
-                            { label: '是', value: true },
+                            { label: '有', value: false },
+                            { label: '无', value: true },
                           ]}
                         />
                       </Form.Item>
@@ -3653,7 +3653,7 @@ const productAttributeLabelMap: Record<string, string> = {
                             ? detailModalProduct.product_type
                             : (detailModalProduct.product_type ? detailModalProduct.product_type.split(',') : []);
                           if (!types.includes('finished')) return null
-                          return <div><strong>无配件:</strong> {detailModalProduct.no_accessory ? <Tag color="orange">是</Tag> : '否'}</div>
+                          return <div><strong>有无配件:</strong> {detailModalProduct.no_accessory ? <Tag color="orange">无</Tag> : '有'}</div>
                         })()}
                       </div>
                     </div>
