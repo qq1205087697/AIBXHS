@@ -433,6 +433,8 @@ export const storesApi = {
     page_size?: number;
     name_search?: string;
     site_search?: string;
+    search?: string;
+    assignment_fallback?: boolean;
   }) => apiClient.get("/stores/", { params }),
   getAll: () => apiClient.get("/stores/all"),
   create: (data: {

@@ -14,9 +14,11 @@ interface BaseTableItem {
   in_stock_qty: number
   to_purchase_qty: number
   to_inbound_qty: number
+  store_groups: string
 }
 
 interface WarehouseStock {
+  store_group_name: string
   warehouse: string
   qty: number
 }
@@ -24,6 +26,7 @@ interface WarehouseStock {
 interface ReplenishmentDetail {
   order_id: number
   order_number: string
+  store_group_name: string
   status: string
   pending_qty: number
 }
@@ -31,6 +34,7 @@ interface ReplenishmentDetail {
 interface PurchaseDetail {
   order_id: number
   order_number: string
+  store_group_name: string
   supplier: string
   warehouse: string
   status: string
@@ -189,12 +193,15 @@ const BaseTableManagement: React.FC = () => {
       <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
         {record.in_stock_qty > 0 && (
           <div style={{ flex: 1, minWidth: 0 }}>
-            <Text strong style={{ fontSize: 13 }}>仓库分布</Text>
+            <Text strong style={{ fontSize: 13 }}>库存分布（店铺分组 / 仓库）</Text>
             {detail.warehouses && detail.warehouses.length > 0 ? (
               <div style={{ marginTop: 8 }}>
                 {detail.warehouses.map((w, idx) => (
-                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px dashed #f0f0f0' }}>
-                    <Text style={{ fontSize: 12 }}>{w.warehouse}</Text>
+                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '4px 0', borderBottom: '1px dashed #f0f0f0' }}>
+                    <Text style={{ fontSize: 12 }}>
+                      {w.store_group_name}
+                      <Text type="secondary" style={{ fontSize: 12 }}> / {w.warehouse}</Text>
+                    </Text>
                     <Text style={{ fontSize: 12, fontWeight: 'bold' }}>{w.qty}</Text>
                   </div>
                 ))}
@@ -212,6 +219,9 @@ const BaseTableManagement: React.FC = () => {
                 {detail.replenishments.map((r) => (
                   <div key={r.order_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px dashed #f0f0f0' }}>
                     {renderOrderNumber(r.order_number)}
+                    <Text type="secondary" style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.store_group_name}
+                    </Text>
                     <Tag color={replenishStatusColor[r.status] || 'default'} style={{ fontSize: 11 }}>
                       {replenishStatusLabel[r.status] || r.status}
                     </Tag>
@@ -233,7 +243,7 @@ const BaseTableManagement: React.FC = () => {
                   <div key={p.order_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px dashed #f0f0f0' }}>
                     {renderOrderNumber(p.order_number)}
                     <Text type="secondary" style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {p.supplier}{p.warehouse ? ` / ${p.warehouse}` : ''}
+                      {p.store_group_name}{p.supplier ? ` / ${p.supplier}` : ''}{p.warehouse ? ` / ${p.warehouse}` : ''}
                     </Text>
                     <Tag color={purchaseStatusColor[p.status] || 'default'} style={{ fontSize: 11 }}>
                       {purchaseStatusLabel[p.status] || p.status}
@@ -282,6 +292,19 @@ const BaseTableManagement: React.FC = () => {
         <Tag color={type === 'accessory' ? 'cyan' : 'geekblue'} style={{ fontSize: 12 }}>
           {type === 'accessory' ? '配件' : '成品'}
         </Tag>
+      ),
+    },
+    {
+      title: '店铺分组',
+      dataIndex: 'store_groups',
+      key: 'store_groups',
+      width: 160,
+      align: 'center',
+      ellipsis: true,
+      render: (text: string) => (
+        <span title={text} style={{ fontSize: 12, color: text ? '#595959' : '#999' }}>
+          {text || '—'}
+        </span>
       ),
     },
     {
@@ -387,7 +410,7 @@ const BaseTableManagement: React.FC = () => {
           rowKey="product_id"
           loading={loading}
           pagination={false}
-          scroll={{ x: 900 }}
+          scroll={{ x: 1100 }}
           expandable={{
             expandedRowKeys: expandedKeys,
             onExpand: handleExpand,

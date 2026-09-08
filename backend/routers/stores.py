@@ -197,6 +197,7 @@ async def get_stores(
     # name_search: Optional[str] = None,
     # site_search: Optional[str] = None,
     search: Optional[str] = None,
+    assignment_fallback: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -224,7 +225,8 @@ async def get_stores(
                 for i, sid in enumerate(store_id_list):
                     params[f"store_{i}"] = sid
                 where_conditions.append(f"s.id IN ({store_placeholders})")
-            else:
+            elif not assignment_fallback:
+                # 未分配任何店铺时默认返回空；assignment_fallback=true 时兜底显示全部分店
                 where_conditions.append("1=0")
 
         if search:
