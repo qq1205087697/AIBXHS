@@ -1,10 +1,34 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Table, Input, Select, message, Space, Tag, Pagination, Statistic, Spin, Empty, Typography } from 'antd'
-import { SearchOutlined, DatabaseOutlined, ShoppingCartOutlined, CheckSquareOutlined } from '@ant-design/icons'
+import { Card, Table, Input, Select, message, Space, Tag, Pagination, Statistic, Spin, Empty, Typography, Tooltip } from 'antd'
+import { SearchOutlined, DatabaseOutlined, ShoppingCartOutlined, CheckSquareOutlined, WarningOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { baseTableApi } from '../api'
 
 const { Text } = Typography
+
+// 表头在纵向滚动容器内吸附固定
+const tableScrollStyle = `
+  .base-table-scroll .ant-table-content {
+    overflow: visible !important;
+  }
+  .base-table-scroll .ant-table-thead > tr > th {
+    position: sticky !important;
+    top: 0;
+    z-index: 2;
+  }
+  .base-table-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+  .base-table-scroll::-webkit-scrollbar-thumb {
+    background: #d9d9d9;
+    border-radius: 4px;
+  }
+`
+
+interface GroupQty {
+  name: string
+  qty: number
+}
 
 interface BaseTableItem {
   product_id: number
@@ -14,7 +38,10 @@ interface BaseTableItem {
   in_stock_qty: number
   to_purchase_qty: number
   to_inbound_qty: number
-  store_groups: string
+  need_sku?: boolean
+  in_stock_groups: GroupQty[]
+  to_purchase_groups: GroupQty[]
+  to_inbound_groups: GroupQty[]
 }
 
 interface WarehouseStock {
@@ -58,6 +85,8 @@ const replenishStatusColor: Record<string, string> = {
 }
 
 const purchaseStatusLabel: Record<string, string> = {
+  draft: '待审批',  // 草稿即待审批（转采购单后初始状态，审批通过变为已审批）
+  pending: '待审批',
   approved: '已审批',
   purchased: '已采购',
   partial_received: '部分收货',
@@ -65,6 +94,8 @@ const purchaseStatusLabel: Record<string, string> = {
 }
 
 const purchaseStatusColor: Record<string, string> = {
+  draft: 'gold',
+  pending: 'gold',
   approved: 'blue',
   purchased: 'geekblue',
   partial_received: 'orange',
@@ -77,6 +108,7 @@ const issueOptions = [
   { label: '补货未采购', value: 'to_purchase' },
   { label: '采购未入库', value: 'to_inbound' },
   { label: '任一在途', value: 'any_pending' },
+  { label: '缺平台SKU', value: 'no_sku' },
 ]
 
 const productTypeOptions = [
@@ -99,7 +131,7 @@ const BaseTableManagement: React.FC = () => {
   }>({ page: 1, pageSize: 20, issue: 'all', keyword: '', product_type: '' })
   const [total, setTotal] = useState(0)
   const [searchText, setSearchText] = useState('')
-  const [stats, setStats] = useState({ in_stock_total: 0, to_purchase_total: 0, to_inbound_total: 0 })
+  const [stats, setStats] = useState({ in_stock_total: 0, to_purchase_total: 0, to_inbound_total: 0, no_sku_total: 0 })
   const [expandedKeys, setExpandedKeys] = useState<number[]>([])
   const [detailMap, setDetailMap] = useState<Record<number, ProductDetail>>({})
   const [detailLoadingKeys, setDetailLoadingKeys] = useState<number[]>([])
@@ -121,7 +153,7 @@ const BaseTableManagement: React.FC = () => {
         if (cancelled) return
         if (res.data.success) {
           setItems(res.data.data.items || [])
-          setStats(res.data.data.stats || { in_stock_total: 0, to_purchase_total: 0, to_inbound_total: 0 })
+          setStats(res.data.data.stats || { in_stock_total: 0, to_purchase_total: 0, to_inbound_total: 0, no_sku_total: 0 })
           setTotal(res.data.data.total || 0)
         }
       } catch (err: any) {
@@ -180,6 +212,25 @@ const BaseTableManagement: React.FC = () => {
     <span style={{ color: '#1890ff', cursor: 'pointer' }}>{text}</span>
   )
 
+  // 状态列：按店铺分组显示数量标签，如 [B欧: 600] [C英: 300]
+  const renderGroupQtyCell = (qty: number, groups: GroupQty[] | undefined, color: string) => {
+    if (qty <= 0) {
+      return <Text style={{ fontSize: 13, color: '#999' }}>0</Text>
+    }
+    if (!groups || groups.length === 0) {
+      return <Text style={{ fontSize: 13, fontWeight: 'bold' }}>{qty}</Text>
+    }
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, justifyContent: 'center', alignItems: 'center' }}>
+        {groups.map((g) => (
+          <Tag key={g.name} color={color} style={{ fontSize: 12, margin: 0 }}>
+            {g.name}: {g.qty}
+          </Tag>
+        ))}
+      </div>
+    )
+  }
+
   const renderDetailSection = (record: BaseTableItem) => {
     const detail = detailMap[record.product_id]
     if (!detail) {
@@ -190,9 +241,9 @@ const BaseTableManagement: React.FC = () => {
       )
     }
     return (
-      <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         {record.in_stock_qty > 0 && (
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ width: 280 }}>
             <Text strong style={{ fontSize: 13 }}>库存分布（店铺分组 / 仓库）</Text>
             {detail.warehouses && detail.warehouses.length > 0 ? (
               <div style={{ marginTop: 8 }}>
@@ -212,14 +263,14 @@ const BaseTableManagement: React.FC = () => {
           </div>
         )}
         {record.to_purchase_qty > 0 && (
-          <div style={{ flex: 1.4, minWidth: 0 }}>
+          <div style={{ width: 340 }}>
             <Text strong style={{ fontSize: 13 }}>补货未采购明细</Text>
             {detail.replenishments && detail.replenishments.length > 0 ? (
               <div style={{ marginTop: 8 }}>
                 {detail.replenishments.map((r) => (
                   <div key={r.order_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px dashed #f0f0f0' }}>
                     {renderOrderNumber(r.order_number)}
-                    <Text type="secondary" style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <Text type="secondary" style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>
                       {r.store_group_name}
                     </Text>
                     <Tag color={replenishStatusColor[r.status] || 'default'} style={{ fontSize: 11 }}>
@@ -235,7 +286,7 @@ const BaseTableManagement: React.FC = () => {
           </div>
         )}
         {record.to_inbound_qty > 0 && (
-          <div style={{ flex: 1.8, minWidth: 0 }}>
+          <div style={{ width: 420 }}>
             <Text strong style={{ fontSize: 13 }}>采购未入库明细</Text>
             {detail.purchases && detail.purchases.length > 0 ? (
               <div style={{ marginTop: 8 }}>
@@ -278,8 +329,15 @@ const BaseTableManagement: React.FC = () => {
       minWidth: 200,
       align: 'center',
       ellipsis: true,
-      render: (text: string) => (
-        <span title={text} style={{ fontSize: 13 }}>{text}</span>
+      render: (text: string, record: BaseTableItem) => (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, maxWidth: '100%' }}>
+          <span title={text} style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
+          {record.need_sku && (
+            <Tooltip title="该商品有库存但无平台SKU，请通知仓库在商品详情中添加平台信息">
+              <Tag color="red" style={{ fontSize: 12, margin: 0, flexShrink: 0 }}>缺平台SKU</Tag>
+            </Tooltip>
+          )}
+        </span>
       ),
     },
     {
@@ -295,85 +353,83 @@ const BaseTableManagement: React.FC = () => {
       ),
     },
     {
-      title: '店铺分组',
-      dataIndex: 'store_groups',
-      key: 'store_groups',
-      width: 160,
-      align: 'center',
-      ellipsis: true,
-      render: (text: string) => (
-        <span title={text} style={{ fontSize: 12, color: text ? '#595959' : '#999' }}>
-          {text || '—'}
-        </span>
-      ),
-    },
-    {
       title: '已入库',
       dataIndex: 'in_stock_qty',
       key: 'in_stock_qty',
-      width: 120,
+      width: 150,
       align: 'center',
       sorter: true,
-      render: (qty: number) => (
-        <Text style={{ fontSize: 13, color: qty > 0 ? '#52c41a' : '#999', fontWeight: qty > 0 ? 'bold' : 'normal' }}>{qty}</Text>
-      ),
+      render: (qty: number, record: BaseTableItem) => renderGroupQtyCell(qty, record.in_stock_groups, 'green'),
     },
     {
       title: '补货未采购',
       dataIndex: 'to_purchase_qty',
       key: 'to_purchase_qty',
-      width: 130,
+      width: 160,
       align: 'center',
       sorter: true,
-      render: (qty: number) => (
-        <Text style={{ fontSize: 13, color: qty > 0 ? '#fa8c16' : '#999', fontWeight: qty > 0 ? 'bold' : 'normal' }}>{qty}</Text>
-      ),
+      render: (qty: number, record: BaseTableItem) => renderGroupQtyCell(qty, record.to_purchase_groups, 'orange'),
     },
     {
       title: '采购未入库',
       dataIndex: 'to_inbound_qty',
       key: 'to_inbound_qty',
-      width: 130,
+      width: 160,
       align: 'center',
       sorter: true,
-      render: (qty: number) => (
-        <Text style={{ fontSize: 13, color: qty > 0 ? '#1890ff' : '#999', fontWeight: qty > 0 ? 'bold' : 'normal' }}>{qty}</Text>
-      ),
+      render: (qty: number, record: BaseTableItem) => renderGroupQtyCell(qty, record.to_inbound_groups, 'blue'),
     },
+    {
+      title: '总计',
+      dataIndex: 'total_qty',
+      key: 'total_qty',
+      width: 110,
+      align: 'center',
+      sorter: true,
+      render: (_: any, record: BaseTableItem) => {
+        const total = record.in_stock_qty + record.to_purchase_qty + record.to_inbound_qty
+        return <Text strong style={{ fontSize: 13, color: total > 0 ? '#262626' : '#bfbfbf' }}>{total}</Text>
+      },
+    },
+  ]
+
+  // 统计卡片定义：点击直接筛选对应类别，再次点击取消筛选
+  const statCards: { title: string; value: number; color: string; icon: React.ReactNode; issue: string }[] = [
+    { title: '已入库总量', value: stats.in_stock_total, color: '#52c41a', icon: <DatabaseOutlined />, issue: 'in_stock' },
+    { title: '补货未采购总量', value: stats.to_purchase_total, color: '#fa8c16', icon: <CheckSquareOutlined />, issue: 'to_purchase' },
+    { title: '采购未入库总量', value: stats.to_inbound_total, color: '#1890ff', icon: <ShoppingCartOutlined />, issue: 'to_inbound' },
+    { title: '平台信息缺失', value: stats.no_sku_total, color: '#ff4d4f', icon: <WarningOutlined />, issue: 'no_sku' },
   ]
 
   return (
     <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <style>{tableScrollStyle}</style>
       <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
-        <Card style={{ flex: 1 }} styles={{ body: { padding: '12px 24px' } }}>
-          <Statistic
-            title="已入库总量"
-            value={stats.in_stock_total}
-            valueStyle={{ color: '#52c41a' }}
-            prefix={<DatabaseOutlined />}
-          />
-        </Card>
-        <Card style={{ flex: 1 }} styles={{ body: { padding: '12px 24px' } }}>
-          <Statistic
-            title="补货未采购总量"
-            value={stats.to_purchase_total}
-            valueStyle={{ color: '#fa8c16' }}
-            prefix={<CheckSquareOutlined />}
-          />
-        </Card>
-        <Card style={{ flex: 1 }} styles={{ body: { padding: '12px 24px' } }}>
-          <Statistic
-            title="采购未入库总量"
-            value={stats.to_inbound_total}
-            valueStyle={{ color: '#1890ff' }}
-            prefix={<ShoppingCartOutlined />}
-          />
-        </Card>
+        {statCards.map((c) => {
+          const active = query.issue === c.issue
+          return (
+            <Card
+              key={c.issue}
+              style={{
+                flex: 1,
+                cursor: 'pointer',
+                borderColor: active ? c.color : undefined,
+                borderWidth: active ? 2 : 1,
+                transition: 'box-shadow 0.2s',
+              }}
+              styles={{ body: { padding: '12px 24px' } }}
+              onClick={() => setQuery(prev => ({ ...prev, issue: prev.issue === c.issue ? 'all' : c.issue, page: 1 }))}
+              hoverable
+            >
+              <Statistic title={c.title} value={c.value} valueStyle={{ color: c.color }} prefix={c.icon} />
+            </Card>
+          )
+        })}
       </div>
 
       <Card
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
-        styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
+        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
+        styles={{ body: { flex: 1, minHeight: 0, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
         title={
           <Space wrap size="middle">
             <Input
@@ -404,38 +460,39 @@ const BaseTableManagement: React.FC = () => {
           </Space>
         }
       >
-        <Table
-          dataSource={items}
-          columns={columns}
-          rowKey="product_id"
-          loading={loading}
-          pagination={false}
-          scroll={{ x: 1100 }}
-          expandable={{
-            expandedRowKeys: expandedKeys,
-            onExpand: handleExpand,
-            expandedRowRender: (record) => renderDetailSection(record),
-            rowExpandable: (record) =>
-              record.in_stock_qty > 0 || record.to_purchase_qty > 0 || record.to_inbound_qty > 0,
-          }}
-          onChange={(_pagination, _filters, sorterObj: any) => {
-            setQuery(prev => {
-              const nextSorter = sorterObj && sorterObj.field && sorterObj.order
-                ? {
-                    sort_by: sorterObj.field as string,
-                    sort_order: sorterObj.order === 'ascend' ? 'asc' : 'desc',
-                  }
-                : { sort_by: undefined, sort_order: undefined }
-              if (prev.sort_by === nextSorter.sort_by && prev.sort_order === nextSorter.sort_order && prev.page === 1) {
-                return prev
-              }
-              return { ...prev, ...nextSorter, page: 1 }
-            })
-          }}
-          locale={{
-            emptyText: <Empty description="暂无数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />,
-          }}
-        />
+        <div className="base-table-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
+          <Table
+            dataSource={items}
+            columns={columns}
+            rowKey="product_id"
+            loading={loading}
+            pagination={false}
+            expandable={{
+              expandedRowKeys: expandedKeys,
+              onExpand: handleExpand,
+              expandedRowRender: (record) => renderDetailSection(record),
+              rowExpandable: (record) =>
+                record.in_stock_qty > 0 || record.to_purchase_qty > 0 || record.to_inbound_qty > 0,
+            }}
+            onChange={(_pagination, _filters, sorterObj: any) => {
+              setQuery(prev => {
+                const nextSorter = sorterObj && sorterObj.field && sorterObj.order
+                  ? {
+                      sort_by: sorterObj.field as string,
+                      sort_order: sorterObj.order === 'ascend' ? 'asc' : 'desc',
+                    }
+                  : { sort_by: undefined, sort_order: undefined }
+                if (prev.sort_by === nextSorter.sort_by && prev.sort_order === nextSorter.sort_order && prev.page === 1) {
+                  return prev
+                }
+                return { ...prev, ...nextSorter, page: 1 }
+              })
+            }}
+            locale={{
+              emptyText: <Empty description="暂无数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />,
+            }}
+          />
+        </div>
       </Card>
       <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
         <Pagination

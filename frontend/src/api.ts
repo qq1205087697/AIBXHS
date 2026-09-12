@@ -241,6 +241,8 @@ export const reviewsApi = {
   getById: (id: string) => apiClient.get(`/reviews/${id}`),
   updateStatus: (id: string, status: string) =>
     apiClient.put(`/reviews/${id}/status`, { status }),
+  processSuggestion: (id: string, suggestionIndex: number, note: string) =>
+    apiClient.post(`/reviews/${id}/suggestions/${suggestionIndex}/process`, { note }),
   updateImportance: (id: string, importance_level: string | undefined) =>
     apiClient.put(`/reviews/${id}/importance`, { importance_level }),
   batchAnalyze: (ids: string[]) =>
@@ -251,6 +253,10 @@ export const reviewsApi = {
     apiClient.get("/reviews/negative-ranking", {
       params: months ? { months } : {},
     }),
+  // 差评板块订阅（推送对象配置）
+  getSectionSubscribers: () => apiClient.get("/reviews/sections/subscribers"),
+  updateSectionSubscribers: (payload: Record<string, number[]>) =>
+    apiClient.put("/reviews/sections/subscribers", payload),
 };
 
 // ========== Departments API ==========
@@ -443,7 +449,8 @@ export const storesApi = {
     site?: string;
     inventory_name?: string;
     platform_store_id?: string;
-    department_id?: number;
+    shop_abbr?: string;
+    group_id?: number;
   }) => apiClient.post("/stores/", data),
   update: (
     id: number,
@@ -453,15 +460,15 @@ export const storesApi = {
       site?: string;
       inventory_name?: string;
       platform_store_id?: string;
-      department_id?: number;
+      group_id?: number;
       status?: string;
     },
   ) => apiClient.put(`/stores/${id}`, data),
   delete: (id: number) => apiClient.delete(`/stores/${id}`),
-  batchUpdateDepartment: (data: {
+  batchUpdateGroup: (data: {
     store_ids: number[];
-    department_id?: number;
-  }) => apiClient.post("/stores/batch-update-department", data),
+    group_id?: number | null;
+  }) => apiClient.post("/stores/batch-update-group", data),
   // 店铺分配人员
   getMembers: (storeId: number) => apiClient.get(`/stores/${storeId}/members`),
   addMembers: (storeId: number, data: { user_ids: number[] }) =>
@@ -488,7 +495,7 @@ export const productsApi = {
     product_code?: string;
     name: string;
     name_en?: string;
-    product_type?: string;
+    product_type?: string | string[];
     product_attribute?: string;
     category?: string;
     brand?: string;
@@ -508,6 +515,9 @@ export const productsApi = {
     local_inbound_date?: string;
     local_stock_age?: number;
   }) => apiClient.post("/products/", data),
+  // 生成下一个产品编码（成品 BXHS-CP-##### / 配件 BXHS-PJ-#####）
+  getNextCode: (productType: string = "finished") =>
+    apiClient.get("/products/next-code", { params: { product_type: productType } }),
   update: (
     id: number,
     data: {
@@ -984,6 +994,8 @@ export const permissionsApi = {
     data: { name?: string; description?: string; sort_order?: number },
   ) => apiClient.put(`/permissions/roles/${id}`, data),
   deleteRole: (id: number) => apiClient.delete(`/permissions/roles/${id}`),
+  copyRole: (roleId: number, data: { name: string; code: string; description?: string }) =>
+    apiClient.post(`/permissions/roles/${roleId}/copy`, data),
 
   // 权限管理
   getPermissions: (type?: string) =>
@@ -1195,7 +1207,7 @@ export const productBindingsApi = {
 // ========== Product Selection API ==========
 export const productSelectionApi = {
   getTypes: () => apiClient.get("/product-selection/types"),
-  getDates: () => apiClient.get("/product-selection/dates"),
+  getDates: (site?: string) => apiClient.get("/product-selection/dates", { params: site ? { site } : {} }),
   getSites: () => apiClient.get("/product-selection/sites"),
   getList: (params?: {
     page?: number;
@@ -1207,10 +1219,25 @@ export const productSelectionApi = {
     status?: string[];
     sort_by?: string;
     sort_order?: string;
+    rate_mode?: string;
   }) => apiClient.get("/product-selection/", { params }),
   getById: (id: number) => apiClient.get(`/product-selection/${id}`),
-  submitForApproval: (id: number) =>
-    apiClient.post(`/product-selection/${id}/submit-for-approval`, {}),
+  submitForApproval: (id: number, data?: {
+    ali_1688_url?: string;
+    purchase_price?: number;
+    purchase_quantity?: number;
+    store_group_id?: number;
+  }) =>
+    apiClient.post(`/product-selection/${id}/submit-for-approval`, data || {}),
+  getProfitSettings: () => apiClient.get("/product-selection/profit-settings"),
+  saveProfitSettings: (data: {
+    site: string;
+    ad_fee_rate: number;
+    storage_fee_rate: number;
+    tax_rate: number;
+    return_rate: number;
+  }) => apiClient.put("/product-selection/profit-settings", data),
+  resetProfitSettings: () => apiClient.post("/product-selection/profit-settings/reset"),
   approve: (id: number) =>
     apiClient.post(`/product-selection/${id}/approve`, {}),
   cancelApprovalApplication: (id: number) =>
@@ -1373,7 +1400,7 @@ export const replenishmentOrdersApi = {
     page?: number;
     page_size?: number;
     status?: string;
-    platform?: string;
+    store_group_id?: number;
     search?: string;
   }) => apiClient.get("/replenishment-orders/", { params }),
   getDetail: (id: number) => apiClient.get(`/replenishment-orders/${id}`),
@@ -1402,9 +1429,13 @@ export const replenishmentOrdersApi = {
     apiClient.get("/replenishment-orders/template/download", {
       responseType: "blob",
     }),
-  uploadPreview: (file: File) => {
+  // nameOverrides: {行号: 品名}，缺失信息弹窗创建产品后重新解析时传入编辑后的品名
+  uploadPreview: (file: File, nameOverrides?: Record<string, string>) => {
     const formData = new FormData();
     formData.append("file", file);
+    if (nameOverrides && Object.keys(nameOverrides).length > 0) {
+      formData.append("name_overrides", JSON.stringify(nameOverrides));
+    }
     return apiClient.post("/replenishment-orders/upload/preview", formData, {
       headers: { "Content-Type": "multipart/form-data" },
     });

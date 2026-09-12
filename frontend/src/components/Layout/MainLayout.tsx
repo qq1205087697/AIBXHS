@@ -377,7 +377,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               icon: <Contact size={18} />,
               label: '供应商管理',
             }] : []),
-        ...(hasPermission('warehouse:view')
+        ...(hasPermission('base_table:view')
           ? [{
               key: '/base-table',
               icon: <Table2 size={18} />,

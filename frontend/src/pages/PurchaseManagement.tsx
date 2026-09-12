@@ -89,7 +89,7 @@ interface WarehouseItem {
 }
 
 const statusLabelMap: Record<string, string> = {
-  draft: '草稿',
+  draft: '待审批',  // 草稿即待审批（转采购单后初始状态，审批通过变为已审批）
   pending: '待审批',
   approved: '已审批',
   purchased: '已采购',
@@ -126,8 +126,8 @@ const platformColorMap: Record<string, string> = {
 }
 
 const statusColorMap: Record<string, string> = {
-  draft: 'default',
-  pending: 'processing',
+  draft: 'gold',
+  pending: 'gold',
   approved: 'blue',
   purchased: 'geekblue',
   partial_received: 'orange',
@@ -138,7 +138,7 @@ const statusColorMap: Record<string, string> = {
 
 const statusFilterOptions = [
   { label: '全部', value: '' },
-  { label: '草稿', value: 'draft' },
+  { label: '待审批', value: 'draft' },
   { label: '已审批', value: 'approved' },
   { label: '已采购', value: 'purchased' },
   { label: '部分收货', value: 'partial_received' },
@@ -721,18 +721,22 @@ const PurchaseManagement: React.FC = () => {
       message.warning('请选择要导出的采购单')
       return
     }
+    message.loading({ content: '正在生成导出文件，请稍候...', key: 'purchaseExport', duration: 0 })
     try {
       const res = await purchaseOrdersApi.exportOrders(ids)
       const blob = new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `采购单导出_${new Date().toISOString().slice(0, 10)}.xlsx`
+      // 优先使用后端返回的文件名（单号+日期格式）
+      const disposition: string = res.headers['content-disposition'] || ''
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/)
+      link.download = match ? decodeURIComponent(match[1].trim().replace(/^["']|["']$/g, '')) : `采购单_批量_${new Date().toISOString().slice(0, 10)}.xlsx`
       link.click()
       window.URL.revokeObjectURL(url)
-      message.success('导出成功')
+      message.success({ content: '导出成功', key: 'purchaseExport' })
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '导出失败')
+      message.error({ content: e?.response?.data?.detail || '导出失败', key: 'purchaseExport' })
     }
   }
 

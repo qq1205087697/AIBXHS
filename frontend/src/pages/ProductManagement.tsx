@@ -250,6 +250,7 @@ const filterFieldOptions = [
   { label: '已采购数量', value: 'purchased_quantity' },
   { label: '平台数', value: 'platform_count' },
   { label: '状态', value: 'status' },
+  { label: '配件绑定情况', value: 'accessory_binding' },
 ]
 
 // 操作符选项
@@ -263,6 +264,24 @@ const filterOperatorOptions = [
   { label: '包含', value: 'contains' },
   { label: '不包含', value: 'not_contains' },
 ]
+
+// 有固定候选值的字段：值输入渲染为下拉选择框
+const fieldValueOptions: Record<string, { label: string; value: string }[]> = {
+  product_type: [
+    { label: '成品', value: 'finished' },
+    { label: '配件', value: 'accessory' },
+  ],
+  status: [
+    { label: '启用', value: 'active' },
+    { label: '停用', value: 'inactive' },
+    { label: '归档', value: 'archived' },
+  ],
+  accessory_binding: [
+    { label: '未绑定', value: 'unbound' },
+    { label: '已绑定', value: 'bound' },
+    { label: '无配件', value: 'no_accessory' },
+  ],
+}
 
 
 const PRODUCT_FILTER_SESSION_KEY = 'product_management_session_filters_v1'
@@ -2257,7 +2276,14 @@ const productAttributeLabelMap: Record<string, string> = {
                           <div key={condition.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <Select
                               value={condition.field}
-                              onChange={(v) => updateFilterCondition(condition.id, 'field', v)}
+                              onChange={(v) => {
+                                updateFilterCondition(condition.id, 'field', v)
+                                // 切换到有固定候选值的字段时，重置操作符为"等于"并清空已填的值
+                                if (fieldValueOptions[v as string]) {
+                                  updateFilterCondition(condition.id, 'operator', 'eq')
+                                  updateFilterCondition(condition.id, 'value', '')
+                                }
+                              }}
                               options={filterFieldOptions}
                               style={{ width: 150 }}
                               size="middle"
@@ -2287,6 +2313,25 @@ const productAttributeLabelMap: Record<string, string> = {
                                   style={{ flex: 1 }}
                                   size="middle"
                                   min={0}
+                                />
+                              </>
+                            ) : fieldValueOptions[condition.field] ? (
+                              <>
+                                <Select
+                                  value={condition.operator}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'operator', v)}
+                                  options={filterOperatorOptions.filter(o => o.value === 'eq' || o.value === 'neq')}
+                                  style={{ width: 100 }}
+                                  size="middle"
+                                />
+                                <Select
+                                  value={condition.value || undefined}
+                                  onChange={(v) => updateFilterCondition(condition.id, 'value', v || '')}
+                                  options={fieldValueOptions[condition.field]}
+                                  placeholder="选择值"
+                                  style={{ flex: 1 }}
+                                  size="middle"
+                                  allowClear
                                 />
                               </>
                             ) : (

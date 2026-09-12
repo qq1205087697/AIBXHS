@@ -119,6 +119,14 @@ async def create_store_group(
     current_user: User = Depends(get_current_admin_user),
 ):
     try:
+        # 分组名不可重复（同一租户内，未删除的分组）
+        dup = db.execute(
+            text("SELECT id FROM store_groups WHERE tenant_id = :tid AND name = :name AND deleted_at IS NULL"),
+            {"tid": current_user.tenant_id, "name": data.name},
+        ).fetchone()
+        if dup:
+            raise HTTPException(status_code=400, detail="分组名称已存在，请更换名称")
+
         result = db.execute(
             text("""
                 INSERT INTO store_groups (tenant_id, name, description)
@@ -151,6 +159,13 @@ async def update_store_group(
         updates = []
         params: dict = {"id": group_id}
         if data.name is not None:
+            # 分组名不可重复（排除自身）
+            dup = db.execute(
+                text("SELECT id FROM store_groups WHERE tenant_id = :tid AND name = :name AND id != :gid AND deleted_at IS NULL"),
+                {"tid": current_user.tenant_id, "name": data.name, "gid": group_id},
+            ).fetchone()
+            if dup:
+                raise HTTPException(status_code=400, detail="分组名称已存在，请更换名称")
             updates.append("name = :name")
             params["name"] = data.name
         if data.description is not None:

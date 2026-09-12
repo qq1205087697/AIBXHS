@@ -365,6 +365,17 @@ async def get_products(
                         if not field or value == "":
                             continue
 
+                        # 特殊字段：配件绑定情况（值为 unbound/bound/no_accessory，忽略操作符）
+                        if field == "accessory_binding":
+                            exists_sql = "EXISTS (SELECT 1 FROM product_bindings pb WHERE pb.finished_product_id = p.id AND pb.deleted_at IS NULL)"
+                            if value == "no_accessory":
+                                adv_parts.append("(p.product_type LIKE '%finished%' AND p.no_accessory = 1)")
+                            elif value == "bound":
+                                adv_parts.append(f"(p.product_type LIKE '%finished%' AND (p.no_accessory IS NULL OR p.no_accessory = 0) AND {exists_sql})")
+                            elif value == "unbound":
+                                adv_parts.append(f"(p.product_type LIKE '%finished%' AND (p.no_accessory IS NULL OR p.no_accessory = 0) AND NOT {exists_sql})")
+                            continue
+
                         # 字段映射到SQL列/表达式
                         field_sql_map = {
                             "local_quantity": "COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0)",
@@ -2689,7 +2700,10 @@ async def get_product_profit_margins(
         if not product:
             raise HTTPException(status_code=404, detail="商品不存在")
 
-        margins = _fetch_profit_margins(db, [product_id], current_user.tenant_id)
+        margins = _fetch_profit_margins(
+            db, [product_id], current_user.tenant_id,
+            current_user.id, is_admin_user(current_user, db)
+        )
         return {"success": True, "data": margins.get(product_id, [])}
     except HTTPException:
         raise
@@ -2709,11 +2723,21 @@ async def batch_get_product_profit_margins(
         if not product_ids:
             return {"success": True, "data": {}}
 
-        is_admin = current_user.role == 'admin' if hasattr(current_user, 'role') else False
+        is_admin = is_admin_user(current_user, db)
         margins = _fetch_profit_margins(db, product_ids, current_user.tenant_id, current_user.id, is_admin)
         return {"success": True, "data": margins}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"批量获取利润率失败: {str(e)}")
+
+
+def is_admin_user(user: User, db: Session) -> bool:
+    """判断用户是否是管理员（通过 role_id）"""
+    if not user.role_id:
+        return False
+    role = db.execute(text("""
+        SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+    """), {"role_id": user.role_id}).fetchone()
+    return bool(role and role[0] == "admin")
 
 
 def _fetch_profit_margins(db: Session, product_ids: list, tenant_id: int, user_id: int = None, is_admin: bool = False) -> dict:
