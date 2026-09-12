@@ -1400,7 +1400,7 @@ export const replenishmentOrdersApi = {
     page?: number;
     page_size?: number;
     status?: string;
-    platform?: string;
+    store_group_id?: number;
     search?: string;
   }) => apiClient.get("/replenishment-orders/", { params }),
   getDetail: (id: number) => apiClient.get(`/replenishment-orders/${id}`),

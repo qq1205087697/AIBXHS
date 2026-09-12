@@ -365,6 +365,17 @@ async def get_products(
                         if not field or value == "":
                             continue
 
+                        # 特殊字段：配件绑定情况（值为 unbound/bound/no_accessory，忽略操作符）
+                        if field == "accessory_binding":
+                            exists_sql = "EXISTS (SELECT 1 FROM product_bindings pb WHERE pb.finished_product_id = p.id AND pb.deleted_at IS NULL)"
+                            if value == "no_accessory":
+                                adv_parts.append("(p.product_type LIKE '%finished%' AND p.no_accessory = 1)")
+                            elif value == "bound":
+                                adv_parts.append(f"(p.product_type LIKE '%finished%' AND (p.no_accessory IS NULL OR p.no_accessory = 0) AND {exists_sql})")
+                            elif value == "unbound":
+                                adv_parts.append(f"(p.product_type LIKE '%finished%' AND (p.no_accessory IS NULL OR p.no_accessory = 0) AND NOT {exists_sql})")
+                            continue
+
                         # 字段映射到SQL列/表达式
                         field_sql_map = {
                             "local_quantity": "COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0)",

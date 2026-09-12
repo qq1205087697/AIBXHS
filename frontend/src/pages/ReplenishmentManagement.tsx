@@ -154,11 +154,6 @@ const statusFilterOptions = [
   { label: '已取消', value: 'cancelled' },
 ]
 
-const platformFilterOptions = [
-  { label: '全部平台', value: '' },
-  ...platformOptions,
-]
-
 let itemKeyCounter = 0
 const generateItemKey = () => `item_${Date.now()}_${++itemKeyCounter}`
 
@@ -215,7 +210,6 @@ const ReplenishmentManagement: React.FC = () => {
   const [form] = Form.useForm()
   const [searchText, setSearchText] = useState('')
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined)
-  const [platformFilter, setPlatformFilter] = useState<string | undefined>(undefined)
   const [groupFilter, setGroupFilter] = useState<number | undefined>(undefined) // 店铺分组筛选
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [filters, setFilters] = useState<Record<string, any>>({})
@@ -402,14 +396,14 @@ const ReplenishmentManagement: React.FC = () => {
     setPagination((prev) => ({ ...prev, current: 1 }))
   }
 
-  const handlePlatformFilter = (value: string | undefined) => {
-    setPlatformFilter(value)
+  const handleGroupFilter = (value: number | undefined) => {
+    setGroupFilter(value)
     setFilters((prev) => {
       const next: Record<string, any> = { ...prev }
       if (value) {
-        next.platform = value
+        next.store_group_id = value
       } else {
-        delete next.platform
+        delete next.store_group_id
       }
       return next
     })
@@ -1070,6 +1064,10 @@ const ReplenishmentManagement: React.FC = () => {
     }
     for (const i of idxList) {
       const r = pendingSkuRows[i]
+      if (!String(r.sku || '').trim()) {
+        message.error(`第 ${r.row_no} 行：平台SKU不能为空，请填写实际平台SKU`)
+        return
+      }
       if (r.store_group_id) {
         const groupStores = missingStores.filter((s: any) => s.group_id === r.store_group_id)
         if (groupStores.length === 0) {
@@ -1608,12 +1606,14 @@ const ReplenishmentManagement: React.FC = () => {
               options={statusFilterOptions}
             />
             <Select
-              placeholder="平台"
+              placeholder="店铺分组"
               allowClear
-              style={{ width: 140 }}
-              value={platformFilter}
-              onChange={handlePlatformFilter}
-              options={platformFilterOptions}
+              showSearch
+              optionFilterProp="label"
+              style={{ width: 160 }}
+              value={groupFilter}
+              onChange={handleGroupFilter}
+              options={storeGroups.map(g => ({ label: g.name, value: g.id }))}
             />
           </Space>
         }
@@ -2125,7 +2125,7 @@ const ReplenishmentManagement: React.FC = () => {
               </div>
               <Table
                 size="small"
-                rowKey={(r: any) => `${r.row_no}-${r.sku}`}
+                rowKey={(r: any) => String(r.row_no)}
                 dataSource={newProductRows}
                 pagination={false}
                 style={{ marginBottom: 20 }}
@@ -2194,7 +2194,7 @@ const ReplenishmentManagement: React.FC = () => {
               </div>
               <Table
                 size="small"
-                rowKey={(r: any) => `${r.row_no}-${r.sku}`}
+                rowKey={(r: any) => String(r.row_no)}
                 dataSource={pendingSkuRows}
                 pagination={false}
                 columns={[
@@ -2204,7 +2204,24 @@ const ReplenishmentManagement: React.FC = () => {
                       <span>产品编码 {r.product_code} - 品名：{r.product_name}</span>
                     ),
                   },
-                  { title: '缺失SKU', dataIndex: 'sku', width: 130, align: 'center' as const },
+                  {
+                    title: '缺失SKU', dataIndex: 'sku', width: 150, align: 'center' as const,
+                    render: (v: string, r: any, i: number) => {
+                      if (r._status === 'created') return <span style={{ color: '#999' }}>{v}</span>
+                      // 编码命中的行：平台SKU默认填产品编码，允许修改为实际平台SKU
+                      if (r.sku_is_code) {
+                        return (
+                          <Input
+                            size="small"
+                            value={r.sku}
+                            placeholder="请输入平台SKU"
+                            onChange={(e) => updatePendingSkuRow(i, { sku: e.target.value })}
+                          />
+                        )
+                      }
+                      return v
+                    },
+                  },
                   {
                     title: '店铺分组', dataIndex: 'store_group_name', width: 95, align: 'center' as const,
                     render: (v: string) => v || '未分组',

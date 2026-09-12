@@ -201,7 +201,7 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, na
 
     # 平台SKU -> product_id 映射
     platform_skus = db.execute(text("""
-        SELECT pp.sku, pp.product_id
+        SELECT pp.sku, pp.product_id, pp.store_id
         FROM platform_products pp
         JOIN products p ON p.id = pp.product_id
         WHERE p.tenant_id = :tid AND pp.deleted_at IS NULL AND p.deleted_at IS NULL
@@ -212,6 +212,27 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, na
     for s in platform_skus:
         if s[0]:
             product_platform_skus.setdefault(s[1], set()).add(str(s[0]).strip().lower())
+    # 产品 -> 已覆盖平台商品的店铺集合（store_id 为 JSON 数组，如 '[55]'）
+    product_platform_store_map = {}
+    for s in platform_skus:
+        try:
+            sids = json.loads(s[2]) if s[2] else []
+        except (json.JSONDecodeError, TypeError):
+            sids = []
+        store_set = product_platform_store_map.setdefault(s[1], set())
+        for sid in sids:
+            try:
+                store_set.add(int(sid))
+            except (ValueError, TypeError):
+                continue
+
+    # 店铺分组 -> 分组下店铺集合
+    group_stores_map = {}
+    for s in db.execute(text("""
+        SELECT group_id, id FROM stores
+        WHERE tenant_id = :tid AND deleted_at IS NULL AND group_id IS NOT NULL
+    """), {"tid": tenant_id}).fetchall():
+        group_stores_map.setdefault(s[0], set()).add(s[1])
 
     # 查询店铺分组列表，用于名称→ID映射
     store_groups = db.execute(text("""
@@ -272,6 +293,8 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, na
         # 品名匹配成功（缺平台SKU候选）/ 全新品待创建
         pending_entry = None
         new_entry = None
+        # 平台信息完整性待检查的产品ID（延后到分组解析后统一判断）
+        platform_check_pid = None
 
         val_lower = sku.lower()
         name_key = product_name_from_row.lower()
@@ -296,17 +319,21 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, na
                 errs.append(
                     f"{conflict_desc}，与品名 '{product_name_from_row}' 对应的产品 [{p[1] or ''} {product_name}] 不一致，请检查后修改"
                 )
-            # 平台信息完整性检查：该产品下没有此SKU的平台记录时提示补建（SKU为空时无法补建，不提示）
+            # 平台信息完整性检查：仅当该SKU不在产品的平台SKU集合中时触发；
+            # 填的是产品编码时延后按分组覆盖判断，填的是其他未知SKU时提示补建（SKU为空时不提示）
             elif sku and val_lower not in product_platform_skus.get(product_id, set()):
-                pending_entry = {
-                    "row_no": row_no,
-                    "product_id": product_id,
-                    "product_code": p[1] or "",
-                    "product_name": product_name,
-                    "sku": sku,
-                    "store_group_id": None,
-                    "store_group_name": "",
-                }
+                if val_lower == str(p[1] or "").strip().lower():
+                    platform_check_pid = product_id
+                else:
+                    pending_entry = {
+                        "row_no": row_no,
+                        "product_id": product_id,
+                        "product_code": p[1] or "",
+                        "product_name": product_name,
+                        "sku": sku,
+                        "store_group_id": None,
+                        "store_group_name": "",
+                    }
 
         if not product_id:
             if sku and val_lower in product_code_map:
@@ -314,17 +341,9 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, na
                 product_id = pid
                 product_code = pcode or ""
                 product_name = pname or ""
-                # 平台信息完整性检查：产品存在但该SKU没有平台商品记录时，仍可导入，同时提示可补建平台信息
+                # 平台信息完整性检查：延后到分组解析后统一判断
                 if val_lower not in product_platform_skus.get(pid, set()):
-                    pending_entry = {
-                        "row_no": row_no,
-                        "product_id": pid,
-                        "product_code": pcode or "",
-                        "product_name": product_name,
-                        "sku": sku,
-                        "store_group_id": None,
-                        "store_group_name": "",
-                    }
+                    platform_check_pid = pid
             elif sku and val_lower in platform_sku_map:
                 pid = platform_sku_map[val_lower]
                 product_id = pid
@@ -375,6 +394,27 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, na
         if errs:
             row_errors.append(f"第 {row_no} 行: " + "；".join(errs))
             continue
+
+        # 延后的平台信息完整性检查（按产品编码匹配的行）：
+        # 产品在目标分组店铺上已有平台商品时直接导入；未覆盖时提示补建
+        if platform_check_pid:
+            owned_stores = product_platform_store_map.get(platform_check_pid, set())
+            if store_group_id:
+                covered = bool(group_stores_map.get(store_group_id, set()) & owned_stores)
+            else:
+                covered = bool(owned_stores)
+            if not covered:
+                pending_entry = {
+                    "row_no": row_no,
+                    "product_id": platform_check_pid,
+                    "product_code": product_code,
+                    "product_name": product_name,
+                    "sku": sku,
+                    # 填的是产品编码：前端允许编辑实际平台SKU（默认填产品编码）
+                    "sku_is_code": True,
+                    "store_group_id": None,
+                    "store_group_name": "",
+                }
 
         if pending_entry:
             pending_entry["store_group_id"] = store_group_id

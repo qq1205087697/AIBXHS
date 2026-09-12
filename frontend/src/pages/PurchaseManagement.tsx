@@ -728,7 +728,10 @@ const PurchaseManagement: React.FC = () => {
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `采购单导出_${new Date().toISOString().slice(0, 10)}.xlsx`
+      // 优先使用后端返回的文件名（单号+日期格式）
+      const disposition: string = res.headers['content-disposition'] || ''
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/)
+      link.download = match ? decodeURIComponent(match[1].trim().replace(/^["']|["']$/g, '')) : `采购单_批量_${new Date().toISOString().slice(0, 10)}.xlsx`
       link.click()
       window.URL.revokeObjectURL(url)
       message.success({ content: '导出成功', key: 'purchaseExport' })
