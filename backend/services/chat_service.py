@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 import sys
 import logging
@@ -608,7 +609,7 @@ def get_review_analysis(db: Session, review_id: int, tenant_id: Optional[int] = 
     """从数据库获取评论分析结果"""
     query_sql = """
         SELECT id, tenant_id, review_id, model, sentiment, sentiment_score,
-               key_points, topics, suggestions, summary, raw_response, department
+               key_points, topics, suggestions, summary, raw_response, department, departments
         FROM review_analyses
         WHERE review_id = :review_id
     """
@@ -623,6 +624,9 @@ def get_review_analysis(db: Session, review_id: int, tenant_id: Optional[int] = 
     if not row:
         return None
 
+    departments_str = row[12] or row[11] or _infer_department(json.loads(row[7]) if row[7] else [], row[9] or "")
+    departments_list = [d for d in (departments_str or "").split(",") if d]
+
     return {
         "id": row[0],
         "tenant_id": row[1],
@@ -635,33 +639,48 @@ def get_review_analysis(db: Session, review_id: int, tenant_id: Optional[int] = 
         "suggestions": json.loads(row[8]) if row[8] else [],
         "summary": row[9],
         "raw_response": row[10],
-        # 历史数据无department时，按规则推断兜底
-        "department": row[11] or _infer_department(json.loads(row[7]) if row[7] else [], row[9] or "")
+        # 首个板块（兼容旧字段），departments 为全部板块列表
+        "department": departments_list[0] if departments_list else "",
+        "departments": departments_list
     }
 
 
-# 部门板块分类规则提示词（供AI分析输出department字段）
-DEPARTMENT_PROMPT_RULES = """部门板块分类规则（department字段，必须输出以下四个之一）：
+# 部门板块分类规则提示词（供AI分析输出departments字段，支持多板块）
+DEPARTMENT_PROMPT_RULES = """部门板块分类规则（departments字段，从以下四个板块中选择所有符合的，至少选一个，可多选）：
 - operations（运营板块）：文案问题、产品货不对板
 - purchasing（采购板块）：质量不好、字母/印刷出错
 - warehouse（仓库板块）：损坏
 - design（美工板块）：尺寸、颜色、图片、夸大
-根据评论内容判断最符合的板块，无法判断时归入operations。"""
+根据评论内容判断所有符合的板块（例如：商品破损且颜色与描述不符，应同时归入warehouse和design）。完全无法判断时归入operations。"""
+
+
+def _normalize_departments(value) -> str:
+    """归一化AI输出的板块字段为逗号分隔字符串（兼容 list / str / 旧版单值department）"""
+    VALID = ("operations", "purchasing", "warehouse", "design")
+    if isinstance(value, str):
+        items = [v.strip() for v in re.split(r"[,，\s]+", value) if v.strip()]
+    elif isinstance(value, list):
+        items = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        items = []
+    ordered = [k for k in VALID if k in items]
+    return ",".join(ordered)
 
 
 def _infer_department(topics, summary: str = "") -> str:
-    """按关键词规则推断问题板块（用于历史数据兜底）"""
+    """按关键词规则推断问题板块（可命中多个，逗号分隔；用于历史数据兜底）"""
     topics_text = " ".join(topics) if isinstance(topics, list) else (topics or "")
     t = (topics_text + " " + (summary or "")).lower()
+    result = []
     if any(k in t for k in ["货不对板", "描述不符", "与描述", "文案", "假货", "not as described", "different product", "fake"]):
-        return "operations"
+        result.append("operations")
     if any(k in t for k in ["质量", "打印", "印刷", "字母", "做工", "quality", "print"]):
-        return "purchasing"
+        result.append("purchasing")
     if any(k in t for k in ["损坏", "破损", "碎", "裂", "damaged", "broken", "cracked"]):
-        return "warehouse"
+        result.append("warehouse")
     if any(k in t for k in ["尺寸", "颜色", "图片", "夸大", "size", "color", "colour", "picture", "photo", "image"]):
-        return "design"
-    return ""
+        result.append("design")
+    return ",".join(result)
 
 
 def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> Optional[dict]:
@@ -735,7 +754,7 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
 }}
 """
 
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},
@@ -745,7 +764,7 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
         )
 
         response_content = response.choices[0].message.content.strip()
-        
+
         # 清理可能的markdown标记
         if response_content.startswith("```"):
             response_content = response_content.split("\n", 1)[-1]
@@ -849,7 +868,7 @@ def analyze_review(db: Session, review: Review) -> dict:
 {{"sentiment":"negative","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}
 """
 
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "你是专业差评分析助手。所有分析结果必须使用中文输出。只输出JSON。"},
@@ -872,15 +891,17 @@ def analyze_review(db: Session, review: Review) -> dict:
             result = {"sentiment": "negative", "sentiment_score": 3, "key_points": [], "topics": [], "suggestions": [], "summary": response_content}
 
         insert_query = text("""
-            INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department)
-            VALUES (:tenant_id, :review_id, :model, :sentiment, :score, :kp, :top, :sug, :sum, :raw, :dept)
+            INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department, departments)
+            VALUES (:tenant_id, :review_id, :model, :sentiment, :score, :kp, :top, :sug, :sum, :raw, :dept, :depts)
         """)
+        depts_str = _normalize_departments(result.get("departments") or result.get("department"))
         db.execute(insert_query, {
             "tenant_id": review.tenant_id, "review_id": review.id, "model": settings.OPENAI_MODEL,
             "sentiment": result.get("sentiment", "negative"), "score": result.get("sentiment_score", 3),
             "kp": json.dumps(result.get("key_points", [])), "top": json.dumps(result.get("topics", [])),
             "sug": json.dumps(result.get("suggestions", [])), "sum": result.get("summary", ""), "raw": response_content,
-            "dept": result.get("department", "")
+            "dept": depts_str.split(",")[0] if depts_str else "",
+            "depts": depts_str
         })
         
         # 更新重要性等级
@@ -962,11 +983,11 @@ def batch_analyze_reviews(db: Session, review_ids: List[int], tenant_id: Optiona
 
 """ + DEPARTMENT_PROMPT_RULES + """
 
-输出JSON:{{"sentiment":"","sentiment_score":0,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}"""
+输出JSON:{{"sentiment":"","sentiment_score":0,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","departments":["operations","purchasing","warehouse","design"]}}"""
 
                 if settings.OPENAI_API_KEY:
                     try:
-                        resp = openai.ChatCompletion.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3, timeout=120)
+                        resp = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=[{"role":"system","content":"你是专业的跨境电商差评分析师。所有分析结果必须使用中文输出。只输出JSON，不要输出其他内容。"},{"role":"user","content":prompt}], temperature=0.3, timeout=120)
                         rc = resp.choices[0].message.content.strip()
                         if rc.startswith("```"): rc = rc.split("\n",1)[-1]
                         if rc.endswith("```"): rc = rc[:-3]

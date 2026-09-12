@@ -4,7 +4,7 @@ import asyncio
 import uuid
 import requests
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -172,7 +172,147 @@ def _row_to_dict(row) -> dict:
         "status": row[28] or "",
         "created_at": row[29].strftime("%Y-%m-%d %H:%M:%S") if row[29] else "",
         "updated_at": row[30].strftime("%Y-%m-%d %H:%M:%S") if row[30] else "",
+        # 申请选品信息（LEFT JOIN users / store_groups）
+        "ali_1688_url": (row[34] or "") if len(row) > 34 else "",
+        "purchase_price": float(row[35]) if len(row) > 35 and row[35] is not None else None,
+        "purchase_quantity": row[36] if len(row) > 36 else None,
+        "applicant_id": row[37] if len(row) > 37 else None,
+        "store_group_id": row[38] if len(row) > 38 else None,
+        "applicant_name": (row[39] or "") if len(row) > 39 else "",
+        "store_group_name": (row[40] or "") if len(row) > 40 else "",
     }
+
+
+# ===== 利润计算逻辑设置 =====
+# 站点归一化：site 字符串 -> us/de/uk
+PROFIT_SETTING_SITES = {"us": "美国", "de": "德国", "uk": "英国"}
+PROFIT_DEFAULTS = {
+    "us": {"ad_fee_rate": 0.15, "storage_fee_rate": 0.02, "tax_rate": 0.20, "return_rate": 0.0},
+    "de": {"ad_fee_rate": 0.15, "storage_fee_rate": 0.02, "tax_rate": 0.20, "return_rate": 0.06},
+    "uk": {"ad_fee_rate": 0.15, "storage_fee_rate": 0.02, "tax_rate": 0.20, "return_rate": 0.06},
+}
+
+
+def _normalize_site_key(site: str | None) -> str:
+    """站点字符串归一化为 us/de/uk"""
+    s = (site or "").lower()
+    if "德" in (site or "") or "de" in s:
+        return "de"
+    if "英" in (site or "") or "uk" in s or "gb" in s:
+        return "uk"
+    return "us"
+
+
+def _ensure_profit_settings_table(db: Session):
+    """确保利润设置表存在"""
+    db.execute(text("""
+        CREATE TABLE IF NOT EXISTS selection_profit_settings (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            tenant_id INT NOT NULL COMMENT '租户ID',
+            site VARCHAR(20) NOT NULL COMMENT '站点: us/de/uk',
+            ad_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.1500 COMMENT '广告费率',
+            storage_fee_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0200 COMMENT '仓储费率',
+            tax_rate DECIMAL(6,4) NOT NULL DEFAULT 0.2000 COMMENT '税率',
+            return_rate DECIMAL(6,4) NOT NULL DEFAULT 0.0000 COMMENT '退货率',
+            updated_by INT NULL COMMENT '更新人',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_tenant_site (tenant_id, site)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='选品利润计算设置'
+    """))
+    db.commit()
+
+
+def _get_profit_settings(db: Session, tenant_id: int) -> dict:
+    """获取租户利润设置（含默认值填充），返回 {us: {...}, de: {...}, uk: {...}}"""
+    _ensure_profit_settings_table(db)
+    rows = db.execute(text(
+        "SELECT site, ad_fee_rate, storage_fee_rate, tax_rate, return_rate "
+        "FROM selection_profit_settings WHERE tenant_id = :tid"
+    ), {"tid": tenant_id}).fetchall()
+    saved = {r[0]: {
+        "ad_fee_rate": float(r[1]), "storage_fee_rate": float(r[2]),
+        "tax_rate": float(r[3]), "return_rate": float(r[4]),
+    } for r in rows}
+    result = {}
+    for key, default in PROFIT_DEFAULTS.items():
+        result[key] = saved.get(key, dict(default))
+        result[key]["site_name"] = PROFIT_SETTING_SITES[key]
+        result[key]["currency"] = {"us": "USD", "de": "EUR", "uk": "GBP"}[key]
+    return result
+
+
+class ProfitSettingUpdate(BaseModel):
+    site: str  # us / de / uk
+    ad_fee_rate: float = Field(ge=0, le=1)
+    storage_fee_rate: float = Field(ge=0, le=1)
+    tax_rate: float = Field(ge=0, le=1)
+    return_rate: float = Field(ge=0, le=1)
+
+
+@router.get("/profit-settings")
+async def get_profit_settings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取各站点利润计算设置（无记录时返回默认值）"""
+    try:
+        return {"success": True, "data": _get_profit_settings(db, current_user.tenant_id)}
+    except Exception as e:
+        logger.error(f"获取利润设置失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取利润设置失败: {str(e)}")
+
+
+@router.put("/profit-settings")
+async def save_profit_settings(
+    data: ProfitSettingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("product_selection:settings"))
+):
+    """保存指定站点的利润计算设置"""
+    try:
+        if data.site not in PROFIT_SETTING_SITES:
+            raise HTTPException(status_code=400, detail="站点无效，仅支持 us/de/uk")
+        _ensure_profit_settings_table(db)
+        db.execute(text("""
+            INSERT INTO selection_profit_settings
+                (tenant_id, site, ad_fee_rate, storage_fee_rate, tax_rate, return_rate, updated_by, created_at, updated_at)
+            VALUES (:tid, :site, :ad, :storage, :tax, :ret, :uid, NOW(), NOW())
+            ON DUPLICATE KEY UPDATE
+                ad_fee_rate = :ad, storage_fee_rate = :storage, tax_rate = :tax,
+                return_rate = :ret, updated_by = :uid, updated_at = NOW()
+        """), {
+            "tid": current_user.tenant_id, "site": data.site,
+            "ad": data.ad_fee_rate, "storage": data.storage_fee_rate,
+            "tax": data.tax_rate, "ret": data.return_rate, "uid": current_user.id,
+        })
+        db.commit()
+        return {"success": True, "message": "保存成功", "data": _get_profit_settings(db, current_user.tenant_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"保存利润设置失败: {e}")
+        raise HTTPException(status_code=500, detail=f"保存利润设置失败: {str(e)}")
+
+
+@router.post("/profit-settings/reset")
+async def reset_profit_settings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("product_selection:settings"))
+):
+    """恢复所有站点利润设置为默认值"""
+    try:
+        _ensure_profit_settings_table(db)
+        db.execute(text(
+            "DELETE FROM selection_profit_settings WHERE tenant_id = :tid"
+        ), {"tid": current_user.tenant_id})
+        db.commit()
+        return {"success": True, "message": "已恢复默认逻辑", "data": _get_profit_settings(db, current_user.tenant_id)}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"恢复默认利润设置失败: {e}")
+        raise HTTPException(status_code=500, detail=f"恢复默认利润设置失败: {str(e)}")
 
 
 @router.get("/types")
@@ -198,18 +338,24 @@ async def get_product_types(
 
 @router.get("/dates")
 async def get_product_dates(
+    site: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """获取当前租户已有的选品日期列表（去重，倒序）"""
+    """获取当前租户已有的选品日期列表（去重，倒序；可按站点过滤，只返回该站点有数据的日期）"""
     try:
-        query = text("""
+        params = {"tenant_id": current_user.tenant_id}
+        site_cond = ""
+        if site:
+            site_cond = " AND site = :site"
+            params["site"] = site
+        query = text(f"""
             SELECT DISTINCT DATE(created_at) AS dt
             FROM product_selections
-            WHERE tenant_id = :tenant_id AND deleted_at IS NULL
+            WHERE tenant_id = :tenant_id AND deleted_at IS NULL{site_cond}
             ORDER BY dt DESC
         """)
-        result = db.execute(query, {"tenant_id": current_user.tenant_id})
+        result = db.execute(query, params)
         dates = [row[0].strftime("%Y-%m-%d") if hasattr(row[0], 'strftime') else str(row[0]) for row in result]
         return {"success": True, "data": dates}
     except Exception as e:
@@ -248,6 +394,7 @@ async def get_product_selections(
     date_filter: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = "desc",
+    rate_mode: Optional[str] = "realtime",
     status: Optional[List[str]] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -292,13 +439,50 @@ async def get_product_selections(
         total = db.execute(count_query, params).scalar() or 0
 
         order_column = "ps.created_at"
+        order_nulls_clause = ""
+        profit_join = ""
         if sort_by and sort_by in [
             "composite_score", "rating", "price", "monthly_sales", "created_at",
-            "product_title", "asin", "product_type", "site", "commission",
-            "first_leg_cost", "last_mile_cost", "weight_kg", "cost_at_15_profit",
-            "review_count"
+            "commission", "first_leg_cost", "last_mile_cost", "weight_kg",
+            "cost_at_15_profit", "review_count", "purchase_price", "purchase_quantity"
         ]:
             order_column = f"ps.{sort_by}"
+        elif sort_by in ("actual_profit", "actual_profit_margin", "profit_15"):
+            # 实际毛利/毛利率/15%毛利为动态计算列，按与前端一致的公式在 SQL 中计算后排序
+            rate_col = "ps.scrape_rate" if (rate_mode or "") == "scrape" else "ps.realtime_rate"
+            # 站点归一化：与美国/us→us，德国/de→de，英国/uk|gb→uk，默认us
+            site_key_sql = ("CASE "
+                            "WHEN ps.site LIKE '%德%' OR LOWER(ps.site) LIKE '%de%' THEN 'de' "
+                            "WHEN ps.site LIKE '%英%' OR LOWER(ps.site) LIKE '%uk%' OR LOWER(ps.site) LIKE '%gb%' THEN 'uk' "
+                            "ELSE 'us' END")
+            profit_join = (
+                " LEFT JOIN selection_profit_settings sps "
+                f"ON sps.tenant_id = ps.tenant_id AND sps.site = {site_key_sql}"
+            )
+            # 退货率默认：美国0，德国/英国0.06（与前端默认一致）
+            return_rate_sql = (
+                f"COALESCE(sps.return_rate, CASE {site_key_sql} WHEN 'us' THEN 0 ELSE 0.06 END)"
+            )
+            if sort_by == "profit_15":
+                # 15%毛利 = 价格 × 15% ÷ 汇率（CNY）
+                order_column = f"(ps.price * 0.15 / NULLIF({rate_col}, 0))"
+            else:
+                profit_expr = (
+                    "(ps.price - ps.purchase_price * " + rate_col + " "
+                    "- COALESCE(ps.first_leg_cost, 0) "
+                    "- COALESCE(ps.last_mile_cost, 0) "
+                    "- COALESCE(ps.commission, 0) "
+                    "- ps.price * COALESCE(sps.ad_fee_rate, 0.15) "
+                    "- ps.price * COALESCE(sps.storage_fee_rate, 0.02) "
+                    "- ps.price * COALESCE(sps.tax_rate, 0.20) "
+                    "- ps.price * " + return_rate_sql + ")"
+                )
+                if sort_by == "actual_profit":
+                    order_column = profit_expr
+                else:
+                    order_column = f"{profit_expr} / NULLIF(ps.price, 0)"
+            # 计算值为空的记录排最后
+            order_nulls_clause = f"({order_column} IS NULL) ASC, "
         order_dir = "DESC" if sort_order.lower() == "desc" else "ASC"
 
         offset = (page - 1) * page_size
@@ -313,10 +497,16 @@ async def get_product_selections(
                    ps.seasonality, ps.infringement_analysis, ps.infringement_conclusion, ps.traffic_score_result,
                    ps.traffic_score, ps.sales_score, ps.rating_score, ps.penalty_factor, ps.composite_score,
                    ps.status, ps.created_at, ps.updated_at,
-                   ps.scrape_rate, ps.realtime_rate, ps.category
-            FROM product_selections ps
+                   ps.scrape_rate, ps.realtime_rate, ps.category,
+                   ps.ali_1688_url, ps.purchase_price, ps.purchase_quantity,
+                   ps.applicant_id, ps.store_group_id,
+                   COALESCE(NULLIF(u.nickname, ''), u.username) AS applicant_name,
+                   sg.name AS store_group_name
+            FROM product_selections ps{profit_join}
+            LEFT JOIN users u ON u.id = ps.applicant_id
+            LEFT JOIN store_groups sg ON sg.id = ps.store_group_id AND sg.deleted_at IS NULL
             WHERE {where_clause}
-            ORDER BY {order_column} {order_dir}
+            ORDER BY {order_nulls_clause}{order_column} {order_dir}
             LIMIT :limit OFFSET :offset
         """)
         result = db.execute(query, params)
@@ -350,8 +540,14 @@ async def get_product_selection(
                    ps.seasonality, ps.infringement_analysis, ps.infringement_conclusion, ps.traffic_score_result,
                    ps.traffic_score, ps.sales_score, ps.rating_score, ps.penalty_factor, ps.composite_score,
                    ps.status, ps.created_at, ps.updated_at,
-                   ps.scrape_rate, ps.realtime_rate, ps.category
+                   ps.scrape_rate, ps.realtime_rate, ps.category,
+                   ps.ali_1688_url, ps.purchase_price, ps.purchase_quantity,
+                   ps.applicant_id, ps.store_group_id,
+                   COALESCE(NULLIF(u.nickname, ''), u.username) AS applicant_name,
+                   sg.name AS store_group_name
             FROM product_selections ps
+            LEFT JOIN users u ON u.id = ps.applicant_id
+            LEFT JOIN store_groups sg ON sg.id = ps.store_group_id AND sg.deleted_at IS NULL
             WHERE ps.id = :id AND ps.tenant_id = :tid AND ps.deleted_at IS NULL
         """)
         row = db.execute(query, {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
@@ -1044,13 +1240,22 @@ async def recalc_all_scores(
         raise HTTPException(status_code=500, detail=f"重新计算评分失败: {str(e)}")
 
 
+class SubmitForApprovalData(BaseModel):
+    """申请选品弹窗数据"""
+    ali_1688_url: Optional[str] = None
+    purchase_price: Optional[float] = None
+    purchase_quantity: Optional[int] = None
+    store_group_id: Optional[int] = None
+
+
 @router.post("/{selection_id}/submit-for-approval")
 async def submit_for_approval(
     selection_id: int,
+    data: Optional[SubmitForApprovalData] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(PermissionChecker("product_selection:submit"))
 ):
-    """提交选品审批（状态变更为 pending）"""
+    """提交选品审批（状态变更为 pending），同时记录1688链接/采购价/数量/申请人/店铺分组"""
     try:
         row = db.execute(text(
             "SELECT id, status, product_title FROM product_selections WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
@@ -1064,9 +1269,33 @@ async def submit_for_approval(
         if current_status == "approved":
             raise HTTPException(status_code=400, detail="该选品已审批通过")
 
-        db.execute(text(
-            "UPDATE product_selections SET status = 'pending', updated_at = NOW() WHERE id = :id"
-        ), {"id": selection_id})
+        # 校验店铺分组存在
+        if data and data.store_group_id:
+            sg = db.execute(text(
+                "SELECT id FROM store_groups WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            ), {"id": data.store_group_id, "tid": current_user.tenant_id}).fetchone()
+            if not sg:
+                raise HTTPException(status_code=400, detail="店铺分组不存在")
+
+        set_clause = "status = 'pending', updated_at = NOW()"
+        params = {"id": selection_id, "uid": current_user.id}
+        if data:
+            if data.ali_1688_url is not None:
+                set_clause += ", ali_1688_url = :aurl"
+                params["aurl"] = data.ali_1688_url.strip()
+            if data.purchase_price is not None:
+                set_clause += ", purchase_price = :pprice"
+                params["pprice"] = data.purchase_price
+            if data.purchase_quantity is not None:
+                set_clause += ", purchase_quantity = :pqty"
+                params["pqty"] = data.purchase_quantity
+            if data.store_group_id is not None:
+                set_clause += ", store_group_id = :sgid"
+                params["sgid"] = data.store_group_id
+        # 申请人始终记录为当前操作用户
+        set_clause += ", applicant_id = :uid"
+
+        db.execute(text(f"UPDATE product_selections SET {set_clause} WHERE id = :id"), params)
         db.commit()
         return {"success": True, "message": "已提交审批"}
     except HTTPException:

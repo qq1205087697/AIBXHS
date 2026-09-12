@@ -9,13 +9,65 @@ from database.database import SessionLocal, get_db
 from config import get_settings
 from services.translate_service import translate_review
 from services.chat_service import batch_analyze_reviews
-from dependencies import get_current_user
+from dependencies import get_current_user, PermissionChecker
 from models.user import User
 import concurrent.futures
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
+# 跨店铺可见的推送板块（运营仍按店铺隔离，订阅不扩展可见范围）
+CROSS_STORE_SECTIONS = ("purchasing", "warehouse", "design")
+
+
+def build_review_visibility_condition(db: Session, current_user, params: dict, alias: str = "r"):
+    """非管理员的差评可见范围SQL条件：已分配店铺的差评 ∪ 订阅板块命中的差评。
+
+    - 运营板块按店铺隔离（订阅不扩展可见范围）
+    - 采购/仓库/美工板块订阅后可见命中板块的全部差评（跨店铺）
+    - 一条差评可属多个板块（review_analyses.departments逗号分隔），兼容旧版单值department字段
+    管理员返回None（不加条件）；两者皆无返回"1=0"。
+    """
+    is_admin = False
+    if current_user.role_id:
+        role = db.execute(text("""
+            SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL
+        """), {"role_id": current_user.role_id}).fetchone()
+        if role and role[0] == "admin":
+            is_admin = True
+    if is_admin:
+        return None
+
+    store_ids = db.execute(
+        text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+        {"uid": current_user.id, "tid": current_user.tenant_id}
+    ).fetchall()
+    store_id_list = [s[0] for s in store_ids]
+    sub_rows = db.execute(
+        text("SELECT section FROM review_section_subscribers WHERE tenant_id = :tid AND user_id = :uid"),
+        {"uid": current_user.id, "tid": current_user.tenant_id}
+    ).fetchall()
+    section_list = [s[0] for s in sub_rows if s[0] in CROSS_STORE_SECTIONS]
+
+    parts = []
+    if store_id_list:
+        ph = ",".join([f":vs_{i}" for i in range(len(store_id_list))])
+        for i, sid in enumerate(store_id_list):
+            params[f"vs_{i}"] = sid
+        parts.append(f"{alias}.store_id IN ({ph})")
+    if section_list:
+        sec_conds = []
+        for i, sec in enumerate(section_list):
+            params[f"vsec_{i}"] = sec
+            sec_conds.append(f"FIND_IN_SET(:vsec_{i}, COALESCE(NULLIF(ras.departments, ''), ras.department)) > 0")
+        parts.append(
+            "EXISTS (SELECT 1 FROM review_analyses ras WHERE ras.review_id = " + alias + ".id "
+            "AND ras.tenant_id = " + alias + ".tenant_id AND ras.deleted_at IS NULL AND (" + " OR ".join(sec_conds) + "))"
+        )
+    if parts:
+        return "(" + " OR ".join(parts) + ")"
+    return "1=0"
 
 # 异步处理批量分析 - 使用独立的线程池
 def async_batch_analyze(review_ids: List[int], tenant_id: Optional[int] = None):
@@ -48,8 +100,8 @@ async def get_reviews(
     start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     status: Optional[str] = Query(None, description="状态筛选: new, read, processing, resolved"),
-    importance_level: Optional[str] = Query(None, description="重要等级筛选: high, medium, low"),
-    department: Optional[str] = Query(None, description="问题板块筛选: operations, purchasing, warehouse, design"),
+    importance_level: Optional[str] = Query(None, description="重要等级筛选，支持多选逗号分隔: high,medium,low"),
+    department: Optional[str] = Query(None, description="问题板块筛选，支持多选逗号分隔: operations,purchasing,warehouse,design"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -65,7 +117,8 @@ async def get_reviews(
             has_importance_level = check_col.fetchone() is not None
         except:
             has_importance_level = False
-        
+        ensure_suggestion_processed_column(db)
+
         # 非管理员用户按部门过滤数据
         is_admin = False
         if current_user.role_id:
@@ -76,19 +129,9 @@ async def get_reviews(
                 is_admin = True
         
         if not is_admin:
-            store_ids = db.execute(
-                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
-                {"uid": current_user.id, "tid": current_user.tenant_id}
-            ).fetchall()
-            store_id_list = [s[0] for s in store_ids]
-            if store_id_list:
-                store_placeholders = ",".join([f":store_{i}" for i in range(len(store_id_list))])
-                for i, sid in enumerate(store_id_list):
-                    params[f"store_{i}"] = sid
-                where_conditions.append(f"r.store_id IN ({store_placeholders})")
-            else:
-                # 用户没有分配任何店铺，不显示任何数据
-                where_conditions.append("1=0")
+            # 可见范围 = 已分配店铺的差评 ∪ 订阅板块命中的差评（采购/仓库/美工跨店铺；运营按店铺隔离）
+            visibility_cond = build_review_visibility_condition(db, current_user, params, alias="r")
+            where_conditions.append(visibility_cond)
         
         if asin_search:
             where_conditions.append("r.asin LIKE :asin_search")
@@ -106,20 +149,30 @@ async def get_reviews(
             where_conditions.append("r.review_date <= :end_date")
             params["end_date"] = f"{end_date} 23:59:59"
         if department:
-            where_conditions.append(
-                "EXISTS (SELECT 1 FROM review_analyses rad WHERE rad.review_id = r.id AND rad.tenant_id = r.tenant_id AND rad.deleted_at IS NULL AND rad.department = :department)"
-            )
-            params["department"] = department
+            # 支持多选板块（逗号分隔），任一命中即返回；一条差评可属多个板块（兼容旧版单值department字段）
+            deps = [d.strip().lower() for d in str(department).split(",") if d.strip()]
+            if deps:
+                dep_conds = []
+                for i, d in enumerate(deps):
+                    params[f"dep_{i}"] = d
+                    dep_conds.append(f"FIND_IN_SET(:dep_{i}, COALESCE(NULLIF(rad.departments, ''), rad.department)) > 0")
+                where_conditions.append(
+                    "EXISTS (SELECT 1 FROM review_analyses rad WHERE rad.review_id = r.id AND rad.tenant_id = r.tenant_id AND rad.deleted_at IS NULL "
+                    "AND (" + " OR ".join(dep_conds) + "))"
+                )
         # 处理状态筛选
         if status is not None and status != '' and str(status).strip() != '':
             status_str = str(status).strip()
             where_conditions.append("r.status = :status")
             params["status"] = status_str
-        # 处理重要等级筛选
-        if importance_level is not None and importance_level != '' and str(importance_level).strip() != '':
-            importance_level_str = str(importance_level).strip()
-            where_conditions.append("r.importance_level = :importance_level")
-            params["importance_level"] = importance_level_str
+        # 处理重要等级筛选（支持多选，逗号分隔）
+        if importance_level is not None and importance_level != '' and str(importance_level).strip() != '' and has_importance_level:
+            ils = [s.strip() for s in str(importance_level).split(",") if s.strip()]
+            if ils:
+                il_ph = ",".join([f":il_{i}" for i in range(len(ils))])
+                for i, v in enumerate(ils):
+                    params[f"il_{i}"] = v
+                where_conditions.append(f"r.importance_level IN ({il_ph})")
         
         where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
         
@@ -246,12 +299,12 @@ async def get_reviews(
         reviews = result.fetchall()
 
         analysis_query = text("""
-            SELECT review_id, key_points, summary, topics, suggestions, department
-            FROM review_analyses
+            SELECT review_id, key_points, summary, topics, suggestions, department, departments, suggestion_processed
+        FROM review_analyses
             WHERE tenant_id = :tenant_id AND deleted_at IS NULL
         """)
         analysis_result = db.execute(analysis_query, {"tenant_id": current_user.tenant_id})
-        analysis_map = {row[0]: {"key_points": row[1], "summary": row[2], "topics": row[3], "suggestions": row[4], "department": row[5]} for row in analysis_result}
+        analysis_map = {row[0]: {"key_points": row[1], "summary": row[2], "topics": row[3], "suggestions": row[4], "department": row[5], "departments": row[6], "suggestion_processed": row[7]} for row in analysis_result}
 
         review_data = []
         for idx, row in enumerate(reviews):
@@ -278,7 +331,16 @@ async def get_reviews(
                     suggestions = json.loads(suggestions)
                 except (json.JSONDecodeError, TypeError):
                     suggestions = []
-            
+
+            suggestion_processed = analysis.get("suggestion_processed") or {}
+            if isinstance(suggestion_processed, str):
+                try:
+                    suggestion_processed = json.loads(suggestion_processed)
+                except (json.JSONDecodeError, TypeError):
+                    suggestion_processed = {}
+            if not isinstance(suggestion_processed, dict):
+                suggestion_processed = {}
+
             is_new = False
             status_idx = 9
             date_idx = 8
@@ -329,6 +391,7 @@ async def get_reviews(
                 "keyPoints": key_points,
                 "topics": topics,
                 "suggestions": suggestions,
+                "suggestionProcessed": suggestion_processed,
                 "department": analysis.get("department", ""),
                 "date": row[date_idx].strftime("%Y-%m-%d %H:%M:%S") if row[date_idx] else "",
                 "status": row[status_idx] or "new",
@@ -366,7 +429,6 @@ async def get_review_stats(db: Session = Depends(get_db), current_user: User = D
             has_importance_level = False
 
         store_join = ""
-        dept_filter = ""
         params = {"tenant_id": current_user.tenant_id}
         # 检查是否是管理员（只通过 role_id 检查）
         is_admin = False
@@ -376,22 +438,19 @@ async def get_review_stats(db: Session = Depends(get_db), current_user: User = D
             """), {"role_id": current_user.role_id}).fetchone()
             if role and role[0] == "admin":
                 is_admin = True
-        
+
+        # 重要等级统计与列表使用相同的可见范围（店铺 ∪ 订阅板块）
+        visibility_cond = build_review_visibility_condition(db, current_user, params, alias="reviews")
+        visibility_clause = f"AND {visibility_cond}" if visibility_cond else ""
+
+        # 运营板块数字按店铺隔离用
+        op_store_limit = None
         if not is_admin:
-            # 直接通过 user_stores 表获取用户被分配的店铺
             user_stores = db.execute(
                 text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
                 {"uid": current_user.id, "tid": current_user.tenant_id}
             ).fetchall()
-            store_id_list = [s[0] for s in user_stores]
-            if store_id_list:
-                placeholders = ",".join([f":s_{i}" for i in range(len(store_id_list))])
-                for i, sid in enumerate(store_id_list):
-                    params[f"s_{i}"] = sid
-                dept_filter = f"AND reviews.store_id IN ({placeholders})"
-                store_join = ""
-            else:
-                dept_filter = "AND 1=0"
+            op_store_limit = set(s[0] for s in user_stores)
 
         if has_importance_level:
             query = text(f"""
@@ -406,7 +465,7 @@ async def get_review_stats(db: Session = Depends(get_db), current_user: User = D
                 {store_join}
                 WHERE reviews.rating <= 3
                   AND reviews.tenant_id = :tenant_id
-                  {dept_filter}
+                  {visibility_clause}
             """)
         else:
             # 如果没有 importance_level 列，所有数据归为 medium
@@ -420,18 +479,52 @@ async def get_review_stats(db: Session = Depends(get_db), current_user: User = D
                 {store_join}
                 WHERE reviews.rating <= 3
                   AND reviews.tenant_id = :tenant_id
-                  {dept_filter}
+                  {visibility_clause}
             """)
 
         result = db.execute(query, params)
         row = result.fetchone()
+
+        # 各板块未处理差评数（推送口径：一条差评可命中多个板块，板块订阅人在KPI卡片看到各自板块的待处理数）
+        ensure_section_subscribers_table(db)
+        # 取板块字段后在Python侧统计（一条差评可属于多个板块）
+        sec_rows = db.execute(text("""
+            SELECT r.store_id, COALESCE(NULLIF(ra.departments, ''), ra.department) AS dept_str
+            FROM reviews r
+            JOIN review_analyses ra ON ra.review_id = r.id
+            WHERE r.tenant_id = :tenant_id
+              AND r.rating <= 3
+              AND r.status NOT IN ('resolved', 'dismissed')
+              AND r.deleted_at IS NULL
+              AND ra.deleted_at IS NULL
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+        section_stats = {s: 0 for s in VALID_SECTIONS}
+        # 运营板块按店铺隔离（与列表可见性一致）；采购/仓库/美工为全租户数
+        for sr in sec_rows:
+            if not sr[1]:
+                continue
+            for sec in str(sr[1]).split(","):
+                sec = sec.strip().lower()
+                if sec not in section_stats:
+                    continue
+                if sec == "operations" and op_store_limit is not None and sr[0] not in op_store_limit:
+                    continue
+                section_stats[sec] += 1
+
+        # 当前用户订阅的板块
+        sub_rows = db.execute(text(
+            "SELECT section FROM review_section_subscribers WHERE tenant_id = :tid AND user_id = :uid"
+        ), {"tid": current_user.tenant_id, "uid": current_user.id}).fetchall()
+        my_sections = [r[0] for r in sub_rows if r[0] in VALID_SECTIONS]
 
         return {
             "success": True,
             "data": {
                 "high": {"unviewed": row[0], "viewed": row[1]},
                 "medium": {"unviewed": row[2], "viewed": row[3]},
-                "low": {"unviewed": row[4], "viewed": row[5]}
+                "low": {"unviewed": row[4], "viewed": row[5]},
+                "section_stats": section_stats,
+                "my_sections": my_sections,
             }
         }
     except Exception as e:
@@ -563,7 +656,8 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             else:
                 # 用户没有分配任何店铺，不显示任何数据
                 raise HTTPException(status_code=404, detail=f"差评 {review_id} 不存在")
-        
+
+        ensure_suggestion_processed_column(db)
         query = text(f"""
             SELECT
                 r.id,
@@ -596,13 +690,22 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             raise HTTPException(status_code=404, detail=f"差评 {review_id} 不存在")
 
         analysis_query = text("""
-            SELECT key_points, summary, topics, suggestions, department
+            SELECT key_points, summary, topics, suggestions, department, suggestion_processed
             FROM review_analyses
             WHERE review_id = :review_id AND tenant_id = :tenant_id AND deleted_at IS NULL
         """)
         analysis_result = db.execute(analysis_query, {"review_id": review_id, "tenant_id": current_user.tenant_id})
         analysis_row = analysis_result.fetchone()
 
+        detail_departments_str = (analysis_row[4] or "") if analysis_row else ""
+        detail_processed = (analysis_row[5] or {}) if analysis_row else {}
+        if isinstance(detail_processed, str):
+            try:
+                detail_processed = json.loads(detail_processed)
+            except (json.JSONDecodeError, TypeError):
+                detail_processed = {}
+        if not isinstance(detail_processed, dict):
+            detail_processed = {}
         review_detail = {
             "id": str(row[0]),
             "asin": row[1] or "",
@@ -621,7 +724,9 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             "analysis": analysis_row[1] if analysis_row else "",
             "topics": analysis_row[2] if analysis_row else [],
             "suggestions": analysis_row[3] if analysis_row else [],
-            "department": analysis_row[4] if analysis_row else ""
+            "suggestionProcessed": detail_processed,
+            "department": analysis_row[4] if analysis_row else "",
+            "departments": [d for d in detail_departments_str.split(",") if d]
         }
         
         if isinstance(review_detail["keyPoints"], str):
@@ -1016,3 +1121,200 @@ async def batch_analyze_reviews_endpoint(review_ids: List[Any], background_tasks
     except Exception as e:
         logger.error(f"批量分析接口异常: {e}")
         raise HTTPException(status_code=500, detail=f"批量分析失败: {str(e)}")
+
+
+# ============ 差评板块订阅（推送对象配置） ============
+# 板块为系统固定枚举（与AI分类一致），推送对象不再挂靠部门/角色，
+# 采用"板块-用户"订阅关系：谁订阅某板块，该板块的差评就推送给谁。
+
+VALID_SECTIONS = ("operations", "purchasing", "warehouse", "design")
+
+
+def ensure_suggestion_processed_column(db: Session):
+    """确保 review_analyses.suggestion_processed 列存在（幂等）
+
+    存储AI处理建议的处理状态JSON：{"<建议索引>": {"note": 处理说明, "by": 处理人, "at": 时间}}
+    """
+    try:
+        check = db.execute(text("SHOW COLUMNS FROM review_analyses LIKE 'suggestion_processed'"))
+        if check.fetchone() is None:
+            db.execute(text(
+                "ALTER TABLE review_analyses ADD COLUMN suggestion_processed TEXT NULL "
+                "COMMENT 'AI建议处理状态JSON'"
+            ))
+            db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.post("/{review_id}/suggestions/{suggestion_index}/process")
+async def process_suggestion(
+    review_id: int,
+    suggestion_index: int,
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """处理单条AI建议：记录处理说明，该条建议状态变为已处理"""
+    try:
+        ensure_suggestion_processed_column(db)
+        note = str(payload.get("note") or "").strip()
+        if not note:
+            raise HTTPException(status_code=400, detail="处理说明不能为空")
+
+        row = db.execute(text("""
+            SELECT id, suggestions, suggestion_processed
+            FROM review_analyses
+            WHERE review_id = :rid AND tenant_id = :tid AND deleted_at IS NULL
+        """), {"rid": review_id, "tid": current_user.tenant_id}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="该差评尚未进行AI分析")
+
+        suggestions = row[1]
+        if isinstance(suggestions, str):
+            try:
+                suggestions = json.loads(suggestions)
+            except (json.JSONDecodeError, TypeError):
+                suggestions = []
+        if not isinstance(suggestions, list) or suggestion_index < 0 or suggestion_index >= len(suggestions):
+            raise HTTPException(status_code=400, detail="建议索引无效")
+
+        processed = row[2]
+        if isinstance(processed, str):
+            try:
+                processed = json.loads(processed)
+            except (json.JSONDecodeError, TypeError):
+                processed = {}
+        if not isinstance(processed, dict):
+            processed = {}
+
+        # 处理人显示名（昵称优先）
+        u = db.execute(text("SELECT COALESCE(NULLIF(nickname, ''), username) FROM users WHERE id = :uid"),
+                       {"uid": current_user.id}).fetchone()
+        display_name = u[0] if u and u[0] else "未知用户"
+
+        processed[str(suggestion_index)] = {
+            "note": note,
+            "by": display_name,
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        db.execute(text(
+            "UPDATE review_analyses SET suggestion_processed = :sp WHERE id = :id"
+        ), {"sp": json.dumps(processed, ensure_ascii=False), "id": row[0]})
+        db.commit()
+
+        return {"success": True, "data": {"suggestionProcessed": processed}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"处理建议失败: {str(e)}")
+
+
+def ensure_section_subscribers_table(db: Session):
+    """确保订阅表存在（幂等）"""
+    db.execute(text("""
+        CREATE TABLE IF NOT EXISTS review_section_subscribers (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            tenant_id INT NOT NULL,
+            section VARCHAR(20) NOT NULL COMMENT '问题板块:operations/purchasing/warehouse/design',
+            user_id INT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_tenant_section_user (tenant_id, section, user_id),
+            KEY idx_tenant_section (tenant_id, section)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """))
+    db.commit()
+
+
+@router.get("/sections/subscribers")
+async def get_section_subscribers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取各板块的订阅用户配置"""
+    ensure_section_subscribers_table(db)
+    rows = db.execute(text("""
+        SELECT section, user_id FROM review_section_subscribers
+        WHERE tenant_id = :tid
+    """), {"tid": current_user.tenant_id}).fetchall()
+    subscribers: Dict[str, List[int]] = {s: [] for s in VALID_SECTIONS}
+    for r in rows:
+        if r[0] in subscribers:
+            subscribers[r[0]].append(int(r[1]))
+    # 可选用户列表（复用部门管理的全量用户接口数据结构）
+    users = db.execute(text("""
+        SELECT u.id, u.username,
+               COALESCE(NULLIF(u.nickname, ''), u.username) AS display_name,
+               r.name AS role_name
+        FROM users u
+        LEFT JOIN roles r ON r.id = u.role_id AND r.deleted_at IS NULL
+        WHERE u.tenant_id = :tid AND u.deleted_at IS NULL AND u.status = 'active'
+        ORDER BY display_name
+    """), {"tid": current_user.tenant_id}).fetchall()
+    return {
+        "success": True,
+        "data": {
+            "subscribers": subscribers,
+            "users": [{"id": u[0], "username": u[1], "display_name": u[2], "role_name": u[3] or ""} for u in users],
+        },
+    }
+
+
+@router.put("/sections/subscribers")
+async def update_section_subscribers(
+    payload: Dict[str, List[int]],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("robot:review:push_config"))
+):
+    """全量更新各板块订阅用户（body: {operations:[uid...], purchasing:[...], ...}）"""
+    ensure_section_subscribers_table(db)
+    # 权限：差评推送配置
+    # 校验板块与用户合法性
+    cleaned: Dict[str, List[int]] = {}
+    for section, uids in (payload or {}).items():
+        if section not in VALID_SECTIONS:
+            raise HTTPException(status_code=400, detail=f"未知板块: {section}")
+        seen = set()
+        valid_ids: List[int] = []
+        for uid in uids:
+            try:
+                uid_int = int(uid)
+            except (TypeError, ValueError):
+                continue
+            if uid_int in seen:
+                continue
+            seen.add(uid_int)
+            valid_ids.append(uid_int)
+        cleaned[section] = valid_ids
+    # 校验用户都属于当前租户
+    all_uids = sorted({u for uids in cleaned.values() for u in uids})
+    if all_uids:
+        ph = ",".join([f":u{i}" for i in range(len(all_uids))])
+        uparams = {"tid": current_user.tenant_id}
+        for i, uid in enumerate(all_uids):
+            uparams[f"u{i}"] = uid
+        valid_users = db.execute(text(
+            f"SELECT id FROM users WHERE tenant_id = :tid AND deleted_at IS NULL AND id IN ({ph})"
+        ), uparams).fetchall()
+        valid_set = {r[0] for r in valid_users}
+        invalid = [u for u in all_uids if u not in valid_set]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"包含无效用户: {invalid}")
+    try:
+        db.execute(text("DELETE FROM review_section_subscribers WHERE tenant_id = :tid"),
+                   {"tid": current_user.tenant_id})
+        for section, uids in cleaned.items():
+            for uid in uids:
+                db.execute(text("""
+                    INSERT INTO review_section_subscribers (tenant_id, section, user_id)
+                    VALUES (:tid, :section, :uid)
+                """), {"tid": current_user.tenant_id, "section": section, "uid": uid})
+        db.commit()
+        return {"success": True, "message": "板块订阅配置已保存"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"保存板块订阅配置失败: {e}")
+        raise HTTPException(status_code=500, detail=f"保存失败: {str(e)}")

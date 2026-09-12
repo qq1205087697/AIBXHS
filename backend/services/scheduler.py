@@ -461,7 +461,7 @@ def analyze_unanalyzed_reviews_job():
 
 
 def push_daily_review_notifications_job():
-    """每天早上8点：推送未处理差评通知给对应部门所有人员"""
+    """每天早上8点：推送未处理差评通知给对应店铺分组的所有人员"""
     from database.database import SessionLocal
     from sqlalchemy import text
     from datetime import datetime, date
@@ -495,24 +495,24 @@ def push_daily_review_notifications_job():
         logger.info(f"今天 ({today}) 尚未推送通知，开始处理...")
 
         # 检查各表是否存在
-        has_dept_table = False
-        has_user_dept_table = False
+        has_group_table = False
+        has_user_stores_table = False
         has_notifications_table = False
         has_importance_level = False
 
         try:
-            check = db.execute(text("SHOW TABLES LIKE 'departments'"))
-            has_dept_table = check.fetchone() is not None
-            logger.info(f"departments 表: {'存在' if has_dept_table else '不存在'}")
+            check = db.execute(text("SHOW TABLES LIKE 'store_groups'"))
+            has_group_table = check.fetchone() is not None
+            logger.info(f"store_groups 表: {'存在' if has_group_table else '不存在'}")
         except Exception as e:
-            logger.error(f"检查 departments 表失败: {e}")
+            logger.error(f"检查 store_groups 表失败: {e}")
         
         try:
-            check = db.execute(text("SHOW TABLES LIKE 'user_departments'"))
-            has_user_dept_table = check.fetchone() is not None
-            logger.info(f"user_departments 表: {'存在' if has_user_dept_table else '不存在'}")
+            check = db.execute(text("SHOW TABLES LIKE 'user_stores'"))
+            has_user_stores_table = check.fetchone() is not None
+            logger.info(f"user_stores 表: {'存在' if has_user_stores_table else '不存在'}")
         except Exception as e:
-            logger.error(f"检查 user_departments 表失败: {e}")
+            logger.error(f"检查 user_stores 表失败: {e}")
         
         try:
             check = db.execute(text("SHOW TABLES LIKE 'notifications'"))
@@ -529,37 +529,37 @@ def push_daily_review_notifications_job():
             logger.error(f"检查 importance_level 字段失败: {e}")
 
         # 检查必须的表是否都存在
-        if not has_dept_table or not has_user_dept_table or not has_notifications_table:
+        if not has_group_table or not has_user_stores_table or not has_notifications_table:
             logger.warning("必要表不存在，跳过通知推送")
-            logger.warning(f"需要的表: departments={has_dept_table}, user_departments={has_user_dept_table}, notifications={has_notifications_table}")
+            logger.warning(f"需要的表: store_groups={has_group_table}, user_stores={has_user_stores_table}, notifications={has_notifications_table}")
             return
 
         # 查询未处理的差评（status为new, read, processing）
-        # 只对 high 和 medium 重要级别的差评发送通知
+        # 按差评所属店铺的店铺分组归类，只对 high 和 medium 重要级别的差评发送通知
         if has_importance_level:
             logger.info("使用包含 importance_level 的查询")
             pending_query = text("""
                 SELECT r.id, r.asin, r.title, r.rating, r.importance_level, r.status,
-                       s.department_id, d.name as dept_name
+                       s.group_id, sg.name as group_name, r.tenant_id
                 FROM reviews r
                 LEFT JOIN stores s ON r.store_id = s.id
-                LEFT JOIN departments d ON s.department_id = d.id
+                LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
                 WHERE r.rating <= 3
                   AND r.status IN ('new', 'read', 'processing')
-                  AND s.department_id IS NOT NULL
+                  AND s.group_id IS NOT NULL
                   AND r.importance_level IN ('high', 'medium')
             """)
         else:
             logger.info("使用不包含 importance_level 的查询")
             pending_query = text("""
                 SELECT r.id, r.asin, r.title, r.rating, r.status,
-                       s.department_id, d.name as dept_name
+                       s.group_id, sg.name as group_name, r.tenant_id
                 FROM reviews r
                 LEFT JOIN stores s ON r.store_id = s.id
-                LEFT JOIN departments d ON s.department_id = d.id
+                LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
                 WHERE r.rating <= 3
                   AND r.status IN ('new', 'read', 'processing')
-                  AND s.department_id IS NOT NULL
+                  AND s.group_id IS NOT NULL
             """)
         
         logger.info("执行差评查询...")
@@ -575,61 +575,69 @@ def push_daily_review_notifications_job():
         logger.info("差评详情:")
         for i, row in enumerate(pending_reviews[:5]):
             if has_importance_level:
-                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 重要性={row[4]}, 状态={row[5]}, 部门ID={row[6]}, 部门名={row[7]}")
+                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 重要性={row[4]}, 状态={row[5]}, 分组ID={row[6]}, 分组名={row[7]}")
             else:
-                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 状态={row[4]}, 部门ID={row[5]}, 部门名={row[6]}")
+                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 状态={row[4]}, 分组ID={row[5]}, 分组名={row[6]}")
         if len(pending_reviews) > 5:
             logger.info(f"  ... 还有 {len(pending_reviews) - 5} 条")
 
-        # 按部门分组统计
-        dept_stats = {}
+        # 按店铺分组统计（租户+分组为唯一键）
+        group_stats = {}
         for row in pending_reviews:
             if has_importance_level:
-                dept_id = row[6]
-                dept_name = row[7] or f"部门{dept_id}"
+                group_id = row[6]
+                group_name = row[7] or f"分组{group_id}"
+                tenant_id = row[8]
             else:
-                dept_id = row[5]
-                dept_name = row[6] or f"部门{dept_id}"
+                group_id = row[5]
+                group_name = row[6] or f"分组{group_id}"
+                tenant_id = row[7]
             
-            if dept_id not in dept_stats:
-                dept_stats[dept_id] = {"name": dept_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": []}
-            dept_stats[dept_id]["total"] += 1
+            key = (tenant_id, group_id)
+            if key not in group_stats:
+                group_stats[key] = {"tenant_id": tenant_id, "group_id": group_id, "name": group_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": []}
+            group_stats[key]["total"] += 1
             
             if has_importance_level:
                 level = str(row[4]) if row[4] else "medium"
                 if level == "high":
-                    dept_stats[dept_id]["high"] += 1
+                    group_stats[key]["high"] += 1
                 elif level == "medium":
-                    dept_stats[dept_id]["medium"] += 1
+                    group_stats[key]["medium"] += 1
                 else:
-                    dept_stats[dept_id]["low"] += 1
+                    group_stats[key]["low"] += 1
             else:
-                dept_stats[dept_id]["medium"] += 1
+                group_stats[key]["medium"] += 1
             
-            dept_stats[dept_id]["review_ids"].append(str(row[0]))
+            group_stats[key]["review_ids"].append(str(row[0]))
 
-        logger.info(f"按部门分组完成，共 {len(dept_stats)} 个部门有未处理差评")
-        for dept_id, stats in dept_stats.items():
-            logger.info(f"  部门 {stats['name']} (ID={dept_id}): 总计={stats['total']}, 严重={stats['high']}, 中等={stats['medium']}, 轻微={stats['low']}")
+        logger.info(f"按店铺分组完成，共 {len(group_stats)} 个分组有未处理差评")
+        for key, stats in group_stats.items():
+            logger.info(f"  分组 {stats['name']} (ID={stats['group_id']}, 租户={stats['tenant_id']}): 总计={stats['total']}, 严重={stats['high']}, 中等={stats['medium']}, 轻微={stats['low']}")
 
-        # 为每个部门的成员推送通知
+        # 为每个店铺分组的成员推送通知
         notification_count = 0
         notification_rows = []
-        for dept_id, stats in dept_stats.items():
-            logger.info(f"处理部门 {stats['name']} (ID={dept_id})...")
+        for key, stats in group_stats.items():
+            tenant_id = stats["tenant_id"]
+            logger.info(f"处理店铺分组 {stats['name']} (ID={stats['group_id']}, 租户={tenant_id})...")
             
-            members = db.execute(
-                text("SELECT user_id FROM user_departments WHERE department_id = :did"),
-                {"did": dept_id}
-            ).fetchall()
-            logger.info(f"  找到 {len(members)} 个部门成员")
+            # 分组成员 = 被分配了该分组下店铺的用户（user_stores -> stores）
+            members = db.execute(text("""
+                SELECT DISTINCT us.user_id
+                FROM user_stores us
+                INNER JOIN stores s ON us.store_id = s.id
+                INNER JOIN users u ON u.id = us.user_id AND u.deleted_at IS NULL
+                WHERE s.group_id = :gid AND us.tenant_id = :tid AND s.deleted_at IS NULL
+            """), {"gid": stats["group_id"], "tid": tenant_id}).fetchall()
+            logger.info(f"  找到 {len(members)} 个分组成员")
 
             if not members:
-                logger.warning(f"  部门 {stats['name']} 没有成员，跳过")
+                logger.warning(f"  分组 {stats['name']} 没有成员，跳过")
                 continue
 
             title = f"【{stats['name']}】未处理差评提醒"
-            content = f"您所在的部门「{stats['name']}」有 {stats['total']} 条未处理差评（严重: {stats['high']}，中等: {stats['medium']}，轻微: {stats['low']}），请及时处理。"
+            content = f"您所在的店铺分组「{stats['name']}」有 {stats['total']} 条未处理差评（严重: {stats['high']}，中等: {stats['medium']}，轻微: {stats['low']}），请及时处理。"
             logger.info(f"  通知标题: {title}")
             logger.info(f"  通知内容: {content}")
 
@@ -664,7 +672,7 @@ def push_daily_review_notifications_job():
                 logger.error(f"批量写入通知失败: {e}")
 
         db.commit()
-        logger.info(f"========== 推送完成！共推送 {notification_count} 条通知，覆盖 {len(dept_stats)} 个部门 ==========")
+        logger.info(f"========== 推送完成！共推送 {notification_count} 条通知，覆盖 {len(group_stats)} 个店铺分组 ==========")
 
     except Exception as e:
         logger.error(f"每日通知推送任务失败: {e}")

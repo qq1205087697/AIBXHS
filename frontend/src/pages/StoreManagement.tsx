@@ -21,18 +21,11 @@ interface Store {
   platform: string
   site: string
   status: string
-  department_id: number | null
-  department_name: string
   inventory_name: string | null
   ziniao_account: string | null
   group_id: number | null
   group_name: string
   created_at: string
-}
-
-interface Department {
-  id: number
-  name: string
 }
 
 interface StoreGroup {
@@ -48,7 +41,6 @@ const StoreManagement: React.FC = () => {
   const resp = useResponsive()
 
   const [stores, setStores] = useState<Store[]>([])
-  const [departments, setDepartments] = useState<Department[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingStore, setEditingStore] = useState<Store | null>(null)
@@ -77,6 +69,7 @@ const StoreManagement: React.FC = () => {
 
   const [groups, setGroups] = useState<StoreGroup[]>([])
   const [groupLoading, setGroupLoading] = useState(false)
+  const [groupSearchText, setGroupSearchText] = useState('')
   const [groupPagination, setGroupPagination] = useState({ current: 1, pageSize: 20 })
   const [groupModalOpen, setGroupModalOpen] = useState(false)
   const [editingGroup, setEditingGroup] = useState<StoreGroup | null>(null)
@@ -150,7 +143,6 @@ const StoreManagement: React.FC = () => {
   useEffect(() => {
     fetchGroups()
     fetchAllStores()
-    fetchDepartments()
   }, [])
 
   const fetchStores = async () => {
@@ -169,15 +161,6 @@ const StoreManagement: React.FC = () => {
       console.error(e)
     } finally {
       setLoading(false)
-    }
-  }
-
-  const fetchDepartments = async () => {
-    try {
-      const res = await departmentsApi.getList()
-      if (res.data.success) setDepartments(res.data.data)
-    } catch (e) {
-      console.error(e)
     }
   }
 
@@ -270,7 +253,7 @@ const StoreManagement: React.FC = () => {
 
   const handleBatchAssign = () => {
     if (selectedRowKeys.length === 0) {
-      message.warning('请先选择要分配部门的店铺')
+      message.warning('请先选择要分配分组的店铺')
       return
     }
     batchForm.resetFields()
@@ -280,17 +263,17 @@ const StoreManagement: React.FC = () => {
   const handleBatchSubmit = async () => {
     try {
       const values = await batchForm.validateFields()
-      await storesApi.batchUpdateDepartment({
+      await storesApi.batchUpdateGroup({
         store_ids: selectedRowKeys as number[],
-        department_id: values.department_id,
+        group_id: values.group_id ?? null,
       })
-      message.success('批量分配部门成功')
+      message.success('批量分配分组成功')
       setBatchModalOpen(false)
       setSelectedRowKeys([])
       fetchStores()
     } catch (e: any) {
       if (e.errorFields) return
-      message.error('批量分配失败')
+      message.error(e?.response?.data?.detail || '批量分配失败')
     }
   }
 
@@ -309,7 +292,7 @@ const StoreManagement: React.FC = () => {
       platform: store.platform,
       site: store.site,
       shop_abbr: (store as any).shop_abbr,
-      department_id: store.department_id,
+      group_id: store.group_id,
       status: store.status,
     })
     setModalOpen(true)
@@ -406,14 +389,17 @@ const StoreManagement: React.FC = () => {
     if (!assignGroupStore) return
     try {
       const values = await assignGroupForm.validateFields()
-      // 调用API更新店铺分组
-      await storesApi.update(assignGroupStore.id, { group_id: values.group_id } as any)
+      // 调用批量接口更新店铺分组（group_id 为空时表示取消分组）
+      await storesApi.batchUpdateGroup({
+        store_ids: [assignGroupStore.id],
+        group_id: values.group_id ?? null,
+      })
       message.success('分配店铺分组成功')
       setAssignGroupModalOpen(false)
       fetchStores()
       fetchAllStores()
-    } catch (e) {
-      message.error('分配失败')
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '分配失败')
     }
   }
 
@@ -454,7 +440,7 @@ const StoreManagement: React.FC = () => {
       fetchGroups()
     } catch (e: any) {
       if (e.errorFields) return
-      message.error('操作失败')
+      message.error(e?.response?.data?.detail || '操作失败')
     }
   }
 
@@ -515,6 +501,22 @@ const StoreManagement: React.FC = () => {
     } catch (e) {
       message.error('移除失败')
     }
+  }
+
+  // 分组搜索过滤（名称/描述）
+  const filteredGroups = useMemo(() => {
+    const kw = groupSearchText.trim().toLowerCase()
+    if (!kw) return groups
+    return groups.filter(
+      (g) =>
+        (g.name || '').toLowerCase().includes(kw) ||
+        (g.description || '').toLowerCase().includes(kw),
+    )
+  }, [groups, groupSearchText])
+
+  const handleGroupSearch = (value: string) => {
+    setGroupSearchText(value)
+    setGroupPagination((prev) => ({ ...prev, current: 1 }))
   }
 
   const storeColumns = [
@@ -690,7 +692,7 @@ const StoreManagement: React.FC = () => {
                     <Space>
                       {selectedRowKeys.length > 0 && (
                         <Button type="default" onClick={handleBatchAssign}>
-                          批量分配部门 ({selectedRowKeys.length})
+                          批量分配分组 ({selectedRowKeys.length})
                         </Button>
                       )}
                       <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>新增店铺</Button>
@@ -730,6 +732,16 @@ const StoreManagement: React.FC = () => {
               <>
                 <Card
                   loading={groupLoading}
+                  title={
+                    <Input
+                      placeholder="搜索分组名称、描述..."
+                      prefix={<SearchOutlined />}
+                      allowClear
+                      style={{ width: resp.isMobile ? '100%' : 400 }}
+                      value={groupSearchText}
+                      onChange={(e) => handleGroupSearch(e.target.value)}
+                    />
+                  }
                   extra={
                     <Button type="primary" icon={<PlusOutlined />} onClick={handleGroupCreate}>
                       新建分组
@@ -737,7 +749,7 @@ const StoreManagement: React.FC = () => {
                   }
                 >
                   <Table
-                    dataSource={groups.slice(
+                    dataSource={filteredGroups.slice(
                       (groupPagination.current - 1) * groupPagination.pageSize,
                       groupPagination.current * groupPagination.pageSize,
                     )}
@@ -788,7 +800,7 @@ const StoreManagement: React.FC = () => {
                   <Pagination
                     current={groupPagination.current}
                     pageSize={groupPagination.pageSize}
-                    total={groups.length}
+                    total={filteredGroups.length}
                     showSizeChanger
                     showQuickJumper
                     showTotal={(total) => `共 ${total} 条`}
@@ -844,10 +856,10 @@ const StoreManagement: React.FC = () => {
           <Form.Item name="shop_abbr" label="店铺简称" rules={[{ required: true, message: '请输入店铺简称' }]}>
             <Input placeholder="请输入店铺简称" />
           </Form.Item>
-          <Form.Item name="department_id" label="所属部门">
+          <Form.Item name="group_id" label="所属分组">
             <Select
-              placeholder="请选择部门"
-              options={departments.map((d) => ({ label: d.name, value: d.id }))}
+              placeholder="请选择店铺分组"
+              options={groups.map((g) => ({ label: g.name, value: g.id }))}
               allowClear
             />
           </Form.Item>
@@ -860,17 +872,17 @@ const StoreManagement: React.FC = () => {
       </Modal>
 
       <Modal
-        title="批量分配部门"
+        title="批量分配分组"
         open={batchModalOpen}
         onOk={handleBatchSubmit}
         onCancel={() => setBatchModalOpen(false)}
         width={resp.isMobile ? '95vw' : 520}
       >
         <Form form={batchForm} layout="vertical">
-          <Form.Item name="department_id" label="选择部门">
-            <Select placeholder="请选择部门（不选择则取消分配）" allowClear>
-              {departments.map((dept) => (
-                <Select.Option key={dept.id} value={dept.id}>{dept.name}</Select.Option>
+          <Form.Item name="group_id" label="选择店铺分组">
+            <Select placeholder="请选择店铺分组（不选择则取消分组）" allowClear>
+              {groups.map((g) => (
+                <Select.Option key={g.id} value={g.id}>{g.name}</Select.Option>
               ))}
             </Select>
           </Form.Item>

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, message, Space, Tag, Divider, Dropdown, Menu, Pagination, Row, Col } from 'antd'
+import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, message, Space, Tag, Divider, Dropdown, Menu, Pagination, Row, Col, Tooltip } from 'antd'
 import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, CheckOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, DownOutlined, RightOutlined, AppstoreOutlined, LinkOutlined, CloseCircleFilled, CloseCircleOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { replenishmentOrdersApi, productsApi, productBindingsApi, storeGroupsApi } from '../api'
+import { replenishmentOrdersApi, productsApi, productBindingsApi, storeGroupsApi, storesApi } from '../api'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useResponsive } from '../hooks/useResponsive'
@@ -106,6 +106,24 @@ const platformOptions = [
 ]
 
 const platformLabelMap: Record<string, string> = Object.fromEntries(platformOptions.map(p => [p.value, p.label]))
+
+// 平台商品创建用平台选项（与产品管理创建平台商品一致，含半托/全托）
+const missingPlatformOptions = [
+  { label: 'Amazon', value: 'amazon' },
+  { label: 'eBay', value: 'ebay' },
+  { label: 'Walmart', value: 'walmart' },
+  { label: 'Shopify', value: 'shopify' },
+  { label: 'Shopee', value: 'shopee' },
+  { label: 'Lazada', value: 'lazada' },
+  { label: 'TikTok', value: 'tiktok' },
+  { label: 'Temu半托', value: 'temu_half' },
+  { label: 'Temu全托', value: 'temu_full' },
+  { label: 'SHEIN半托', value: 'shein_half' },
+  { label: 'SHEIN全托', value: 'shein_full' },
+  { label: '速卖通半托', value: 'aliexpress_half' },
+  { label: '速卖通全托', value: 'aliexpress_full' },
+  { label: '其他', value: 'other' },
+]
 
 const platformColorMap: Record<string, string> = {
   amazon: 'orange',
@@ -230,6 +248,13 @@ const ReplenishmentManagement: React.FC = () => {
   const [profitMargins, setProfitMargins] = useState<Record<number, { account: string; country: string; gross_margin: number; sku: string }[]>>({})
   // 产品店铺分组 SKU 数据 { productId: { sku, asin, store_group_id, store_group_name } }
   const [productSkuMap, setProductSkuMap] = useState<Record<number, { sku: string; asin: string; store_group_id: number | null; store_group_name: string }>>({})
+  // 导入缺失信息处理（新品创建 + 平台SKU补建）
+  const importFileRef = useRef<File | null>(null)
+  const [missingModalOpen, setMissingModalOpen] = useState(false)
+  const [newProductRows, setNewProductRows] = useState<any[]>([])
+  const [pendingSkuRows, setPendingSkuRows] = useState<any[]>([])
+  const [missingStores, setMissingStores] = useState<any[]>([])
+  const [missingSubmitting, setMissingSubmitting] = useState(false)
 
   useEffect(() => {
     fetchData()
@@ -417,6 +442,8 @@ const ReplenishmentManagement: React.FC = () => {
   const handleView = async (order: ReplenishmentOrder) => {
     setViewingOrder(order)
     setEditingOrder(null)
+    // 清空SKU缓存，避免补建平台SKU后仍显示旧数据
+    setProductSkuMap({})
     try {
       const res = await replenishmentOrdersApi.getDetail(order.id)
       if (res.data.success) {
@@ -439,7 +466,7 @@ const ReplenishmentManagement: React.FC = () => {
           // 批量加载已有产品的利润率和店铺分组SKU
           const productIds = items.map((i: any) => i.product_id).filter(Boolean) as number[]
           fetchProfitMarginsBatch(productIds)
-          fetchStoreGroupSkusBatch(productIds)
+          fetchStoreGroupSkusBatch(productIds, true)
         } else {
           setProductList([])
           setFormItems([createEmptyFormItem()])
@@ -460,6 +487,8 @@ const ReplenishmentManagement: React.FC = () => {
   const handleEdit = async (order: ReplenishmentOrder) => {
     setViewingOrder(null)
     setEditingOrder(order)
+    // 清空SKU缓存，避免补建平台SKU后仍显示旧数据
+    setProductSkuMap({})
     try {
       const res = await replenishmentOrdersApi.getDetail(order.id)
       if (res.data.success) {
@@ -482,7 +511,7 @@ const ReplenishmentManagement: React.FC = () => {
           // 批量加载已有产品的利润率和店铺分组SKU
           const productIds = items.map((i: any) => i.product_id).filter(Boolean) as number[]
           fetchProfitMarginsBatch(productIds)
-          fetchStoreGroupSkusBatch(productIds)
+          fetchStoreGroupSkusBatch(productIds, true)
         } else {
           setFormItems([createEmptyFormItem()])
         }
@@ -712,9 +741,11 @@ const ReplenishmentManagement: React.FC = () => {
     }
   }
 
-  // 批量获取店铺分组 SKU，并同步写入对应明细行
-  const fetchStoreGroupSkusBatch = async (productIds: number[]) => {
-    const uniqueIds = Array.from(new Set(productIds)).filter(id => id && !productSkuMap[id])
+  // 批量获取店铺分组 SKU，并同步写入对应明细行（force=true 时忽略缓存强制重新获取）
+  const fetchStoreGroupSkusBatch = async (productIds: number[], force = false) => {
+    const uniqueIds = force
+      ? Array.from(new Set(productIds)).filter(id => id)
+      : Array.from(new Set(productIds)).filter(id => id && !productSkuMap[id])
     if (uniqueIds.length === 0) {
       setFormItems(prev => prev.map(item =>
         item.product_id && productSkuMap[item.product_id]
@@ -745,7 +776,8 @@ const ReplenishmentManagement: React.FC = () => {
       setProductSkuMap({})
       setFormItems(prev => prev.map(item => ({ ...item, sku: '' })))
       if (productIds.length > 0) {
-        fetchStoreGroupSkusBatch(productIds)
+        // force=true：闭包中的 productSkuMap 可能仍是旧分组缓存，强制重新获取
+        fetchStoreGroupSkusBatch(productIds, true)
       }
     }
   }
@@ -843,6 +875,71 @@ const ReplenishmentManagement: React.FC = () => {
     fileInputRef.current?.click()
   }
 
+  // 展示导入错误（多行用弹窗完整展示，单行用 toast）
+  const showImportErrors = (errors: string) => {
+    const lines = String(errors).split('\n').filter(Boolean)
+    if (lines.length > 1) {
+      Modal.error({
+        title: `导入文件存在 ${lines.length} 处错误，请修正后重新上传`,
+        width: 560,
+        content: (
+          <div style={{ maxHeight: 300, overflowY: 'auto', whiteSpace: 'pre-line', marginTop: 8 }}>
+            {lines.map((line, i) => (
+              <div key={i} style={{ padding: '2px 0', color: '#ff4d4f' }}>{line}</div>
+            ))}
+          </div>
+        ),
+      })
+    } else {
+      message.error(String(errors), 8)
+    }
+  }
+
+  const applyPreviewResult = (rd: any) => {
+    setPreviewItems(rd.data || [])
+    setPreviewOrderInfo(rd.order_info || {})
+    setPreviewPlatform(undefined)
+  }
+
+  // 将解析结果分发：有待处理行打开缺失处理弹窗，否则直接进预览
+  const dispatchPreviewResult = (rd: any) => {
+    const newProducts: any[] = rd.new_products || []
+    const pendingSkus: any[] = rd.pending_platform_skus || []
+
+    if (rd.errors) showImportErrors(rd.errors)
+
+    if (newProducts.length > 0 || pendingSkus.length > 0) {
+      setNewProductRows(newProducts.map((r: any) => {
+        const prev = newProductRows.find((p: any) => p.row_no === r.row_no && p.sku === r.sku)
+        return { ...r, name: prev?.name ?? r.name, _status: 'pending' }
+      }))
+      setPendingSkuRows(pendingSkus.map((r: any) => {
+        const prev = pendingSkuRows.find((p: any) => p.row_no === r.row_no && p.sku === r.sku)
+        return { ...r, platform: prev?.platform, store_id: prev?.store_id, _status: 'pending' }
+      }))
+      setMissingModalOpen(true)
+      fetchMissingStores()
+      return
+    }
+
+    if (rd.errors) return
+    if ((rd.data || []).length === 0) {
+      message.warning('未解析到有效数据，请检查文件内容')
+      return
+    }
+    setPreviewModalOpen(true)
+  }
+
+  const fetchMissingStores = async () => {
+    if (missingStores.length > 0) return
+    try {
+      const res = await storesApi.getList({ page: 1, page_size: 1000, assignment_fallback: true })
+      if (res.data.success) setMissingStores(res.data.data || [])
+    } catch (e) {
+      console.error('加载店铺列表失败', e)
+    }
+  }
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -850,36 +947,243 @@ const ReplenishmentManagement: React.FC = () => {
     setUploading(true)
     try {
       const res = await replenishmentOrdersApi.uploadPreview(file)
-      if (res.data.success) {
-        setPreviewItems(res.data.data || [])
-        setPreviewOrderInfo(res.data.order_info || {})
-        setPreviewPlatform(undefined)
-        setPreviewModalOpen(true)
+      const rd = res.data || {}
+      if (rd.success) {
+        importFileRef.current = file
+        applyPreviewResult(rd)
+        dispatchPreviewResult(rd)
       } else {
-        message.error(res.data.message || '文件解析失败')
+        message.error(rd.message || '文件解析失败')
       }
     } catch (e: any) {
       const errorMsg = e.response?.data?.detail || e.message || '文件上传失败'
-      // 多行错误（后端一次返回全部错误行）用弹窗完整展示
-      const lines = String(errorMsg).split('\n').filter(Boolean)
-      if (lines.length > 1) {
-        Modal.error({
-          title: `导入文件存在 ${lines.length} 处错误，请修正后重新上传`,
-          width: 560,
-          content: (
-            <div style={{ maxHeight: 300, overflowY: 'auto', whiteSpace: 'pre-line', marginTop: 8 }}>
-              {lines.map((line, i) => (
-                <div key={i} style={{ padding: '2px 0', color: '#ff4d4f' }}>{line}</div>
-              ))}
-            </div>
-          ),
-        })
-      } else {
-        message.error(errorMsg, 8)
-      }
+      showImportErrors(errorMsg)
     } finally {
       setUploading(false)
       e.target.value = ''
+    }
+  }
+
+  // 重新解析原导入文件（缺失信息处理完成后调用）
+  const reparseImportFile = async () => {
+    const file = importFileRef.current
+    if (!file) {
+      setMissingModalOpen(false)
+      return
+    }
+    setUploading(true)
+    try {
+      // 已创建产品的行：Excel中仍是旧品名，重新解析时传编辑后的品名用于匹配刚创建的产品
+      const nameOverrides: Record<string, string> = {}
+      newProductRows.forEach(r => {
+        if (r._status === 'created' && String(r.name || '').trim()) {
+          nameOverrides[String(r.row_no)] = String(r.name).trim()
+        }
+      })
+      const res = await replenishmentOrdersApi.uploadPreview(file, nameOverrides)
+      const rd = res.data || {}
+      if (rd.success) {
+        applyPreviewResult(rd)
+        const newProducts: any[] = rd.new_products || []
+        const pendingSkus: any[] = rd.pending_platform_skus || []
+        if (newProducts.length > 0 || pendingSkus.length > 0) {
+          // 仍有未处理行：刷新弹窗内容（保留用户已编辑的SKU/品名）
+          setNewProductRows(newProducts.map((r: any) => {
+            const prev = newProductRows.find((p: any) => p.row_no === r.row_no && (p.sku || '') === (r.sku || ''))
+            return { ...r, name: prev?.name ?? r.name, sku: prev?.sku ?? r.sku, _status: 'pending' }
+          }))
+          setPendingSkuRows(pendingSkus.map((r: any) => ({ ...r, platform: undefined, store_id: undefined, _status: 'pending' })))
+          if (rd.errors) showImportErrors(rd.errors)
+          else message.info('仍有缺失信息待处理')
+        } else {
+          setMissingModalOpen(false)
+          if (rd.errors) {
+            showImportErrors(rd.errors)
+          } else if ((rd.data || []).length > 0) {
+            setPreviewModalOpen(true)
+            message.success('缺失信息处理完成，文件解析通过')
+          } else {
+            message.warning('未解析到有效数据，请检查文件内容')
+          }
+        }
+      } else {
+        message.error(rd.message || '文件解析失败')
+      }
+    } catch (e: any) {
+      const errorMsg = e.response?.data?.detail || e.message || '文件解析失败'
+      showImportErrors(errorMsg)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  // 创建新品（单个或全部）
+  const createMissingProducts = async (idxList: number[]) => {
+    if (idxList.length === 0) return
+    if (!hasPermission('product:create')) {
+      message.error('您没有创建产品的权限，请联系管理员在产品管理中创建')
+      return
+    }
+    for (const i of idxList) {
+      if (!String(newProductRows[i]?.name || '').trim()) {
+        message.error(`第 ${newProductRows[i].row_no} 行：请先填写品名`)
+        return
+      }
+    }
+    setMissingSubmitting(true)
+    const rows = [...newProductRows]
+    let successCount = 0
+    try {
+      for (const i of idxList) {
+        const r = rows[i]
+        try {
+          // 产品编码自动生成（Excel中的SKU是平台商品属性，不作为产品编码），产品类型固定为成品
+          const codeRes = await productsApi.getNextCode('finished')
+          const code = codeRes.data?.code || ''
+          if (!code) throw new Error('生成产品编码失败')
+          await productsApi.create({ product_code: code, name: String(r.name).trim(), product_type: ['finished'] })
+          rows[i] = { ...r, _status: 'created', _error: undefined }
+          successCount++
+        } catch (err: any) {
+          const detail = err.response?.data?.detail || '创建失败'
+          rows[i] = { ...r, _status: 'error', _error: detail }
+        }
+      }
+    } finally {
+      setMissingSubmitting(false)
+    }
+    setNewProductRows(rows)
+    if (successCount > 0) message.success(`成功创建 ${successCount} 个产品，请点击"继续导入"重新解析文件`)
+    const failed = idxList.filter(i => rows[i]._status === 'error')
+    if (failed.length > 0) {
+      const first = rows[failed[0]]
+      message.error(`第 ${first.row_no} 行创建失败：${first._error}`, 8)
+    }
+  }
+
+  // 补建平台商品SKU（单个或全部）：有店铺分组的行自动添加到分组内全部店铺，未分组行需手动选平台店铺
+  const addMissingPlatformSkus = async (idxList: number[]) => {
+    if (idxList.length === 0) return
+    if (!hasPermission('platform:create')) {
+      message.error('您没有创建平台商品的权限，请联系管理员在产品管理中添加平台信息')
+      return
+    }
+    for (const i of idxList) {
+      const r = pendingSkuRows[i]
+      if (r.store_group_id) {
+        const groupStores = missingStores.filter((s: any) => s.group_id === r.store_group_id)
+        if (groupStores.length === 0) {
+          message.error(`第 ${r.row_no} 行：店铺分组「${r.store_group_name || '未命名'}」下没有店铺，请先在店铺分组中分配店铺`)
+          return
+        }
+      } else if (!r.platform || !r.store_id) {
+        message.error(`第 ${r.row_no} 行：该行未填写店铺分组，请先选择平台和店铺`)
+        return
+      }
+    }
+    setMissingSubmitting(true)
+    const rows = [...pendingSkuRows]
+    let successCount = 0
+    try {
+      for (const i of idxList) {
+        const r = rows[i]
+        try {
+          // 查询该产品已有平台商品用于去重（store_id 为 JSON 数组）
+          const existRes = await productsApi.getPlatformProducts(r.product_id)
+          const existing: any[] = existRes.data?.data || existRes.data || []
+          const existKey = new Set<string>()
+          for (const pp of existing) {
+            let storeIds: any[] = []
+            try {
+              storeIds = typeof pp.store_id === 'string' ? JSON.parse(pp.store_id) : (pp.store_id || [])
+            } catch {
+              storeIds = []
+            }
+            for (const sid of storeIds) {
+              existKey.add(`${String(pp.platform)}|${sid}|${String(pp.sku || '').trim().toLowerCase()}`)
+            }
+          }
+          // 目标店铺：有分组用分组下全部店铺（平台取店铺自身平台），无分组用手动选择
+          const targets: any[] = r.store_group_id
+            ? missingStores.filter((s: any) => s.group_id === r.store_group_id)
+            : [{ id: r.store_id, platform: r.platform }]
+          for (const st of targets) {
+            const key = `${String(st.platform)}|${st.id}|${String(r.sku || '').trim().toLowerCase()}`
+            if (existKey.has(key)) continue
+            await productsApi.createPlatformProduct(r.product_id, {
+              platform: st.platform,
+              store_ids: [st.id],
+              sku: r.sku,
+              title: r.product_name,
+            })
+          }
+          rows[i] = { ...r, _status: 'created', _error: undefined }
+          successCount++
+        } catch (err: any) {
+          const detail = err.response?.data?.detail || '添加失败'
+          rows[i] = { ...r, _status: 'error', _error: detail }
+        }
+      }
+    } finally {
+      setMissingSubmitting(false)
+    }
+    setPendingSkuRows(rows)
+    if (successCount > 0) message.success(`成功添加 ${successCount} 条平台商品，请点击"继续导入"重新解析文件`)
+    const failed = idxList.filter(i => rows[i]._status === 'error')
+    if (failed.length > 0) {
+      const first = rows[failed[0]]
+      message.error(`第 ${first.row_no} 行添加失败：${first._error}`, 8)
+    }
+  }
+
+  const updateNewProductName = (idx: number, name: string) => {
+    setNewProductRows(rows => rows.map((r, i) => (i === idx ? { ...r, name } : r)))
+  }
+
+  const updatePendingSkuRow = (idx: number, patch: Record<string, any>) => {
+    setPendingSkuRows(rows => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)))
+  }
+
+  // 继续导入：重新解析原文件（有未处理行时二次确认）
+  const handleContinueImport = () => {
+    const unhandledNew = newProductRows.filter(r => r._status !== 'created').length
+    const unhandledSku = pendingSkuRows.filter(r => r._status !== 'created').length
+    if (unhandledNew > 0) {
+      Modal.confirm({
+        title: `还有 ${unhandledNew} 个产品未创建`,
+        content: '未创建的产品行不会包含在本次导入中，是否继续？',
+        onOk: reparseImportFile,
+      })
+    } else if (unhandledSku > 0) {
+      Modal.confirm({
+        title: `还有 ${unhandledSku} 行未添加平台信息`,
+        content: '这些行仍可正常导入补货单，是否继续？',
+        onOk: reparseImportFile,
+      })
+    } else {
+      reparseImportFile()
+    }
+  }
+
+  // 跳过处理，直接导入已匹配的行
+  const handleSkipMissing = () => {
+    const unhandledNew = newProductRows.filter(r => r._status !== 'created').length
+    const proceed = () => {
+      setMissingModalOpen(false)
+      if ((previewItems || []).length === 0) {
+        message.warning('没有可导入的行，请先处理缺失信息')
+        return
+      }
+      setPreviewModalOpen(true)
+    }
+    if (unhandledNew > 0) {
+      Modal.confirm({
+        title: `还有 ${unhandledNew} 个产品未创建`,
+        content: '未创建的产品行不会包含在本次导入中，是否直接导入已匹配的行？',
+        onOk: proceed,
+      })
+    } else {
+      proceed()
     }
   }
 
@@ -1362,25 +1666,27 @@ const ReplenishmentManagement: React.FC = () => {
             )}
           </Space>
         }
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16 }}
-        styles={{ body: { flex: 1, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', marginBottom: 16, minHeight: 0 }}
+        styles={{ body: { flex: 1, minHeight: 0, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
       >
-        <Table
-          dataSource={orders}
-          columns={columns}
-          rowKey="id"
-          scroll={{ x: 1200 }}
-          pagination={false}
-          rowSelection={{
-            type: 'checkbox',
-            selectedRowKeys,
-            onChange: (newSelectedRowKeys) => {
-              setSelectedRowKeys(newSelectedRowKeys)
-            },
-          }}
-        />
+        <div className="replenish-scroll-container" style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+          <Table
+            dataSource={orders}
+            columns={columns}
+            rowKey="id"
+            scroll={{ x: 1200 }}
+            pagination={false}
+            rowSelection={{
+              type: 'checkbox',
+              selectedRowKeys,
+              onChange: (newSelectedRowKeys) => {
+                setSelectedRowKeys(newSelectedRowKeys)
+              },
+            }}
+          />
+        </div>
       </Card>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', paddingBottom: 8 }}>
+      <div className="pagination-wrapper">
         <Pagination
           current={pagination.current}
           pageSize={pagination.pageSize}
@@ -1770,6 +2076,7 @@ const ReplenishmentManagement: React.FC = () => {
               }}
               columns={[
                 { title: '商品编码', dataIndex: 'product_code', key: 'product_code', width: 140 },
+                { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 130, render: (v: string) => v || '-' },
                 { title: '商品名称', dataIndex: 'product_name', key: 'product_name', ellipsis: true },
                 {
                   title: '配件', dataIndex: 'bindings', key: 'bindings', width: 80,
@@ -1781,6 +2088,187 @@ const ReplenishmentManagement: React.FC = () => {
             />
           </div>
         ))}
+      </Modal>
+
+      <Modal
+        title="导入缺失信息处理"
+        open={missingModalOpen}
+        width={res.isMobile ? '95vw' : 960}
+        maskClosable={false}
+        onCancel={() => setMissingModalOpen(false)}
+        footer={[
+          <Button key="skip" onClick={handleSkipMissing}>跳过，导入已匹配行</Button>,
+          <Button key="continue" type="primary" loading={uploading} onClick={handleContinueImport}>继续导入（重新解析）</Button>,
+        ]}
+      >
+        <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          {newProductRows.length > 0 && (
+            <>
+              <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600 }}>
+                  <InfoCircleOutlined style={{ color: '#faad14', marginRight: 6 }} />
+                  以下产品尚未创建（共 {newProductRows.length} 行），请确认品名后创建；产品编码将自动生成，平台SKU由仓库人员后续补填：
+                </span>
+                {hasPermission('product:create') && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={missingSubmitting}
+                    disabled={newProductRows.every(r => r._status === 'created')}
+                    onClick={() => createMissingProducts(
+                      newProductRows.map((_, i) => i).filter(i => newProductRows[i]._status !== 'created')
+                    )}
+                  >
+                    全部创建
+                  </Button>
+                )}
+              </div>
+              <Table
+                size="small"
+                rowKey={(r: any) => `${r.row_no}-${r.sku}`}
+                dataSource={newProductRows}
+                pagination={false}
+                style={{ marginBottom: 20 }}
+                columns={[
+                  { title: '行号', dataIndex: 'row_no', width: 60, align: 'center' as const },
+                  {
+                    title: 'SKU', width: 140, align: 'center' as const,
+                    // SKU是平台商品属性（产品创建后由仓库人员在平台信息中补填），不作为产品编码
+                    render: (_: any, r: any) => (r.sku ? <span>{r.sku}</span> : <span style={{ color: '#999' }}>-</span>),
+                  },
+                  {
+                    title: '品名',
+                    width: 240,
+                    render: (_: any, r: any, i: number) => r._status === 'created'
+                      ? <span>{r.name}</span>
+                      : (
+                        <Input
+                          size="small"
+                          value={r.name}
+                          placeholder="必填，用于创建产品"
+                          onChange={(e) => updateNewProductName(i, e.target.value)}
+                        />
+                      ),
+                  },
+                  { title: '数量', dataIndex: 'quantity', width: 70, align: 'center' as const },
+                  {
+                    title: '店铺分组', dataIndex: 'store_group_name', width: 100, align: 'center' as const,
+                    render: (v: string) => v || '未分组',
+                  },
+                  {
+                    title: '操作', width: 100, align: 'center' as const,
+                    render: (_: any, r: any, i: number) => {
+                      if (r._status === 'created') return <Tag color="success">已创建</Tag>
+                      if (r._status === 'error') return <Tooltip title={r._error}><Tag color="error">失败</Tag></Tooltip>
+                      return hasPermission('product:create') ? (
+                        <Button size="small" type="primary" loading={missingSubmitting} onClick={() => createMissingProducts([i])}>创建</Button>
+                      ) : (
+                        <Tooltip title="无创建产品权限，请联系管理员"><Button size="small" disabled>创建</Button></Tooltip>
+                      )
+                    },
+                  },
+                ]}
+              />
+            </>
+          )}
+          {pendingSkuRows.length > 0 && (
+            <>
+              <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600 }}>
+                  <InfoCircleOutlined style={{ color: '#faad14', marginRight: 6 }} />
+                  以下产品未找到对应 SKU 的平台信息（共 {pendingSkuRows.length} 行），点击"立即添加"将自动添加到店铺分组内全部店铺（未分组行需手动选择平台与店铺）；未处理的行本次不会导入：
+                </span>
+                {hasPermission('platform:create') && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={missingSubmitting}
+                    disabled={pendingSkuRows.every(r => r._status === 'created')}
+                    onClick={() => addMissingPlatformSkus(
+                      pendingSkuRows.map((_, i) => i).filter(i => pendingSkuRows[i]._status !== 'created')
+                    )}
+                  >
+                    全部添加
+                  </Button>
+                )}
+              </div>
+              <Table
+                size="small"
+                rowKey={(r: any) => `${r.row_no}-${r.sku}`}
+                dataSource={pendingSkuRows}
+                pagination={false}
+                columns={[
+                  {
+                    title: '产品信息', width: 260,
+                    render: (_: any, r: any) => (
+                      <span>产品编码 {r.product_code} - 品名：{r.product_name}</span>
+                    ),
+                  },
+                  { title: '缺失SKU', dataIndex: 'sku', width: 130, align: 'center' as const },
+                  {
+                    title: '店铺分组', dataIndex: 'store_group_name', width: 95, align: 'center' as const,
+                    render: (v: string) => v || '未分组',
+                  },
+                  {
+                    title: '平台', width: 145,
+                    render: (_: any, r: any, i: number) => {
+                      if (r._status === 'created') return <Tag color="success">已添加</Tag>
+                      // 有店铺分组：自动按各店铺自身平台添加
+                      if (r.store_group_id) return <Tag color="blue">按店铺平台自动</Tag>
+                      return (
+                        <Select
+                          size="small"
+                          style={{ width: '100%' }}
+                          placeholder="选择平台"
+                          value={r.platform}
+                          options={missingPlatformOptions}
+                          onChange={(v) => updatePendingSkuRow(i, { platform: v, store_id: undefined })}
+                        />
+                      )
+                    },
+                  },
+                  {
+                    title: '店铺', width: 170,
+                    render: (_: any, r: any, i: number) => {
+                      if (r._status === 'created') return <span style={{ color: '#999' }}>—</span>
+                      if (r.store_group_id) {
+                        const n = missingStores.filter((s: any) => s.group_id === r.store_group_id).length
+                        return <span>分组内全部（{n}个店铺）</span>
+                      }
+                      const storeOpts = missingStores
+                        .map((s: any) => ({ label: s.name, value: s.id }))
+                      return (
+                        <Select
+                          size="small"
+                          style={{ width: '100%' }}
+                          placeholder="选择店铺"
+                          value={r.store_id}
+                          disabled={storeOpts.length === 0}
+                          options={storeOpts}
+                          showSearch
+                          optionFilterProp="label"
+                          onChange={(v) => updatePendingSkuRow(i, { store_id: v })}
+                        />
+                      )
+                    },
+                  },
+                  {
+                    title: '操作', width: 100, align: 'center' as const,
+                    render: (_: any, r: any, i: number) => {
+                      if (r._status === 'created') return <Tag color="success">已添加</Tag>
+                      if (r._status === 'error') return <Tooltip title={r._error}><Tag color="error">失败</Tag></Tooltip>
+                      return hasPermission('platform:create') ? (
+                        <Button size="small" type="primary" loading={missingSubmitting} onClick={() => addMissingPlatformSkus([i])}>立即添加</Button>
+                      ) : (
+                        <Tooltip title="无创建平台商品权限，请联系管理员"><Button size="small" disabled>立即添加</Button></Tooltip>
+                      )
+                    },
+                  },
+                ]}
+              />
+            </>
+          )}
+        </div>
       </Modal>
 
       <Modal
