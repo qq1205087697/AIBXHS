@@ -38,9 +38,7 @@ const ThemedApp: React.FC = () => {
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ThemeProvider>
-      <ThemedApp />
-    </ThemeProvider>
-  </React.StrictMode>,
+  <ThemeProvider>
+    <ThemedApp />
+  </ThemeProvider>,
 )

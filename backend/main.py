@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import time
 import logging
 import platform
 
@@ -246,6 +247,34 @@ async def serve_static_middleware(request: Request, call_next):
     
     return await call_next(request)
 
+# 请求日志中间件：为每个 API 请求记录发起用户（从 JWT 解码，不查数据库）
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    path = request.url.path
+    if path == "/api/health":
+        return await call_next(request)
+
+    user_desc = "匿名"
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        try:
+            from jose import jwt
+            payload = jwt.decode(auth[7:].strip(), settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            user_desc = f"用户 {payload.get('sub') or payload.get('uid')}(ID:{payload.get('uid')})"
+        except Exception:
+            user_desc = "无效token"
+
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed = (time.perf_counter() - start) * 1000
+        logger.error(f"{user_desc} {request.method} {path} 500 - {elapsed:.0f}ms")
+        raise
+    elapsed = (time.perf_counter() - start) * 1000
+    logger.info(f"{user_desc} {request.method} {path} {response.status_code} - {elapsed:.0f}ms")
+    return response
+
 if __name__ == "__main__":
     import uvicorn
     from config import get_settings
@@ -260,6 +289,7 @@ if __name__ == "__main__":
         port=settings.PORT,
         reload=False,
         log_level="info",
+        access_log=False,
         workers=workers,
         limit_concurrency=1000,
         timeout_keep_alive=5
