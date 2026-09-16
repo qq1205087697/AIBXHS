@@ -994,8 +994,9 @@ def batch_analyze_reviews(db: Session, review_ids: List[int], tenant_id: Optiona
                         rc = rc.strip()
                         ar = json.loads(rc) if rc.startswith("{") else {}
                         
-                        db.execute(text("""INSERT INTO review_analyses (tenant_id,review_id,model,sentiment,sentiment_score,key_points,topics,suggestions,summary,raw_response,department) VALUES (:tid,:rid,:m,:s,:sc,:kp,:t,:sg,:sm,:r,:dept)"""), {
-                            "tid": tenant_id, "rid": review_id, "m": settings.OPENAI_MODEL, "s": ar.get("sentiment","negative"), "sc": ar.get("sentiment_score",3), "kp": json.dumps(ar.get("key_points",[])), "t": json.dumps(ar.get("topics",[])), "sg": json.dumps(ar.get("suggestions",[])), "sm": ar.get("summary",""), "r": rc, "dept": ar.get("department","")
+                        depts_str = _normalize_departments(ar.get("departments") or ar.get("department"))
+                        db.execute(text("""INSERT INTO review_analyses (tenant_id,review_id,model,sentiment,sentiment_score,key_points,topics,suggestions,summary,raw_response,department,departments) VALUES (:tid,:rid,:m,:s,:sc,:kp,:t,:sg,:sm,:r,:dept,:depts)"""), {
+                            "tid": tenant_id, "rid": review_id, "m": settings.OPENAI_MODEL, "s": ar.get("sentiment","negative"), "sc": ar.get("sentiment_score",3), "kp": json.dumps(ar.get("key_points",[])), "t": json.dumps(ar.get("topics",[])), "sg": json.dumps(ar.get("suggestions",[])), "sm": ar.get("summary",""), "r": rc, "dept": depts_str.split(",")[0] if depts_str else "", "depts": depts_str
                         })
                         db.commit()
                         
