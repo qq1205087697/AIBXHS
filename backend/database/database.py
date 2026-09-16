@@ -105,6 +105,11 @@ def init_db():
                 conn.execute(text("ALTER TABLE review_analyses ADD COLUMN department VARCHAR(20) NULL COMMENT '问题板块:operations/purchasing/warehouse/design'"))
             except Exception as e:
                 print(f"添加 review_analyses.department 字段失败（可能已存在）: {e}")
+            # 差评分析表新增多板块字段（逗号分隔，一条差评可属多个板块）
+            try:
+                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"))
+            except Exception as e:
+                print(f"添加 review_analyses.departments 字段失败（可能已存在）: {e}")
             conn.commit()
         
         print("数据库表结构创建成功")

@@ -296,6 +296,7 @@ def analyze_unanalyzed_reviews_job():
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
+    from services.chat_service import DEPARTMENT_PROMPT_RULES, _normalize_departments
 
     LOCK_KEY = "daily_review_analysis"
     db = SessionLocal()
@@ -373,14 +374,9 @@ def analyze_unanalyzed_reviews_job():
 2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
 3. low（第三级）：其他所有场景
 
-部门板块分类规则（department字段，必须输出以下四个之一）：
-- operations（运营板块）：文案问题、产品货不对板
-- purchasing（采购板块）：质量不好、字母/印刷出错
-- warehouse（仓库板块）：损坏
-- design（美工板块）：尺寸、颜色、图片、夸大
-根据评论内容判断最符合的板块，无法判断时归入operations。
+""" + DEPARTMENT_PROMPT_RULES + """
 
-输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}"""
+输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","departments":["operations","purchasing","warehouse","design"]}}"""
 
                 response = client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -401,9 +397,10 @@ def analyze_unanalyzed_reviews_job():
                     ar = {"sentiment": "negative", "sentiment_score": 3, "key_points": [], "topics": [], "suggestions": [], "summary": rc[:200]}
 
                 # 保存AI分析结果（使用ON DUPLICATE KEY UPDATE避免并发重复插入）
+                depts_str = _normalize_departments(ar.get("departments") or ar.get("department"))
                 thread_db.execute(text("""
-                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department)
-                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw, :dept)
+                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department, departments)
+                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw, :dept, :depts)
                     ON DUPLICATE KEY UPDATE
                         sentiment = VALUES(sentiment),
                         sentiment_score = VALUES(sentiment_score),
@@ -412,13 +409,14 @@ def analyze_unanalyzed_reviews_job():
                         suggestions = VALUES(suggestions),
                         summary = VALUES(summary),
                         raw_response = VALUES(raw_response),
-                        department = VALUES(department)
+                        department = VALUES(department),
+                        departments = VALUES(departments)
                 """), {
                     "tid": tenant_id, "rid": review_id, "model": settings.OPENAI_MODEL,
                     "sentiment": ar.get("sentiment", "negative"), "score": ar.get("sentiment_score", 3),
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
                     "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc,
-                    "dept": ar.get("department", "")
+                    "dept": depts_str.split(",")[0] if depts_str else "", "depts": depts_str
                 })
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
