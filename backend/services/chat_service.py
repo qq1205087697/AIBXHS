@@ -522,8 +522,8 @@ def query_inventory_status(db: Session, tenant_id: int, query_type: str, risk_le
         return []
 
 
-def query_negative_reviews(db: Session, tenant_id: int, start_date: str, end_date: str, asin: Optional[str] = None) -> List[Dict[str, Any]]:
-    """查询差评工具函数 - 使用纯SQL避免Enum问题"""
+def query_negative_reviews(db: Session, tenant_id: int, start_date: str, end_date: str, asin: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """查询差评工具函数 - 使用纯SQL避免Enum问题（返回最新 limit 条明细，真实总数用 get_negative_review_stats）"""
     try:
         start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
         end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
@@ -531,13 +531,13 @@ def query_negative_reviews(db: Session, tenant_id: int, start_date: str, end_dat
         # 明确查询产品表的 name 字段作为产品名
         if asin:
             query = text("""
-                SELECT r.id, r.asin, r.reviewer_name, r.rating, r.title, r.content, 
-                       r.translated_content, r.review_date, r.crawled_at, r.account, 
+                SELECT r.id, r.asin, r.reviewer_name, r.rating, r.title, r.content,
+                       r.translated_content, r.review_date, r.crawled_at, r.account,
                        r.site, r.return_rate, r.tenant_id,
-                       CASE 
+                       CASE
                            WHEN p.name IS NOT NULL AND p.name != '' THEN p.name
                            WHEN r.asin IS NOT NULL AND r.asin != '' THEN r.asin
-                           ELSE '未知商品' 
+                           ELSE '未知商品'
                        END as product_name
                 FROM reviews r
                 LEFT JOIN products p ON r.asin = p.asin
@@ -547,20 +547,20 @@ def query_negative_reviews(db: Session, tenant_id: int, start_date: str, end_dat
                 AND r.review_date <= :end_date
                 AND r.asin = :asin
                 ORDER BY r.review_date DESC
-                LIMIT 50
+                LIMIT :limit
             """)
             result = db.execute(query, {
-                "tenant_id": tenant_id, "start_date": start_date_obj, "end_date": end_date_obj, "asin": asin
+                "tenant_id": tenant_id, "start_date": start_date_obj, "end_date": end_date_obj, "asin": asin, "limit": limit
             })
         else:
             query = text("""
-                SELECT r.id, r.asin, r.reviewer_name, r.rating, r.title, r.content, 
-                       r.translated_content, r.review_date, r.crawled_at, r.account, 
+                SELECT r.id, r.asin, r.reviewer_name, r.rating, r.title, r.content,
+                       r.translated_content, r.review_date, r.crawled_at, r.account,
                        r.site, r.return_rate, r.tenant_id,
-                       CASE 
+                       CASE
                            WHEN p.name IS NOT NULL AND p.name != '' THEN p.name
                            WHEN r.asin IS NOT NULL AND r.asin != '' THEN r.asin
-                           ELSE '未知商品' 
+                           ELSE '未知商品'
                        END as product_name
                 FROM reviews r
                 LEFT JOIN products p ON r.asin = p.asin
@@ -569,10 +569,10 @@ def query_negative_reviews(db: Session, tenant_id: int, start_date: str, end_dat
                 AND r.review_date >= :start_date
                 AND r.review_date <= :end_date
                 ORDER BY r.review_date DESC
-                LIMIT 50
+                LIMIT :limit
             """)
             result = db.execute(query, {
-                "tenant_id": tenant_id, "start_date": start_date_obj, "end_date": end_date_obj
+                "tenant_id": tenant_id, "start_date": start_date_obj, "end_date": end_date_obj, "limit": limit
             })
 
         reviews = result.fetchall()
@@ -603,6 +603,111 @@ def query_negative_reviews(db: Session, tenant_id: int, start_date: str, end_dat
         import traceback
         logger.error(traceback.format_exc())
         return []
+
+
+def get_negative_review_stats(db: Session, tenant_id: int, start_date: str, end_date: str, asin: Optional[str] = None, top_n: int = 30) -> Dict[str, Any]:
+    """统计差评真实总数、各商品差评数量排行（含产品编码/品名/ASIN/板块分布/主要板块）。
+    数量与排行榜类问题以此为准，避免明细截断导致答错。"""
+    try:
+        from collections import Counter
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+
+        asin_cond = "AND r.asin = :asin" if asin else ""
+        params = {"tenant_id": tenant_id, "start_date": start_date_obj, "end_date": end_date_obj}
+        if asin:
+            params["asin"] = asin
+
+        total = db.execute(text(f"""
+            SELECT COUNT(*) FROM reviews r
+            WHERE r.rating <= 3
+            AND r.tenant_id = :tenant_id
+            AND r.review_date >= :start_date
+            AND r.review_date <= :end_date {asin_cond}
+        """), params).scalar() or 0
+
+        rows = db.execute(text(f"""
+            SELECT r.asin, COUNT(*) AS cnt
+            FROM reviews r
+            WHERE r.rating <= 3
+            AND r.tenant_id = :tenant_id
+            AND r.review_date >= :start_date
+            AND r.review_date <= :end_date {asin_cond}
+            GROUP BY r.asin
+            ORDER BY cnt DESC
+        """), params).fetchall()
+
+        # asin → 产品编码/品名（products 优先，库存快照 product_name 兜底）
+        asins = [row[0] for row in rows if row[0]]
+        name_map, code_map = {}, {}
+        if asins:
+            ph = ",".join([f":a_{i}" for i in range(len(asins))])
+            for i, a in enumerate(asins):
+                params[f"a_{i}"] = a
+            prows = db.execute(text(f"""
+                SELECT asin, name, product_code FROM products
+                WHERE tenant_id = :tenant_id AND deleted_at IS NULL AND asin IN ({ph})
+            """), params).fetchall()
+            for p in prows:
+                if p[0] and p[0] not in name_map:
+                    name_map[p[0]] = p[1]
+                    code_map[p[0]] = p[2]
+            missing = [a for a in asins if a not in name_map]
+            if missing:
+                mph = ",".join([f":m_{i}" for i in range(len(missing))])
+                for i, a in enumerate(missing):
+                    params[f"m_{i}"] = a
+                srows = db.execute(text(f"""
+                    SELECT asin, product_name FROM inventory_snapshots
+                    WHERE tenant_id = :tenant_id AND asin IN ({mph})
+                      AND product_name IS NOT NULL AND product_name != ''
+                """), params).fetchall()
+                for s in srows:
+                    if s[0] and s[0] not in name_map:
+                        name_map[s[0]] = s[1]
+
+        # 各差评的板块归属（departments 多选优先，兼容旧版单值 department；未分析单独计数）
+        SECTION_NAMES = {"operations": "运营", "purchasing": "采购", "warehouse": "仓库", "design": "美工"}
+        sec_counter: Dict[str, Counter] = {}
+        section_rows = db.execute(text(f"""
+            SELECT r.asin, ra.departments, ra.department
+            FROM reviews r
+            LEFT JOIN review_analyses ra ON r.id = ra.review_id
+            WHERE r.rating <= 3
+            AND r.tenant_id = :tenant_id
+            AND r.review_date >= :start_date
+            AND r.review_date <= :end_date {asin_cond}
+        """), params).fetchall()
+        for srow in section_rows:
+            a = srow[0]
+            raw = (srow[1] or srow[2] or "")
+            secs = [s.strip() for s in raw.split(",") if s.strip()]
+            c = sec_counter.setdefault(a, Counter())
+            if secs:
+                for s in secs:
+                    c[s] += 1
+            else:
+                c["未分类"] += 1
+
+        product_stats = []
+        for row in rows[:top_n]:
+            a = row[0]
+            c = sec_counter.get(a, Counter())
+            main = c.most_common(1)[0][0] if c else "未分类"
+            product_stats.append({
+                "product_code": code_map.get(a, "") or "",
+                "product_name": (name_map.get(a) if a else "") or a or "未知商品",
+                "asin": a,
+                "review_count": int(row[1]),
+                "sections": {SECTION_NAMES.get(k, k): v for k, v in c.items()},
+                "main_section": SECTION_NAMES.get(main, main),
+            })
+        return {"total": int(total), "product_kinds": len(rows), "product_stats": product_stats}
+    except Exception as e:
+        logger.error(f"统计差评数据失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"total": 0, "product_kinds": 0, "product_stats": []}
 
 
 def get_review_analysis(db: Session, review_id: int, tenant_id: Optional[int] = None) -> Optional[dict]:
@@ -2288,8 +2393,38 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                         start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
                     logger.info(f"[CHAT] 统一模式差评查询: {start_date} ~ {end_date}, ASIN={asin}")
-                    reviews = query_negative_reviews(db, tenant_id, start_date, end_date, asin)
-                    logger.info(f"[CHAT] 查询到 {len(reviews)} 条差评")
+                    review_stats = get_negative_review_stats(db, tenant_id, start_date, end_date, asin)
+
+                    # 排行/数量类问题：只发统计数据（含产品编码/品名/ASIN/板块分布），不发明细，不触发评论分析
+                    is_ranking_question = any(k in user_message for k in ("排行", "排名", "最多", "前十", "前10", "TOP", "top", "统计", "哪些商品", "哪个商品", "几个商品"))
+                    if is_ranking_question:
+                        logger.info(f"[CHAT] 排行榜类问题，仅使用统计数据回答")
+                        analysis_prompt = f"""当前日期: {current_date}
+
+差评统计数据（日期范围: {start_date} ~ {end_date}）：
+- 该时间范围实际共有 {review_stats['total']} 条差评，涉及商品 {review_stats['product_kinds']} 个
+- 差评数量排行榜（按差评数降序，含产品编码、品名、ASIN、差评数、板块分布、主要板块）：
+{json.dumps(review_stats['product_stats'], ensure_ascii=False, indent=1)}
+
+【回答要求】
+1. 直接基于以上统计数据输出差评数量排行榜（默认前10名），差评数相同的商品并列排名
+2. 数据中已包含品名与产品编码，不要声称缺少商品名称信息
+3. 使用"品名（产品编码）"指代商品，可附ASIN
+4. 输出每个商品的板块分布（板块用中文名称：运营/采购/仓库/美工/未分类），并指出该商品差评主要属于哪个板块"""
+
+                        final_messages = [{"role": "system", "content": analysis_prompt}]
+                        final_messages.extend(history)
+                        final_messages.append({"role": "user", "content": user_message})
+                        with ai_call_slot():
+                            final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
+                        final_reply = final_response.choices[0].message.content or "抱歉，无法处理"
+                        save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                        return final_reply
+
+                    # 明细尽量取全量，最多200条（每条明细含内容摘要+翻译+AI总结约300~400 token，超大范围会撑爆模型上下文）
+                    detail_limit = min(review_stats["total"], 200) if review_stats["total"] > 0 else 100
+                    reviews = query_negative_reviews(db, tenant_id, start_date, end_date, asin, limit=detail_limit)
+                    logger.info(f"[CHAT] 查询到 {len(reviews)} 条差评明细（该范围实际共 {review_stats['total']} 条）")
 
                     # 分离已分析和未分析的差评
                     reviews_for_ai = []
@@ -2361,7 +2496,16 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
 
                     analysis_prompt = f"""当前日期: {current_date}
 
-查询到 {len(reviews_for_ai)} 条差评数据（日期范围: {start_date} ~ {end_date}）：
+差评数据统计（日期范围: {start_date} ~ {end_date}）：
+- 该时间范围实际共有 {review_stats['total']} 条差评
+- 涉及商品 {review_stats['product_kinds']} 个
+- 下面展示其中最新 {len(reviews_for_ai)} 条明细{'（已展示该范围全部差评明细）' if review_stats['total'] <= len(reviews_for_ai) else ''}
+- 各商品差评数量排行：
+{json.dumps(review_stats['product_stats'], ensure_ascii=False)}
+
+【重要】回答数量、排行、对比类问题时，必须以上面的统计数字和商品排行为准，不要根据明细条数臆断总数。
+
+差评明细（{len(reviews_for_ai)} 条{'，已全部展示' if review_stats['total'] <= len(reviews_for_ai) else '，为最新采样'}）：
 
 {json.dumps(reviews_for_ai, ensure_ascii=False, indent=1)}
 
@@ -2590,8 +2734,38 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
                         start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
                     
                     logger.info(f"[CHAT] 查询日期: {start_date} ~ {end_date}")
-                    reviews = query_negative_reviews(db, tenant_id, start_date, end_date)
-                    logger.info(f"[CHAT] 查询到 {len(reviews)} 条差评")
+                    review_stats = get_negative_review_stats(db, tenant_id, start_date, end_date)
+
+                    # 排行/数量类问题：只发统计数据（含产品编码/品名/ASIN/板块分布），不发明细，不触发评论分析
+                    is_ranking_question = any(k in user_message for k in ("排行", "排名", "最多", "前十", "前10", "TOP", "top", "统计", "哪些商品", "哪个商品", "几个商品"))
+                    if is_ranking_question:
+                        logger.info(f"[CHAT] 排行榜类问题，仅使用统计数据回答")
+                        analysis_prompt = f"""当前日期: {current_date}
+
+差评统计数据（日期范围: {start_date} ~ {end_date}）：
+- 该时间范围实际共有 {review_stats['total']} 条差评，涉及商品 {review_stats['product_kinds']} 个
+- 差评数量排行榜（按差评数降序，含产品编码、品名、ASIN、差评数、板块分布、主要板块）：
+{json.dumps(review_stats['product_stats'], ensure_ascii=False, indent=1)}
+
+【回答要求】
+1. 直接基于以上统计数据输出差评数量排行榜（默认前10名），差评数相同的商品并列排名
+2. 数据中已包含品名与产品编码，不要声称缺少商品名称信息
+3. 使用"品名（产品编码）"指代商品，可附ASIN
+4. 输出每个商品的板块分布（板块用中文名称：运营/采购/仓库/美工/未分类），并指出该商品差评主要属于哪个板块"""
+
+                        final_messages = [{"role": "system", "content": analysis_prompt}]
+                        final_messages.extend(history)
+                        final_messages.append({"role": "user", "content": user_message})
+                        with ai_call_slot():
+                            final_response = client.chat.completions.create(model=settings.OPENAI_MODEL, messages=final_messages, temperature=0.7, timeout=240)
+                        final_reply = final_response.choices[0].message.content or "抱歉，无法处理"
+                        save_message(db, user_id, session_id, "assistant", final_reply, chat_type=chat_type)
+                        return final_reply
+
+                    # 明细尽量取全量，最多200条（每条明细含内容摘要+翻译+AI总结约300~400 token，超大范围会撑爆模型上下文）
+                    detail_limit = min(review_stats["total"], 200) if review_stats["total"] > 0 else 100
+                    reviews = query_negative_reviews(db, tenant_id, start_date, end_date, limit=detail_limit)
+                    logger.info(f"[CHAT] 查询到 {len(reviews)} 条差评明细（该范围实际共 {review_stats['total']} 条）")
 
                     reviews_for_ai = []
                     unanalyzed_reviews = []
@@ -2657,7 +2831,16 @@ def process_chat(db: Session, user_id: int, session_id: str, user_message: str, 
 
                     analysis_prompt = f"""当前日期: {current_date}
 
-你有以下差评数据（共{len(reviews_for_ai)}条）：
+差评数据统计（日期范围: {start_date} ~ {end_date}）：
+- 该时间范围实际共有 {review_stats['total']} 条差评
+- 涉及商品 {review_stats['product_kinds']} 个
+- 下面展示其中最新 {len(reviews_for_ai)} 条明细{'（已展示该范围全部差评明细）' if review_stats['total'] <= len(reviews_for_ai) else ''}
+- 各商品差评数量排行：
+{json.dumps(review_stats['product_stats'], ensure_ascii=False)}
+
+【重要】回答数量、排行、对比类问题时，必须以上面的统计数字和商品排行为准，不要根据明细条数臆断总数。
+
+差评明细（{len(reviews_for_ai)} 条{'，已全部展示' if review_stats['total'] <= len(reviews_for_ai) else '，为最新采样'}）：
 
 {json.dumps(reviews_for_ai, ensure_ascii=False, indent=1)}
 

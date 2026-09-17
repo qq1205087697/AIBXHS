@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Card, Table, Input, Select, message, Space, Tag, Pagination, Statistic, Spin, Empty, Typography, Tooltip } from 'antd'
 import { SearchOutlined, DatabaseOutlined, ShoppingCartOutlined, CheckSquareOutlined, WarningOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
@@ -34,11 +34,11 @@ interface BaseTableItem {
   product_id: number
   product_code: string
   name: string
-  product_type: string
   in_stock_qty: number
   to_purchase_qty: number
   to_inbound_qty: number
   need_sku?: boolean
+  skus?: string[]
   in_stock_groups: GroupQty[]
   to_purchase_groups: GroupQty[]
   to_inbound_groups: GroupQty[]
@@ -48,6 +48,11 @@ interface WarehouseStock {
   store_group_name: string
   warehouse: string
   qty: number
+}
+
+interface MyGroup {
+  group_id: number
+  group_name: string
 }
 
 interface ReplenishmentDetail {
@@ -111,12 +116,6 @@ const issueOptions = [
   { label: '缺平台SKU', value: 'no_sku' },
 ]
 
-const productTypeOptions = [
-  { label: '全部类型', value: '' },
-  { label: '成品', value: 'finished' },
-  { label: '配件', value: 'accessory' },
-]
-
 const BaseTableManagement: React.FC = () => {
   const [items, setItems] = useState<BaseTableItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -125,16 +124,29 @@ const BaseTableManagement: React.FC = () => {
     pageSize: number
     issue: string
     keyword: string
-    product_type: string
+    group_id?: number
     sort_by?: string
     sort_order?: string
-  }>({ page: 1, pageSize: 20, issue: 'all', keyword: '', product_type: '' })
+  }>({ page: 1, pageSize: 20, issue: 'all', keyword: '' })
   const [total, setTotal] = useState(0)
   const [searchText, setSearchText] = useState('')
   const [stats, setStats] = useState({ in_stock_total: 0, to_purchase_total: 0, to_inbound_total: 0, no_sku_total: 0 })
   const [expandedKeys, setExpandedKeys] = useState<number[]>([])
   const [detailMap, setDetailMap] = useState<Record<number, ProductDetail>>({})
   const [detailLoadingKeys, setDetailLoadingKeys] = useState<number[]>([])
+  const [myGroups, setMyGroups] = useState<MyGroup[]>([])
+
+  // 分组筛选框：非管理员=所属店铺分组，管理员=全部分组
+  useEffect(() => {
+    let cancelled = false
+    baseTableApi
+      .getMyGroups()
+      .then((res) => {
+        if (!cancelled && res.data.success) setMyGroups(res.data.data || [])
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -146,7 +158,7 @@ const BaseTableManagement: React.FC = () => {
           page_size: query.pageSize,
           issue: query.issue,
           keyword: query.keyword || undefined,
-          product_type: query.product_type || undefined,
+          group_id: query.group_id,
           sort_by: query.sort_by || undefined,
           sort_order: query.sort_order,
         })
@@ -195,17 +207,23 @@ const BaseTableManagement: React.FC = () => {
     if (expanded) loadDetail(record.product_id)
   }
 
+  const searchTimeoutRef = useRef<number | null>(null)
+
+  // 搜索（300ms防抖实时搜索，与产品管理一致）
   const handleSearch = (value: string) => {
     setSearchText(value)
-    setQuery(prev => (prev.keyword === value && prev.page === 1 ? prev : { ...prev, keyword: value, page: 1 }))
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+    searchTimeoutRef.current = window.setTimeout(() => {
+      setQuery(prev => (prev.keyword === value && prev.page === 1 ? prev : { ...prev, keyword: value, page: 1 }))
+    }, 300)
   }
 
   const handleIssueChange = (value: string) => {
     setQuery(prev => (prev.issue === value && prev.page === 1 ? prev : { ...prev, issue: value, page: 1 }))
   }
 
-  const handleProductTypeChange = (value: string) => {
-    setQuery(prev => (prev.product_type === value && prev.page === 1 ? prev : { ...prev, product_type: value, page: 1 }))
+  const handleGroupChange = (value?: number) => {
+    setQuery(prev => (prev.group_id === value && prev.page === 1 ? prev : { ...prev, group_id: value, page: 1 }))
   }
 
   const renderOrderNumber = (text: string) => (
@@ -341,16 +359,29 @@ const BaseTableManagement: React.FC = () => {
       ),
     },
     {
-      title: '类型',
-      dataIndex: 'product_type',
-      key: 'product_type',
-      width: 90,
+      title: 'SKU',
+      dataIndex: 'skus',
+      key: 'skus',
+      width: 170,
       align: 'center',
-      render: (type: string) => (
-        <Tag color={type === 'accessory' ? 'cyan' : 'geekblue'} style={{ fontSize: 12 }}>
-          {type === 'accessory' ? '配件' : '成品'}
-        </Tag>
-      ),
+      render: (skus: string[] | undefined) => {
+        const list = skus || []
+        if (list.length === 0) {
+          return <Text style={{ fontSize: 13, color: '#999' }}>-</Text>
+        }
+        return (
+          <Tooltip title={list.join('、')} placement="topLeft">
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, justifyContent: 'center', alignItems: 'center' }}>
+              {list.slice(0, 2).map((s) => (
+                <Tag key={s} style={{ fontSize: 12, margin: 0, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {s}
+                </Tag>
+              ))}
+              {list.length > 2 && <Tag style={{ fontSize: 12, margin: 0 }}>+{list.length - 2}</Tag>}
+            </div>
+          </Tooltip>
+        )
+      },
     },
     {
       title: '已入库',
@@ -433,17 +464,12 @@ const BaseTableManagement: React.FC = () => {
         title={
           <Space wrap size="middle">
             <Input
-              placeholder="搜索产品编码、名称（回车搜索）"
+              placeholder="搜索产品编码、名称、SKU..."
               prefix={<SearchOutlined />}
               allowClear
               style={{ width: 240 }}
               value={searchText}
-              onChange={(e) => {
-                const v = e.target.value
-                setSearchText(v)
-                if (v === '') handleSearch('')
-              }}
-              onPressEnter={(e) => handleSearch((e.target as HTMLInputElement).value)}
+              onChange={(e) => handleSearch(e.target.value)}
             />
             <Select
               value={query.issue}
@@ -452,10 +478,14 @@ const BaseTableManagement: React.FC = () => {
               onChange={handleIssueChange}
             />
             <Select
-              value={query.product_type}
-              style={{ width: 120 }}
-              options={productTypeOptions}
-              onChange={handleProductTypeChange}
+              value={query.group_id}
+              style={{ width: 180 }}
+              placeholder={myGroups.length > 0 ? '筛选分组' : '未绑定店铺分组'}
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              options={myGroups.map(g => ({ label: g.group_name, value: g.group_id }))}
+              onChange={handleGroupChange}
             />
           </Space>
         }
