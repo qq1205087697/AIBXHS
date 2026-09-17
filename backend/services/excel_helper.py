@@ -7,6 +7,29 @@ from sqlalchemy import text
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
 
+# 标准平台列表（与前端下拉一致）
+STANDARD_PLATFORMS = {
+    "amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other",
+    "temu_half", "temu_full", "shein_half", "shein_full", "aliexpress_half", "aliexpress_full"
+}
+
+
+def get_custom_platforms(db: Session, tenant_id: int) -> set:
+    """从店铺表与平台商品表提取本租户的自定义平台（非标准平台值），小写集合"""
+    custom = set()
+    try:
+        for sql in (
+            "SELECT DISTINCT platform FROM stores WHERE tenant_id = :tid AND platform IS NOT NULL AND platform != ''",
+            "SELECT DISTINCT platform FROM platform_products WHERE tenant_id = :tid AND platform IS NOT NULL AND platform != ''",
+        ):
+            for row in db.execute(text(sql), {"tid": tenant_id}).fetchall():
+                p = str(row[0]).strip().lower()
+                if p and p not in STANDARD_PLATFORMS:
+                    custom.add(p)
+    except Exception:
+        pass
+    return custom
+
 
 def set_auto_column_width(worksheet):
     """设置工作表列宽自适应"""
@@ -650,10 +673,7 @@ def parse_product_excel(file_bytes: bytes, db: Session, tenant_id: int) -> Dict[
                 raise ValueError(f"平台商品页签缺少必需列: {col}")
         
         status_map = {"启用": "active", "停用": "inactive", "归档": "archived"}
-        valid_platforms = {
-            "amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other",
-            "temu_half", "temu_full", "shein_half", "shein_full", "aliexpress_half", "aliexpress_full"
-        }
+        valid_platforms = STANDARD_PLATFORMS | get_custom_platforms(db, tenant_id)
         platform_aliases = {
             "amazon": "amazon",
             "ebay": "ebay",

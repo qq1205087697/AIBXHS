@@ -92,7 +92,6 @@ async def get_unread_count(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    logger.info(f"用户 {current_user.username} (ID:{current_user.id}) 请求未读通知数量")
     try:
         # 检查表是否存在
         check_table = db.execute(text("SHOW TABLES LIKE 'notifications'")).fetchone()
@@ -105,7 +104,7 @@ async def get_unread_count(
             WHERE user_id = :user_id AND read_at IS NULL
         """)
         count = db.execute(query, {"user_id": current_user.id}).scalar()
-        logger.info(f"用户 {current_user.id} 有 {count} 条未读通知")
+        logger.info(f"用户 {current_user.username}(ID:{current_user.id}) 有 {count} 条未读通知")
         return {"success": True, "data": {"count": count}}
     except Exception as e:
         logger.error(f"获取未读通知数量失败: {e}")

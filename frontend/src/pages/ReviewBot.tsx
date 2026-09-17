@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Row, Col, List, Button, Alert, Tag, Statistic, Divider, Space, Avatar, Modal, Checkbox, Pagination, message, Input, Select, DatePicker, Dropdown, MenuProps } from 'antd'
+import { Card, Row, Col, List, Button, Alert, Tag, Statistic, Divider, Space, Avatar, Modal, Checkbox, Pagination, message, Input, Select, DatePicker, Dropdown, MenuProps, Table, Tooltip, Spin } from 'antd'
 import {
   MessageSquare,
   AlertTriangle,
@@ -34,8 +34,44 @@ interface ReviewItem {
   status: 'new' | 'read' | 'processing' | 'resolved'
   author: string
   isNew?: boolean
-  importanceLevel?: string
+  importanceLevel?: string | null
   returnRate?: number
+  department?: string
+  departments?: string[]
+  suggestionProcessed?: Record<string, { note: string; by: string; at: string }>
+}
+
+// 问题板块分类：AI建议按部门归类，方便运营知道去找谁
+const DEPARTMENT_MAP: Record<string, { label: string; color: string; desc: string }> = {
+  operations: { label: '运营板块', color: 'orange', desc: '文案问题、产品货不对板' },
+  purchasing: { label: '采购板块', color: 'purple', desc: '质量不好、字母/印刷出错' },
+  warehouse: { label: '仓库板块', color: 'blue', desc: '损坏' },
+  design: { label: '美工板块', color: 'magenta', desc: '尺寸、颜色、图片、夸大' },
+}
+
+// 一条差评可同时属于多个板块，渲染多个标签
+const getDepartmentTags = (review?: { department?: string; departments?: string[] }) => {
+  if (!review) return <Tag>未分类</Tag>
+  const list = (review.departments && review.departments.length > 0
+    ? review.departments
+    : (review.department ? [review.department] : [])
+  ).filter(d => DEPARTMENT_MAP[d])
+  if (list.length === 0) return <Tag>未分类</Tag>
+  return (
+    <>
+      {list.map(d => {
+        const info = DEPARTMENT_MAP[d]
+        return <Tooltip key={d} title={info.desc}><Tag color={info.color} style={{ marginBottom: 2 }}>{info.label.replace('板块', '')}</Tag></Tooltip>
+      })}
+    </>
+  )
+}
+
+// 单板块标签（用于排行榜"主要问题板块"列）
+const getDepartmentTag = (department?: string) => {
+  if (!department || !DEPARTMENT_MAP[department]) return <Tag>未分类</Tag>
+  const d = DEPARTMENT_MAP[department]
+  return <Tooltip title={d.desc}><Tag color={d.color}>{d.label}</Tag></Tooltip>
 }
 
 const ReviewBot: React.FC = () => {
@@ -62,7 +98,18 @@ const ReviewBot: React.FC = () => {
   const [sortOrder, setSortOrder] = useState('desc')
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null]>([null, null])
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined)
-  const [importanceLevelFilter, setImportanceLevelFilter] = useState<string | undefined>(undefined)
+  const [importanceLevelFilter, setImportanceLevelFilter] = useState<string[]>([])
+  const [departmentFilter, setDepartmentFilter] = useState<string[]>([])
+
+  // 单条AI建议处理弹窗
+  const [processModalOpen, setProcessModalOpen] = useState(false)
+  const [processingSuggestion, setProcessingSuggestion] = useState<{ index: number; text: string } | null>(null)
+  const [processNote, setProcessNote] = useState('')
+  const [processSubmitting, setProcessSubmitting] = useState(false)
+
+  const [rankingOpen, setRankingOpen] = useState(false)
+  const [rankingData, setRankingData] = useState<any[]>([])
+  const [rankingLoading, setRankingLoading] = useState(false)
 
   const [importanceStats, setImportanceStats] = useState({
     high: { unviewed: 0, viewed: 0 },
@@ -70,9 +117,55 @@ const ReviewBot: React.FC = () => {
     low: { unviewed: 0, viewed: 0 },
   })
 
+  // 板块推送配置（订阅人）
+  const [subscriberModalOpen, setSubscriberModalOpen] = useState(false)
+  const [subscriberLoading, setSubscriberLoading] = useState(false)
+  const [subscriberSaving, setSubscriberSaving] = useState(false)
+  const [sectionSubscribers, setSectionSubscribers] = useState<Record<string, number[]>>({})
+  const [subscriberUserOptions, setSubscriberUserOptions] = useState<{ value: number; label: string; role: string }[]>([])
+
+  const openSubscriberModal = async () => {
+    setSubscriberModalOpen(true)
+    setSubscriberLoading(true)
+    try {
+      const response = await reviewsApi.getSectionSubscribers()
+      if (response.data.success) {
+        setSectionSubscribers(response.data.data.subscribers || {})
+        setSubscriberUserOptions(
+          (response.data.data.users || []).map((u: any) => ({
+            value: u.id,
+            label: u.display_name,
+            role: u.role_name || '',
+          }))
+        )
+      }
+    } catch (error) {
+      console.error('获取板块订阅配置失败:', error)
+      message.error('获取板块订阅配置失败')
+    } finally {
+      setSubscriberLoading(false)
+    }
+  }
+
+  const saveSubscribers = async () => {
+    setSubscriberSaving(true)
+    try {
+      const response = await reviewsApi.updateSectionSubscribers(sectionSubscribers)
+      if (response.data.success) {
+        message.success('板块订阅配置已保存')
+        setSubscriberModalOpen(false)
+      }
+    } catch (error: any) {
+      console.error('保存板块订阅配置失败:', error)
+      message.error(error?.response?.data?.detail || '保存失败')
+    } finally {
+      setSubscriberSaving(false)
+    }
+  }
+
   useEffect(() => {
     fetchReviewData()
-  }, [currentPage, pageSize, asinSearch, productNameSearch, skuSearch, sortBy, sortOrder, dateRange, statusFilter, importanceLevelFilter])
+  }, [currentPage, pageSize, asinSearch, productNameSearch, skuSearch, sortBy, sortOrder, dateRange, statusFilter, importanceLevelFilter, departmentFilter])
 
   useEffect(() => {
     fetchStats()
@@ -86,6 +179,21 @@ const ReviewBot: React.FC = () => {
       }
     } catch (error) {
       console.error('获取统计数据失败:', error)
+    }
+  }
+
+  const fetchRanking = async () => {
+    setRankingLoading(true)
+    try {
+      const response = await reviewsApi.getNegativeRanking(6)
+      if (response.data.success) {
+        setRankingData(response.data.data.ranking)
+      }
+    } catch (error) {
+      console.error('获取排行榜失败:', error)
+      message.error('获取排行榜失败')
+    } finally {
+      setRankingLoading(false)
     }
   }
 
@@ -103,7 +211,8 @@ const ReviewBot: React.FC = () => {
         start_date: dateRange?.[0]?.format('YYYY-MM-DD') || undefined,
         end_date: dateRange?.[1]?.format('YYYY-MM-DD') || undefined,
         status: statusFilter,
-        importance_level: importanceLevelFilter,
+        importance_level: importanceLevelFilter.length > 0 ? importanceLevelFilter.join(',') : undefined,
+        department: departmentFilter.length > 0 ? departmentFilter.join(',') : undefined,
       }
       const response = await reviewsApi.getList(params)
       if (response.data.success) {
@@ -259,7 +368,8 @@ const ReviewBot: React.FC = () => {
     setSortOrder('desc')
     setDateRange([null, null])
     setStatusFilter(undefined)
-    setImportanceLevelFilter(undefined)
+    setImportanceLevelFilter([])
+    setDepartmentFilter([])
     setCurrentPage(1)
   }
 
@@ -317,16 +427,38 @@ const ReviewBot: React.FC = () => {
     }
   }
 
-  const handleMarkAsResolved = async () => {
-    if (!selectedReview) return
+  // 打开单条建议处理弹窗
+  const openProcessModal = (index: number, text: string) => {
+    setProcessingSuggestion({ index, text })
+    setProcessNote('')
+    setProcessModalOpen(true)
+  }
+
+  // 提交单条建议处理说明
+  const handleSubmitSuggestionProcess = async () => {
+    if (!selectedReview || !processingSuggestion) return
+    const note = processNote.trim()
+    if (!note) {
+      message.warning('请填写处理说明')
+      return
+    }
+    setProcessSubmitting(true)
     try {
-      await reviewsApi.updateStatus(selectedReview.id, 'resolved')
-      setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, status: 'resolved' } : r))
-      setSelectedReview(prev => prev ? { ...prev, status: 'resolved' } : null)
-      message.success('已标记为已处理')
-      fetchStats()
-    } catch (e) {
-      message.error('标记失败')
+      const response = await reviewsApi.processSuggestion(selectedReview.id, processingSuggestion.index, note)
+      if (response.data.success) {
+        const processed = response.data.data?.suggestionProcessed || {}
+        message.success('已记录处理说明')
+        setProcessModalOpen(false)
+        setProcessNote('')
+        setProcessingSuggestion(null)
+        setSelectedReview(prev => prev ? { ...prev, suggestionProcessed: processed } : prev)
+        setReviews(prev => prev.map(r => r.id === selectedReview.id ? { ...r, suggestionProcessed: processed } : r))
+      }
+    } catch (error: any) {
+      console.error('处理建议失败:', error)
+      message.error(error?.response?.data?.detail || '处理失败，请重试')
+    } finally {
+      setProcessSubmitting(false)
     }
   }
 
@@ -435,19 +567,36 @@ const ReviewBot: React.FC = () => {
             </Col>
             <Col xs={24} sm={12} md={3}>
               <Select
+                mode="multiple"
                 value={importanceLevelFilter}
-                onChange={(value) => { 
-                  setImportanceLevelFilter(value || undefined)
-                  setCurrentPage(1) 
+                onChange={(value) => {
+                  setImportanceLevelFilter(value)
+                  setCurrentPage(1)
                 }}
                 style={{ width: '100%' }}
                 placeholder="重要等级筛选"
                 allowClear
+                maxTagCount="responsive"
                 options={[
                   { value: 'high', label: '严重' },
                   { value: 'medium', label: '中等' },
                   { value: 'low', label: '轻微' },
                 ]}
+              />
+            </Col>
+            <Col xs={24} sm={12} md={3}>
+              <Select
+                mode="multiple"
+                value={departmentFilter}
+                onChange={(value) => {
+                  setDepartmentFilter(value)
+                  setCurrentPage(1)
+                }}
+                style={{ width: '100%' }}
+                placeholder="问题板块筛选"
+                allowClear
+                maxTagCount="responsive"
+                options={Object.entries(DEPARTMENT_MAP).map(([value, d]) => ({ value, label: d.label }))}
               />
             </Col>
             <Col xs={24} sm={24} md={8}>
@@ -472,6 +621,9 @@ const ReviewBot: React.FC = () => {
                   ]}
                 />
                 <Button onClick={handleResetSearch}>重置</Button>
+                <Button type="primary" ghost onClick={() => { setRankingOpen(true); fetchRanking() }}>
+                  半年排行榜
+                </Button>
               </Space>
             </Col>
           </Row>
@@ -494,6 +646,12 @@ const ReviewBot: React.FC = () => {
           loading={loading}
           extra={
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {hasPermission('robot:review:push_config') && (
+                <Button onClick={openSubscriberModal}>
+                  <Bell size={14} style={{ marginRight: 4, verticalAlign: -2 }} />
+                  推送配置
+                </Button>
+              )}
               {hasPermission('robot:review:analyze') && (
                 <Button
                   disabled={!hasSelected}
@@ -567,6 +725,7 @@ const ReviewBot: React.FC = () => {
                         }
                         return null;
                       })()}
+                      {getDepartmentTags(item)}
                       {getImportanceBadge(item.importanceLevel)}
                       {getStatusBadge(item.status, item.isNew)}
                     </div>
@@ -621,6 +780,66 @@ const ReviewBot: React.FC = () => {
         </Card>
       </div>
 
+      {/* 半年差评排行榜 */}
+      <Modal
+        title="半年差评排行榜（按差评数量排序）"
+        open={rankingOpen}
+        onCancel={() => setRankingOpen(false)}
+        footer={null}
+        width={res.isMobile ? '95vw' : 1000}
+      >
+        <Table
+          dataSource={rankingData}
+          loading={rankingLoading}
+          rowKey="asin"
+          size="small"
+          pagination={false}
+          scroll={{ y: 480 }}
+          tableLayout="fixed"
+          columns={[
+            { title: '排名', dataIndex: 'rank', key: 'rank', width: 60, align: 'center',
+              render: (v: number) => v <= 3 ? <span style={{ fontWeight: 700, color: '#cf1322' }}>{v}</span> : v,
+            },
+            { title: '产品编码', dataIndex: 'sku', key: 'sku', width: 120, align: 'center', ellipsis: true, render: (v: string) => v || '-' },
+            {
+              title: '产品名称', dataIndex: 'product_name', key: 'product_name', ellipsis: { showTitle: false },
+              render: (v: string) => <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip>,
+            },
+            {
+              title: '差评数', dataIndex: 'total', key: 'total', width: 80, align: 'center',
+              sorter: (a: any, b: any) => a.total - b.total,
+              render: (v: number) => <span style={{ fontWeight: 700 }}>{v}</span>,
+            },
+            { title: '严重', dataIndex: 'high', key: 'high', width: 60, align: 'center', render: (v: number) => v > 0 ? <span style={{ color: '#cf1322' }}>{v}</span> : '-' },
+            { title: '中等', dataIndex: 'medium', key: 'medium', width: 60, align: 'center', render: (v: number) => v > 0 ? <span style={{ color: '#faad14' }}>{v}</span> : '-' },
+            { title: '轻微', dataIndex: 'low', key: 'low', width: 60, align: 'center', render: (v: number) => v > 0 ? <span style={{ color: '#1890ff' }}>{v}</span> : '-' },
+            {
+              title: '板块分布', key: 'dept_dist', align: 'center',
+              render: (_: any, r: any) => {
+                const unclassified = r.total - r.operations - r.purchasing - r.warehouse - r.design
+                return (
+                  <Space size={4} wrap>
+                    {(['operations', 'purchasing', 'warehouse', 'design'] as const).map(k => {
+                      const cnt = r[k]
+                      return cnt > 0 ? (
+                        <Tag key={k} color={DEPARTMENT_MAP[k].color} style={{ marginInlineEnd: 0 }}>
+                          {DEPARTMENT_MAP[k].label.replace('板块', '')} {cnt}
+                        </Tag>
+                      ) : null
+                    })}
+                    {unclassified > 0 && <Tag style={{ marginInlineEnd: 0 }}>未分类 {unclassified}</Tag>}
+                  </Space>
+                )
+              },
+            },
+            {
+              title: '主要问题板块', dataIndex: 'main_department', key: 'main_department', width: 110, align: 'center',
+              render: (v: string) => getDepartmentTag(v),
+            },
+          ]}
+        />
+      </Modal>
+
       {selectedReview && (
         <Modal
           title="差评详情"
@@ -628,16 +847,6 @@ const ReviewBot: React.FC = () => {
           onCancel={() => setSelectedReview(null)}
           footer={[
             <Button key="close" onClick={() => setSelectedReview(null)}>关闭</Button>,
-            hasPermission('robot:review:manage') && selectedReview?.status !== 'resolved' && (
-              <Button
-                key="resolve"
-                type="primary"
-                onClick={handleMarkAsResolved}
-                style={{ backgroundColor: currentTheme.primary, borderColor: currentTheme.primary }}
-              >
-                标记为已处理
-              </Button>
-            ),
           ]}
           width={res.isMobile ? '95vw' : 800}
           styles={{ body: { maxHeight: '60vh', overflowY: 'auto', padding: '16px 24px' } }}
@@ -711,7 +920,8 @@ const ReviewBot: React.FC = () => {
 
             <div>
               <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>🏷️ 问题分类</h3>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                {getDepartmentTags(selectedReview)}
                 {Array.isArray(selectedReview.topics) && selectedReview.topics.map((topic, idx) => (
                   <Tag key={idx} color="blue">{topic}</Tag>
                 ))}
@@ -741,15 +951,38 @@ const ReviewBot: React.FC = () => {
                 <List
                   dataSource={selectedReview.suggestions}
                   style={{ margin: 0 }}
-                  renderItem={(suggestion) => (
-                    <List.Item style={{ padding: '4px 0', minHeight: 'auto' }}>
-                      <Alert
-                        message={suggestion}
-                        type="info"
-                        showIcon
-                      />
-                    </List.Item>
-                  )}
+                  renderItem={(suggestion, idx) => {
+                    const processedInfo = selectedReview.suggestionProcessed?.[String(idx)]
+                    return (
+                      <List.Item style={{ padding: '4px 0', minHeight: 'auto' }}>
+                        <Alert
+                          style={{ width: '100%' }}
+                          message={
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{suggestion}</span>
+                              {processedInfo ? (
+                                <Tooltip title={`处理人：${processedInfo.by || '未知用户'}　时间：${processedInfo.at || '-'}　说明：${processedInfo.note || '-'}`}>
+                                  <Tag color="success" style={{ marginInlineEnd: 0, flexShrink: 0 }}>已处理</Tag>
+                                </Tooltip>
+                              ) : (
+                                <Tag color="warning" style={{ marginInlineEnd: 0, flexShrink: 0 }}>未处理</Tag>
+                              )}
+                              {!processedInfo && (
+                                <Button
+                                  size="small"
+                                  onClick={() => openProcessModal(idx, suggestion)}
+                                >
+                                  处理
+                                </Button>
+                              )}
+                            </div>
+                          }
+                          type="info"
+                          showIcon
+                        />
+                      </List.Item>
+                    )
+                  }}
                 />
               ) : (
                 <Alert
@@ -763,6 +996,35 @@ const ReviewBot: React.FC = () => {
           </div>
         </Modal>
       )}
+
+      {/* 单条AI建议处理弹窗 */}
+      <Modal
+        title="处理AI建议"
+        open={processModalOpen}
+        onOk={handleSubmitSuggestionProcess}
+        onCancel={() => { setProcessModalOpen(false); setProcessNote(''); setProcessingSuggestion(null) }}
+        confirmLoading={processSubmitting}
+        okText="提交"
+        cancelText="取消"
+        width={res.isMobile ? '95vw' : 520}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 8, color: '#666', fontSize: 13 }}>建议内容：</div>
+          <Alert message={processingSuggestion?.text} type="info" showIcon />
+        </div>
+        <div>
+          <div style={{ marginBottom: 8 }}>
+            <span style={{ color: '#ff4d4f', marginRight: 4 }}>*</span>处理说明：
+          </div>
+          <Input.TextArea
+            rows={4}
+            value={processNote}
+            onChange={(e) => setProcessNote(e.target.value)}
+            placeholder="请填写处理说明"
+            maxLength={500}
+          />
+        </div>
+      </Modal>
 
       {/* 批量操作确认弹窗 */}
       <Modal
@@ -785,6 +1047,60 @@ const ReviewBot: React.FC = () => {
             <p>您确定要将选中的 <strong>{selectedIds.length}</strong> 条差评标记为 <strong>{batchStatus === 'new' ? '未读' : batchStatus === 'read' ? '已读' : '已处理'}</strong> 吗？</p>
           </div>
         )}
+      </Modal>
+
+      {/* 板块推送配置弹窗 */}
+      <Modal
+        title="板块推送配置"
+        open={subscriberModalOpen}
+        onOk={saveSubscribers}
+        onCancel={() => setSubscriberModalOpen(false)}
+        confirmLoading={subscriberSaving}
+        okText="保存"
+        cancelText="取消"
+        width={res.isMobile ? '95vw' : 560}
+      >
+        <div style={{ color: '#999', fontSize: 12, marginBottom: 16 }}>
+          AI分析将差评分到对应板块后，会推送给该板块的全部订阅人；一人可订阅多个板块。
+        </div>
+        <Spin spinning={subscriberLoading}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {Object.entries(DEPARTMENT_MAP).map(([section, info]) => (
+              <div key={section}>
+                <div style={{ marginBottom: 4 }}>
+                  <Tag color={info.color}>{info.label}</Tag>
+                  <span style={{ color: '#999', fontSize: 12 }}>{info.desc}</span>
+                </div>
+                <Select
+                  mode="multiple"
+                  style={{ width: '100%' }}
+                  placeholder={`选择订阅「${info.label.replace('板块', '')}」的用户`}
+                  value={sectionSubscribers[section] || []}
+                  options={subscriberUserOptions}
+                  optionFilterProp="label"
+                  optionRender={(option) => {
+                    const opt = subscriberUserOptions.find(o => o.value === option.value)
+                    return (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <span>{option.label}</span>
+                        {opt?.role && (
+                          <Tag color={opt.role === '管理员' || opt.role === 'admin' ? 'red' : 'blue'} style={{ marginRight: 0 }}>
+                            {opt.role}
+                          </Tag>
+                        )}
+                      </span>
+                    )
+                  }}
+                  onChange={(values: number[]) =>
+                    setSectionSubscribers(prev => ({ ...prev, [section]: values }))
+                  }
+                  allowClear
+                  maxTagCount="responsive"
+                />
+              </div>
+            ))}
+          </div>
+        </Spin>
       </Modal>
     </div>
   )

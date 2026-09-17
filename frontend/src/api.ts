@@ -171,6 +171,14 @@ export const inventoryApi = {
       action: action,
       holiday_type: holidayType,
     }),
+  allocateShipment: (
+    items: {
+      asin?: string;
+      sku?: string;
+      country: string;
+      purchase_qty: number;
+    }[],
+  ) => apiClient.post("/restock/allocate-shipment", { items }),
 };
 
 // ========== Local Inventory API ==========
@@ -217,6 +225,7 @@ export const reviewsApi = {
     end_date?: string;
     status?: string;
     importance_level?: string;
+    department?: string;
   }) => {
     // 过滤掉undefined、null和空字符串的参数
     const filteredParams: any = {};
@@ -232,12 +241,22 @@ export const reviewsApi = {
   getById: (id: string) => apiClient.get(`/reviews/${id}`),
   updateStatus: (id: string, status: string) =>
     apiClient.put(`/reviews/${id}/status`, { status }),
+  processSuggestion: (id: string, suggestionIndex: number, note: string) =>
+    apiClient.post(`/reviews/${id}/suggestions/${suggestionIndex}/process`, { note }),
   updateImportance: (id: string, importance_level: string | undefined) =>
     apiClient.put(`/reviews/${id}/importance`, { importance_level }),
   batchAnalyze: (ids: string[]) =>
     apiClient.post("/reviews/analyze/batch", ids),
   getNewCount: () => apiClient.get("/reviews/new/count"),
   getStats: () => apiClient.get("/reviews/stats"),
+  getNegativeRanking: (months?: number) =>
+    apiClient.get("/reviews/negative-ranking", {
+      params: months ? { months } : {},
+    }),
+  // 差评板块订阅（推送对象配置）
+  getSectionSubscribers: () => apiClient.get("/reviews/sections/subscribers"),
+  updateSectionSubscribers: (payload: Record<string, number[]>) =>
+    apiClient.put("/reviews/sections/subscribers", payload),
 };
 
 // ========== Departments API ==========
@@ -381,7 +400,9 @@ export const productPageInfoApi = {
   getById: (id: number) => apiClient.get(`/product-page-info/${id}`),
   getStoreOptions: () => apiClient.get("/product-page-info/stores/options"),
   deleteCompetitor: (id: number, competitorLine: string) =>
-    apiClient.put(`/product-page-info/${id}/delete-competitor`, { competitor_line: competitorLine }),
+    apiClient.put(`/product-page-info/${id}/delete-competitor`, {
+      competitor_line: competitorLine,
+    }),
   submitRating: (ids: number[]) =>
     apiClient.post("/product-page-info/submit-rating", { ids }),
   deleteRecords: (ids: number[]) =>
@@ -395,11 +416,21 @@ export const productPageInfoApi = {
     });
   },
   cancelImport: (importIds: number[]) =>
-    apiClient.post("/product-page-info/cancel-import", { import_ids: importIds }),
-  submitEdit: (data: { item_id: number; store: string; field_type: string; sku: string; content: string; reset_rating: boolean }) =>
-    apiClient.post("/product-page-info/submit-edit", data),
+    apiClient.post("/product-page-info/cancel-import", {
+      import_ids: importIds,
+    }),
+  submitEdit: (data: {
+    item_id: number;
+    store: string;
+    field_type: string;
+    sku: string;
+    content: string;
+    reset_rating: boolean;
+  }) => apiClient.post("/product-page-info/submit-edit", data),
   updateRatingStatus: (id: number, ratingStatus: number) =>
-    apiClient.put(`/product-page-info/${id}/rating-status`, { rating_status: ratingStatus }),
+    apiClient.put(`/product-page-info/${id}/rating-status`, {
+      rating_status: ratingStatus,
+    }),
 };
 // ========== Stores API ==========
 export const storesApi = {
@@ -408,6 +439,8 @@ export const storesApi = {
     page_size?: number;
     name_search?: string;
     site_search?: string;
+    search?: string;
+    assignment_fallback?: boolean;
   }) => apiClient.get("/stores/", { params }),
   getAll: () => apiClient.get("/stores/all"),
   create: (data: {
@@ -416,7 +449,8 @@ export const storesApi = {
     site?: string;
     inventory_name?: string;
     platform_store_id?: string;
-    department_id?: number;
+    shop_abbr?: string;
+    group_id?: number;
   }) => apiClient.post("/stores/", data),
   update: (
     id: number,
@@ -426,15 +460,15 @@ export const storesApi = {
       site?: string;
       inventory_name?: string;
       platform_store_id?: string;
-      department_id?: number;
+      group_id?: number;
       status?: string;
     },
   ) => apiClient.put(`/stores/${id}`, data),
   delete: (id: number) => apiClient.delete(`/stores/${id}`),
-  batchUpdateDepartment: (data: {
+  batchUpdateGroup: (data: {
     store_ids: number[];
-    department_id?: number;
-  }) => apiClient.post("/stores/batch-update-department", data),
+    group_id?: number | null;
+  }) => apiClient.post("/stores/batch-update-group", data),
   // 店铺分配人员
   getMembers: (storeId: number) => apiClient.get(`/stores/${storeId}/members`),
   addMembers: (storeId: number, data: { user_ids: number[] }) =>
@@ -461,7 +495,7 @@ export const productsApi = {
     product_code?: string;
     name: string;
     name_en?: string;
-    product_type?: string;
+    product_type?: string | string[];
     product_attribute?: string;
     category?: string;
     brand?: string;
@@ -481,6 +515,9 @@ export const productsApi = {
     local_inbound_date?: string;
     local_stock_age?: number;
   }) => apiClient.post("/products/", data),
+  // 生成下一个产品编码（成品 BXHS-CP-##### / 配件 BXHS-PJ-#####）
+  getNextCode: (productType: string = "finished") =>
+    apiClient.get("/products/next-code", { params: { product_type: productType } }),
   update: (
     id: number,
     data: {
@@ -512,11 +549,19 @@ export const productsApi = {
   getProfitMargins: (productId: number) =>
     apiClient.get(`/products/${productId}/profit-margins`),
   getProfitMarginsBatch: (productIds: number[]) =>
-    apiClient.post('/products/profit-margins/batch', { product_ids: productIds }),
+    apiClient.post("/products/profit-margins/batch", {
+      product_ids: productIds,
+    }),
   getStoreGroupSku: (productId: number, storeGroupId?: number) =>
-    apiClient.get(`/products/${productId}/store-group-sku`, { params: storeGroupId ? { store_group_id: storeGroupId } : {} }),
+    apiClient.get(`/products/${productId}/store-group-sku`, {
+      params: storeGroupId ? { store_group_id: storeGroupId } : {},
+    }),
   getStoreGroupSkusBatch: (productIds: number[], storeGroupId?: number) =>
-    apiClient.post('/products/store-group-skus/batch', { product_ids: productIds }, { params: storeGroupId ? { store_group_id: storeGroupId } : {} }),
+    apiClient.post(
+      "/products/store-group-skus/batch",
+      { product_ids: productIds },
+      { params: storeGroupId ? { store_group_id: storeGroupId } : {} },
+    ),
   getPlatformProducts: (productId: number) =>
     apiClient.get(`/products/${productId}/platform-products`),
   createPlatformProduct: (
@@ -579,6 +624,12 @@ export const productsApi = {
   batchImport: (data: any) => apiClient.post("/products/batch-import", data),
   getImportRecordStatus: (recordId: number) =>
     apiClient.get(`/products/import-records/${recordId}/status`),
+  getIncompleteList: (params: {
+    page?: number;
+    page_size?: number;
+    issue?: string;
+    keyword?: string;
+  }) => apiClient.get("/products/incomplete-list", { params }),
   batchUpdateMissing: (items: any[]) =>
     apiClient.post("/products/batch-update-missing", { items }),
   exportProducts: (params?: {
@@ -627,24 +678,24 @@ export const productsApi = {
 export const uploadApi = {
   uploadImage: (file: File, customName?: string) => {
     const formData = new FormData();
-    formData.append('file', file);
-    if (customName) formData.append('custom_name', customName);
-    return apiClient.post('/upload/image', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+    formData.append("file", file);
+    if (customName) formData.append("custom_name", customName);
+    return apiClient.post("/upload/image", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
       timeout: 60000,
     });
   },
   uploadVideo: (file: File, customName?: string) => {
     const formData = new FormData();
-    formData.append('file', file);
-    if (customName) formData.append('custom_name', customName);
-    return apiClient.post('/upload/video', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+    formData.append("file", file);
+    if (customName) formData.append("custom_name", customName);
+    return apiClient.post("/upload/video", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
       timeout: 300000,
     });
   },
   deleteFile: (fileUrl: string) =>
-    apiClient.post('/upload/delete', { file_url: fileUrl }),
+    apiClient.post("/upload/delete", { file_url: fileUrl }),
 };
 
 // ========== Inventory Count API ==========
@@ -666,7 +717,8 @@ export const inventoryCountApi = {
 export const storeGroupsApi = {
   getList: () => apiClient.get("/store-groups/"),
   getMyGroup: () => apiClient.get("/store-groups/my-group"),
-  getGroupStores: (groupId: number) => apiClient.get(`/store-groups/${groupId}/stores`),
+  getGroupStores: (groupId: number) =>
+    apiClient.get(`/store-groups/${groupId}/stores`),
   create: (data: { name: string; description?: string }) =>
     apiClient.post("/store-groups/", data),
   update: (id: number, data: { name?: string; description?: string }) =>
@@ -864,6 +916,7 @@ export const purchaseOrdersApi = {
       warehouse?: string;
       expected_date?: string;
       notes?: string;
+      status?: string;
       items?: {
         product_id: number;
         quantity: number;
@@ -888,7 +941,12 @@ export const purchaseOrdersApi = {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },
-  exportOrders: (ids: number[]) => apiClient.post('/purchase-orders/export', { ids }, { responseType: 'blob' }),
+  exportOrders: (ids: number[]) =>
+    apiClient.post(
+      "/purchase-orders/export",
+      { ids },
+      { responseType: "blob" },
+    ),
 };
 
 // ========== Inventory Batches API ==========
@@ -936,6 +994,8 @@ export const permissionsApi = {
     data: { name?: string; description?: string; sort_order?: number },
   ) => apiClient.put(`/permissions/roles/${id}`, data),
   deleteRole: (id: number) => apiClient.delete(`/permissions/roles/${id}`),
+  copyRole: (roleId: number, data: { name: string; code: string; description?: string }) =>
+    apiClient.post(`/permissions/roles/${roleId}/copy`, data),
 
   // 权限管理
   getPermissions: (type?: string) =>
@@ -1147,7 +1207,7 @@ export const productBindingsApi = {
 // ========== Product Selection API ==========
 export const productSelectionApi = {
   getTypes: () => apiClient.get("/product-selection/types"),
-  getDates: () => apiClient.get("/product-selection/dates"),
+  getDates: (site?: string) => apiClient.get("/product-selection/dates", { params: site ? { site } : {} }),
   getSites: () => apiClient.get("/product-selection/sites"),
   getList: (params?: {
     page?: number;
@@ -1159,13 +1219,33 @@ export const productSelectionApi = {
     status?: string[];
     sort_by?: string;
     sort_order?: string;
+    rate_mode?: string;
   }) => apiClient.get("/product-selection/", { params }),
   getById: (id: number) => apiClient.get(`/product-selection/${id}`),
-  submitForApproval: (id: number) => apiClient.post(`/product-selection/${id}/submit-for-approval`, {}),
-  approve: (id: number) => apiClient.post(`/product-selection/${id}/approve`, {}),
-  cancelApprovalApplication: (id: number) => apiClient.post(`/product-selection/${id}/cancel-approval-application`, {}),
-  generatePurchaseOrder: (id: number) => apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
-  batchGeneratePurchaseOrders: (ids: number[]) => apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
+  submitForApproval: (id: number, data?: {
+    ali_1688_url?: string;
+    purchase_price?: number;
+    purchase_quantity?: number;
+    store_group_id?: number;
+  }) =>
+    apiClient.post(`/product-selection/${id}/submit-for-approval`, data || {}),
+  getProfitSettings: () => apiClient.get("/product-selection/profit-settings"),
+  saveProfitSettings: (data: {
+    site: string;
+    ad_fee_rate: number;
+    storage_fee_rate: number;
+    tax_rate: number;
+    return_rate: number;
+  }) => apiClient.put("/product-selection/profit-settings", data),
+  resetProfitSettings: () => apiClient.post("/product-selection/profit-settings/reset"),
+  approve: (id: number) =>
+    apiClient.post(`/product-selection/${id}/approve`, {}),
+  cancelApprovalApplication: (id: number) =>
+    apiClient.post(`/product-selection/${id}/cancel-approval-application`, {}),
+  generatePurchaseOrder: (id: number) =>
+    apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
+  batchGeneratePurchaseOrders: (ids: number[]) =>
+    apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
   create: (data: {
     product_title: string;
     url?: string;
@@ -1183,6 +1263,7 @@ export const productSelectionApi = {
     product_type?: string;
     monthly_sales?: number;
     traffic_trend?: string;
+    category?: string[];
   }) => apiClient.post("/product-selection/", data),
   update: (
     id: number,
@@ -1203,18 +1284,24 @@ export const productSelectionApi = {
       product_type?: string;
       monthly_sales?: number;
       traffic_trend?: string;
+      category?: string[];
     },
   ) => apiClient.put(`/product-selection/${id}`, data),
   delete: (id: number) => apiClient.delete(`/product-selection/${id}`),
   analyze: (id: number) =>
     apiClient.post(`/product-selection/${id}/analyze`, {}, { timeout: 180000 }),
   batchAnalyze: (ids: number[]) =>
+    apiClient.post("/product-selection/batch-analyze", ids, { timeout: 30000 }),
+  batchAnalyzeProgress: (batchId: string) =>
+    apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
+  recalcScores: () =>
+    apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  switchRate: (useRealtime: boolean) =>
     apiClient.post(
-      "/product-selection/batch-analyze",
-      ids,
-      { timeout: 300000 },
+      "/product-selection/switch-rate",
+      { use_realtime: useRealtime },
+      { timeout: 60000 },
     ),
-  recalcScores: () => apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
 };
 // ========== Ads API ==========
 export const adsApi = {
@@ -1313,7 +1400,7 @@ export const replenishmentOrdersApi = {
     page?: number;
     page_size?: number;
     status?: string;
-    platform?: string;
+    store_group_id?: number;
     search?: string;
   }) => apiClient.get("/replenishment-orders/", { params }),
   getDetail: (id: number) => apiClient.get(`/replenishment-orders/${id}`),
@@ -1321,17 +1408,34 @@ export const replenishmentOrdersApi = {
   update: (id: number, data: any) =>
     apiClient.put(`/replenishment-orders/${id}`, data),
   delete: (id: number) => apiClient.delete(`/replenishment-orders/${id}`),
-  batchDelete: (ids: number[]) => apiClient.post('/replenishment-orders/batch-delete', { ids }),
-  batchConvert: (data: { ids: number[]; supplier?: string; contact_person?: string; contact_phone?: string; notes?: string }) =>
-    apiClient.post("/replenishment-orders/batch-convert", data),
-  batchApprove: (ids: number[]) => apiClient.post('/replenishment-orders/batch-approve', { ids }),
-  batchImport: (groups: any[]) => apiClient.post('/replenishment-orders/batch-import', { groups }),
-  approve: (id: number) => apiClient.post(`/replenishment-orders/${id}/approve`),
-  cancelApproval: (id: number) => apiClient.post(`/replenishment-orders/${id}/cancel-approval`),
-  downloadTemplate: () => apiClient.get("/replenishment-orders/template/download", { responseType: 'blob' }),
-  uploadPreview: (file: File) => {
+  batchDelete: (ids: number[]) =>
+    apiClient.post("/replenishment-orders/batch-delete", { ids }),
+  batchConvert: (data: {
+    ids: number[];
+    supplier?: string;
+    contact_person?: string;
+    contact_phone?: string;
+    notes?: string;
+  }) => apiClient.post("/replenishment-orders/batch-convert", data),
+  batchApprove: (ids: number[]) =>
+    apiClient.post("/replenishment-orders/batch-approve", { ids }),
+  batchImport: (groups: any[]) =>
+    apiClient.post("/replenishment-orders/batch-import", { groups }),
+  approve: (id: number) =>
+    apiClient.post(`/replenishment-orders/${id}/approve`),
+  cancelApproval: (id: number) =>
+    apiClient.post(`/replenishment-orders/${id}/cancel-approval`),
+  downloadTemplate: () =>
+    apiClient.get("/replenishment-orders/template/download", {
+      responseType: "blob",
+    }),
+  // nameOverrides: {行号: 品名}，缺失信息弹窗创建产品后重新解析时传入编辑后的品名
+  uploadPreview: (file: File, nameOverrides?: Record<string, string>) => {
     const formData = new FormData();
     formData.append("file", file);
+    if (nameOverrides && Object.keys(nameOverrides).length > 0) {
+      formData.append("name_overrides", JSON.stringify(nameOverrides));
+    }
     return apiClient.post("/replenishment-orders/upload/preview", formData, {
       headers: { "Content-Type": "multipart/form-data" },
     });
@@ -1366,17 +1470,44 @@ export const shipmentsApi = {
   confirm: (id: number) => apiClient.put(`/shipments/${id}/confirm`),
   delete: (id: number) => apiClient.delete(`/shipments/${id}`),
   getKpiCount: () => apiClient.get("/shipments/kpi-count"),
-  batchConfirm: (ids: number[]) => apiClient.post("/shipments/batch-confirm", { ids }),
-  batchDelete: (ids: number[]) => apiClient.post("/shipments/batch-delete", { ids }),
-  batchConvertOutbound: (ids: number[], notes?: string) => apiClient.post("/shipments/batch-convert-outbound", { ids, notes }),
-  exportDetail: (id: number) => apiClient.get(`/shipments/${id}/export`, { responseType: 'blob' }),
+  batchConfirm: (ids: number[]) =>
+    apiClient.post("/shipments/batch-confirm", { ids }),
+  batchDelete: (ids: number[]) =>
+    apiClient.post("/shipments/batch-delete", { ids }),
+  batchConvertOutbound: (ids: number[], notes?: string) =>
+    apiClient.post("/shipments/batch-convert-outbound", { ids, notes }),
+  exportDetail: (id: number) =>
+    apiClient.get(`/shipments/${id}/export`, { responseType: "blob" }),
   importDetail: (id: number, file: File) => {
-    const formData = new FormData()
-    formData.append('file', file)
+    const formData = new FormData();
+    formData.append("file", file);
     return apiClient.post(`/shipments/${id}/import`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
+      headers: { "Content-Type": "multipart/form-data" },
+    });
   },
+};
+
+// ========== Base Table (底表管理) API ==========
+export const baseTableApi = {
+  getSummary: (params?: {
+    page?: number;
+    page_size?: number;
+    issue?: string;
+    keyword?: string;
+    group_id?: number;
+    sort_by?: string;
+    sort_order?: string;
+  }) =>
+    apiClient.get("/base-table/summary", {
+      params,
+    }),
+  getMyGroups: () => apiClient.get("/base-table/my-groups"),
+  getProductWarehouses: (productId: number) =>
+    apiClient.get(`/base-table/${productId}/warehouses`),
+  getProductPurchaseOrders: (productId: number) =>
+    apiClient.get(`/base-table/${productId}/purchase-orders`),
+  getProductReplenishmentOrders: (productId: number) =>
+    apiClient.get(`/base-table/${productId}/replenishment-orders`),
 };
 
 // ========== Suppliers API ==========
@@ -1384,10 +1515,23 @@ export const suppliersApi = {
   getList: (params?: { page?: number; page_size?: number; search?: string }) =>
     apiClient.get("/suppliers/", { params }),
   listAll: () => apiClient.get("/suppliers/list-all"),
-  create: (data: { name: string; contact_person?: string; contact_phone?: string; address?: string; notes?: string }) =>
-    apiClient.post("/suppliers/", data),
-  update: (id: number, data: { name?: string; contact_person?: string; contact_phone?: string; address?: string; notes?: string }) =>
-    apiClient.put(`/suppliers/${id}`, data),
+  create: (data: {
+    name: string;
+    contact_person?: string;
+    contact_phone?: string;
+    address?: string;
+    notes?: string;
+  }) => apiClient.post("/suppliers/", data),
+  update: (
+    id: number,
+    data: {
+      name?: string;
+      contact_person?: string;
+      contact_phone?: string;
+      address?: string;
+      notes?: string;
+    },
+  ) => apiClient.put(`/suppliers/${id}`, data),
   delete: (id: number) => apiClient.delete(`/suppliers/${id}`),
 };
 

@@ -11,12 +11,16 @@ import {
   Spin,
   message,
   Descriptions,
+  Select,
+  Modal,
 } from "antd";
 import {
   CheckOutlined,
   StopOutlined,
   ThunderboltOutlined,
   ReloadOutlined,
+  DeleteOutlined,
+  PlayCircleOutlined,
 } from "@ant-design/icons";
 import { adSuggestionsApi } from "../../api";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -27,38 +31,62 @@ import type { ColumnsType } from "antd/es/table";
 interface SuggestionItem {
   id: number;
   rule_name: string;
-  priority: string;
+  rule_priority: string; // 后端字段: rule_priority（中文 高/中）
+  rule_version?: string;
   target_type: string;
+  target_id?: string;
   target_name: string;
-  current_value: number;
-  suggested_action: string;
-  suggested_value: number;
-  reason: string;
+  condition_metrics?: any;
+  current_value: number | null;
+  threshold: number | null;
+  suggestion_action: string;
+  suggestion_reason: string;
+  ai_analysis?: any;
   status: string;
+  created_by?: number;
+  confirmed_by?: number;
+  confirmed_at?: string | null;
+  executed_at?: string | null;
+  expired_at?: string | null;
+  evaluation_date?: string;
   created_at: string;
-  executed_at: string | null;
-  details: any;
+  updated_at?: string;
 }
 
+// 优先级映射：后端返回中文 高/中
 const PRIORITY_COLORS: Record<string, string> = {
+  "高": "red",
+  "中": "orange",
+  "低": "blue",
   high: "red",
   medium: "orange",
   low: "blue",
 };
 
 const PRIORITY_LABELS: Record<string, string> = {
+  "高": "高",
+  "中": "中",
+  "低": "低",
   high: "高",
   medium: "中",
   low: "低",
 };
 
+// 目标类型映射
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  campaign: "广告活动",
+  keyword: "关键词",
+  search_term: "搜索词",
+  product: "商品",
+};
+
 const STATUS_TABS = [
   { key: "all", label: "全部" },
-  { key: "pending", label: "待处理" },
-  { key: "confirmed", label: "已确认" },
-  { key: "executed", label: "已执行" },
-  { key: "ignored", label: "已忽略" },
-  { key: "expired", label: "已失效" },
+  { key: "待处理", label: "待处理" },
+  { key: "已确认", label: "已确认" },
+  { key: "已执行", label: "已执行" },
+  { key: "已忽略", label: "已忽略" },
+  { key: "已失效", label: "已失效" },
 ];
 
 const SuggestionManagement: React.FC = () => {
@@ -70,6 +98,8 @@ const SuggestionManagement: React.FC = () => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [activeTab, setActiveTab] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState<string | undefined>(undefined);
+  const [targetTypeFilter, setTargetTypeFilter] = useState<string | undefined>(undefined);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [currentSuggestion, setCurrentSuggestion] = useState<SuggestionItem | null>(null);
@@ -80,6 +110,8 @@ const SuggestionManagement: React.FC = () => {
     try {
       const params: any = { page, page_size: pageSize };
       if (activeTab !== "all") params.status = activeTab;
+      if (priorityFilter) params.priority = priorityFilter;
+      if (targetTypeFilter) params.target_type = targetTypeFilter;
 
       const res = await adSuggestionsApi.list(params);
       if (res.data.success) {
@@ -91,7 +123,7 @@ const SuggestionManagement: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, activeTab]);
+  }, [page, pageSize, activeTab, priorityFilter, targetTypeFilter]);
 
   useEffect(() => {
     fetchData();
@@ -109,16 +141,32 @@ const SuggestionManagement: React.FC = () => {
     }
   };
 
+  const handleUpdateStatusConfirm = (id: number, status: string, label: string) => {
+    Modal.confirm({
+      title: `确认${label}`,
+      content: `确定要将该建议状态更改为"${label}"吗？`,
+      okText: "确定",
+      cancelText: "取消",
+      onOk: () => handleUpdateStatus(id, status),
+    });
+  };
+
   const handleBatchUpdate = async (status: string) => {
     if (selectedRowKeys.length === 0) {
       message.warning("请先选择建议");
       return;
     }
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         selectedRowKeys.map((id) => adSuggestionsApi.updateStatus(id as number, status)),
       );
-      message.success(`批量操作 ${selectedRowKeys.length} 条成功`);
+      const successCount = results.filter((r) => r.status === "fulfilled").length;
+      const failedCount = results.length - successCount;
+      if (failedCount === 0) {
+        message.success(`批量操作 ${successCount} 条成功`);
+      } else {
+        message.warning(`批量操作完成：成功 ${successCount} 条，失败 ${failedCount} 条`);
+      }
       setSelectedRowKeys([]);
       fetchData();
     } catch (e) {
@@ -126,12 +174,36 @@ const SuggestionManagement: React.FC = () => {
     }
   };
 
+  const handleDelete = (id: number) => {
+    Modal.confirm({
+      title: "确认删除",
+      content: "确定要删除该建议吗？删除后不可恢复。",
+      okText: "确定",
+      cancelText: "取消",
+      okType: "danger",
+      onOk: async () => {
+        try {
+          const res = await adSuggestionsApi.delete(id);
+          if (res.data.success) {
+            message.success("删除成功");
+            fetchData();
+          }
+        } catch (e) {
+          message.error("删除失败");
+        }
+      },
+    });
+  };
+
   const handleRunRules = async () => {
     setRunLoading(true);
     try {
       const res = await adSuggestionsApi.runRules(runDate.format("YYYY-MM-DD"));
       if (res.data.success) {
-        message.success("规则执行成功");
+        const data = res.data.data || {};
+        message.success(
+          `规则执行成功：触发 ${data.total_triggered || 0} 条，保存 ${data.saved_count || 0} 条`,
+        );
         fetchData();
       }
     } catch (e) {
@@ -155,6 +227,26 @@ const SuggestionManagement: React.FC = () => {
     setDrawerOpen(true);
   };
 
+  const formatValue = (v: any, suffix: string = "") => {
+    if (v === null || v === undefined) return "-";
+    if (typeof v === "number") return `${v}${suffix}`;
+    return `${v}${suffix}`;
+  };
+
+  const formatMetrics = (metrics: any) => {
+    if (!metrics) return null;
+    try {
+      const obj = typeof metrics === "string" ? JSON.parse(metrics) : metrics;
+      return (
+        <pre style={{ margin: 0, maxHeight: 300, overflow: "auto", fontSize: 12 }}>
+          {JSON.stringify(obj, null, 2)}
+        </pre>
+      );
+    } catch {
+      return String(metrics);
+    }
+  };
+
   const columns: ColumnsType<SuggestionItem> = [
     {
       title: "规则名",
@@ -165,8 +257,8 @@ const SuggestionManagement: React.FC = () => {
     },
     {
       title: "优先级",
-      dataIndex: "priority",
-      key: "priority",
+      dataIndex: "rule_priority",
+      key: "rule_priority",
       width: 80,
       render: (v: string) => (
         <Tag color={PRIORITY_COLORS[v] || "default"}>
@@ -175,12 +267,19 @@ const SuggestionManagement: React.FC = () => {
       ),
     },
     {
+      title: "目标类型",
+      dataIndex: "target_type",
+      key: "target_type",
+      width: 90,
+      render: (v: string) => TARGET_TYPE_LABELS[v] || v || "-",
+    },
+    {
       title: "目标",
       dataIndex: "target_name",
       key: "target_name",
       width: 160,
       ellipsis: true,
-      render: (v: string, record) => v || record.target_type,
+      render: (v: string, record) => v || record.target_type || "-",
     },
     {
       title: "当前值",
@@ -190,9 +289,16 @@ const SuggestionManagement: React.FC = () => {
       render: (v: number) => (v !== undefined && v !== null ? v : "-"),
     },
     {
+      title: "阈值",
+      dataIndex: "threshold",
+      key: "threshold",
+      width: 100,
+      render: (v: number) => (v !== undefined && v !== null ? v : "-"),
+    },
+    {
       title: "建议动作",
-      dataIndex: "suggested_action",
-      key: "suggested_action",
+      dataIndex: "suggestion_action",
+      key: "suggestion_action",
       width: 200,
       ellipsis: true,
     },
@@ -206,31 +312,48 @@ const SuggestionManagement: React.FC = () => {
     {
       title: "操作",
       key: "action",
-      width: 200,
+      width: 240,
+      fixed: "right",
       render: (_: any, record: SuggestionItem) => (
         <Space size="small">
           <Button size="small" onClick={() => showDetail(record)}>
             详情
           </Button>
-          {record.status === "pending" && (
+          {record.status === "待处理" && (
             <>
               <Button
                 size="small"
                 type="primary"
                 icon={<CheckOutlined />}
-                onClick={() => handleUpdateStatus(record.id, "confirmed")}
+                onClick={() => handleUpdateStatusConfirm(record.id, "已确认", "确认")}
               >
                 确认
               </Button>
               <Button
                 size="small"
                 icon={<StopOutlined />}
-                onClick={() => handleUpdateStatus(record.id, "ignored")}
+                onClick={() => handleUpdateStatusConfirm(record.id, "已忽略", "忽略")}
               >
                 忽略
               </Button>
             </>
           )}
+          {record.status === "已确认" && (
+            <Button
+              size="small"
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              onClick={() => handleUpdateStatusConfirm(record.id, "已执行", "执行")}
+            >
+              执行
+            </Button>
+          )}
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => handleDelete(record.id)}
+          />
         </Space>
       ),
     },
@@ -245,6 +368,7 @@ const SuggestionManagement: React.FC = () => {
             value={runDate}
             onChange={(d) => d && setRunDate(d)}
             allowClear={false}
+            disabledDate={(current) => current && current > dayjs().endOf("day")}
           />
           <Button
             type="primary"
@@ -262,6 +386,41 @@ const SuggestionManagement: React.FC = () => {
       </Card>
 
       <Card>
+        <Space style={{ marginBottom: 16 }} wrap>
+          <span>优先级:</span>
+          <Select
+            allowClear
+            placeholder="全部优先级"
+            style={{ width: 120 }}
+            value={priorityFilter}
+            onChange={(v) => {
+              setPriorityFilter(v);
+              setPage(1);
+            }}
+            options={[
+              { value: "高", label: "高" },
+              { value: "中", label: "中" },
+            ]}
+          />
+          <span>目标类型:</span>
+          <Select
+            allowClear
+            placeholder="全部目标"
+            style={{ width: 140 }}
+            value={targetTypeFilter}
+            onChange={(v) => {
+              setTargetTypeFilter(v);
+              setPage(1);
+            }}
+            options={[
+              { value: "campaign", label: "广告活动" },
+              { value: "keyword", label: "关键词" },
+              { value: "search_term", label: "搜索词" },
+              { value: "product", label: "商品" },
+            ]}
+          />
+        </Space>
+
         <Tabs
           activeKey={activeTab}
           onChange={(key) => {
@@ -277,13 +436,13 @@ const SuggestionManagement: React.FC = () => {
             <span>已选 {selectedRowKeys.length} 项</span>
             <Button
               icon={<CheckOutlined />}
-              onClick={() => handleBatchUpdate("confirmed")}
+              onClick={() => handleBatchUpdate("已确认")}
             >
               批量确认
             </Button>
             <Button
               icon={<StopOutlined />}
-              onClick={() => handleBatchUpdate("ignored")}
+              onClick={() => handleBatchUpdate("已忽略")}
             >
               批量忽略
             </Button>
@@ -298,7 +457,7 @@ const SuggestionManagement: React.FC = () => {
             selectedRowKeys,
             onChange: setSelectedRowKeys,
             getCheckboxProps: (record: SuggestionItem) => ({
-              disabled: record.status !== "pending",
+              disabled: record.status !== "待处理",
             }),
           }}
           pagination={{
@@ -313,7 +472,7 @@ const SuggestionManagement: React.FC = () => {
             setPageSize(p.pageSize || 20);
           }}
           size="small"
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1200 }}
         />
       </Card>
 
@@ -321,7 +480,7 @@ const SuggestionManagement: React.FC = () => {
         title="建议详情"
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        width={560}
+        width={640}
       >
         {currentSuggestion && (
           <Descriptions column={1} bordered size="small">
@@ -331,28 +490,37 @@ const SuggestionManagement: React.FC = () => {
             <Descriptions.Item label="规则名">
               {currentSuggestion.rule_name}
             </Descriptions.Item>
+            <Descriptions.Item label="规则版本">
+              {currentSuggestion.rule_version || "-"}
+            </Descriptions.Item>
             <Descriptions.Item label="优先级">
-              <Tag color={PRIORITY_COLORS[currentSuggestion.priority] || "default"}>
-                {PRIORITY_LABELS[currentSuggestion.priority] || currentSuggestion.priority}
+              <Tag color={PRIORITY_COLORS[currentSuggestion.rule_priority] || "default"}>
+                {PRIORITY_LABELS[currentSuggestion.rule_priority] || currentSuggestion.rule_priority}
               </Tag>
             </Descriptions.Item>
             <Descriptions.Item label="目标类型">
-              {currentSuggestion.target_type}
+              {TARGET_TYPE_LABELS[currentSuggestion.target_type] || currentSuggestion.target_type}
+            </Descriptions.Item>
+            <Descriptions.Item label="目标ID">
+              {currentSuggestion.target_id || "-"}
             </Descriptions.Item>
             <Descriptions.Item label="目标名称">
               {currentSuggestion.target_name}
             </Descriptions.Item>
             <Descriptions.Item label="当前值">
-              {currentSuggestion.current_value}
+              {formatValue(currentSuggestion.current_value)}
+            </Descriptions.Item>
+            <Descriptions.Item label="阈值">
+              {formatValue(currentSuggestion.threshold)}
             </Descriptions.Item>
             <Descriptions.Item label="建议动作">
-              {currentSuggestion.suggested_action}
+              {currentSuggestion.suggestion_action}
             </Descriptions.Item>
-            <Descriptions.Item label="建议值">
-              {currentSuggestion.suggested_value}
+            <Descriptions.Item label="建议原因">
+              {currentSuggestion.suggestion_reason}
             </Descriptions.Item>
-            <Descriptions.Item label="原因">
-              {currentSuggestion.reason}
+            <Descriptions.Item label="评估日期">
+              {currentSuggestion.evaluation_date || "-"}
             </Descriptions.Item>
             <Descriptions.Item label="状态">
               <SuggestionStatusTag status={currentSuggestion.status} />
@@ -362,16 +530,29 @@ const SuggestionManagement: React.FC = () => {
                 ? dayjs(currentSuggestion.created_at).format("YYYY-MM-DD HH:mm:ss")
                 : "-"}
             </Descriptions.Item>
+            <Descriptions.Item label="确认时间">
+              {currentSuggestion.confirmed_at
+                ? dayjs(currentSuggestion.confirmed_at).format("YYYY-MM-DD HH:mm:ss")
+                : "-"}
+            </Descriptions.Item>
             <Descriptions.Item label="执行时间">
               {currentSuggestion.executed_at
                 ? dayjs(currentSuggestion.executed_at).format("YYYY-MM-DD HH:mm:ss")
                 : "-"}
             </Descriptions.Item>
-            {currentSuggestion.details && (
-              <Descriptions.Item label="详细信息">
-                <pre style={{ margin: 0, maxHeight: 300, overflow: "auto" }}>
-                  {JSON.stringify(currentSuggestion.details, null, 2)}
-                </pre>
+            <Descriptions.Item label="失效时间">
+              {currentSuggestion.expired_at
+                ? dayjs(currentSuggestion.expired_at).format("YYYY-MM-DD HH:mm:ss")
+                : "-"}
+            </Descriptions.Item>
+            {currentSuggestion.condition_metrics && (
+              <Descriptions.Item label="条件指标">
+                {formatMetrics(currentSuggestion.condition_metrics)}
+              </Descriptions.Item>
+            )}
+            {currentSuggestion.ai_analysis && (
+              <Descriptions.Item label="AI 分析">
+                {formatMetrics(currentSuggestion.ai_analysis)}
               </Descriptions.Item>
             )}
           </Descriptions>

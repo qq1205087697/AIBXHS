@@ -79,6 +79,7 @@ class ReviewAnalysis(BaseModel):
     summary = Column(Text, nullable=True, comment="分析摘要")
     raw_response = Column(Text, nullable=True, comment="AI原始响应")
     analysis_time = Column(Integer, nullable=True, comment="分析耗时(ms)")
+    department = Column(String(20), nullable=True, comment="问题板块:operations/purchasing/warehouse/design")
 
     # 关联关系
     review = relationship("Review", back_populates="analysis")

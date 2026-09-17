@@ -38,6 +38,19 @@ class RunRulesRequest(BaseModel):
     date: str  # YYYY-MM-DD
 
 
+# ==================== 状态机定义 ====================
+# 合法的状态转换表（previous_status → 允许的目标状态集合）
+# 业务规则：待处理 → 已确认 → 已执行 / 已忽略 / 已失效
+# 已执行 / 已忽略 / 已失效 均为终态，不可再转换
+_SUGGESTION_TRANSITIONS = {
+    "待处理": {"已确认", "已忽略", "已失效"},
+    "已确认": {"已执行", "已忽略", "已失效"},
+    "已执行": set(),   # 终态
+    "已忽略": set(),   # 终态
+    "已失效": set(),   # 终态
+}
+
+
 # ==================== 辅助函数 ====================
 
 def _suggestion_to_dict(s: AdOptimizationSuggestion) -> dict:
@@ -182,8 +195,21 @@ async def update_suggestion_status(
         if not suggestion:
             raise HTTPException(status_code=404, detail="建议不存在")
 
-        now = datetime.now()
         previous_status = suggestion.status
+
+        # 状态机校验：previous_status → body.status 必须在合法转换表中
+        allowed_targets = _SUGGESTION_TRANSITIONS.get(previous_status, set())
+        if body.status not in allowed_targets:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"非法状态转换：{previous_status} → {body.status}。"
+                    f"当前状态「{previous_status}」允许的目标："
+                    f"{', '.join(sorted(allowed_targets)) or '无（终态）'}"
+                ),
+            )
+
+        now = datetime.now()
         suggestion.status = body.status
 
         if body.status == "已确认":

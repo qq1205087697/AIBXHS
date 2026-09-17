@@ -7,7 +7,7 @@
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import date
 from sqlalchemy.orm import Session
 
@@ -45,6 +45,25 @@ class BaseOptimizationRule(ABC):
     @abstractmethod
     def description(self) -> str:
         pass
+
+    @property
+    def rule_type(self) -> str:
+        """规则类型：adjust_bid/pause/add_negative/increase_budget/optimization"""
+        return "optimization"
+
+    @property
+    def conditions(self) -> List[Dict[str, Any]]:
+        """触发条件元信息（用于前端展示与编辑）
+
+        返回格式: [{"metric": "acos", "operator": ">", "threshold": 0.30, "unit": "%"}]
+        子类应覆盖此属性以暴露可编辑的阈值
+        """
+        return []
+
+    @property
+    def actions(self) -> List[str]:
+        """执行动作列表（用于前端展示）"""
+        return []
 
     @abstractmethod
     def evaluate(self, db: Session, tenant_id: int, evaluation_date: date) -> List[RuleResult]:

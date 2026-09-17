@@ -58,6 +58,7 @@ def init_db():
         from models import department
         from models import product_selection
         from models import data_warning
+        from models import product_aging_inventory
         
         from models import ad_campaign
         from models import ad_report
@@ -76,6 +77,7 @@ def init_db():
         from models.product_selection import ProductSelection
         from models.data_warning import DataWarning
         from models.product_sales import ProductSales
+        from models.product_aging_inventory import ProductAgingInventory
         from models.threshold_setting import ThresholdSetting
         from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
         from models.local_inventory import LocalInventory
@@ -98,6 +100,16 @@ def init_db():
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN deleted_at DATETIME NULL'))
                 except Exception as e:
                     print(f"添加 {table}.deleted_at 字段失败（可能已存在）: {e}")
+            # 差评分析表新增部门板块分类字段
+            try:
+                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN department VARCHAR(20) NULL COMMENT '问题板块:operations/purchasing/warehouse/design'"))
+            except Exception as e:
+                print(f"添加 review_analyses.department 字段失败（可能已存在）: {e}")
+            # 差评分析表新增多板块字段（逗号分隔，一条差评可属多个板块）
+            try:
+                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"))
+            except Exception as e:
+                print(f"添加 review_analyses.departments 字段失败（可能已存在）: {e}")
             conn.commit()
         
         print("数据库表结构创建成功")
@@ -168,6 +180,36 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # 列已存在则忽略
+            # 为已存在的表添加汇率列（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1人民币兑外币)' AFTER cost_at_15_profit"))
+                conn.commit()
+            except Exception:
+                pass
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1人民币兑外币)' AFTER scrape_rate"))
+                conn.commit()
+            except Exception:
+                pass
+            # 为已存在的表添加类目列（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN category VARCHAR(1000) NULL COMMENT '类目(JSON列表)' AFTER realtime_rate"))
+                conn.commit()
+            except Exception:
+                pass
+            # 头程改为3位小数（如果需要）
+            try:
+                conn.execute(text("ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'"))
+                conn.commit()
+            except Exception:
+                pass
+
+            # products 表新增无配件标记字段（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE products ADD COLUMN no_accessory TINYINT(1) NOT NULL DEFAULT 0 COMMENT '无配件标记(是:数据补齐不再提示未绑配件)'"))
+                conn.commit()
+            except Exception:
+                pass
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:

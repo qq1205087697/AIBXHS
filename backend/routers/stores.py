@@ -17,7 +17,7 @@ class StoreCreate(BaseModel):
     platform: str = "amazon"
     site: Optional[str] = None
     shop_abbr: str
-    department_id: Optional[int] = None
+    group_id: Optional[int] = None
 
 
 class StoreUpdate(BaseModel):
@@ -27,7 +27,6 @@ class StoreUpdate(BaseModel):
     site: Optional[str] = None
     inventory_name: Optional[str] = None
     shop_abbr: Optional[str] = None
-    department_id: Optional[int] = None
     group_id: Optional[int] = None
     status: Optional[str] = None
 
@@ -100,6 +99,96 @@ async def get_all_stores(
         raise HTTPException(status_code=500, detail=f"获取店铺列表失败: {str(e)}")
 
 
+@router.get("/my-stores")
+async def get_my_stores(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取当前用户可访问的店铺列表（用于数据驾驶舱）
+    逻辑：先通过user_stores获取用户可访问的inventory_name（与其他机器人一致），
+    再从这些store记录中提取shop_abbr去重后用于数据驾驶舱展示
+    """
+    try:
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id}
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+        # 兜底：username为admin的用户也视为管理员
+        if not is_admin and current_user.username == "admin":
+            is_admin = True
+
+        # 第一步：获取用户可访问的store_id列表（与其他机器人逻辑一致）
+        if is_admin:
+            # admin看全部active的store
+            store_rows = db.execute(
+                text("SELECT id FROM stores WHERE tenant_id = :tid AND deleted_at IS NULL AND status = 'active' AND platform = 'amazon'"),
+                {"tid": current_user.tenant_id}
+            ).fetchall()
+        else:
+            # 非admin按user_stores过滤
+            store_rows = db.execute(
+                text("SELECT store_id FROM user_stores WHERE user_id = :uid AND tenant_id = :tid"),
+                {"uid": current_user.id, "tid": current_user.tenant_id}
+            ).fetchall()
+        store_id_list = [s[0] for s in store_rows if s[0]]
+
+        if not store_id_list:
+            return {"success": True, "data": {"stores": [], "regions": []}}
+
+        # 第二步：从这些store中获取inventory_name和shop_abbr
+        placeholders = ",".join([f":sid_{i}" for i in range(len(store_id_list))])
+        params = {f"sid_{i}": sid for i, sid in enumerate(store_id_list)}
+
+        query = text(f"""
+            SELECT s.id, s.shop_abbr, s.inventory_name, s.name, s.site
+            FROM stores s
+            WHERE s.id IN ({placeholders}) AND s.platform = 'amazon' AND s.status = 'active'
+            ORDER BY s.shop_abbr ASC, s.site ASC
+        """)
+        result = db.execute(query, params)
+
+        # 第三步：按shop_abbr去重，同时记录每个shop_abbr对应的inventory_name列表
+        stores = []
+        abbr_map = {}  # shop_abbr -> {inventory_names, sites, ...}
+        for row in result:
+            store_id, shop_abbr, inventory_name, name, site = row
+            shop_abbr = shop_abbr or ""
+            inventory_name = inventory_name or ""
+            if not shop_abbr:
+                continue
+            if shop_abbr not in abbr_map:
+                abbr_map[shop_abbr] = {
+                    "id": store_id,
+                    "shop_abbr": shop_abbr,
+                    "name": name or "",
+                    "inventory_names": [],
+                    "sites": [],
+                }
+            if inventory_name and inventory_name not in abbr_map[shop_abbr]["inventory_names"]:
+                abbr_map[shop_abbr]["inventory_names"].append(inventory_name)
+            if site and site not in abbr_map[shop_abbr]["sites"]:
+                abbr_map[shop_abbr]["sites"].append(site)
+
+        for abbr, info in sorted(abbr_map.items(), key=lambda x: x[0]):
+            stores.append({
+                "id": info["id"],
+                "shop_abbr": info["shop_abbr"],
+                "name": info["name"],
+                "site": info["sites"][0] if info["sites"] else "",
+                "inventory_names": info["inventory_names"],
+            })
+
+        # 提取唯一的地区列表
+        regions = sorted(set(s["site"] for s in stores if s["site"]))
+
+        return {"success": True, "data": {"stores": stores, "regions": regions}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取店铺列表失败: {str(e)}")
+
 @router.get("/")
 async def get_stores(
     page: int = 1,
@@ -107,6 +196,7 @@ async def get_stores(
     # name_search: Optional[str] = None,
     # site_search: Optional[str] = None,
     search: Optional[str] = None,
+    assignment_fallback: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -134,7 +224,8 @@ async def get_stores(
                 for i, sid in enumerate(store_id_list):
                     params[f"store_{i}"] = sid
                 where_conditions.append(f"s.id IN ({store_placeholders})")
-            else:
+            elif not assignment_fallback:
+                # 未分配任何店铺时默认返回空；assignment_fallback=true 时兜底显示全部分店
                 where_conditions.append("1=0")
 
         if search:
@@ -199,8 +290,8 @@ async def create_store(
 ):
     try:
         insert_sql = text("""
-            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, inventory_name, shop_abbr, department_id)
-            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :inventory_name, :shop_abbr, :department_id)
+            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, inventory_name, shop_abbr, group_id)
+            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :inventory_name, :shop_abbr, :group_id)
         """)
         result = db.execute(insert_sql, {
             "tenant_id": current_user.tenant_id,
@@ -210,7 +301,7 @@ async def create_store(
             "site": store_data.site,
             "inventory_name": store_data.inventory_name,
             "shop_abbr": store_data.shop_abbr,
-            "department_id": store_data.department_id,
+            "group_id": store_data.group_id,
         })
         db.commit()
         return {
@@ -256,10 +347,8 @@ async def update_store(
         if store_data.shop_abbr is not None:
             updates.append("shop_abbr = :shop_abbr")
             params["shop_abbr"] = store_data.shop_abbr
-        if store_data.department_id is not None:
-            updates.append("department_id = :department_id")
-            params["department_id"] = store_data.department_id
-        if hasattr(store_data, 'group_id'):
+        # 仅在显式传入分组时更新（清空分组请使用 /batch-update-group 接口传 null）
+        if store_data.group_id is not None:
             updates.append("group_id = :group_id")
             params["group_id"] = store_data.group_id
         if store_data.status is not None:
@@ -297,49 +386,59 @@ async def delete_store(
         raise HTTPException(status_code=500, detail=f"删除店铺失败: {str(e)}")
 
 
-class BatchUpdateDepartmentRequest(BaseModel):
+class BatchUpdateGroupRequest(BaseModel):
     store_ids: List[int]
-    department_id: Optional[int] = None
+    group_id: Optional[int] = None
 
 
-@router.post("/batch-update-department")
-async def batch_update_department(
-    request: BatchUpdateDepartmentRequest,
+@router.post("/batch-update-group")
+async def batch_update_group(
+    request: BatchUpdateGroupRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin_user)
 ):
+    """批量分配店铺分组（group_id 传 null 表示取消分组）"""
     try:
         if not request.store_ids:
             raise HTTPException(status_code=400, detail="请选择要更新的店铺")
-        
+
         # 验证所有店铺都属于当前租户
         placeholders = ",".join([f":id_{i}" for i in range(len(request.store_ids))])
         params = {f"id_{i}": store_id for i, store_id in enumerate(request.store_ids)}
         params["tenant_id"] = current_user.tenant_id
-        
+
         check_query = text(f"""
-            SELECT COUNT(*) FROM stores 
+            SELECT COUNT(*) FROM stores
             WHERE id IN ({placeholders}) AND tenant_id = :tenant_id
         """)
         count_result = db.execute(check_query, params)
         count = count_result.fetchone()[0]
-        
+
         if count != len(request.store_ids):
             raise HTTPException(status_code=400, detail="部分店铺不存在或无权限")
-        
+
+        # 验证分组存在且属于当前租户
+        if request.group_id is not None:
+            group_check = db.execute(
+                text("SELECT id FROM store_groups WHERE id = :gid AND tenant_id = :tid AND deleted_at IS NULL"),
+                {"gid": request.group_id, "tid": current_user.tenant_id}
+            ).fetchone()
+            if not group_check:
+                raise HTTPException(status_code=400, detail="店铺分组不存在")
+
         # 批量更新
         update_params = params.copy()
-        update_params["department_id"] = request.department_id
-        
+        update_params["group_id"] = request.group_id
+
         update_query = text(f"""
-            UPDATE stores 
-            SET department_id = :department_id, updated_at = NOW()
+            UPDATE stores
+            SET group_id = :group_id, updated_at = NOW()
             WHERE id IN ({placeholders}) AND tenant_id = :tenant_id
         """)
         db.execute(update_query, update_params)
         db.commit()
-        
-        return {"success": True, "message": f"成功更新 {count} 个店铺的部门"}
+
+        return {"success": True, "message": f"成功更新 {count} 个店铺的分组"}
     except HTTPException:
         raise
     except Exception as e:

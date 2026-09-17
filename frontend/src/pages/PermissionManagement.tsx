@@ -25,6 +25,7 @@ import {
     PlusOutlined,
     DeleteOutlined,
     EditOutlined,
+    CopyOutlined,
     UserOutlined,
     KeyOutlined,
     SaveOutlined,
@@ -45,6 +46,8 @@ import {
     MailOutlined,
     PlusSquareOutlined,
     StarOutlined,
+    TableOutlined,
+    ContactsOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
 import { useResponsive } from "../hooks/useResponsive";
@@ -94,6 +97,9 @@ const PermissionManagement: React.FC = () => {
   const [roleModalVisible, setRoleModalVisible] = useState(false);
   const [editingRole, setEditingRole] = useState<Role | null>(null);
   const [roleForm] = Form.useForm();
+  const [copyRoleVisible, setCopyRoleVisible] = useState(false);
+  const [copyingRole, setCopyingRole] = useState<Role | null>(null);
+  const [copyForm] = Form.useForm();
 
   // 权限相关状态
   const [permissions, setPermissions] = useState<Record<string, Permission[]>>({});
@@ -223,6 +229,35 @@ const PermissionManagement: React.FC = () => {
       fetchRoles();
     } catch (error: any) {
       message.error(error.response?.data?.detail || "保存失败");
+    }
+  };
+
+  // 复制角色（复制权限，不复制用户）
+  const handleCopyRole = (role: Role) => {
+    setCopyingRole(role);
+    copyForm.setFieldsValue({
+      name: `${role.name}-副本`,
+      code: `${role.code}_copy`,
+      description: role.description,
+    });
+    setCopyRoleVisible(true);
+  };
+
+  // 保存复制的角色
+  const handleSaveCopyRole = async () => {
+    if (!copyingRole) return;
+    setLoading(true);
+    try {
+      const values = await copyForm.validateFields();
+      await permissionsApi.copyRole(copyingRole.id, values);
+      message.success("角色复制成功");
+      setCopyRoleVisible(false);
+      fetchRoles();
+    } catch (error: any) {
+      if (error.errorFields) return;
+      message.error(error.response?.data?.detail || "复制失败");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -363,6 +398,9 @@ const PermissionManagement: React.FC = () => {
         '页面优化机器人': { icon: <StarOutlined />, color: '#faad14' },
         '补货管理': { icon: <PlusSquareOutlined />, color: '#7c3aed' },
         '发货管理': { icon: <ShopOutlined />, color: '#1890ff' },
+        '选品管理': { icon: <StarOutlined />, color: '#eb2f96' },
+        '底表管理': { icon: <TableOutlined />, color: '#13c2c2' },
+        '供应商管理': { icon: <ContactsOutlined />, color: '#fa8c16' },
     };
 
   // 计算权限总数
@@ -389,6 +427,15 @@ const PermissionManagement: React.FC = () => {
                 onClick: (e) => {
                   e.domEvent.stopPropagation();
                   handleEditRole(role);
+                }
+              },
+              {
+                key: 'copy',
+                label: '复制',
+                icon: <CopyOutlined />,
+                onClick: (e) => {
+                  e.domEvent.stopPropagation();
+                  handleCopyRole(role);
                 }
               },
               {
@@ -754,6 +801,44 @@ const PermissionManagement: React.FC = () => {
           >
             <Input.TextArea rows={3} placeholder="请输入角色描述" disabled={editingRole?.code === 'admin'} />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 复制角色弹窗 */}
+      <Modal
+        title={copyingRole ? `复制角色：${copyingRole.name}` : "复制角色"}
+        open={copyRoleVisible}
+        onOk={handleSaveCopyRole}
+        onCancel={() => setCopyRoleVisible(false)}
+        okText="确定"
+        cancelText="取消"
+        confirmLoading={loading}
+        width={resp.isMobile ? '95vw' : 520}
+      >
+        <Form form={copyForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="新角色名称"
+            rules={[{ required: true, message: "请输入新角色名称" }]}
+          >
+            <Input placeholder="请输入新角色名称" />
+          </Form.Item>
+          <Form.Item
+            name="code"
+            label="新角色编码"
+            rules={[{ required: true, message: "请输入新角色编码" }]}
+          >
+            <Input placeholder="请输入新角色编码" />
+          </Form.Item>
+          <Form.Item
+            name="description"
+            label="角色描述"
+          >
+            <Input.TextArea rows={3} placeholder="请输入角色描述" />
+          </Form.Item>
+          <div style={{ color: "#999", fontSize: "12px" }}>
+            复制将保留源角色的全部权限，不复制角色下的用户。
+          </div>
         </Form>
       </Modal>
 

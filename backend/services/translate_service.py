@@ -1,13 +1,14 @@
 import re
 from typing import Optional, Tuple
 import openai
+from openai import OpenAI
 from config import get_settings
 
 settings = get_settings()
 
+client: Optional[OpenAI] = None
 if settings.OPENAI_API_KEY:
-    openai.api_key = settings.OPENAI_API_KEY
-    openai.api_base = settings.OPENAI_API_BASE
+    client = OpenAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_API_BASE)
 
 
 def _contains_chinese(text: str) -> bool:

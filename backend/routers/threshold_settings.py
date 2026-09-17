@@ -27,7 +27,9 @@ async def get_threshold_settings(
                 "store": row.store,
                 "ad_ratio_threshold": row.ad_ratio_threshold,
                 "storage_ratio_threshold": row.storage_ratio_threshold,
-                "acos_threshold": row.acos_threshold
+                "acos_threshold": row.acos_threshold,
+                "overall_trend_threshold": row.overall_trend_threshold,
+                "latest_trend_threshold": row.latest_trend_threshold
             })
         
         return {
@@ -52,7 +54,9 @@ async def get_stores_with_thresholds(db: Session = Depends(get_db)):
             data[row.store] = {
                 "ad_ratio_threshold": row.ad_ratio_threshold,
                 "storage_ratio_threshold": row.storage_ratio_threshold,
-                "acos_threshold": row.acos_threshold
+                "acos_threshold": row.acos_threshold,
+                "overall_trend_threshold": row.overall_trend_threshold,
+                "latest_trend_threshold": row.latest_trend_threshold
             }
         
         return {
@@ -67,12 +71,101 @@ async def get_stores_with_thresholds(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"获取店铺阈值失败: {str(e)}")
 
 
+@router.get("/sku-anomaly")
+async def get_sku_anomaly_thresholds(db: Session = Depends(get_db)):
+    try:
+        SKU_GLOBAL_STORE = "__sku_global__"
+        setting = db.query(ThresholdSetting).filter(
+            ThresholdSetting.tenant_id == 1,
+            ThresholdSetting.store == SKU_GLOBAL_STORE
+        ).first()
+        
+        if not setting:
+            setting = ThresholdSetting(
+                tenant_id=1,
+                store=SKU_GLOBAL_STORE,
+                ad_ratio_threshold=25.0,
+                storage_ratio_threshold=10.0,
+                acos_threshold=30.0,
+                overall_trend_threshold=15.0,
+                latest_trend_threshold=20.0,
+            )
+            db.add(setting)
+            db.commit()
+            db.refresh(setting)
+        
+        return {
+            "success": True,
+            "data": {
+                "overall_trend_threshold": setting.overall_trend_threshold,
+                "latest_trend_threshold": setting.latest_trend_threshold,
+            }
+        }
+    
+    except Exception as e:
+        import traceback
+        print(f"Error in get_sku_anomaly_thresholds: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取SKU异动阈值失败: {str(e)}")
+
+
+@router.post("/sku-anomaly")
+async def update_sku_anomaly_thresholds(
+    overall_trend_threshold: Optional[float] = None,
+    latest_trend_threshold: Optional[float] = None,
+    db: Session = Depends(get_db)
+):
+    try:
+        SKU_GLOBAL_STORE = "__sku_global__"
+        setting = db.query(ThresholdSetting).filter(
+            ThresholdSetting.tenant_id == 1,
+            ThresholdSetting.store == SKU_GLOBAL_STORE
+        ).first()
+        
+        if not setting:
+            setting = ThresholdSetting(
+                tenant_id=1,
+                store=SKU_GLOBAL_STORE,
+                ad_ratio_threshold=25.0,
+                storage_ratio_threshold=10.0,
+                acos_threshold=30.0,
+                overall_trend_threshold=overall_trend_threshold if overall_trend_threshold is not None else 15.0,
+                latest_trend_threshold=latest_trend_threshold if latest_trend_threshold is not None else 20.0,
+            )
+            db.add(setting)
+        else:
+            if overall_trend_threshold is not None:
+                setting.overall_trend_threshold = overall_trend_threshold
+            if latest_trend_threshold is not None:
+                setting.latest_trend_threshold = latest_trend_threshold
+        
+        db.commit()
+        db.refresh(setting)
+        
+        return {
+            "success": True,
+            "data": {
+                "overall_trend_threshold": setting.overall_trend_threshold,
+                "latest_trend_threshold": setting.latest_trend_threshold,
+            }
+        }
+    
+    except Exception as e:
+        import traceback
+        print(f"Error in update_sku_anomaly_thresholds: {str(e)}")
+        traceback.print_exc()
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新SKU异动阈值失败: {str(e)}")
+
+
 @router.post("/")
 async def update_threshold_setting(
     store: str,
     ad_ratio_threshold: Optional[float] = None,
     storage_ratio_threshold: Optional[float] = None,
     acos_threshold: Optional[float] = None,
+    overall_trend_threshold: Optional[float] = None,
+    latest_trend_threshold: Optional[float] = None,
     db: Session = Depends(get_db)
 ):
     try:
@@ -87,7 +180,9 @@ async def update_threshold_setting(
                 store=store,
                 ad_ratio_threshold=ad_ratio_threshold or 25.0,
                 storage_ratio_threshold=storage_ratio_threshold or 10.0,
-                acos_threshold=acos_threshold or 30.0
+                acos_threshold=acos_threshold or 30.0,
+                overall_trend_threshold=overall_trend_threshold or 15.0,
+                latest_trend_threshold=latest_trend_threshold or 20.0,
             )
             db.add(setting)
         else:
@@ -97,6 +192,10 @@ async def update_threshold_setting(
                 setting.storage_ratio_threshold = storage_ratio_threshold
             if acos_threshold is not None:
                 setting.acos_threshold = acos_threshold
+            if overall_trend_threshold is not None:
+                setting.overall_trend_threshold = overall_trend_threshold
+            if latest_trend_threshold is not None:
+                setting.latest_trend_threshold = latest_trend_threshold
         
         db.commit()
         db.refresh(setting)
@@ -107,7 +206,9 @@ async def update_threshold_setting(
                 "store": setting.store,
                 "ad_ratio_threshold": setting.ad_ratio_threshold,
                 "storage_ratio_threshold": setting.storage_ratio_threshold,
-                "acos_threshold": setting.acos_threshold
+                "acos_threshold": setting.acos_threshold,
+                "overall_trend_threshold": setting.overall_trend_threshold,
+                "latest_trend_threshold": setting.latest_trend_threshold,
             }
         }
     
@@ -141,7 +242,9 @@ async def batch_update_threshold_settings(
                     store=store,
                     ad_ratio_threshold=item.get("ad_ratio_threshold", 25.0),
                     storage_ratio_threshold=item.get("storage_ratio_threshold", 10.0),
-                    acos_threshold=item.get("acos_threshold", 30.0)
+                    acos_threshold=item.get("acos_threshold", 30.0),
+                    overall_trend_threshold=item.get("overall_trend_threshold", 15.0),
+                    latest_trend_threshold=item.get("latest_trend_threshold", 20.0),
                 )
                 db.add(setting)
             else:
@@ -151,6 +254,10 @@ async def batch_update_threshold_settings(
                     setting.storage_ratio_threshold = item["storage_ratio_threshold"]
                 if "acos_threshold" in item:
                     setting.acos_threshold = item["acos_threshold"]
+                if "overall_trend_threshold" in item:
+                    setting.overall_trend_threshold = item["overall_trend_threshold"]
+                if "latest_trend_threshold" in item:
+                    setting.latest_trend_threshold = item["latest_trend_threshold"]
         
         db.commit()
         

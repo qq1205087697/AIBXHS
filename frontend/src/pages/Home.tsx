@@ -20,10 +20,26 @@ const DEFAULT_REVIEW_STATS: ReviewStats = {
   low: { unhandled: 0, handled: 0 },
 }
 
+// 差评板块配色（与差评机器人页保持一致）
+const REVIEW_SECTION_MAP: Record<string, { label: string; color: string }> = {
+  operations: { label: '运营', color: '#fa8c16', bg: '#fff7e6' },
+  purchasing: { label: '采购', color: '#722ed1', bg: '#f9f0ff' },
+  warehouse: { label: '仓库', color: '#1890ff', bg: '#e6f7ff' },
+  design: { label: '美工', color: '#eb2f96', bg: '#fff0f6' },
+}
+
+interface ReviewSectionStats {
+  sectionStats: Record<string, number>
+  mySections: string[]
+}
+
+const DEFAULT_SECTION_STATS: ReviewSectionStats = { sectionStats: {}, mySections: [] }
+
 const Home: React.FC = () => {
   const navigate = useNavigate()
   const { user, hasPermission } = useAuth()
   const [reviewStats, setReviewStats] = useState<ReviewStats>(DEFAULT_REVIEW_STATS)
+  const [reviewSectionData, setReviewSectionData] = useState<ReviewSectionStats>(DEFAULT_SECTION_STATS)
   const [inventoryStats, setInventoryStats] = useState<{ red: number; yellow: number; green: number } | null>(null)
   const [loading, setLoading] = useState(true)
   const [emailStats, setEmailStats] = useState<{ urgent: number; medium: number; normal: number; total: number }>({ urgent: 0, medium: 0, normal: 0, total: 0 })
@@ -75,6 +91,10 @@ const Home: React.FC = () => {
             unhandled: data.low?.unviewed || 0,
             handled: data.low?.viewed || 0,
           },
+        })
+        setReviewSectionData({
+          sectionStats: data.section_stats || {},
+          mySections: data.my_sections || [],
         })
       }
     } catch (error) {
@@ -315,6 +335,28 @@ const Home: React.FC = () => {
     [permittedBots])
 
   const renderReviewStats = (stats: any) => {
+    // 推送口径：用户订阅了板块时，按订阅板块显示未处理数（一条差评可同时推送多个板块）
+    const { sectionStats, mySections } = reviewSectionData
+    if (mySections.length > 0) {
+      return (
+        <div style={{ marginTop: 16 }}>
+          <Row gutter={[8, 8]}>
+            {mySections.map(sec => {
+              const info = REVIEW_SECTION_MAP[sec]
+              if (!info) return null
+              return (
+                <Col span={mySections.length >= 4 ? 6 : 8} key={sec}>
+                  <div style={{ textAlign: 'center', padding: '8px 0', background: info.bg, borderRadius: 8 }}>
+                    <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>{info.label}</div>
+                    <div style={{ fontSize: 20, fontWeight: 'bold', color: info.color }}>{sectionStats[sec] || 0}</div>
+                  </div>
+                </Col>
+              )
+            })}
+          </Row>
+        </div>
+      )
+    }
     return (
       <div style={{ marginTop: 16 }}>
         <Row gutter={[8, 8]}>

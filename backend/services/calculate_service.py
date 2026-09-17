@@ -21,7 +21,7 @@ def _update_status(task_id: str, **kwargs):
         _tasks[task_id].update(kwargs)
 
 
-def _run_calculation(task_id: str, snapshot_date: str, snapshot_ids: list):
+def _run_calculation(task_id: str, snapshot_date: str, snapshot_ids: list, tenant_id: int = 1):
     """后台执行补货计算"""
     try:
         _update_status(task_id, status="running", started_at=time.time())
@@ -39,7 +39,7 @@ def _run_calculation(task_id: str, snapshot_date: str, snapshot_ids: list):
         db = SessionLocal()
         try:
             _log(task_id, f"增量计算 {len(snapshot_ids) if snapshot_ids else '全部'} 条数据...")
-            result = calculate_replenishment(db, snapshot_date=snapshot_date, snapshot_ids=snapshot_ids, progress_callback=progress_callback)
+            result = calculate_replenishment(db, snapshot_date=snapshot_date, snapshot_ids=snapshot_ids, progress_callback=progress_callback, tenant_id=tenant_id)
             _update_status(task_id, status="completed", finished_at=time.time(), result=result, progress=100)
             _log(task_id, f"补货计算完成: 共{result.get('total',0)}条")
         finally:
@@ -50,7 +50,7 @@ def _run_calculation(task_id: str, snapshot_date: str, snapshot_ids: list):
         _update_status(task_id, status="failed", error=str(e), finished_at=time.time())
 
 
-def start_calculation_async(snapshot_date: str = None, snapshot_ids: list = None) -> dict:
+def start_calculation_async(snapshot_date: str = None, snapshot_ids: list = None, tenant_id: int = 1) -> dict:
     """启动异步补货计算"""
     task_id = str(uuid.uuid4())
     _tasks[task_id] = {
@@ -68,7 +68,7 @@ def start_calculation_async(snapshot_date: str = None, snapshot_ids: list = None
 
     thread = threading.Thread(
         target=_run_calculation,
-        args=(task_id, snapshot_date, snapshot_ids),
+        args=(task_id, snapshot_date, snapshot_ids, tenant_id),
         daemon=True
     )
     thread.start()

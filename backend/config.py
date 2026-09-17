@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
-    OPENAI_VISION_MODEL: str = "gpt-4o"  # 用于图片分析，需为支持视觉的模型
-    OPENAI_VISION_RESPONSE_FORMAT: str = "json_object"  # 图片分析响应格式: json_schema / json_object / text
+    OPENAI_VISION_MODEL: str = ""
+    OPENAI_VISION_RESPONSE_FORMAT: str = ""
 
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
