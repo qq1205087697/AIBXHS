@@ -1494,13 +1494,14 @@ export const baseTableApi = {
     page_size?: number;
     issue?: string;
     keyword?: string;
-    product_type?: string;
+    group_id?: number;
     sort_by?: string;
     sort_order?: string;
   }) =>
     apiClient.get("/base-table/summary", {
       params,
     }),
+  getMyGroups: () => apiClient.get("/base-table/my-groups"),
   getProductWarehouses: (productId: number) =>
     apiClient.get(`/base-table/${productId}/warehouses`),
   getProductPurchaseOrders: (productId: number) =>
