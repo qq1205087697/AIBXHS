@@ -50,6 +50,7 @@ import {
   AlertTriangle,
   Sparkles,
   Table2,
+  Video,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -204,12 +205,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/tenants",
     "/stores",
   ];
+  const mediaPaths = ["/ai-creation"];
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
     const keys: string[] = [];
     if (inventoryPaths.includes(currentPath)) keys.push("inventory-group");
     if (systemPaths.includes(currentPath)) keys.push("system-group");
+    if (mediaPaths.includes(currentPath)) keys.push("media-creation");
     return keys;
   });
 
@@ -225,6 +228,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       }
       if (systemPaths.includes(currentPath) && !next.includes("system-group")) {
         next.push("system-group");
+      }
+      if (mediaPaths.includes(currentPath) && !next.includes("media-creation")) {
+        next.push("media-creation");
       }
       return next;
     });
@@ -309,10 +315,17 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         }] : []),
     ...(hasPermission('ai_creation:use')
       ? [{
-          key: '/ai-creation',
+          key: 'media-creation',
           icon: <Sparkles size={20} />,
-          label: 'AI创作中心',
-          shortLabel: '创作',
+          label: '媒体创作中心',
+          shortLabel: '媒体',
+          children: [
+            {
+              key: '/ai-creation',
+              icon: <Video size={18} />,
+              label: 'AI视频',
+            },
+          ],
         }] : []),
     {
       key: "/data-alert",
