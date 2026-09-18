@@ -155,9 +155,6 @@ def _row_to_dict(row) -> dict:
         "last_mile_cost": float(row[12]) if row[12] is not None else None,
         "weight_kg": float(row[13]) if row[13] is not None else None,
         "cost_at_15_profit": float(row[14]) if row[14] is not None else None,
-        "scrape_rate": float(row[31]) if row[31] is not None else None,
-        "realtime_rate": float(row[32]) if row[32] is not None else None,
-        "category": _parse_category(row[33]),
         "product_type": row[15] or "",
         "site": row[16] or "",
         "monthly_sales": row[17],
@@ -172,16 +169,20 @@ def _row_to_dict(row) -> dict:
         "penalty_factor": float(row[26]) if row[26] is not None else None,
         "composite_score": float(row[27]) if row[27] is not None else None,
         "status": row[28] or "",
-        "created_at": row[29].strftime("%Y-%m-%d %H:%M:%S") if row[29] else "",
-        "updated_at": row[30].strftime("%Y-%m-%d %H:%M:%S") if row[30] else "",
+        "reject_reason": row[29],
+        "created_at": row[30].strftime("%Y-%m-%d %H:%M:%S") if row[30] else "",
+        "updated_at": row[31].strftime("%Y-%m-%d %H:%M:%S") if row[31] else "",
         # 申请选品信息（LEFT JOIN users / store_groups）
-        "ali_1688_url": (row[34] or "") if len(row) > 34 else "",
-        "purchase_price": float(row[35]) if len(row) > 35 and row[35] is not None else None,
-        "purchase_quantity": row[36] if len(row) > 36 else None,
-        "applicant_id": row[37] if len(row) > 37 else None,
-        "store_group_id": row[38] if len(row) > 38 else None,
-        "applicant_name": (row[39] or "") if len(row) > 39 else "",
-        "store_group_name": (row[40] or "") if len(row) > 40 else "",
+        "scrape_rate": float(row[32]) if row[32] is not None else None,
+        "realtime_rate": float(row[33]) if row[33] is not None else None,
+        "category": _parse_category(row[34]),
+        "ali_1688_url": (row[35] or "") if len(row) > 35 else "",
+        "purchase_price": float(row[36]) if len(row) > 36 and row[36] is not None else None,
+        "purchase_quantity": row[37] if len(row) > 37 else None,
+        "applicant_id": row[38] if len(row) > 38 else None,
+        "store_group_id": row[39] if len(row) > 39 else None,
+        "applicant_name": (row[40] or "") if len(row) > 40 else "",
+        "store_group_name": (row[41] or "") if len(row) > 41 else "",
     }
 
 
@@ -402,6 +403,7 @@ async def get_product_selections(
     current_user: User = Depends(get_current_user)
 ):
     try:
+        _ensure_reject_reason_column(db)
         where_conditions = ["ps.tenant_id = :tenant_id", "ps.deleted_at IS NULL"]
         params = {"tenant_id": current_user.tenant_id}
 
@@ -428,7 +430,7 @@ async def get_product_selections(
             for idx, s in enumerate(status):
                 if s == "empty":
                     status_filters.append("(ps.status IS NULL OR ps.status = '')")
-                elif s in ("pending", "approved"):
+                elif s in ("pending", "approved", "rejected"):
                     param_name = f"status_{idx}"
                     status_filters.append(f"ps.status = :{param_name}")
                     params[param_name] = s
@@ -498,7 +500,7 @@ async def get_product_selections(
                    ps.product_type, ps.site, ps.monthly_sales, ps.traffic_trend,
                    ps.seasonality, ps.infringement_analysis, ps.infringement_conclusion, ps.traffic_score_result,
                    ps.traffic_score, ps.sales_score, ps.rating_score, ps.penalty_factor, ps.composite_score,
-                   ps.status, ps.created_at, ps.updated_at,
+                   ps.status, ps.reject_reason, ps.created_at, ps.updated_at,
                    ps.scrape_rate, ps.realtime_rate, ps.category,
                    ps.ali_1688_url, ps.purchase_price, ps.purchase_quantity,
                    ps.applicant_id, ps.store_group_id,
@@ -534,6 +536,7 @@ async def get_product_selection(
     current_user: User = Depends(get_current_user)
 ):
     try:
+        _ensure_reject_reason_column(db)
         query = text("""
             SELECT ps.id, ps.tenant_id, ps.product_title, ps.url, ps.asin, ps.image_url,
                    ps.rating, ps.review_count, ps.keywords, ps.price, ps.commission,
@@ -541,7 +544,7 @@ async def get_product_selection(
                    ps.product_type, ps.site, ps.monthly_sales, ps.traffic_trend,
                    ps.seasonality, ps.infringement_analysis, ps.infringement_conclusion, ps.traffic_score_result,
                    ps.traffic_score, ps.sales_score, ps.rating_score, ps.penalty_factor, ps.composite_score,
-                   ps.status, ps.created_at, ps.updated_at,
+                   ps.status, ps.reject_reason, ps.created_at, ps.updated_at,
                    ps.scrape_rate, ps.realtime_rate, ps.category,
                    ps.ali_1688_url, ps.purchase_price, ps.purchase_quantity,
                    ps.applicant_id, ps.store_group_id,
@@ -1682,6 +1685,69 @@ async def batch_approve_selections(
         raise HTTPException(status_code=500, detail=f"批量审批失败: {str(e)}")
 
 
+class RejectData(BaseModel):
+    """拒绝审批数据"""
+    ids: List[int]
+    reason: Optional[str] = None
+
+
+def _ensure_reject_reason_column(db: Session):
+    """确保选品表有拒绝原因字段。"""
+    try:
+        db.execute(text(
+            "ALTER TABLE product_selections ADD COLUMN reject_reason VARCHAR(500) NULL COMMENT '拒绝原因' AFTER status"
+        ))
+    except Exception:
+        db.rollback()
+
+
+@router.post("/reject")
+async def reject_selection(
+    data: RejectData,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("product_selection:approve"))
+):
+    """拒绝选品审批（状态 pending -> rejected），拒绝原因选填；支持批量。
+
+    data.ids 传 1 条即单个拒绝，多条即批量拒绝。
+    """
+    if not data.ids:
+        raise HTTPException(status_code=400, detail="请选择要拒绝的选品")
+    try:
+        _ensure_reject_reason_column(db)
+        placeholders = ", ".join(f":id{i}" for i in range(len(data.ids)))
+        params = {f"id{i}": data.ids[i] for i in range(len(data.ids))}
+        params["tid"] = current_user.tenant_id
+        rows = db.execute(text(
+            f"SELECT id, status FROM product_selections "
+            f"WHERE id IN ({placeholders}) AND tenant_id = :tid AND deleted_at IS NULL"
+        ), params).fetchall()
+
+        pending_ids = [r[0] for r in rows if (r[1] or "") == "pending"]
+        if not pending_ids:
+            raise HTTPException(status_code=400, detail="所选选品中没有待审批状态的记录")
+
+        upd_placeholders = ", ".join(f":pid{i}" for i in range(len(pending_ids)))
+        upd_params = {f"pid{i}": pending_ids[i] for i in range(len(pending_ids))}
+        upd_params["reason"] = (data.reason or "").strip() or None
+        db.execute(text(
+            f"UPDATE product_selections SET status = 'rejected', reject_reason = :reason, updated_at = NOW() "
+            f"WHERE id IN ({upd_placeholders})"
+        ), upd_params)
+        db.commit()
+        skipped = len(data.ids) - len(pending_ids)
+        msg = f"已拒绝 {len(pending_ids)} 条选品"
+        if skipped > 0:
+            msg += f"，跳过 {skipped} 条非待审批状态的记录"
+        return {"success": True, "message": msg, "data": {"rejected_count": len(pending_ids), "skipped_count": skipped}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"拒绝选品审批失败: {e}")
+        raise HTTPException(status_code=500, detail=f"拒绝审批失败: {str(e)}")
+
+
 @router.post("/{selection_id}/revoke-approval")
 async def revoke_approval(
     selection_id: int,
@@ -1824,155 +1890,3 @@ async def batch_cancel_approval_application(
         logger.error(f"批量取消申请选品失败: {e}")
         raise HTTPException(status_code=500, detail=f"批量取消申请失败: {str(e)}")
 
-
-@router.post("/{selection_id}/generate-purchase-order")
-async def generate_purchase_order(
-    selection_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(PermissionChecker("purchase:create"))
-):
-    """根据已审批选品生成采购单"""
-    try:
-        row = db.execute(text(
-            "SELECT id, product_title, asin, cost_at_15_profit, price, status FROM product_selections "
-            "WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
-        ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="选品记录不存在")
-
-        if (row[5] or "") != "approved":
-            raise HTTPException(status_code=400, detail="只有已审批的选品才能生成采购单")
-
-        asin = row[2] or ""
-        product_title = row[1] or ""
-        unit_price = float(row[3]) if row[3] is not None else (float(row[4]) if row[4] is not None else 0)
-
-        # 根据 ASIN 查找对应产品
-        product_row = None
-        if asin:
-            product_row = db.execute(text(
-                "SELECT id FROM products WHERE tenant_id = :tid AND asin = :asin AND deleted_at IS NULL "
-                "ORDER BY id ASC LIMIT 1"
-            ), {"tid": current_user.tenant_id, "asin": asin}).fetchone()
-
-        if not product_row:
-            raise HTTPException(
-                status_code=400,
-                detail=f"未找到 ASIN '{asin}' 对应的产品，请先在产品管理中创建该产品"
-            )
-
-        product_id = product_row[0]
-        order_number = f"PO{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        total_price = round(unit_price * 1, 2)
-
-        db.execute(text("""
-            INSERT INTO purchase_orders (tenant_id, order_number, warehouse, store_group_id, platform, total_amount, status, notes, created_by, created_at, updated_at)
-            VALUES (:tenant_id, :order_number, NULL, NULL, NULL, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
-        """), {
-            "tenant_id": current_user.tenant_id,
-            "order_number": order_number,
-            "total_amount": total_price,
-            "notes": f"由选品生成：{product_title}",
-            "created_by": current_user.id,
-            "created_at": datetime.now(),
-            "updated_at": datetime.now(),
-        })
-        order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
-
-        db.execute(text("""
-            INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, created_at, updated_at)
-            VALUES (:oid, :pid, 1, :up, :tp, :notes, :created_at, :updated_at)
-        """), {
-            "oid": order_id, "pid": product_id, "up": unit_price, "tp": total_price,
-            "notes": f"ASIN: {asin}",
-            "created_at": datetime.now(), "updated_at": datetime.now(),
-        })
-
-        db.commit()
-        return {"success": True, "message": "采购单生成成功", "data": {"id": order_id, "order_number": order_number}}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"生成采购单失败: {e}")
-        raise HTTPException(status_code=500, detail=f"生成采购单失败: {str(e)}")
-
-
-@router.post("/batch-generate-purchase-orders")
-async def batch_generate_purchase_orders(
-    ids: List[int],
-    db: Session = Depends(get_db),
-    current_user: User = Depends(PermissionChecker("purchase:create"))
-):
-    """批量根据已审批选品生成采购单（每个选品生成一个独立采购单）"""
-    if not ids:
-        raise HTTPException(status_code=400, detail="请选择要生成采购单的选品")
-
-    results = []
-    errors = []
-    for selection_id in ids:
-        try:
-            row = db.execute(text(
-                "SELECT id, product_title, asin, cost_at_15_profit, price, status FROM product_selections "
-                "WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
-            ), {"id": selection_id, "tid": current_user.tenant_id}).fetchone()
-            if not row:
-                errors.append({"id": selection_id, "message": "选品记录不存在"})
-                continue
-
-            if (row[5] or "") != "approved":
-                errors.append({"id": selection_id, "message": "只有已审批的选品才能生成采购单"})
-                continue
-
-            asin = row[2] or ""
-            product_title = row[1] or ""
-            unit_price = float(row[3]) if row[3] is not None else (float(row[4]) if row[4] is not None else 0)
-
-            product_row = None
-            if asin:
-                product_row = db.execute(text(
-                    "SELECT id FROM products WHERE tenant_id = :tid AND asin = :asin AND deleted_at IS NULL "
-                    "ORDER BY id ASC LIMIT 1"
-                ), {"tid": current_user.tenant_id, "asin": asin}).fetchone()
-
-            if not product_row:
-                errors.append({"id": selection_id, "message": f"未找到 ASIN '{asin}' 对应的产品"})
-                continue
-
-            product_id = product_row[0]
-            order_number = f"PO{datetime.now().strftime('%Y%m%d%H%M%S')}{selection_id}"
-            total_price = round(unit_price * 1, 2)
-
-            db.execute(text("""
-                INSERT INTO purchase_orders (tenant_id, order_number, warehouse, store_group_id, platform, total_amount, status, notes, created_by, created_at, updated_at)
-                VALUES (:tenant_id, :order_number, NULL, NULL, NULL, :total_amount, 'draft', :notes, :created_by, :created_at, :updated_at)
-            """), {
-                "tenant_id": current_user.tenant_id,
-                "order_number": order_number,
-                "total_amount": total_price,
-                "notes": f"由选品生成：{product_title}",
-                "created_by": current_user.id,
-                "created_at": datetime.now(),
-                "updated_at": datetime.now(),
-            })
-            order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
-
-            db.execute(text("""
-                INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, total_price, notes, created_at, updated_at)
-                VALUES (:oid, :pid, 1, :up, :tp, :notes, :created_at, :updated_at)
-            """), {
-                "oid": order_id, "pid": product_id, "up": unit_price, "tp": total_price,
-                "notes": f"ASIN: {asin}",
-                "created_at": datetime.now(), "updated_at": datetime.now(),
-            })
-
-            results.append({"id": selection_id, "order_id": order_id, "order_number": order_number})
-        except Exception as e:
-            errors.append({"id": selection_id, "message": str(e)})
-
-    if results:
-        db.commit()
-    if errors and not results:
-        raise HTTPException(status_code=400, detail=f"生成失败：{errors[0]['message']}")
-
-    return {"success": True, "data": {"created": results, "errors": errors}}

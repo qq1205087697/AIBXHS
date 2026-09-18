@@ -6,7 +6,7 @@ import {
   PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
   RobotOutlined, EyeOutlined, BarChartOutlined,
   AlertOutlined, RiseOutlined, StarOutlined, StarFilled, FireOutlined, MoreOutlined, QuestionCircleOutlined,
-  CheckOutlined, DownOutlined, FileTextOutlined, LinkOutlined, UndoOutlined
+  CheckOutlined, DownOutlined, FileTextOutlined, LinkOutlined, UndoOutlined, CloseOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { productSelectionApi, storeGroupsApi } from '../api'
@@ -46,6 +46,7 @@ interface ProductSelectionItem {
   penalty_factor: number | null
   composite_score: number | null
   status: string | null
+  reject_reason?: string | null
   created_at: string
   updated_at: string
   // 申请选品信息
@@ -167,7 +168,7 @@ const ProductSelection: React.FC = () => {
     field: null, order: null,
   })
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
-  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'approved' | 'empty'>('all')
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'approved' | 'rejected' | 'empty'>('all')
   const [statusFilter, setStatusFilter] = useState<string[]>([])
   // 申请选品弹窗（单个或批量）
   const [applyModal, setApplyModal] = useState<{
@@ -686,18 +687,6 @@ const ProductSelection: React.FC = () => {
     })
   }
 
-  const handleGeneratePurchaseOrder = async (id: number) => {
-    try {
-      const res = await productSelectionApi.generatePurchaseOrder(id)
-      if (res.data.success) {
-        message.success(`采购单 ${res.data.data.order_number} 生成成功`)
-        fetchData()
-      }
-    } catch (e: any) {
-      message.error(e.response?.data?.detail || '生成采购单失败')
-    }
-  }
-
   const handleBatchApprove = () => {
     if (selectedRowKeys.length === 0) {
       message.warning('请先选择要审批的选品')
@@ -746,30 +735,6 @@ const ProductSelection: React.FC = () => {
     }
   }
 
-  const handleBatchGeneratePurchaseOrder = async () => {
-    if (selectedRowKeys.length === 0) {
-      message.warning('请先选择要生成采购单的选品')
-      return
-    }
-    const ids = selectedRowKeys as number[]
-    try {
-      const res = await productSelectionApi.batchGeneratePurchaseOrders(ids)
-      if (res.data.success) {
-        const { created, errors } = res.data.data
-        if (created.length > 0) {
-          message.success(`成功生成 ${created.length} 个采购单`)
-        }
-        if (errors.length > 0) {
-          message.warning(`${errors.length} 条生成失败：${errors[0].message}`)
-        }
-        setSelectedRowKeys([])
-        fetchData()
-      }
-    } catch (e: any) {
-      message.error(e.response?.data?.detail || '批量生成采购单失败')
-    }
-  }
-
   const handleBatchCancelApprovalApplication = async () => {
     if (selectedRowKeys.length === 0) {
       message.warning('请先选择要取消申请的选品')
@@ -814,6 +779,36 @@ const ProductSelection: React.FC = () => {
       }
     } catch (e: any) {
       message.error(e.response?.data?.detail || '批量撤回审批失败')
+    }
+  }
+
+  // 拒绝审批弹窗（单个/批量共用，拒绝原因选填）
+  const [rejectModal, setRejectModal] = useState<{ open: boolean; ids: number[] }>({ open: false, ids: [] })
+  const [rejectSubmitting, setRejectSubmitting] = useState(false)
+  const [rejectReason, setRejectReason] = useState('')
+
+  const openRejectModal = (ids: number[]) => {
+    setRejectReason('')
+    setRejectModal({ open: true, ids })
+  }
+
+  const handleRejectSubmit = async () => {
+    try {
+      setRejectSubmitting(true)
+      const res = await productSelectionApi.reject({
+        ids: rejectModal.ids,
+        reason: rejectReason.trim() || undefined,
+      })
+      if (res.data.success) {
+        message.success(res.data.message || '已拒绝审批')
+        setRejectModal({ open: false, ids: [] })
+        setSelectedRowKeys([])
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '拒绝审批失败')
+    } finally {
+      setRejectSubmitting(false)
     }
   }
 
@@ -1320,10 +1315,16 @@ const ProductSelection: React.FC = () => {
       key: 'status',
       width: 90,
       align: 'center',
-      render: (status: string | null) => {
+      render: (status: string | null, record: ProductSelectionItem) => {
         if (!status) return null
         if (status === 'pending') return <Tag color="processing">待审批</Tag>
         if (status === 'approved') return <Tag color="success">已审批</Tag>
+        if (status === 'rejected') {
+          const tag = <Tag color="error">审批未通过</Tag>
+          return record.reject_reason
+            ? <Tooltip title={`拒绝原因：${record.reject_reason}`}>{tag}</Tooltip>
+            : tag
+        }
         return <Tag color="default">{status}</Tag>
       },
     },
@@ -1335,7 +1336,6 @@ const ProductSelection: React.FC = () => {
       align: 'right',
       render: (_: any, record: ProductSelectionItem) => {
         const canApprove = hasPermission('product_selection:approve')
-        const canCreatePurchase = hasPermission('purchase:create')
         const dropdownItems: any[] = [
           {
             key: 'analyze',
@@ -1360,6 +1360,13 @@ const ProductSelection: React.FC = () => {
             label: '审批',
             onClick: () => handleApprove(record),
           })
+          dropdownItems.push({
+            key: 'reject',
+            icon: <CloseOutlined />,
+            label: '拒绝审批',
+            danger: true,
+            onClick: () => openRejectModal([record.id]),
+          })
         }
         if (record.status === 'pending') {
           dropdownItems.push({
@@ -1368,14 +1375,6 @@ const ProductSelection: React.FC = () => {
             label: '取消申请',
             danger: true,
             onClick: () => handleCancelApprovalApplication(record.id),
-          })
-        }
-        if (record.status === 'approved' && canCreatePurchase) {
-          dropdownItems.push({
-            key: 'generate-po',
-            icon: <FileTextOutlined />,
-            label: '生成采购单',
-            onClick: () => handleGeneratePurchaseOrder(record.id),
           })
         }
         if (record.status === 'approved' && canApprove) {
@@ -1490,6 +1489,7 @@ const ProductSelection: React.FC = () => {
           { key: 'empty', label: '未申请' },
           { key: 'pending', label: '待审批' },
           { key: 'approved', label: '已审批' },
+          { key: 'rejected', label: '审批未通过' },
         ]}
         style={{ marginBottom: 16, flexShrink: 0 }}
       />
@@ -1540,6 +1540,7 @@ const ProductSelection: React.FC = () => {
                   { label: '未申请', value: 'empty' },
                   { label: '待审批', value: 'pending' },
                   { label: '已审批', value: 'approved' },
+                  { label: '审批未通过', value: 'rejected' },
                 ]}
                 onChange={(v) => { setStatusFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
@@ -1571,6 +1572,16 @@ const ProductSelection: React.FC = () => {
                       disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'approved'),
                       onClick: handleBatchRevokeApproval,
                     },
+                    hasPermission('product_selection:approve') && {
+                      key: 'batch-reject',
+                      icon: <CloseOutlined />,
+                      label: '批量拒绝',
+                      danger: true,
+                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      onClick: () => openRejectModal(
+                        items.filter(i => selectedRowKeys.includes(i.id) && i.status === 'pending').map(i => i.id)
+                      ),
+                    },
                     {
                       key: 'batch-cancel-application',
                       icon: <DeleteOutlined />,
@@ -1578,13 +1589,6 @@ const ProductSelection: React.FC = () => {
                       danger: true,
                       disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
                       onClick: handleBatchCancelApprovalApplication,
-                    },
-                    hasPermission('purchase:create') && {
-                      key: 'batch-generate-po',
-                      icon: <FileTextOutlined />,
-                      label: '生成采购单',
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'approved'),
-                      onClick: handleBatchGeneratePurchaseOrder,
                     },
                     {
                       key: 'batch-analyze',
@@ -1947,6 +1951,31 @@ const ProductSelection: React.FC = () => {
         </div>
       </Modal>
 
+      {/* 拒绝审批弹窗：拒绝原因选填 */}
+      <Modal
+        title={rejectModal.ids.length > 1 ? `批量拒绝（${rejectModal.ids.length} 条）` : '拒绝审批'}
+        open={rejectModal.open}
+        onOk={handleRejectSubmit}
+        onCancel={() => setRejectModal({ open: false, ids: [] })}
+        confirmLoading={rejectSubmitting}
+        okText="确认拒绝"
+        okType="danger"
+        cancelText="取消"
+        width={480}
+        destroyOnClose
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary">拒绝后选品状态将变为"审批未通过"，拒绝原因选填。</Text>
+        </div>
+        <Input.TextArea
+          rows={3}
+          maxLength={500}
+          placeholder="请输入拒绝原因（可留空）"
+          value={rejectReason}
+          onChange={(e) => setRejectReason(e.target.value)}
+        />
+      </Modal>
+
       {/* 利润计算逻辑设置弹窗 */}
       <Modal
         title="利润计算逻辑设置"
@@ -2100,7 +2129,7 @@ const ProductSelection: React.FC = () => {
               </Descriptions.Item>
               <Descriptions.Item label="数量">{detailItem.purchase_quantity ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="申请人">{detailItem.applicant_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="申请店铺分组">
+              <Descriptions.Item label="申请店铺分组" labelStyle={{ whiteSpace: 'nowrap' }}>
                 {detailItem.store_group_name ? <Tag color="blue">{detailItem.store_group_name}</Tag> : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="实际毛利润">
@@ -2124,6 +2153,22 @@ const ProductSelection: React.FC = () => {
                     </span>
                   )
                 })()}
+              </Descriptions.Item>
+              <Descriptions.Item label="状态">
+                {detailItem.status === 'pending'
+                  ? <Tag color="processing">待审批</Tag>
+                  : detailItem.status === 'approved'
+                    ? <Tag color="success">已审批</Tag>
+                    : detailItem.status === 'rejected'
+                      ? <Tag color="error">审批未通过</Tag>
+                      : <Tag>未申请</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="拒绝原因" span={2}>
+                {detailItem.status === 'rejected'
+                  ? (detailItem.reject_reason
+                    ? <Text type="danger">{detailItem.reject_reason}</Text>
+                    : <Text type="secondary">未填写</Text>)
+                  : '-'}
               </Descriptions.Item>
               <Descriptions.Item label="评分">
                 {detailItem.rating != null ? (

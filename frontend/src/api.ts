@@ -1250,10 +1250,8 @@ export const productSelectionApi = {
     apiClient.post(`/product-selection/${id}/revoke-approval`, {}),
   batchRevokeApproval: (ids: number[]) =>
     apiClient.post(`/product-selection/batch-revoke-approval`, ids),
-  generatePurchaseOrder: (id: number) =>
-    apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
-  batchGeneratePurchaseOrders: (ids: number[]) =>
-    apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
+  reject: (data: { ids: number[]; reason?: string }) =>
+    apiClient.post(`/product-selection/reject`, data),
   create: (data: {
     product_title: string;
     url?: string;
