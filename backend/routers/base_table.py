@@ -51,11 +51,12 @@ REPLENISH_PENDING_STATUS = "('pending', 'approved')"
 PURCHASE_PENDING_STATUS = "('draft', 'pending', 'approved', 'purchased', 'partial_received', 'pending_reshipment')"
 
 # 缺平台SKU条件片段（成品且无任何非空平台SKU；配件不需要平台信息，不标识）
-# {pcol}/{tcol} 分别为产品ID列与租户列
+# 在库或采购在途（转采购未入库）均视为缺失，仓库可在到货前补建平台信息
+# {s}/{b} 分别为在库数量列与采购在途数量列，{pcol}/{tcol} 分别为产品ID列与租户列
 NO_SKU_COND = ("NOT EXISTS (SELECT 1 FROM platform_products pp "
                "WHERE pp.product_id = {pcol} AND pp.tenant_id = {tcol} "
                "AND pp.deleted_at IS NULL AND pp.sku IS NOT NULL AND pp.sku != '')")
-NO_SKU_FULL = "(COALESCE({s}, 0) > 0 AND p.product_type LIKE '%finished%' AND " + NO_SKU_COND + ")"
+NO_SKU_FULL = "(COALESCE({s}, 0) + COALESCE({b}, 0) > 0 AND p.product_type LIKE '%finished%' AND " + NO_SKU_COND + ")"
 
 
 @router.get("/my-groups")
@@ -206,8 +207,8 @@ async def get_base_table_summary(
             "to_purchase": "COALESCE(t.r, 0) > 0",
             "to_inbound": "COALESCE(t.b, 0) > 0",
             "any_pending": "(COALESCE(t.r, 0) > 0 OR COALESCE(t.b, 0) > 0)",
-            # 缺平台SKU：有库存的成品且无任何非空平台SKU（配件不需要平台信息，不标识）
-            "no_sku": NO_SKU_FULL.format(s="t.s", pcol="p.id", tcol="p.tenant_id"),
+            # 缺平台SKU：在库或采购在途的成品且无任何非空平台SKU（配件不需要平台信息，不标识）
+            "no_sku": NO_SKU_FULL.format(s="t.s", b="t.b", pcol="p.id", tcol="p.tenant_id"),
         }.get(issue)
 
         # 单一派生表：三数据源 UNION ALL 后按产品聚合（s=在库, r=补货未采购, b=采购未入库）
@@ -255,7 +256,7 @@ async def get_base_table_summary(
             f"""SELECT COALESCE(SUM(COALESCE(t.s, 0)), 0) AS in_stock_total,
                        COALESCE(SUM(COALESCE(t.r, 0)), 0) AS to_purchase_total,
                        COALESCE(SUM(COALESCE(t.b, 0)), 0) AS to_inbound_total,
-                       COALESCE(SUM(CASE WHEN {NO_SKU_FULL.format(s="t.s", pcol="p.id", tcol="p.tenant_id")}
+                       COALESCE(SUM(CASE WHEN {NO_SKU_FULL.format(s="t.s", b="t.b", pcol="p.id", tcol="p.tenant_id")}
                                          THEN 1 ELSE 0 END), 0) AS no_sku_total
                 FROM products p
                 LEFT JOIN ({agg_clause}) t ON t.product_id = p.id
@@ -284,7 +285,7 @@ async def get_base_table_summary(
                        COALESCE(t.s, 0) AS in_stock_qty,
                        COALESCE(t.r, 0) AS to_purchase_qty,
                        COALESCE(t.b, 0) AS to_inbound_qty,
-                       CASE WHEN COALESCE(t.s, 0) > 0
+                       CASE WHEN COALESCE(t.s, 0) + COALESCE(t.b, 0) > 0
                             AND p.product_type LIKE '%finished%'
                             AND (SELECT COUNT(*) FROM platform_products pp
                                  WHERE pp.product_id = p.id AND pp.tenant_id = p.tenant_id

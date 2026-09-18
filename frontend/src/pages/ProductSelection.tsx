@@ -177,6 +177,16 @@ const ProductSelection: React.FC = () => {
   }>({ open: false, ids: [] })
   const [applySubmitting, setApplySubmitting] = useState(false)
   const [applyForm] = Form.useForm()
+  // 审批通过弹窗（填写品名，生成成品+补货单）
+  const [approveModal, setApproveModal] = useState<{ open: boolean; item?: ProductSelectionItem | null }>({ open: false })
+  const [approveSubmitting, setApproveSubmitting] = useState(false)
+  const [approveForm] = Form.useForm()
+  // 批量审批弹窗（逐条填写品名，合并生成一张补货单）
+  const [batchApproveModalOpen, setBatchApproveModalOpen] = useState(false)
+  const [batchApproveSubmitting, setBatchApproveSubmitting] = useState(false)
+  const [batchApproveItems, setBatchApproveItems] = useState<{
+    id: number; product_title: string; store_group_name: string; purchase_quantity?: number | null; name: string
+  }[]>([])
   // 利润计算设置
   const [profitSettings, setProfitSettings] = useState<ProfitSettings | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -614,15 +624,31 @@ const ProductSelection: React.FC = () => {
     }
   }
 
-  const handleApprove = async (id: number) => {
+  // 打开审批通过弹窗（填写品名）
+  const handleApprove = (item: ProductSelectionItem) => {
+    approveForm.resetFields()
+    setApproveModal({ open: true, item })
+  }
+
+  const handleApproveSubmit = async () => {
+    if (!approveModal.item) return
     try {
-      const res = await productSelectionApi.approve(id)
+      const values = await approveForm.validateFields()
+      setApproveSubmitting(true)
+      const res = await productSelectionApi.approve(approveModal.item.id, {
+        product_name: (values.product_name || '').trim() || undefined,
+      })
       if (res.data.success) {
-        message.success('审批通过')
+        const d = res.data.data || {}
+        message.success(`审批通过，成品 ${d.product_code || ''} 与补货单 ${d.replenishment_order_number || ''} 已生成`)
+        setApproveModal({ open: false })
         fetchData()
       }
     } catch (e: any) {
+      if (e?.errorFields) return
       message.error(e.response?.data?.detail || '审批失败')
+    } finally {
+      setApproveSubmitting(false)
     }
   }
 
@@ -638,6 +664,28 @@ const ProductSelection: React.FC = () => {
     }
   }
 
+  // 撤回审批：仅回退状态，已生成的成品和补货单不受影响
+  const handleRevokeApproval = (id: number) => {
+    Modal.confirm({
+      title: '撤回审批',
+      content: '撤回后选品将回到待审批状态，已生成的成品和补货单不受影响。确定撤回吗？',
+      okText: '撤回',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await productSelectionApi.revokeApproval(id)
+          if (res.data.success) {
+            message.success('已撤回审批')
+            fetchData()
+          }
+        } catch (e: any) {
+          message.error(e.response?.data?.detail || '撤回审批失败')
+        }
+      },
+    })
+  }
+
   const handleGeneratePurchaseOrder = async (id: number) => {
     try {
       const res = await productSelectionApi.generatePurchaseOrder(id)
@@ -650,26 +698,51 @@ const ProductSelection: React.FC = () => {
     }
   }
 
-  const handleBatchApprove = async () => {
+  const handleBatchApprove = () => {
     if (selectedRowKeys.length === 0) {
       message.warning('请先选择要审批的选品')
       return
     }
     const ids = selectedRowKeys as number[]
-    const pendingIds = items.filter(i => ids.includes(i.id) && i.status === 'pending').map(i => i.id)
-    if (pendingIds.length === 0) {
+    const pendingItems = items.filter(i => ids.includes(i.id) && i.status === 'pending')
+    if (pendingItems.length === 0) {
       message.warning('所选选品中没有待审批状态的记录')
       return
     }
+    setBatchApproveItems(pendingItems.map(i => ({
+      id: i.id,
+      product_title: i.product_title,
+      store_group_name: i.store_group_name || '',
+      purchase_quantity: i.purchase_quantity,
+      name: '',
+    })))
+    setBatchApproveModalOpen(true)
+  }
+
+  const handleBatchApproveSubmit = async () => {
+    const emptyIdx = batchApproveItems.findIndex(i => !i.name.trim())
+    if (emptyIdx >= 0) {
+      message.warning(`第 ${emptyIdx + 1} 条「${batchApproveItems[emptyIdx].product_title.slice(0, 30)}…」未填写品名`)
+      return
+    }
+    setBatchApproveSubmitting(true)
     try {
-      for (const id of pendingIds) {
-        await productSelectionApi.approve(id)
+      const res = await productSelectionApi.batchApprove({
+        items: batchApproveItems.map(i => ({ selection_id: i.id, product_name: i.name.trim() })),
+      })
+      if (res.data.success) {
+        const d = res.data.data || {}
+        const orderCount = d.orders?.length || 0
+        const orderNos = (d.orders || []).map((o: any) => o.order_number).join('、')
+        message.success(`成功审批 ${d.approved_count} 条选品，已生成 ${orderCount} 张补货单${orderNos ? `（${orderNos}）` : ''}`)
+        setBatchApproveModalOpen(false)
+        setSelectedRowKeys([])
+        fetchData()
       }
-      message.success(`成功审批 ${pendingIds.length} 条选品`)
-      setSelectedRowKeys([])
-      fetchData()
     } catch (e: any) {
       message.error(e.response?.data?.detail || '批量审批失败')
+    } finally {
+      setBatchApproveSubmitting(false)
     }
   }
 
@@ -709,14 +782,38 @@ const ProductSelection: React.FC = () => {
       return
     }
     try {
-      for (const id of pendingIds) {
-        await productSelectionApi.cancelApprovalApplication(id)
+      const res = await productSelectionApi.batchCancelApproval(pendingIds)
+      if (res.data.success) {
+        message.success(res.data.message || `成功取消 ${pendingIds.length} 条选品申请`)
+        setSelectedRowKeys([])
+        fetchData()
       }
-      message.success(`成功取消 ${pendingIds.length} 条选品申请`)
-      setSelectedRowKeys([])
-      fetchData()
     } catch (e: any) {
       message.error(e.response?.data?.detail || '批量取消申请失败')
+    }
+  }
+
+  // 批量撤回审批：仅回退状态，已生成的成品和补货单不受影响
+  const handleBatchRevokeApproval = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择要撤回审批的选品')
+      return
+    }
+    const ids = selectedRowKeys as number[]
+    const approvedIds = items.filter(i => ids.includes(i.id) && i.status === 'approved').map(i => i.id)
+    if (approvedIds.length === 0) {
+      message.warning('所选选品中没有已审批状态的记录')
+      return
+    }
+    try {
+      const res = await productSelectionApi.batchRevokeApproval(approvedIds)
+      if (res.data.success) {
+        message.success(res.data.message || `成功撤回 ${approvedIds.length} 条选品审批`)
+        setSelectedRowKeys([])
+        fetchData()
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '批量撤回审批失败')
     }
   }
 
@@ -1261,7 +1358,7 @@ const ProductSelection: React.FC = () => {
             key: 'approve',
             icon: <CheckOutlined />,
             label: '审批',
-            onClick: () => handleApprove(record.id),
+            onClick: () => handleApprove(record),
           })
         }
         if (record.status === 'pending') {
@@ -1279,6 +1376,15 @@ const ProductSelection: React.FC = () => {
             icon: <FileTextOutlined />,
             label: '生成采购单',
             onClick: () => handleGeneratePurchaseOrder(record.id),
+          })
+        }
+        if (record.status === 'approved' && canApprove) {
+          dropdownItems.push({
+            key: 'revoke-approval',
+            icon: <UndoOutlined />,
+            label: '撤回审批',
+            danger: true,
+            onClick: () => handleRevokeApproval(record.id),
           })
         }
         dropdownItems.push({
@@ -1456,6 +1562,14 @@ const ProductSelection: React.FC = () => {
                       label: '批量审批',
                       disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
                       onClick: handleBatchApprove,
+                    },
+                    hasPermission('product_selection:approve') && {
+                      key: 'batch-revoke-approval',
+                      icon: <UndoOutlined />,
+                      label: '批量撤回审批',
+                      danger: true,
+                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'approved'),
+                      onClick: handleBatchRevokeApproval,
                     },
                     {
                       key: 'batch-cancel-application',
@@ -1751,6 +1865,86 @@ const ProductSelection: React.FC = () => {
             <Select placeholder="选择店铺分组" options={storeGroupOptions} allowClear />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 审批通过弹窗 */}
+      <Modal
+        title="审批通过"
+        open={approveModal.open}
+        onOk={handleApproveSubmit}
+        onCancel={() => setApproveModal({ open: false })}
+        confirmLoading={approveSubmitting}
+        okText="确认审批"
+        width={520}
+        destroyOnClose
+      >
+        {approveModal.item && (
+          <>
+            <div style={{ marginBottom: 16 }}>
+              <Text type="secondary">产品：</Text>
+              <Text ellipsis style={{ maxWidth: 380 }}>{approveModal.item.product_title}</Text>
+            </div>
+            <Row gutter={16} style={{ marginBottom: 16 }}>
+              <Col span={12}>
+                <Text type="secondary">采购数量：</Text>
+                <Text>{approveModal.item.purchase_quantity ?? '-'}</Text>
+              </Col>
+              <Col span={12}>
+                <Text type="secondary">店铺分组：</Text>
+                {approveModal.item.store_group_name
+                  ? <Tag color="blue">{approveModal.item.store_group_name}</Tag>
+                  : <Text>-</Text>}
+              </Col>
+            </Row>
+            <Form form={approveForm} layout="vertical">
+              <Form.Item
+                name="product_name"
+                label="品名"
+                rules={[{ required: true, message: '请输入品名' }]}
+                extra="确认后将生成新成品和补货单，采购数量与店铺分组取申请选品时填写值"
+              >
+                <Input placeholder="请输入品名" maxLength={200} />
+              </Form.Item>
+            </Form>
+          </>
+        )}
+      </Modal>
+
+      {/* 批量审批弹窗：逐条填写品名，合并生成一张补货单 */}
+      <Modal
+        title={`批量审批（${batchApproveItems.length} 条）`}
+        open={batchApproveModalOpen}
+        onOk={handleBatchApproveSubmit}
+        onCancel={() => setBatchApproveModalOpen(false)}
+        confirmLoading={batchApproveSubmitting}
+        okText="确认审批"
+        width={640}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="每条选品将生成一个成品（需填写品名）；补货单按申请人和店铺分组归并，相同的人生成同一张，不同的人分开生成"
+        />
+        <div style={{ maxHeight: 420, overflow: 'auto' }}>
+          {batchApproveItems.map((item, idx) => (
+            <div key={item.id} style={{ marginBottom: 16 }}>
+              <div style={{ marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Text type="secondary">{idx + 1}.</Text>
+                <Text ellipsis style={{ flex: 1, minWidth: 0 }} title={item.product_title}>{item.product_title}</Text>
+                {item.store_group_name && <Tag color="blue" style={{ flexShrink: 0 }}>{item.store_group_name}</Tag>}
+                <Text type="secondary" style={{ flexShrink: 0 }}>数量：{item.purchase_quantity ?? '-'}</Text>
+              </div>
+              <Input
+                placeholder="请输入品名"
+                maxLength={200}
+                value={item.name}
+                onChange={(e) => setBatchApproveItems(prev => prev.map(p => p.id === item.id ? { ...p, name: e.target.value } : p))}
+              />
+            </div>
+          ))}
+        </div>
       </Modal>
 
       {/* 利润计算逻辑设置弹窗 */}
