@@ -3,7 +3,7 @@ import logging
 import asyncio
 import uuid
 import requests
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
@@ -569,6 +569,7 @@ async def get_product_selection(
 @router.post("/")
 async def create_product_selection(
     data: ProductSelectionCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -615,7 +616,45 @@ async def create_product_selection(
             "category": json.dumps(data.category, ensure_ascii=False) if data.category else None,
         })
         db.commit()
-        return {"success": True, "message": "选品记录创建成功", "data": {"id": result.lastrowid}}
+        selection_id = result.lastrowid
+
+        # 入库即自动计算评分（不用等每日定时任务）
+        rating_score = _calc_rating_score(data.rating, data.review_count)
+        sales_score = _calc_sales_score(data.monthly_sales)
+        penalty_factor = _calc_penalty_factor(rating_score)
+        traffic_score, traffic_score_result = _calc_traffic_score(data.traffic_trend)
+        composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+
+        db.execute(text("""
+            UPDATE product_selections SET
+                traffic_score = :ts, traffic_score_result = :tsr,
+                sales_score = :ss, rating_score = :rs,
+                penalty_factor = :pf, composite_score = :cs,
+                updated_at = NOW()
+            WHERE id = :id
+        """), {
+            "id": selection_id, "ts": traffic_score, "tsr": traffic_score_result,
+            "ss": sales_score, "rs": rating_score, "pf": penalty_factor, "cs": composite_score,
+        })
+        db.commit()
+
+        # 综合评分 >= 65 且未做过AI分析：后台自动触发AI分析（侵权+季节性）
+        auto_analysis_triggered = False
+        if composite_score is not None and composite_score >= 65:
+            auto_analysis_triggered = True
+            background_tasks.add_task(_analyze_one_product, selection_id, current_user.tenant_id)
+
+        return {
+            "success": True,
+            "message": "选品记录创建成功",
+            "data": {
+                "id": selection_id,
+                "rating_score": rating_score, "sales_score": sales_score,
+                "penalty_factor": penalty_factor, "traffic_score": traffic_score,
+                "composite_score": composite_score,
+                "auto_analysis_triggered": auto_analysis_triggered,
+            },
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"创建选品记录失败: {str(e)}")

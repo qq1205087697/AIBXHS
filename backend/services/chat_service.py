@@ -756,7 +756,9 @@ DEPARTMENT_PROMPT_RULES = """部门板块分类规则（departments字段，从�
 - purchasing（采购板块）：质量不好、字母/印刷出错
 - warehouse（仓库板块）：损坏
 - design（美工板块）：尺寸、颜色、图片、夸大
-根据评论内容判断所有符合的板块（例如：商品破损且颜色与描述不符，应同时归入warehouse和design）。完全无法判断时归入operations。"""
+根据评论内容判断所有符合的板块（例如：商品破损且颜色与描述不符，应同时归入warehouse和design）。完全无法判断时归入operations。
+
+处理建议规则（suggestions字段）：每条建议必须是对象 {"department":"板块英文键","text":"中文建议"}，department为该条建议负责处理的板块英文键（从上述四个板块中选一个），text为具体可执行的中文建议（不能为空）。"""
 
 
 def _normalize_departments(value) -> str:
@@ -852,10 +854,10 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
     "sentiment_score": 1-10,
     "key_points": ["要点1", "要点2"],
     "topics": ["主题1", "主题2"],
-    "suggestions": ["建议1", "建议2"],
+    "suggestions": [{"department": "purchasing", "text": "建议1"}],
     "summary": "一句话总结",
     "importance_level": "high|medium|low",
-    "department": "operations|purchasing|warehouse|design"
+    "departments": ["operations", "purchasing", "warehouse", "design"]
 }}
 """
 
@@ -892,13 +894,14 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
         insert_query = text("""
             INSERT INTO review_analyses (
                 tenant_id, review_id, model, sentiment, sentiment_score,
-                key_points, topics, suggestions, summary, raw_response, department
+                key_points, topics, suggestions, summary, raw_response, department, departments
             ) VALUES (
                 :tenant_id, :review_id, :model, :sentiment, :sentiment_score,
-                :key_points, :topics, :suggestions, :summary, :raw_response, :department
+                :key_points, :topics, :suggestions, :summary, :raw_response, :department, :departments
             )
         """)
 
+        dept_str = _normalize_departments(ai_result.get("departments") or ai_result.get("department"))
         db.execute(insert_query, {
             "tenant_id": review_data.get("tenant_id", 1),
             "review_id": review_id,
@@ -910,7 +913,8 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
             "suggestions": json.dumps(ai_result.get("suggestions", [])),
             "summary": ai_result.get("summary", ""),
             "raw_response": response_content,
-            "department": ai_result.get("department", "")
+            "department": dept_str.split(",")[0] if dept_str else "",
+            "departments": dept_str
         })
         
         # 更新重要性等级
@@ -970,7 +974,7 @@ def analyze_review(db: Session, review: Review) -> dict:
 """ + DEPARTMENT_PROMPT_RULES + """
 
 输出JSON格式：
-{{"sentiment":"negative","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}
+{{"sentiment":"negative","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[{"department":"purchasing","text":"建议1"}],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}
 """
 
         response = client.chat.completions.create(
@@ -1088,7 +1092,7 @@ def batch_analyze_reviews(db: Session, review_ids: List[int], tenant_id: Optiona
 
 """ + DEPARTMENT_PROMPT_RULES + """
 
-输出JSON:{{"sentiment":"","sentiment_score":0,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","departments":["operations","purchasing","warehouse","design"]}}"""
+输出JSON:{{"sentiment":"","sentiment_score":0,"key_points":[],"topics":[],"suggestions":[{"department":"purchasing","text":"建议1"}],"summary":"","importance_level":"high|medium|low","departments":["operations","purchasing","warehouse","design"]}}"""
 
                 if settings.OPENAI_API_KEY:
                     try:

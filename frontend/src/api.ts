@@ -216,9 +216,7 @@ export const reviewsApi = {
   getList: (params?: {
     page?: number;
     page_size?: number;
-    asin_search?: string;
-    product_name_search?: string;
-    sku_search?: string;
+    search?: string;
     sort_by?: string;
     sort_order?: string;
     start_date?: string;
