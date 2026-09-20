@@ -2,6 +2,7 @@ import json
 import base64
 import asyncio
 import logging
+import re
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from fastapi import UploadFile
@@ -24,6 +25,7 @@ AMAZON_PRODUCT_ANALYSIS_SCHEMA = {
             "product_name_cn": {"type": "string"},
             "product_name_en": {"type": "string"},
             "product_type": {"type": "string"},
+            "product_size": {"type": "string"},
             "target_audience": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -71,6 +73,7 @@ AMAZON_PRODUCT_ANALYSIS_SCHEMA = {
             "product_name_cn",
             "product_name_en",
             "product_type",
+            "product_size",
             "target_audience",
             "selling_points",
             "material",
@@ -88,6 +91,14 @@ AMAZON_PRODUCT_ANALYSIS_SCHEMA = {
     },
 }
 
+
+# ============================================================
+# 【旧方案提示词 · 已停用，保留备查，可随时切回】
+# 旧流程：① 视觉模型识别商品 → ② 文本模型生成 3 套创意（JSON 结构）
+# 注意：以下 SYSTEM_PROMPT / VIDEO_CONCEPT_SYSTEM_PROMPT /
+#       VIDEO_PROMPT_SYSTEM_PROMPT 及对应接口仍保留可用，
+#       但前端已切换到下方新方案（一次性多模态生成口播方案）。
+# ============================================================
 
 SYSTEM_PROMPT = """你是一名 Amazon 跨境电商产品分析专家。
 
@@ -124,6 +135,7 @@ SYSTEM_PROMPT = """你是一名 Amazon 跨境电商产品分析专家。
     "product_name_cn": "中文名称",
     "product_name_en": "Amazon 英文名称",
     "product_type": "产品类型",
+    "product_size": "产品尺寸，如 30.5'D x 27'W x 30'H；图片无法确认时留空字符串",
     "target_audience": ["受众1", "受众2"],
     "selling_points": ["卖点1", "卖点2"],
     "material": ["材质1"],
@@ -537,15 +549,36 @@ Duration is a core parameter. Design the story structure from the beginning for 
 
 Do not generate a 30s script and trim it. Start from the duration.
 
+=== ASPECT RATIO ===
+
+The target video aspect ratio is provided in the user input (e.g. 9:16). Design shot composition and framing to fit that ratio:
+- auto: follow the reference product image's aspect ratio
+- 9:16 (vertical, TikTok/Reels): subjects roughly centered vertically, keep key content within the middle strip to avoid crop loss, hook face near the upper third
+- 3:4 (portrait): slightly wider vertical framing
+- 1:1 (square): balanced centered composition
+- 4:3 (landscape): moderate horizontal framing
+- 16:9 (landscape): wide cinematic framing, allow wide backgrounds
+- 21:9 (ultra-wide landscape): cinematic widescreen framing, emphasize horizontal space
+
+Mention the framing/composition choices in shot_type and composition accordingly.
+
 === MARKET ADAPTATION ===
 
-If market = US:
-- Characters must feel like real American consumers
-- Clothing, home decor, furniture, props, lifestyle must match American culture
-- Do NOT use Chinese-style homes, furniture, clothing, or behavior
-- Voiceover must be natural spoken American English, not translated Chinese
+Target market language mapping (the voiceover must use the market's language):
+- US / UK: English
+- CA: English (Canadian)
+- AU: English (Australian)
+- DE: German
+- FR: French
+- JP: Japanese
+- CN: Chinese
 
-Characters can be: young American mom, new American dad, party planner, baking enthusiast, professional baker, parent throwing first birthday party, etc. Choose dynamically based on product.
+All voiceover/dialogue must be natural spoken dialogue in the target market's language — NOT translated Chinese and NOT English for non-English markets.
+
+Characters, clothing, home decor, furniture, props, and lifestyle must match the target market's culture.
+Do NOT use Chinese-style homes, furniture, clothing, or behavior (unless market = CN).
+
+Characters can be: local consumers, young local mom, new local dad, party planner, baking enthusiast, professional baker, parent throwing first birthday party, etc. Choose dynamically based on product and market.
 
 === PRODUCT FACT CONSTRAINTS ===
 
@@ -588,8 +621,8 @@ For each shot, provide in Chinese for visual fields and market-appropriate langu
 - product_position: Chinese
 - composition: Chinese
 - environment: Chinese
-- voiceover: natural spoken English for US market
-- voiceover_cn: Chinese translation of the voiceover
+- voiceover: the EXACT spoken line for this shot — complete, natural, speakable sentences in the target market's language. Never a description such as "介绍产品外观", never a placeholder, never empty; every shot must contain real dialogue/voiceover text
+- voiceover_cn: Chinese translation of the voiceover (also never empty)
 - sound: music / sound effects
 
 === STRUCTURE ===
@@ -635,7 +668,7 @@ Generate exactly 3 concepts as valid JSON using this structure:
           "product_position": "...",
           "composition": "...",
           "environment": "...",
-          "voiceover": "Natural spoken English for US market",
+          "voiceover": "Natural spoken dialogue in the target market's language",
           "voiceover_cn": "中文翻译",
           "sound": "..."
         }
@@ -704,19 +737,40 @@ def _select_response_format(schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+VALID_ASPECT_RATIOS = ("auto", "9:16", "16:9", "1:1", "4:3", "3:4", "21:9")
+
+MARKET_LANGUAGE_MAP = {
+    "US": "English",
+    "UK": "English",
+    "CA": "English",
+    "AU": "English",
+    "DE": "German",
+    "FR": "French",
+    "JP": "Japanese",
+    "CN": "Chinese",
+}
+
+
 async def generate_video_concepts(
     product_profile: Dict[str, Any],
     market: str = "US",
     duration: int = 30,
+    aspect_ratio: str = "9:16",
     previous_concepts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """根据产品画像生成 3 个差异化视频创意"""
     if duration not in (15, 30, 45, 60):
         raise AIAnalysisError("视频时长仅支持 15 / 30 / 45 / 60 秒")
+    if aspect_ratio not in VALID_ASPECT_RATIOS:
+        raise AIAnalysisError(f"视频比例仅支持 {' / '.join(VALID_ASPECT_RATIOS)}")
+
+    market_language = MARKET_LANGUAGE_MAP.get(market, market)
 
     user_text_parts = [
         f"Target Market: {market}",
+        f"Voiceover Language: {market_language}",
         f"Video Duration: {duration} seconds",
+        f"Aspect Ratio: {aspect_ratio}",
         "",
         "Product Profile:",
         json.dumps(product_profile, ensure_ascii=False, indent=2),
@@ -758,6 +812,563 @@ async def generate_video_concepts(
 
     return result["concepts"]
 
+
+# ---------- 旧方案结束（下方为新方案） ----------
+
+
+# ============================================================
+# 【新方案 · 短视频口播策划（一次性多模态生成）】
+# 一次调用同时完成：产品信息卡分析 + 3 套口播视频提示词方案
+# ============================================================
+
+VOICEOVER_PLAN_SYSTEM_PROMPT = """你是一个跨境电商短视频口播策划专家和 AI 视频提示词生成器。用户会传入 1~9 张产品参考图，并设置视频时长、目标市场、口播语言等参数。你的任务是先分析产品，再生成 3 套口播视频提示词方案。
+
+【方案类型池】
+推荐款
+场景种草
+促销转化
+情绪共鸣
+专业评测
+DIY教程
+问题解决
+前后对比
+真实体验
+开箱体验
+生活方式种草
+礼物推荐
+
+【随机生成规则】
+1. 如果用户没有指定方案类型，必须从【方案类型池】中随机抽取 3 个互不重复的类型，作为三套方案的类型。
+2. 不要默认固定为“推荐款、场景种草、促销转化”。
+3. 三套方案的类型、方案名、情节、模特、环境、音乐、分镜内容必须差异化。
+4. 三套方案的输出顺序可以随机打乱。
+5. 如果用户指定了部分类型，按指定生成；不足 3 个时，从类型池中随机补齐，且不能重复。
+6. 如果用户指定了 3 个类型，则严格按指定类型生成。
+
+【类型与分镜侧重】
+推荐款：强钩子 → 核心卖点 → 使用/展示 → CTA
+场景种草：生活场景痛点 → 产品融入 → 氛围效果 → CTA
+促销转化：产品亮点 → 紧迫感 → 行动引导 → CTA（不得虚构价格、折扣、库存）
+情绪共鸣：情绪故事 → 产品带来的治愈/陪伴/惊喜 → 情感升华 → CTA
+专业评测：外观 → 材质/参数 → 做工细节 → 优缺点结论 → CTA
+DIY教程：准备 → 步骤1 → 步骤2 → 成果展示 → CTA
+问题解决：痛点 → 传统问题 → 产品方案 → 效果对比 → CTA
+前后对比：Before → 使用过程 → After → 差异强调 → CTA
+真实体验：真实使用 → 感受 → 细节 → 推荐理由 → CTA
+开箱体验：包裹开箱 → 第一印象 → 细节展示 → 上手体验 → CTA
+生活方式种草：生活方式场景 → 产品融入 → 审美/氛围 → CTA
+礼物推荐：送礼场景 → 收礼反应 → 产品亮点 → 适合人群 → CTA
+
+【全局参数】
+video_duration：视频总时长，范围 5~30 秒。
+target_market：目标市场，例如 美国、英国、德国、法国、日本、韩国、巴西、中东、东南亚。
+voiceover_language：口播语言，可指定，也可设为“自动”。
+platform：发布平台，例如 TikTok、Reels、Shorts、Amazon。
+aspect_ratio：画面比例，例如 9:16、16:9、1:1。
+product_name：产品名称。
+reference_images：1~9 张参考图。
+
+【参数优先级】
+1. 用户明确指定的 voiceover_language 优先。
+2. 如果 voiceover_language 为“自动”，则由 target_market 决定口播语言。
+3. 用户指定的 video_duration 必须严格遵守，范围 5~30 秒。
+4. 如果未指定，默认 video_duration=15s，target_market=美国，voiceover_language=English。
+
+【目标市场与口播语言映射】
+美国/加拿大/澳大利亚：英语，直接、高能、强 CTA。
+英国：英语，英式拼写，克制、幽默、轻讽刺。
+德国/奥地利/瑞士：德语，理性、参数、品质、认证。
+法国：法语，审美、生活方式、优雅。
+西班牙/墨西哥/拉美：西班牙语，热情、家庭、节日。
+意大利：意大利语，设计、工艺、时尚。
+日本：日语，礼貌、细节、安心、功能。
+韩国：韩语，潮流、颜值、快速、感性。
+巴西：葡萄牙语，热情、社交、性价比。
+中东：阿拉伯语，尊贵、家庭、礼品。
+东南亚：英语/泰语/越南语/印尼语，按平台选择；英语通用时用短句。
+
+【动态分镜规则】
+video_duration 为 5~30 秒时，分镜数量如下：
+5~9s：2 镜。
+10~12s：3 镜。
+13~17s：4 镜。
+18~23s：5 镜。
+24~30s：6 镜。
+
+第一镜：从 0 开始，视觉钩子，约占 3~5 秒或总时长 20~30%。
+最后一镜：促单/CTA，约占 3~5 秒或总时长 20~30%。
+中间镜头：根据方案类型覆盖产品亮相、细节、材质、使用、场景、对比、信任等内容。
+时间码必须连续、不重叠，总和必须等于 video_duration。
+
+【分镜硬性约束（必须严格遵守）】
+1. 镜头数量必须与时长档位严格一致：5~9s 恰好 2 镜；10~12s 恰好 3 镜；13~17s 恰好 4 镜；18~23s 恰好 5 镜；24~30s 恰好 6 镜。不得多生成或少生成镜头。
+2. 任何两个镜头的时间码不得相同、不得重叠、不得交叉。例如 15 秒视频只允许出现一次 12-15s。
+3. 只允许最后一个镜头是促单/CTA（或成果展示＋CTA、适合人群＋CTA），前面的镜头不得承担促单职责。
+4. 时间码从 0s 开始连续推进，无缝隙无重叠，直到等于 video_duration。
+
+参考时间码：
+5s 两镜：0-2s、2-5s。
+10s 三镜：0-3s、3-7s、7-10s。
+15s 四镜：0-4s、4-8s、8-12s、12-15s。
+20s 五镜：0-4s、4-8s、8-12s、12-16s、16-20s。
+30s 六镜：0-5s、5-10s、10-15s、15-20s、20-25s、25-30s。
+
+【工作流程】
+第一步：分析 1~9 张参考图，输出产品信息卡：
+[产品名称]：根据参考图提炼中文产品名（10 字以内），关键产品术语用英文括号补充，如：仙女手提礼品盒（Fairy Favor Box）。
+[目标受众]：根据视觉特征与使用场景推测 2~4 类目标人群，用、分隔，如：幼儿园家长、派对策划者、迎婴派对主办人。
+[卖点描述]：提炼 3~6 条核心卖点，结合视觉特征、使用场景、目标人群、情绪价值；关键产品术语用英文括号补充。
+[材质描述]：描述材质、工艺、颜色、触感、边缘处理、配件、装饰、质感；关键术语用英文括号补充。
+[使用方式]：用 1. 2. 3. 编号列出 4~6 步，包含检查、佩戴/安装、使用、保养/收纳。
+[产品类目]：输出 Amazon 英文类目路径，层级用 > 分隔。
+
+第二步：从【方案类型池】随机抽取 3 个互不重复的类型，基于产品信息卡、图片和全局参数，生成 3 套口播视频提示词方案。
+
+每套方案必须包含：
+方案名：中文名 + 括号内风格标签。
+类型：从类型池中抽取的类型。
+情节：2~3 句话说明视频故事线。
+模特：年龄、性别、种族、面部特征、眼睛、发型、胡须、肤质、服装。必须具体。
+环境：地点、背景、光线、色温。
+音乐：音乐风格、节奏、音效、转场声音。
+分镜：根据 video_duration 和方案类型动态生成镜头数量、时间码和镜头标签。
+
+【分镜格式】
+[镜头一]：{start}-{end}s | 视觉钩子
+[内容]：【自拍/特写/手持】中文画面描述，包含动作、产品细节、光线、镜头运动、口型状态；口播：{voiceover_language} 口播，1~2 句。
+
+[镜头二]：{start}-{end}s | 根据类型填写，如细节展示/痛点展示/步骤1/开箱/Before
+[内容]：中文画面描述；口播：{voiceover_language} 口播。
+
+后续镜头按总时长和分镜数量继续，直到最后一个 CTA 镜头。
+
+[最后一个镜头]：{start}-{end}s | 促单/召唤行动/CTA
+[内容]：中文画面描述；口播：{voiceover_language} 口播，必须包含 CTA。
+
+【语言与风格要求】
+- 产品分析、方案结构、画面描述用中文。
+- 口播语言由 target_market 或 voiceover_language 决定，不能固定为英文。
+- 口播必须口语化、短句、符合目标市场表达习惯。
+- 产品术语、材质、工艺、类目保留英文括号。
+- 模特、环境、音乐、情节、方案类型在三套方案中不能重复。
+- 必须基于图片可见信息，不要虚构不可见的认证、价格、折扣、功效、品牌授权。
+- 如果图片信息不足，标注“疑似/建议确认”，不要强行编造。
+- 输出不要解释，不要总结，直接按格式输出。
+
+【输出格式】
+[产品名称]：...
+[目标受众]：...
+[卖点描述]：...
+[材质描述]：...
+[使用方式]：1. ... 2. ... 3. ...
+[产品类目]：...
+
+方案一：中文名（风格标签）
+类型：{从类型池随机抽取的类型1}
+情节：...
+模特：...
+环境：...
+音乐：...
+分镜：
+[镜头一]：动态时间码 | 视觉钩子
+[内容]：...；口播：...
+[镜头二]：动态时间码 | 类型对应标签
+[内容]：...；口播：...
+...
+[最后一个镜头]：动态时间码 | 促单/CTA
+[内容]：...；口播：...
+
+方案二：中文名（风格标签）
+类型：{从类型池随机抽取的类型2}
+...
+
+方案三：中文名（风格标签）
+类型：{从类型池随机抽取的类型3}
+...
+"""
+
+
+VOICEOVER_PLAN_USER_PROMPT_TEMPLATE = """请分析我上传的 {image_count} 张产品参考图，并严格按照系统格式输出：
+1. 产品信息卡：[卖点描述]、[材质描述]、[使用方式]、[产品类目]
+2. 三套口播视频提示词方案：方案一、方案二、方案三
+
+参数设置：
+产品名称：{product_name}
+参考图：已上传 {image_count} 张
+视频时长：{duration}s
+目标市场：{target_market}
+口播语言：{voiceover_language}
+画面比例：{aspect_ratio}
+方案类型：{plan_types}
+如需指定类型：{specified_types}
+风格偏好：{style_preference}
+避免出现：价格、折扣、未证实功效、敏感词等
+{extra_instruction}"""
+
+
+# 方案类型池（与系统提示词一致，用于“换一换”时排除已生成类型）
+VOICEOVER_PLAN_TYPE_POOL = [
+    "推荐款", "场景种草", "促销转化", "情绪共鸣", "专业评测", "DIY教程",
+    "问题解决", "前后对比", "真实体验", "开箱体验", "生活方式种草", "礼物推荐",
+]
+
+# 目标市场 → 默认口播语言（voiceover_language 为“自动”时使用）
+MARKET_LANGUAGE_NAME = {
+    "US": "英语", "CA": "英语", "AU": "英语",
+    "UK": "英语（英式拼写）",
+    "DE": "德语", "AT": "德语", "CH": "德语",
+    "FR": "法语",
+    "ES": "西班牙语", "MX": "西班牙语",
+    "IT": "意大利语",
+    "JP": "日语",
+    "KR": "韩语",
+    "BR": "葡萄牙语",
+    "ME": "阿拉伯语",
+    "SEA": "英语（可按平台选择泰语/越南语/印尼语）",
+    "CN": "中文",
+}
+
+
+def build_voiceover_plan_user_prompt(
+    *,
+    image_count: int,
+    duration: int,
+    target_market: str,
+    voiceover_language: str = "自动",
+    aspect_ratio: str = "9:16",
+    product_name: str = "",
+    specified_types: Optional[List[str]] = None,
+    style_preference: str = "",
+    avoid_types: Optional[List[str]] = None,
+    confirmed_card: str = "",
+) -> str:
+    """按新方案的 User Prompt 模板组装用户消息"""
+    specified = "、".join(specified_types) if specified_types else "不指定"
+
+    extra_lines: List[str] = []
+    if avoid_types:
+        extra_lines.append(
+            "本轮为“换一换”重新生成，请勿与以下已生成的方案类型重复："
+            + "、".join(avoid_types)
+        )
+    if confirmed_card:
+        extra_lines.append(
+            "以下产品信息卡已由用户人工确认，请直接采用，不要重新分析或改写其中的内容：\n"
+            + confirmed_card
+        )
+    extra_instruction = ("\n".join(extra_lines) + "\n") if extra_lines else ""
+
+    return VOICEOVER_PLAN_USER_PROMPT_TEMPLATE.format(
+        image_count=image_count,
+        product_name=product_name or "未填写（请从参考图识别）",
+        duration=duration,
+        target_market=target_market,
+        voiceover_language=voiceover_language or "自动",
+        aspect_ratio=aspect_ratio,
+        plan_types="从【方案类型池】中随机抽取 3 个互不重复的类型，不要固定为推荐款、场景种草、促销转化。",
+        specified_types=specified,
+        style_preference=style_preference or "不指定",
+        extra_instruction=extra_instruction,
+    )
+
+
+def _call_vision_stream_sync(
+    client: OpenAI,
+    model: str,
+    messages: List[Dict[str, Any]],
+    timeout: float = 600,
+) -> str:
+    """流式调用多模态模型并拼接完整文本。
+
+    长内容生成必须用流式：非流式请求有整体超时限制，且超时重试会导致同一请求重复扣费。
+    若中途断开但已收到部分内容，则返回已收到的部分，避免整次调用白费。
+    """
+    chunks: List[str] = []
+    try:
+        with ai_call_slot():
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                temperature=0.3,
+                timeout=timeout,
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    chunks.append(chunk.choices[0].delta.content)
+    except Exception as e:
+        if chunks:
+            logger.warning(
+                f"[AI创作中心] 流式生成中断，已收到 {len(''.join(chunks))} 字，尝试使用部分结果: {e}"
+            )
+        else:
+            logger.error(f"[AI创作中心] 流式调用失败: {e}")
+            raise AIAnalysisError(f"AI 模型调用失败: {str(e)}")
+
+    text = "".join(chunks).strip()
+    logger.info(f"[AI创作中心] 流式生成完成，共 {len(text)} 字")
+    return text
+
+
+def _reset_shot_fields() -> Dict[str, str]:
+    """新方案分镜只提供时间码、镜头标签、画面描述与口播，其余字段置空以兼容旧结构"""
+    return {
+        "shot_type": "",
+        "camera_movement": "",
+        "character_action": "",
+        "character_expression": "",
+        "product_action": "",
+        "product_position": "",
+        "composition": "",
+        "environment": "",
+        "voiceover_cn": "",
+        "sound": "",
+    }
+
+
+def _split_items(text: str) -> List[str]:
+    """把一段文字拆成条目：支持换行、；、编号 1. 2. 3."""
+    if not text:
+        return []
+    normalized = text.replace("\r", "")
+    normalized = re.sub(r"\s*(?:\d+[.、)]|\(\d+\))\s*", "\n", normalized)
+    parts = re.split(r"[\n；;]+", normalized)
+    return [p.strip(" 　-·•").strip() for p in parts if p.strip(" 　-·•").strip()]
+
+
+def parse_voiceover_plan_text(raw_text: Optional[str]) -> Dict[str, Any]:
+    """解析新方案输出：产品信息卡 + 3 套口播方案（文本格式）"""
+    result: Dict[str, Any] = {"product": {}, "concepts": [], "raw_text": raw_text or ""}
+    if not raw_text:
+        return result
+
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"```\s*$", "", text).strip()
+
+    # 按“方案一/方案二/方案三”切分，方案之前的段落为产品信息卡
+    parts = re.split(r"\n(?=\s*方案\s*[一二三123])", text)
+    card_text = parts[0]
+    concept_texts = [p for p in parts[1:] if p.strip()][:3]
+
+    # 字段值可能换行（如编号列表），一直收集到下一个标签行 / 方案头为止
+    label_stop = re.compile(
+        r"^\s*(?:\[[^\]]+\]|方案\s*[一二三123]|类型|情节|模特|环境|音乐|分镜)\s*[:：]"
+    )
+
+    def _pick(block: str, label: str) -> str:
+        collected: List[str] = []
+        started = False
+        for line in block.split("\n"):
+            if not started:
+                matched = re.match(rf"^\s*\[?\s*{label}\s*\]?\s*[:：]\s*(.*)$", line)
+                if matched:
+                    started = True
+                    if matched.group(1).strip():
+                        collected.append(matched.group(1).strip())
+                continue
+            if label_stop.match(line):
+                break
+            if line.strip():
+                collected.append(line.strip())
+            else:
+                break
+        return "\n".join(collected)
+
+    product_name = _pick(card_text, "产品名称")
+    audience = _pick(card_text, "目标受众")
+    selling = _pick(card_text, "卖点描述")
+    material = _pick(card_text, "材质描述")
+    usage = _pick(card_text, "使用方式")
+    category = _pick(card_text, "产品类目")
+
+    result["product"] = {
+        "product_name_cn": product_name,
+        "product_name_en": "",
+        "product_type": "",
+        "product_size": "",
+        "target_audience": [
+            a for a in re.split(r"[、，,;；\n]", audience) if a.strip()
+        ],
+        "selling_points": _split_items(selling),
+        "material": [material] if material else [],
+        "usage_scenarios": [],
+        "usage_methods": _split_items(usage),
+        "product_components": [],
+        "colors": [],
+        "amazon_category": category,
+        "keywords": [],
+        "visible_text": [],
+        "confidence": 0,
+        "uncertain_information": [],
+    }
+
+    for block in concept_texts:
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+
+        title = re.sub(r"^\s*方案\s*[一二三123]\s*[:：]\s*", "", lines[0]).strip()
+        type_value = _pick(block, "类型")
+        story = _pick(block, "情节")
+        character = _pick(block, "模特")
+        environment = _pick(block, "环境")
+        music = _pick(block, "音乐")
+
+        storyboard: List[Dict[str, str]] = []
+        for line in lines:
+            shot_matched = re.match(r"^\s*\[?\s*(?:最后一个镜头|镜头\s*[一二三四五六七八九十\d]+)\s*\]?\s*[:：]\s*(.+)$", line)
+            if not shot_matched:
+                continue
+            head = shot_matched.group(1)
+            timestamp, shot_label = head, ""
+            if "|" in head:
+                timestamp, shot_label = [p.strip() for p in head.split("|", 1)]
+            storyboard.append({
+                "timestamp": timestamp.strip(),
+                "shot_purpose": shot_label.strip(),
+                "description": "",
+                "voiceover": "",
+                **_reset_shot_fields(),
+            })
+
+        # [内容] 行按顺序归属到各分镜，并拆出“口播：”
+        content_lines = re.findall(r"^\s*\[内容\]\s*[:：]\s*(.+)$", block, flags=re.MULTILINE)
+        for idx, content in enumerate(content_lines):
+            if idx >= len(storyboard):
+                break
+            voiceover = ""
+            desc = content
+            voiceover_matched = re.split(r"[；;]?\s*口播\s*[:：]", content, maxsplit=1)
+            if len(voiceover_matched) == 2:
+                desc, voiceover = voiceover_matched[0], voiceover_matched[1]
+            storyboard[idx]["description"] = desc.strip().strip("；;")
+            storyboard[idx]["voiceover"] = voiceover.strip()
+
+        # 兜底：模型偶发违反分镜规则，输出多段相同时间码的镜头（如 15s 出现两个 12-15s），
+        # 同一时间码只保留第一个镜头
+        seen_timestamps: set = set()
+        deduped: List[Dict[str, str]] = []
+        for shot in storyboard:
+            if shot["timestamp"] and shot["timestamp"] in seen_timestamps:
+                logger.warning(
+                    f"[AI创作中心] 方案「{title}」存在重复时间码镜头 {shot['timestamp']}，已丢弃多余镜头"
+                )
+                continue
+            seen_timestamps.add(shot["timestamp"])
+            deduped.append(shot)
+        storyboard = deduped
+
+        result["concepts"].append({
+            "concept_title": title or f"方案{len(result['concepts']) + 1}",
+            "marketing_goal": type_value,
+            "creative_strategy": {
+                # 模特信息已在 character 字段，这里不再重复填写，避免前端展示重复
+                "persona_identity": "",
+                "persona_role": "",
+                "age": "",
+                "relationship_to_product": "",
+                "story_background": story,
+                "consumption_scene": "",
+                "core_pain_point": "",
+                "core_selling_point": "",
+                "emotion": "",
+                "video_style": "",
+                "camera_language": "",
+            },
+            "story": story,
+            "character": character,
+            "environment": environment,
+            "music": music,
+            "storyboard": storyboard,
+        })
+
+    return result
+
+
+async def generate_voiceover_plans(
+    files: List[UploadFile],
+    *,
+    duration: int = 15,
+    target_market: str = "美国",
+    voiceover_language: str = "自动",
+    aspect_ratio: str = "9:16",
+    product_name: str = "",
+    specified_types: Optional[List[str]] = None,
+    style_preference: str = "",
+    avoid_types: Optional[List[str]] = None,
+    confirmed_card: str = "",
+) -> Dict[str, Any]:
+    """新方案：一次多模态调用，产出产品信息卡 + 3 套口播视频提示词方案"""
+    if not 5 <= int(duration) <= 30:
+        raise AIAnalysisError("视频时长仅支持 5 / 10 / 15 秒")
+
+    if not settings.OPENAI_API_KEY:
+        raise AIAnalysisError("OpenAI API Key 未配置")
+
+    content = _build_user_content(files)
+    if len(content) <= 1:
+        raise AIAnalysisError("没有可用的图片内容")
+
+    # 首条文本替换为新方案的 User Prompt
+    content[0] = {
+        "type": "text",
+        "text": build_voiceover_plan_user_prompt(
+            image_count=len(content) - 1,
+            duration=int(duration),
+            target_market=target_market,
+            voiceover_language=voiceover_language,
+            aspect_ratio=aspect_ratio,
+            product_name=product_name,
+            specified_types=specified_types,
+            style_preference=style_preference,
+            avoid_types=avoid_types,
+            confirmed_card=confirmed_card,
+        ),
+    }
+
+    client = OpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        base_url=settings.OPENAI_API_BASE,
+        max_retries=0,  # 超时不自动重试，避免同一请求重复扣费
+        timeout=900,
+    )
+    model = settings.OPENAI_VISION_MODEL or "gpt-4o"
+    messages = [
+        {"role": "system", "content": VOICEOVER_PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+    logger.info(
+        f"[AI创作中心] 新方案生成：model={model}, 图片={len(content) - 1} 张, "
+        f"时长={duration}s, 市场={target_market}, 语言={voiceover_language}, 比例={aspect_ratio}"
+    )
+
+    try:
+        raw_text = await asyncio.wait_for(
+            asyncio.to_thread(_call_vision_stream_sync, client, model, messages, 900),
+            timeout=960,
+        )
+    except asyncio.TimeoutError:
+        raise AIAnalysisError("AI 生成超时（16分钟），请稍后重试或减少参考图数量")
+
+    if not raw_text:
+        raise AIAnalysisError("AI 模型返回内容为空")
+
+    parsed = parse_voiceover_plan_text(raw_text)
+    if not parsed["concepts"]:
+        raise AIAnalysisError(f"无法解析 AI 返回的方案内容: {raw_text[:200]}")
+
+    return parsed
+
+
+# ---------- 新方案结束 ----------
+
+
+# ============================================================
+# 【旧方案】最终视频提示词生成（保留可用）
+# ============================================================
 
 async def generate_video_prompts(
     product_profile: Dict[str, Any],

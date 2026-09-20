@@ -1540,6 +1540,7 @@ export interface AmazonProductAnalysisResult {
   product_name_cn: string;
   product_name_en: string;
   product_type: string;
+  product_size?: string;
   target_audience: string[];
   selling_points: string[];
   material: string[];
@@ -1557,6 +1558,7 @@ export interface AmazonProductAnalysisResult {
 export interface VideoStoryboardShot {
   timestamp: string;
   shot_purpose: string;
+  description?: string;
   shot_type: string;
   camera_movement: string;
   character_action: string;
@@ -1600,10 +1602,84 @@ export interface VideoPrompt {
   final_prompt: string;
 }
 
-export type VideoMarket = 'US' | 'UK' | 'CA' | 'AU' | 'DE' | 'FR' | 'JP' | 'CN';
-export type VideoDuration = 15 | 30 | 45 | 60;
+export type VideoMarket =
+  | 'US' | 'CA' | 'AU' | 'UK'
+  | 'DE' | 'AT' | 'CH'
+  | 'FR' | 'ES' | 'MX' | 'IT'
+  | 'JP' | 'KR' | 'BR'
+  | 'ME' | 'SEA' | 'CN';
+export type VideoDuration = 5 | 10 | 15;
+export type VideoRatio = 'auto' | '9:16' | '16:9' | '1:1' | '4:3' | '3:4' | '21:9';
+export type VideoModel = 'minimax-h3' | 'minimax-h3-lite';
+export type VideoResolution = '480P' | '768P' | '1080P';
+
+/** 口播语言：'auto' 表示跟随目标市场自动决定 */
+export type VoiceoverLanguage =
+  | 'auto' | 'English' | 'German' | 'French' | 'Spanish' | 'Italian'
+  | 'Japanese' | 'Korean' | 'Portuguese' | 'Arabic';
+
+export interface VoiceoverPlanParams {
+  /** 视频时长（10~30 秒） */
+  duration: VideoDuration;
+  /** 目标市场（中文名，如“美国”） */
+  target_market: string;
+  /** 口播语言 */
+  voiceover_language: VoiceoverLanguage;
+  /** 画面比例 */
+  aspect_ratio: VideoRatio;
+  /** 产品名称（可空，模型会从图片识别） */
+  product_name?: string;
+  /** 指定的方案类型（可不填） */
+  specified_types?: string[];
+  /** 风格偏好 */
+  style_preference?: string;
+  /** 换一换时需避免重复的已生成类型 */
+  avoid_types?: string[];
+  /** 用户已确认的产品信息卡文本（编辑后重新生成时使用） */
+  confirmed_card?: string;
+}
+
+export interface VoiceoverPlanResult {
+  product: AmazonProductAnalysisResult;
+  concepts: VideoConcept[];
+  raw_text: string;
+}
 
 export const aiCreationApi = {
+  /** 新方案：一次生成产品信息卡 + 3 套口播视频提示词方案 */
+  generateVoiceoverPlans: (files: File[], params: VoiceoverPlanParams) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("duration", String(params.duration));
+    formData.append("target_market", params.target_market);
+    formData.append(
+      "voiceover_language",
+      params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
+    );
+    formData.append("aspect_ratio", params.aspect_ratio);
+    formData.append("product_name", params.product_name || "");
+    if (params.specified_types?.length) {
+      formData.append("specified_types", params.specified_types.join("、"));
+    }
+    if (params.avoid_types?.length) {
+      formData.append("avoid_types", params.avoid_types.join("、"));
+    }
+    if (params.style_preference) {
+      formData.append("style_preference", params.style_preference);
+    }
+    if (params.confirmed_card) {
+      formData.append("confirmed_card", params.confirmed_card);
+    }
+    return apiClient.post<{ success: boolean; data: VoiceoverPlanResult }>(
+      "/ai-creation/generate-voiceover-plans",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 960000,
+      },
+    );
+  },
+  /** 旧方案：仅识别商品信息 */
   analyzeProduct: (files: File[]) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
@@ -1621,10 +1697,11 @@ export const aiCreationApi = {
     market: VideoMarket = "US",
     duration: VideoDuration = 30,
     previous_concepts?: VideoConcept[],
+    aspect_ratio: VideoRatio = "9:16",
   ) =>
     apiClient.post<{ success: boolean; data: VideoConcept[] }>(
       "/ai-creation/generate-video-concepts",
-      { product_profile, market, duration, previous_concepts },
+      { product_profile, market, duration, previous_concepts, aspect_ratio },
       { timeout: 300000 },
     ),
   generateVideoPrompts: (product_profile: AmazonProductAnalysisResult, concepts: VideoConcept[]) =>

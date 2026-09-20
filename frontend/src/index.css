@@ -216,3 +216,38 @@ code {
 .ant-select-dropdown {
   min-width: 180px !important;
 }
+
+/* AI 视频页：左右区域独立滚动 */
+.ai-creation-tabs {
+  height: 100%;
+}
+.ai-creation-tabs .ant-tabs-content-holder {
+  height: 100%;
+  overflow: hidden;
+}
+.ai-creation-tabs .ant-tabs-content {
+  height: 100%;
+}
+.ai-creation-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+/* AI 视频页：细滚动条 */
+.ai-creation-tabs *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.ai-creation-tabs *::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-creation-tabs *::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 3px;
+}
+.ai-creation-tabs *::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+.ai-creation-tabs * {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9d9 transparent;
+}
