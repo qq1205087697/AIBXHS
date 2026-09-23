@@ -133,12 +133,11 @@ const VOICEOVER_LANGUAGE_OPTIONS: { label: string; value: VoiceoverLanguage }[] 
 
 const MODEL_OPTIONS: { label: string; desc: string; value: VideoModel }[] = [
   { label: 'MiniMax H3', desc: '适合批量测款与日常上新', value: 'minimax-h3' },
-  { label: 'MiniMax H3-Lite', desc: '生成更快，成本更低', value: 'minimax-h3-lite' },
 ]
 
 // 视频分辨率档位：0.3 / 0.5 为 megapixels 档位，768P 即 0.98 满画幅
 const RESOLUTION_OPTIONS: { label: string; value: VideoResolution; desc: string }[] = [
-  { label: '0.3', value: '0.3', desc: '草稿档，生成最快' },
+  { label: '0.3（测试/多任务）', value: '0.3', desc: '草稿档，生成最快' },
   { label: '0.5', value: '0.5', desc: '标准档' },
   { label: '768P', value: '768P', desc: '满画幅，画质最好' },
 ]
@@ -180,7 +179,7 @@ const AICreationCenter: React.FC = () => {
   const [duration, setDuration] = useState<VideoDuration>(15)
   const [ratio, setRatio] = useState<VideoRatio>('9:16')
   const [model, setModel] = useState<VideoModel>('minimax-h3')
-  const [resolution, setResolution] = useState<VideoResolution>('768P')
+  const [resolution, setResolution] = useState<VideoResolution>('0.3')
   const [promptText, setPromptText] = useState('')
   const [planModalOpen, setPlanModalOpen] = useState(false)
   const [planRefreshLeft, setPlanRefreshLeft] = useState(2)

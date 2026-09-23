@@ -127,7 +127,7 @@ def _build_workflow(
 
     # Turbo 加速：H3 与 H3-Lite 当前均开 Turbo 走 8 步
     wf[NODE_TURBO]["inputs"]["value"] = True
-    wf[NODE_TURBO_STEPS]["inputs"]["value"] = 8
+    wf[NODE_TURBO_STEPS]["inputs"]["value"] = 12
 
     return wf
 
