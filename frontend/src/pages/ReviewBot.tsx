@@ -11,10 +11,11 @@ import {
   PlayCircle,
   Search,
   ChevronDown,
+  Store,
 } from 'lucide-react'
 import { reviewsApi } from '../api'
 import dayjs, { Dayjs } from 'dayjs'
-import { useTheme } from '../contexts/ThemeContext'
+import { useTheme, ThemeConfig } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useResponsive } from '../hooks/useResponsive'
 const { RangePicker } = DatePicker
@@ -29,10 +30,11 @@ interface ReviewItem {
   translatedText: string
   keyPoints: string[]
   topics: string[]
-  suggestions: string[]
+  suggestions: (string | { department?: string; text?: string })[]
   date: string
   status: 'new' | 'read' | 'processing' | 'resolved'
   author: string
+  storeName?: string
   isNew?: boolean
   importanceLevel?: string | null
   returnRate?: number
@@ -74,6 +76,28 @@ const getDepartmentTag = (department?: string) => {
   return <Tooltip title={d.desc}><Tag color={d.color}>{d.label}</Tag></Tooltip>
 }
 
+// 解析处理建议：兼容旧版纯字符串与新版 {department, text} 对象
+const getSuggestionText = (s: string | { department?: string; text?: string }): string =>
+  typeof s === 'string' ? s : (s?.text || '')
+
+const getSuggestionDept = (s: string | { department?: string; text?: string }): string =>
+  typeof s === 'string' ? '' : (s?.department || '')
+
+// 建议条目：Tag 包裹（浅色系主题色），板块名加粗小标题 + 建议文本
+const renderSuggestionItem = (s: string | { department?: string; text?: string }, theme?: ThemeConfig) => {
+  const text = getSuggestionText(s)
+  const dept = DEPARTMENT_MAP[getSuggestionDept(s)]
+  const themeStyle = theme
+    ? { backgroundColor: theme.primaryBg, borderColor: theme.primaryLight, color: theme.primaryDark }
+    : undefined
+  return (
+    <Tag style={{ flexShrink: 0, whiteSpace: 'normal', lineHeight: 1.6, fontSize: 12, ...themeStyle }}>
+      {dept && <span style={{ fontWeight: 700 }}>{dept.label.replace('板块', '')}：</span>}
+      {text}
+    </Tag>
+  )
+}
+
 const ReviewBot: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission } = useAuth()
@@ -90,10 +114,9 @@ const ReviewBot: React.FC = () => {
   const [batchAction, setBatchAction] = useState<'analyze' | 'status' | null>(null)
   const [batchStatus, setBatchStatus] = useState<'new' | 'processing' | 'resolved'>('processing')
 
-  // 搜索和排序状态
-  const [asinSearch, setAsinSearch] = useState('')
-  const [productNameSearch, setProductNameSearch] = useState('')
-  const [skuSearch, setSkuSearch] = useState('')
+  // 搜索和排序状态（综合搜索，300ms防抖）
+  const [searchText, setSearchText] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState('time')
   const [sortOrder, setSortOrder] = useState('desc')
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null]>([null, null])
@@ -165,7 +188,16 @@ const ReviewBot: React.FC = () => {
 
   useEffect(() => {
     fetchReviewData()
-  }, [currentPage, pageSize, asinSearch, productNameSearch, skuSearch, sortBy, sortOrder, dateRange, statusFilter, importanceLevelFilter, departmentFilter])
+  }, [currentPage, pageSize, searchQuery, sortBy, sortOrder, dateRange, statusFilter, importanceLevelFilter, departmentFilter])
+
+  // 综合搜索防抖：输入停顿300ms后触发查询
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearchQuery(searchText)
+      setCurrentPage(1)
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [searchText])
 
   useEffect(() => {
     fetchStats()
@@ -203,9 +235,7 @@ const ReviewBot: React.FC = () => {
       const params = {
         page: currentPage,
         page_size: pageSize,
-        asin_search: asinSearch || undefined,
-        product_name_search: productNameSearch || undefined,
-        sku_search: skuSearch || undefined,
+        search: searchQuery || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         start_date: dateRange?.[0]?.format('YYYY-MM-DD') || undefined,
@@ -361,9 +391,8 @@ const ReviewBot: React.FC = () => {
   ]
 
   const handleResetSearch = () => {
-    setAsinSearch('')
-    setProductNameSearch('')
-    setSkuSearch('')
+    setSearchText('')
+    setSearchQuery('')
     setSortBy('time')
     setSortOrder('desc')
     setDateRange([null, null])
@@ -522,21 +551,12 @@ const ReviewBot: React.FC = () => {
         {/* 搜索和排序区域 */}
         <Card style={{ marginBottom: 16 }}>
           <Row gutter={[16, 16]} align="middle">
-            <Col xs={24} sm={12} md={3}>
+            <Col xs={24} sm={12} md={6}>
               <Input
-                placeholder="搜索ASIN"
+                placeholder="搜索ASIN、产品名、SKU、店铺、评价人、评论内容..."
                 prefix={<Search size={16} />}
-                value={asinSearch}
-                onChange={(e) => { setAsinSearch(e.target.value); setCurrentPage(1) }}
-                allowClear
-              />
-            </Col>
-            <Col xs={24} sm={12} md={3}>
-              <Input
-                placeholder="搜索产品名"
-                prefix={<Search size={16} />}
-                value={productNameSearch}
-                onChange={(e) => { setProductNameSearch(e.target.value); setCurrentPage(1) }}
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
                 allowClear
               />
             </Col>
@@ -737,6 +757,11 @@ const ReviewBot: React.FC = () => {
                         <span style={{ marginLeft: 16, color: '#666', flexShrink: 0 }}>
                           {item.author} · {dayjs(item.date).format('YYYY-MM-DD HH:mm')}
                         </span>
+                        {item.storeName && (
+                          <span style={{ color: '#666', fontSize: '13px', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <Store size={13} /> {item.storeName}
+                          </span>
+                        )}
                       </div>
                       <p style={{ margin: 0, color: '#333', wordBreak: 'break-word' }}>{item.originalText}</p>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
@@ -749,7 +774,7 @@ const ReviewBot: React.FC = () => {
                           <div style={{ fontSize: '12px', color: '#666', marginBottom: 4 }}>🤖 AI处理建议：</div>
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                             {item.suggestions.map((suggestion, idx) => (
-                              <Tag key={`suggestion-${idx}`} color="blue" style={{ flexShrink: 0 }}>{suggestion}</Tag>
+                              <React.Fragment key={`suggestion-${idx}`}>{renderSuggestionItem(suggestion, currentTheme)}</React.Fragment>
                             ))}
                           </div>
                         </div>
@@ -857,6 +882,9 @@ const ReviewBot: React.FC = () => {
                 <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>商品信息</h3>
                 <p style={{ margin: '4px 0' }}><strong>商品：</strong>{selectedReview.productName}</p>
                 <p style={{ margin: '4px 0' }}><strong>ASIN：</strong>{selectedReview.asin}</p>
+                {selectedReview.storeName && (
+                  <p style={{ margin: '4px 0' }}><strong>店铺：</strong>{selectedReview.storeName}</p>
+                )}
                 {/* 显示退货率 */}
                 {(() => {
                   const rate = selectedReview.returnRate;
@@ -956,10 +984,15 @@ const ReviewBot: React.FC = () => {
                     return (
                       <List.Item style={{ padding: '4px 0', minHeight: 'auto' }}>
                         <Alert
-                          style={{ width: '100%' }}
+                          style={{ width: '100%', backgroundColor: currentTheme.primaryBg, borderColor: currentTheme.primaryLight }}
                           message={
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{suggestion}</span>
+                              {DEPARTMENT_MAP[getSuggestionDept(suggestion)] && (
+                                <span style={{ fontWeight: 700, fontSize: 13, flexShrink: 0, color: currentTheme.primaryDark }}>
+                                  {DEPARTMENT_MAP[getSuggestionDept(suggestion)].label.replace('板块', '')}：
+                                </span>
+                              )}
+                              <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word', color: currentTheme.primaryDark }}>{getSuggestionText(suggestion)}</span>
                               {processedInfo ? (
                                 <Tooltip title={`处理人：${processedInfo.by || '未知用户'}　时间：${processedInfo.at || '-'}　说明：${processedInfo.note || '-'}`}>
                                   <Tag color="success" style={{ marginInlineEnd: 0, flexShrink: 0 }}>已处理</Tag>
@@ -970,7 +1003,7 @@ const ReviewBot: React.FC = () => {
                               {!processedInfo && (
                                 <Button
                                   size="small"
-                                  onClick={() => openProcessModal(idx, suggestion)}
+                                  onClick={() => openProcessModal(idx, getSuggestionText(suggestion))}
                                 >
                                   处理
                                 </Button>

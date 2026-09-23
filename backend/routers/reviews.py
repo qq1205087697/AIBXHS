@@ -88,13 +88,20 @@ def async_batch_analyze(review_ids: List[int], tenant_id: Optional[int] = None):
             db.close()
 
 
+def _load_store_name_map(db: Session, tenant_id: int) -> dict:
+    """加载租户店铺 id -> 店铺名映射"""
+    rows = db.execute(text("""
+        SELECT id, name FROM stores
+        WHERE tenant_id = :tid AND deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 @router.get("/")
 async def get_reviews(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页条数"),
-    asin_search: str = Query(None, description="ASIN搜索"),
-    product_name_search: str = Query(None, description="产品名搜索"),
-    sku_search: str = Query(None, description="SKU搜索"),
+    search: str = Query(None, description="综合搜索: ASIN、产品名、SKU、店铺名、评价人、评论内容"),
     sort_by: str = Query("time", description="排序字段: time, return_rate, review_count"),
     sort_order: str = Query("desc", description="排序方式: asc, desc"),
     start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
@@ -133,15 +140,15 @@ async def get_reviews(
             visibility_cond = build_review_visibility_condition(db, current_user, params, alias="r")
             where_conditions.append(visibility_cond)
         
-        if asin_search:
-            where_conditions.append("r.asin LIKE :asin_search")
-            params["asin_search"] = f"%{asin_search}%"
-        if product_name_search:
-            where_conditions.append("p.name LIKE :product_name_search")
-            params["product_name_search"] = f"%{product_name_search}%"
-        if sku_search:
-            where_conditions.append("p.sku LIKE :sku_search")
-            params["sku_search"] = f"%{sku_search}%"
+        if search:
+            params["search_kw"] = f"%{search}%"
+            # 综合搜索：ASIN、评价人、标题、内容、紫鸟账号、产品名、SKU、店铺名（按account+site匹配Amazon店铺，或store_id直连）
+            where_conditions.append(
+                "(r.asin LIKE :search_kw OR r.reviewer_name LIKE :search_kw OR r.title LIKE :search_kw "
+                "OR r.content LIKE :search_kw OR r.account LIKE :search_kw "
+                "OR p.name LIKE :search_kw OR p.sku LIKE :search_kw "
+                "OR EXISTS (SELECT 1 FROM stores st WHERE st.tenant_id = r.tenant_id AND st.deleted_at IS NULL AND st.name LIKE :search_kw AND st.id = r.store_id))"
+            )
         if start_date:
             where_conditions.append("r.review_date >= :start_date")
             params["start_date"] = f"{start_date} 00:00:00"
@@ -193,10 +200,11 @@ async def get_reviews(
             SELECT COUNT(DISTINCT r.id)
             FROM reviews r
             LEFT JOIN (
-            SELECT DISTINCT pp.asin, p.name
+            SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+            GROUP BY pp.asin
         ) p ON r.asin = p.asin
             {store_join}
             WHERE {where_clause}
@@ -216,10 +224,11 @@ async def get_reviews(
                         rc.review_count, r.importance_level
                     FROM reviews r
                     LEFT JOIN (
-            SELECT DISTINCT pp.asin, p.name
+            SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+            GROUP BY pp.asin
         ) p ON r.asin = p.asin
                     LEFT JOIN (
                         SELECT asin, COUNT(*) as review_count
@@ -240,10 +249,11 @@ async def get_reviews(
                         rc.review_count
                     FROM reviews r
                     LEFT JOIN (
-            SELECT DISTINCT pp.asin, p.name
+            SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+            GROUP BY pp.asin
         ) p ON r.asin = p.asin
                     LEFT JOIN (
                         SELECT asin, COUNT(*) as review_count
@@ -265,10 +275,11 @@ async def get_reviews(
                         r.importance_level
                     FROM reviews r
                     LEFT JOIN (
-            SELECT DISTINCT pp.asin, p.name
+            SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+            GROUP BY pp.asin
         ) p ON r.asin = p.asin
                     {store_join}
                     WHERE {where_clause}
@@ -284,10 +295,11 @@ async def get_reviews(
                         COALESCE(p.name, r.asin, '未知商品') as product_name
                     FROM reviews r
                     LEFT JOIN (
-            SELECT DISTINCT pp.asin, p.name
+            SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+            GROUP BY pp.asin
         ) p ON r.asin = p.asin
                     {store_join}
                     WHERE {where_clause}
@@ -307,6 +319,17 @@ async def get_reviews(
         analysis_map = {row[0]: {"key_points": row[1], "summary": row[2], "topics": row[3], "suggestions": row[4], "department": row[5], "departments": row[6], "suggestion_processed": row[7]} for row in analysis_result}
 
         review_data = []
+        store_name_map = _load_store_name_map(db, current_user.tenant_id)
+        # 批量取本页差评的 store_id，用于解析店铺名
+        store_meta_map = {}
+        if reviews:
+            id_placeholders = ",".join([f":rid_{i}" for i in range(len(reviews))])
+            meta_params = {f"rid_{i}": row[0] for i, row in enumerate(reviews)}
+            meta_rows = db.execute(
+                text(f"SELECT id, store_id FROM reviews WHERE id IN ({id_placeholders})"),
+                meta_params
+            ).fetchall()
+            store_meta_map = {r[0]: r[1] for r in meta_rows}
         for idx, row in enumerate(reviews):
             review_id = row[0]
             
@@ -379,10 +402,12 @@ async def get_reviews(
                 print(f"[DEBUG] 索引10处的退货率值: {row[10] if len(row) > 10 else 'N/A'}")
                 print(f"[DEBUG] 最终 return_rate: {return_rate}")
 
+            # 店铺名：直接按 store_id 查店铺表
             review_data.append({
                 "id": str(review_id),
                 "asin": row[1] or "",
                 "productName": row[product_name_idx] or row[1] or "未知商品",
+                "storeName": store_name_map.get(store_meta_map.get(review_id), ""),
                 "rating": row[3],
                 "title": row[4] or "",
                 "translatedTitle": row[5] or "",
@@ -393,6 +418,7 @@ async def get_reviews(
                 "suggestions": suggestions,
                 "suggestionProcessed": suggestion_processed,
                 "department": analysis.get("department", ""),
+                "departments": [d for d in str(analysis.get("departments") or "").split(",") if d],
                 "date": row[date_idx].strftime("%Y-%m-%d %H:%M:%S") if row[date_idx] else "",
                 "status": row[status_idx] or "new",
                 "isNew": is_new,
@@ -572,10 +598,10 @@ async def get_negative_ranking(
                    COALESCE(SUM(CASE WHEN r.importance_level = 'high' THEN 1 ELSE 0 END), 0) AS high_cnt,
                    COALESCE(SUM(CASE WHEN r.importance_level = 'medium' OR r.importance_level IS NULL THEN 1 ELSE 0 END), 0) AS medium_cnt,
                    COALESCE(SUM(CASE WHEN r.importance_level = 'low' THEN 1 ELSE 0 END), 0) AS low_cnt,
-                   COALESCE(SUM(CASE WHEN ra.department = 'operations' THEN 1 ELSE 0 END), 0) AS operations_cnt,
-                   COALESCE(SUM(CASE WHEN ra.department = 'purchasing' THEN 1 ELSE 0 END), 0) AS purchasing_cnt,
-                   COALESCE(SUM(CASE WHEN ra.department = 'warehouse' THEN 1 ELSE 0 END), 0) AS warehouse_cnt,
-                   COALESCE(SUM(CASE WHEN ra.department = 'design' THEN 1 ELSE 0 END), 0) AS design_cnt
+                   COALESCE(SUM(CASE WHEN FIND_IN_SET('operations', COALESCE(NULLIF(ra.departments, ''), ra.department)) > 0 THEN 1 ELSE 0 END), 0) AS operations_cnt,
+                   COALESCE(SUM(CASE WHEN FIND_IN_SET('purchasing', COALESCE(NULLIF(ra.departments, ''), ra.department)) > 0 THEN 1 ELSE 0 END), 0) AS purchasing_cnt,
+                   COALESCE(SUM(CASE WHEN FIND_IN_SET('warehouse', COALESCE(NULLIF(ra.departments, ''), ra.department)) > 0 THEN 1 ELSE 0 END), 0) AS warehouse_cnt,
+                   COALESCE(SUM(CASE WHEN FIND_IN_SET('design', COALESCE(NULLIF(ra.departments, ''), ra.department)) > 0 THEN 1 ELSE 0 END), 0) AS design_cnt
             FROM reviews r
             LEFT JOIN review_analyses ra ON r.id = ra.review_id AND ra.deleted_at IS NULL
             LEFT JOIN (
@@ -670,13 +696,15 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
                 r.translated_content,
                 r.review_date,
                 r.status,
-                COALESCE(p.name, r.asin, '未知商品') as product_name
+                COALESCE(p.name, r.asin, '未知商品') as product_name,
+                r.store_id
             FROM reviews r
             LEFT JOIN (
-            SELECT DISTINCT pp.asin, p.name
+            SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
             JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
             WHERE pp.deleted_at IS NULL AND pp.asin IS NOT NULL
+            GROUP BY pp.asin
         ) p ON r.asin = p.asin
             WHERE r.id = :review_id
               AND r.tenant_id = :tenant_id
@@ -688,6 +716,10 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
 
         if not row:
             raise HTTPException(status_code=404, detail=f"差评 {review_id} 不存在")
+
+        # 店铺名：直接按 store_id 查店铺表
+        store_name_map = _load_store_name_map(db, current_user.tenant_id)
+        detail_store_name = store_name_map.get(row[11], "")
 
         analysis_query = text("""
             SELECT key_points, summary, topics, suggestions, department, suggestion_processed
@@ -710,6 +742,7 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             "id": str(row[0]),
             "asin": row[1] or "",
             "productName": row[10] or row[1] or "未知商品",
+            "storeName": detail_store_name,
             "rating": row[3],
             "title": row[4] or "",
             "originalText": row[5] or "",

@@ -216,9 +216,7 @@ export const reviewsApi = {
   getList: (params?: {
     page?: number;
     page_size?: number;
-    asin_search?: string;
-    product_name_search?: string;
-    sku_search?: string;
+    search?: string;
     sort_by?: string;
     sort_order?: string;
     start_date?: string;
@@ -1238,14 +1236,20 @@ export const productSelectionApi = {
     return_rate: number;
   }) => apiClient.put("/product-selection/profit-settings", data),
   resetProfitSettings: () => apiClient.post("/product-selection/profit-settings/reset"),
-  approve: (id: number) =>
-    apiClient.post(`/product-selection/${id}/approve`, {}),
+  approve: (id: number, data?: { product_name?: string }) =>
+    apiClient.post(`/product-selection/${id}/approve`, data || {}),
+  batchApprove: (data: { items: { selection_id: number; product_name?: string }[] }) =>
+    apiClient.post(`/product-selection/batch-approve`, data),
   cancelApprovalApplication: (id: number) =>
     apiClient.post(`/product-selection/${id}/cancel-approval-application`, {}),
-  generatePurchaseOrder: (id: number) =>
-    apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
-  batchGeneratePurchaseOrders: (ids: number[]) =>
-    apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
+  batchCancelApproval: (ids: number[]) =>
+    apiClient.post(`/product-selection/batch-cancel-approval`, ids),
+  revokeApproval: (id: number) =>
+    apiClient.post(`/product-selection/${id}/revoke-approval`, {}),
+  batchRevokeApproval: (ids: number[]) =>
+    apiClient.post(`/product-selection/batch-revoke-approval`, ids),
+  reject: (data: { ids: number[]; reason?: string }) =>
+    apiClient.post(`/product-selection/reject`, data),
   create: (data: {
     product_title: string;
     url?: string;

@@ -1738,7 +1738,7 @@ const ReplenishmentManagement: React.FC = () => {
 
           </Row>
           <Form.Item name="notes" label="备注">
-            <TextArea rows={2} placeholder="请输入备注" disabled={!!viewingOrder} />
+            <TextArea rows={2} autoSize={{ minRows: 2, maxRows: 10 }} placeholder="请输入备注" disabled={!!viewingOrder} />
           </Form.Item>
         </Form>
 
@@ -1979,13 +1979,17 @@ const ReplenishmentManagement: React.FC = () => {
                     </div>
                     <div>
                       <div style={{ marginBottom: 6, fontSize: 12, color: '#666', fontWeight: 500 }}>备注</div>
-                      <Input
-                        value={item.notes}
-                        onChange={(e) => handleFormItemChange(item.key, 'notes', e.target.value)}
-                        placeholder="请输入备注"
-                        disabled={!!viewingOrder}
-                        style={{ width: '100%', height: 32, background: isAccessory ? '#fff' : '#fafafa' }}
-                      />
+                      <Tooltip title={viewingOrder ? item.notes : undefined} placement="topLeft">
+                        <span style={{ display: 'block' }}>
+                          <Input
+                            value={item.notes}
+                            onChange={(e) => handleFormItemChange(item.key, 'notes', e.target.value)}
+                            placeholder="请输入备注"
+                            disabled={!!viewingOrder}
+                            style={{ width: '100%', height: 32, background: isAccessory ? '#fff' : '#fafafa' }}
+                          />
+                        </span>
+                      </Tooltip>
                     </div>
                   </div>
                 </div>
@@ -2083,7 +2087,7 @@ const ReplenishmentManagement: React.FC = () => {
                   render: (v: any[]) => v && v.length > 0 ? <Tag color="orange">{v.length}个配件</Tag> : <span style={{ color: '#999' }}>-</span>,
                 },
                 { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 90 },
-                { title: '备注', dataIndex: 'notes', key: 'notes', width: 140, render: (v: string) => v || '-' },
+                { title: '备注', dataIndex: 'notes', key: 'notes', width: 140, ellipsis: true, render: (v: string) => v ? <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip> : '-' },
               ]}
             />
           </div>
