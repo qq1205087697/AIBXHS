@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -75,15 +76,68 @@ def _api(method: str, path: str, timeout: int = 60, **kwargs) -> requests.Respon
     return resp
 
 
-def _upload_image(filename: str, content: bytes) -> str:
-    """上传参考图到 ComfyUI，返回服务器端文件名"""
-    resp = _api(
-        "POST",
-        "/upload/image",
-        files={"image": (filename, content)},
-        data={"overwrite": "true"},
-    )
-    return resp.json()["name"]
+def _normalize_for_comfy(content: bytes) -> bytes:
+    """上传前统一压成 JPEG（长边 ≤2048、透明底合成白底）。
+
+    超大原图或特殊格式会导致上传/解析偶发失败，且 H3 参考图管线本身就会缩到 2048。
+    压缩失败时回退原始字节。
+    """
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(content))
+        img.load()
+        if img.mode in ("RGBA", "P", "LA"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            rgba = img.convert("RGBA")
+            bg.paste(rgba, mask=rgba.split()[-1])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        w, h = img.size
+        if max(w, h) > 2048:
+            scale = 2048 / float(max(w, h))
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        return content
+
+
+def _upload_image(idx: int, content: bytes) -> str:
+    """上传参考图到 ComfyUI，返回服务器端文件名。
+
+    文件名统一为纯 ASCII，避免特殊字符问题；失败自动重试一次。
+    """
+    name = f"aivideo-{int(time.time() * 1000)}-{idx}.jpg"
+    content = _normalize_for_comfy(content)
+
+    last_err: Optional[str] = None
+    for attempt in (1, 2):
+        try:
+            resp = _api(
+                "POST",
+                "/upload/image",
+                files={"image": (name, content)},
+                data={"overwrite": "true"},
+            )
+            return resp.json()["name"]
+        except requests.HTTPError as e:
+            body = ""
+            if e.response is not None:
+                body = (e.response.text or "")[:200]
+            last_err = f"{e}; {body}"
+            logger.warning(f"[H3视频] 参考图上传第 {attempt} 次失败: {last_err}")
+            threading.Event().wait(2)
+        except Exception as e:
+            last_err = str(e)
+            logger.warning(f"[H3视频] 参考图上传第 {attempt} 次异常: {e}")
+            threading.Event().wait(2)
+
+    raise H3VideoError(f"H3 参考图上传失败（已重试）: {last_err}")
 
 
 def _build_workflow(
@@ -311,7 +365,7 @@ def submit_video_task(
 
     # 3. 上传参考图并提交工作流
     try:
-        image_names = [_upload_image(name, content) for name, content in images]
+        image_names = [_upload_image(i, content) for i, (_, content) in enumerate(images)]
         workflow = _build_workflow(
             prompt=prompt, duration=duration, resolution=resolution, ratio=ratio,
             image_names=image_names,
@@ -374,7 +428,10 @@ def _serialize(task) -> Dict[str, Any]:
 
 
 def list_video_tasks(tenant_id: int, limit: int = 20) -> List[Dict[str, Any]]:
-    """租户的视频生成任务列表（按时间倒序，不做账号隔离）"""
+    """租户的视频生成任务列表（按时间倒序，不做账号隔离）。
+
+    失败的任务不返回，不出现在前端生成历史中（记录保留在库里便于排查）。
+    """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
 
@@ -382,7 +439,11 @@ def list_video_tasks(tenant_id: int, limit: int = 20) -> List[Dict[str, Any]]:
     try:
         rows = (
             db.query(AIVideoTask)
-            .filter(AIVideoTask.tenant_id == tenant_id, AIVideoTask.deleted_at.is_(None))
+            .filter(
+                AIVideoTask.tenant_id == tenant_id,
+                AIVideoTask.deleted_at.is_(None),
+                AIVideoTask.status != "失败",
+            )
             .order_by(AIVideoTask.id.desc())
             .limit(limit)
             .all()
