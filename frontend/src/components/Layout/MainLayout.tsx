@@ -313,7 +313,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           icon: <Target size={20} />,
           label: '选品机器人',
         }] : []),
-    ...(hasPermission('ai_creation:use')
+    ...(hasPermission('ai_video:use')
       ? [{
           key: 'media-creation',
           icon: <Sparkles size={20} />,

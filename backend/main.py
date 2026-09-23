@@ -198,6 +198,13 @@ async def startup_event():
     except Exception as e:
         logger.error(f"定时任务调度器启动失败: {e}")
 
+    try:
+        from services.h3_video_service import resume_pending_tasks
+        resume_pending_tasks()
+        logger.info("H3 视频未完成任务已恢复监听")
+    except Exception as e:
+        logger.error(f"H3 视频任务恢复失败: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭事件"""

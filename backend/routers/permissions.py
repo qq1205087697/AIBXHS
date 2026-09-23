@@ -694,8 +694,8 @@ async def init_default_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
-        # AI 创作中心
-        {"name": "使用AI创作中心", "code": "ai_creation:use", "type": "function", "module": "AI创作中心", "sort_order": 71},
+        # 媒体创作中心
+        {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -797,8 +797,8 @@ async def add_missing_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
-        # AI 创作中心
-        {"name": "使用AI创作中心", "code": "ai_creation:use", "type": "function", "module": "AI创作中心", "sort_order": 71},
+        # 媒体创作中心
+        {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -893,6 +893,37 @@ async def add_missing_permissions(
                         VALUES (:tenant_id, :role_id, :perm_id, NOW(), NOW())
                     """), {"tenant_id": tenant_id, "role_id": admin_role[0], "perm_id": perm_id})
     
+    # 迁移旧「AI创作中心」权限到「媒体创作中心-AI视频」（保留角色绑定关系）
+    legacy_perm = db.execute(text("""
+        SELECT id FROM permissions
+        WHERE tenant_id = :tid AND code = 'ai_creation:use' AND deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchone()
+    new_perm = db.execute(text("""
+        SELECT id FROM permissions
+        WHERE tenant_id = :tid AND code = 'ai_video:use' AND deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchone()
+    if legacy_perm and new_perm and legacy_perm[0] != new_perm[0]:
+        # 新旧并存：把旧权限的角色绑定迁移到新权限后软删旧权限
+        db.execute(text("""
+            UPDATE role_permissions SET permission_id = :new_pid, updated_at = NOW()
+            WHERE permission_id = :old_pid AND deleted_at IS NULL
+              AND id NOT IN (
+                SELECT id FROM (SELECT id FROM role_permissions
+                                WHERE permission_id = :new_pid AND deleted_at IS NULL) t
+              )
+        """), {"new_pid": new_perm[0], "old_pid": legacy_perm[0]})
+        db.execute(text("""
+            UPDATE permissions SET deleted_at = NOW(), updated_at = NOW()
+            WHERE id = :pid
+        """), {"pid": legacy_perm[0]})
+    elif legacy_perm and not new_perm:
+        # 仅存在旧权限：原地改码改名（角色绑定不受影响）
+        db.execute(text("""
+            UPDATE permissions
+            SET code = 'ai_video:use', name = 'AI视频', module = '媒体创作中心', updated_at = NOW()
+            WHERE id = :pid
+        """), {"pid": legacy_perm[0]})
+
     # 规范化已有权限的模块和名称（防止之前的数据错乱）
     fix_map = [
         {"code": "inbound:confirm", "name": "审批入库", "module": "入库管理"},

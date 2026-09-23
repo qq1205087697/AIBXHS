@@ -88,6 +88,7 @@ def init_db():
             AdCampaignDaily, AdKeywordDaily, AdSearchTermDaily,
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
         )
+        from models.ai_video_task import AIVideoTask
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)
@@ -117,6 +118,40 @@ def init_db():
         # 手动创建 scheduler_locks 和 product_selections 表
         from sqlalchemy import text
         with engine.connect() as conn:
+            # 视频生成任务表新增口播语言字段（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN voiceover_language VARCHAR(30) NULL COMMENT '口播语言' AFTER market"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增租户字段（历史按租户隔离），并回填存量数据
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN tenant_id INT NOT NULL DEFAULT 0 COMMENT '租户ID' AFTER id"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增生成者字段，并按提交用户回填
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN creator_name VARCHAR(100) NULL COMMENT '生成者用户名' AFTER user_id"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            try:
+                conn.execute(text(
+                    "UPDATE ai_video_tasks t JOIN users u ON t.user_id = u.id "
+                    "SET t.creator_name = u.username WHERE t.creator_name IS NULL OR t.creator_name = ''"
+                ))
+                conn.commit()
+            except Exception:
+                pass  # 回填失败不影响启动
+            try:
+                conn.execute(text(
+                    "UPDATE ai_video_tasks t JOIN users u ON t.user_id = u.id "
+                    "SET t.tenant_id = u.tenant_id WHERE t.tenant_id = 0"
+                ))
+                conn.commit()
+            except Exception:
+                pass  # 回填失败不影响启动
             # 创建 scheduler_locks 表
             create_lock_table_sql = """
                 CREATE TABLE IF NOT EXISTS scheduler_locks (

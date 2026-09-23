@@ -11,6 +11,12 @@ from services.ai_creation_service import (
     generate_voiceover_plans,
     AIAnalysisError,
 )
+from services.h3_video_service import (
+    submit_video_task,
+    list_video_tasks,
+    delete_video_task,
+    H3VideoError,
+)
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -104,6 +110,77 @@ async def generate_voiceover_plans_endpoint(
         "success": True,
         "data": result,
     }
+
+
+@router.post("/generate-video")
+async def generate_video_endpoint(
+    files: List[UploadFile] = File(...),
+    prompt: str = Form(...),
+    duration: int = Form(15),
+    resolution: str = Form("0.5"),
+    ratio: str = Form("9:16"),
+    model: str = Form("minimax-h3"),
+    market: str = Form("US"),
+    voiceover_language: str = Form("自动"),
+    title: str = Form("视频生成任务"),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    提交 MiniMax H3 视频生成任务：参考图 + 完整提示词 + 参数。
+    生成需较长时间，接口立即返回任务记录，由后台轮询进度并回写状态。
+    """
+    _validate_images(files)
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="提示词不能为空")
+    if not 5 <= duration <= 30:
+        raise HTTPException(status_code=400, detail="视频时长仅支持 5 / 10 / 15 秒")
+
+    images = [(f.filename or f"ref-{i}.jpg", await f.read()) for i, f in enumerate(files)]
+
+    logger.info(
+        f"[AI创作中心] 用户 {current_user.id} 提交视频生成：{len(images)} 张图, "
+        f"时长={duration}s, 分辨率={resolution}, 比例={ratio}, 模型={model}, 市场={market}"
+    )
+
+    try:
+        task = submit_video_task(
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+            creator_name=current_user.username,
+            title=title,
+            prompt=prompt,
+            images=images,
+            duration=duration,
+            resolution=resolution,
+            ratio=ratio,
+            model=model,
+            market=market,
+            voiceover_language=voiceover_language,
+        )
+    except H3VideoError as e:
+        logger.error(f"[AI创作中心] 提交视频生成失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"success": True, "data": task}
+
+
+@router.get("/video-tasks")
+async def list_video_tasks_endpoint(
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+):
+    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询"""
+    return {"success": True, "data": list_video_tasks(current_user.tenant_id, limit=limit)}
+
+
+@router.delete("/video-tasks/{task_id}")
+async def delete_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """删除视频生成任务记录（租户内任意账号均可删）"""
+    delete_video_task(current_user.tenant_id, task_id)
+    return {"success": True}
 
 
 @router.post("/analyze-product")

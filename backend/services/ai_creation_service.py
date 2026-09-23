@@ -152,6 +152,45 @@ SYSTEM_PROMPT = """你是一名 Amazon 跨境电商产品分析专家。
 """
 
 
+def _compress_image(image_bytes: bytes, mime_type: str, max_side: int = 1024, quality: int = 85) -> tuple[bytes, str]:
+    """压缩参考图：长边缩到 max_side 内、转 JPEG 重编码。
+
+    多张手机原图（3~8MB/张）直接 base64 上传会导致请求体过大、视觉模型处理缓慢甚至超时。
+    识别商品信息 1024px 足够；压缩失败时回退原图。
+    """
+    try:
+        from PIL import Image
+        import io
+
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+        if img.mode in ("RGBA", "P", "LA"):
+            # 透明通道合成到白底（商品图白底为主），再转 JPEG
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            background.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        w, h = img.size
+        if max(w, h) > max_side:
+            scale = max_side / float(max(w, h))
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        compressed = buf.getvalue()
+        if len(compressed) < len(image_bytes):
+            logger.info(
+                f"[AI创作中心] 图片压缩: {len(image_bytes)//1024}KB -> {len(compressed)//1024}KB"
+            )
+            return compressed, "image/jpeg"
+        return image_bytes, mime_type
+    except Exception as e:
+        logger.warning(f"[AI创作中心] 图片压缩失败，使用原图: {e}")
+        return image_bytes, mime_type
+
+
 def _build_user_content(files: List[UploadFile]) -> List[Dict[str, Any]]:
     """构建包含图片的用户消息内容"""
     content: List[Dict[str, Any]] = [
@@ -163,6 +202,7 @@ def _build_user_content(files: List[UploadFile]) -> List[Dict[str, Any]]:
             file.file.seek(0)
             image_bytes = file.file.read()
             mime_type = file.content_type or "image/jpeg"
+            image_bytes, mime_type = _compress_image(image_bytes, mime_type)
             encoded = base64.b64encode(image_bytes).decode("utf-8")
             content.append({
                 "type": "image_url",
@@ -928,7 +968,7 @@ video_duration 为 5~30 秒时，分镜数量如下：
 方案名：中文名 + 括号内风格标签。
 类型：从类型池中抽取的类型。
 情节：2~3 句话说明视频故事线。
-模特：年龄、性别、种族、面部特征、眼睛、发型、胡须、肤质、服装。必须具体。
+模特：年龄、性别、种族、面部特征、眼睛、发型、胡须、肤质、服装。必须具体。模特以白种人（欧美白人面孔）为主，外貌描述需符合欧美审美与目标市场主流人群特征。
 环境：地点、背景、光线、色温。
 音乐：音乐风格、节奏、音效、转场声音。
 分镜：根据 video_duration 和方案类型动态生成镜头数量、时间码和镜头标签。
@@ -945,12 +985,29 @@ video_duration 为 5~30 秒时，分镜数量如下：
 [最后一个镜头]：{start}-{end}s | 促单/召唤行动/CTA
 [内容]：中文画面描述；口播：{voiceover_language} 口播，必须包含 CTA。
 
+【镜头互动协议】
+每个分镜必须满足以下至少 4 项：
+1. 视角必须标注：【自拍】/【对镜自拍】/【手持前置】/【第一人称】。
+2. 模特必须与镜头发生关系：看镜头、凑近镜头、指镜头、点屏幕、飞吻、举产品给镜头。
+3. 口播必须是对观众说的第一/第二人称，禁止写成“她说”“旁白说”。
+4. 动作与口播同步：先做动作，再说台词，口型张合明显。
+5. 产品每个镜头都要出现，并且与手、头、镜头互动。
+6. 镜头保持轻微手持呼吸感，可快速推拉、轻微晃动、快速对焦。
+7. 声音设计必须包含：口播 + 环境音 + 产品声 + 转场音。
+
+禁止：
+- 纯背影、纯侧脸、无视线接触。
+- 人物低头做事，口播像后期配音。
+- 镜头只做展示，不与角色发生关系。
+- 把口播写成第三人称描述。
+
 【语言与风格要求】
 - 产品分析、方案结构、画面描述用中文。
 - 口播语言由 target_market 或 voiceover_language 决定，不能固定为英文。
 - 口播必须口语化、短句、符合目标市场表达习惯。
 - 产品术语、材质、工艺、类目保留英文括号。
 - 模特、环境、音乐、情节、方案类型在三套方案中不能重复。
+- 模特以白种人为主（欧美白人面孔），仅在目标市场明显不符时（如中东、日韩、东南亚市场）可换用当地主流人群。
 - 必须基于图片可见信息，不要虚构不可见的认证、价格、折扣、功效、品牌授权。
 - 如果图片信息不足，标注“疑似/建议确认”，不要强行编造。
 - 输出不要解释，不要总结，直接按格式输出。
