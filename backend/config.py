@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     OPENAI_VISION_MODEL: str = ""
     OPENAI_VISION_RESPONSE_FORMAT: str = ""
 
+    # MiniMax H3 本地视频生成（ComfyUI API，需 Basic Auth 账号密码）
+    H3_BASE_URL: str = "https://h3.bxhsrpa.com"
+    H3_AUTH_USER: str = "kayn"
+    H3_AUTH_PASSWORD: str = "Kayn7777"
+    H3_WORKFLOW_PATH: str = r"D:\MiniMax H3\api\workflow_template.json"
+    H3_POLL_INTERVAL: int = 15          # 轮询任务状态间隔（秒）
+    H3_MAX_WAIT_MINUTES: int = 240      # 单条视频最长等待时间（分钟）
+
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
     # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建

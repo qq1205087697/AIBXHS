@@ -1539,4 +1539,254 @@ export const suppliersApi = {
   delete: (id: number) => apiClient.delete(`/suppliers/${id}`),
 };
 
+// ========== AI 创作中心 API ==========
+export interface AmazonProductAnalysisResult {
+  product_name_cn: string;
+  product_name_en: string;
+  product_type: string;
+  product_size?: string;
+  target_audience: string[];
+  selling_points: string[];
+  material: string[];
+  usage_scenarios: string[];
+  usage_methods: string[];
+  product_components: string[];
+  colors: string[];
+  amazon_category: string;
+  keywords: string[];
+  visible_text: string[];
+  confidence: number;
+  uncertain_information: string[];
+}
+
+export interface VideoStoryboardShot {
+  timestamp: string;
+  shot_purpose: string;
+  description?: string;
+  shot_type: string;
+  camera_movement: string;
+  character_action: string;
+  character_expression: string;
+  product_action: string;
+  product_position: string;
+  composition: string;
+  environment: string;
+  voiceover: string;
+  voiceover_cn: string;
+  sound: string;
+}
+
+export interface CreativeStrategy {
+  persona_identity: string;
+  persona_role: string;
+  age: string;
+  relationship_to_product: string;
+  story_background: string;
+  consumption_scene: string;
+  core_pain_point: string;
+  core_selling_point: string;
+  emotion: string;
+  video_style: string;
+  camera_language: string;
+}
+
+export interface VideoConcept {
+  concept_title: string;
+  marketing_goal: string;
+  creative_strategy: CreativeStrategy;
+  story: string;
+  character: string;
+  environment: string;
+  music: string;
+  storyboard: VideoStoryboardShot[];
+}
+
+export interface VideoPrompt {
+  concept_title: string;
+  final_prompt: string;
+}
+
+export type VideoMarket =
+  | 'US' | 'CA' | 'AU' | 'UK'
+  | 'DE' | 'AT' | 'CH'
+  | 'FR' | 'ES' | 'MX' | 'IT'
+  | 'JP' | 'KR' | 'BR'
+  | 'ME' | 'SEA' | 'CN';
+export type VideoDuration = 5 | 10 | 15;
+export type VideoRatio = 'auto' | '9:16' | '16:9' | '1:1' | '4:3' | '3:4' | '21:9';
+export type VideoModel = 'minimax-h3' | 'minimax-h3-lite';
+/** 视频分辨率档位：0.3 / 0.5 为 megapixels 档位，768P 即 0.98 满画幅 */
+export type VideoResolution = '0.3' | '0.5' | '768P';
+
+/** 口播语言：'auto' 表示跟随目标市场自动决定 */
+export type VoiceoverLanguage =
+  | 'auto' | 'English' | 'German' | 'French' | 'Spanish' | 'Italian'
+  | 'Japanese' | 'Korean' | 'Portuguese' | 'Arabic';
+
+export interface VoiceoverPlanParams {
+  /** 视频时长（10~30 秒） */
+  duration: VideoDuration;
+  /** 目标市场（中文名，如“美国”） */
+  target_market: string;
+  /** 口播语言 */
+  voiceover_language: VoiceoverLanguage;
+  /** 画面比例 */
+  aspect_ratio: VideoRatio;
+  /** 产品名称（可空，模型会从图片识别） */
+  product_name?: string;
+  /** 指定的方案类型（可不填） */
+  specified_types?: string[];
+  /** 风格偏好 */
+  style_preference?: string;
+  /** 换一换时需避免重复的已生成类型 */
+  avoid_types?: string[];
+  /** 用户已确认的产品信息卡文本（编辑后重新生成时使用） */
+  confirmed_card?: string;
+}
+
+export interface VoiceoverPlanResult {
+  product: AmazonProductAnalysisResult;
+  concepts: VideoConcept[];
+  raw_text: string;
+}
+
+/** 视频生成任务（MiniMax H3） */
+export interface AIVideoTask {
+  id: number;
+  title: string;
+  /** 排队中 / 生成中 / 已完成 / 失败 */
+  status: string;
+  /** 生成者用户名 */
+  creator_name: string;
+  prompt: string;
+  market: VideoMarket;
+  /** 口播语言，「自动」表示跟随目标市场 */
+  voiceover_language: string;
+  model: VideoModel;
+  resolution: VideoResolution;
+  duration: VideoDuration;
+  ratio: VideoRatio;
+  /** 本次生成使用的参考图地址 */
+  images: string[];
+  video_url: string | null;
+  /** ComfyUI 任务 ID */
+  h3_prompt_id: string;
+  /** 生成总耗时（秒），未完成为 null */
+  cost_seconds: number | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface GenerateVideoParams {
+  prompt: string;
+  duration: VideoDuration;
+  resolution: VideoResolution;
+  ratio: VideoRatio;
+  model: VideoModel;
+  /** 目标市场代码，如 US / DE */
+  market: VideoMarket;
+  /** 口播语言，'auto' 表示跟随目标市场 */
+  voiceover_language: VoiceoverLanguage;
+  title: string;
+}
+
+export const aiCreationApi = {
+  /** 新方案：一次生成产品信息卡 + 3 套口播视频提示词方案 */
+  generateVoiceoverPlans: (files: File[], params: VoiceoverPlanParams) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("duration", String(params.duration));
+    formData.append("target_market", params.target_market);
+    formData.append(
+      "voiceover_language",
+      params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
+    );
+    formData.append("aspect_ratio", params.aspect_ratio);
+    formData.append("product_name", params.product_name || "");
+    if (params.specified_types?.length) {
+      formData.append("specified_types", params.specified_types.join("、"));
+    }
+    if (params.avoid_types?.length) {
+      formData.append("avoid_types", params.avoid_types.join("、"));
+    }
+    if (params.style_preference) {
+      formData.append("style_preference", params.style_preference);
+    }
+    if (params.confirmed_card) {
+      formData.append("confirmed_card", params.confirmed_card);
+    }
+    return apiClient.post<{ success: boolean; data: VoiceoverPlanResult }>(
+      "/ai-creation/generate-voiceover-plans",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 960000,
+      },
+    );
+  },
+  /** 立即生成：提交 MiniMax H3 视频生成任务（长时间生成，立即返回任务记录） */
+  generateVideo: (files: File[], params: GenerateVideoParams) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("prompt", params.prompt);
+    formData.append("duration", String(params.duration));
+    formData.append("resolution", params.resolution);
+    formData.append("ratio", params.ratio);
+    formData.append("model", params.model);
+    formData.append("market", params.market);
+    formData.append(
+      "voiceover_language",
+      params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
+    );
+    formData.append("title", params.title);
+    return apiClient.post<{ success: boolean; data: AIVideoTask }>(
+      "/ai-creation/generate-video",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 300000,
+      },
+    );
+  },
+  /** 视频生成任务列表（含状态与成片地址） */
+  listVideoTasks: (limit = 20) =>
+    apiClient.get<{ success: boolean; data: AIVideoTask[] }>("/ai-creation/video-tasks", {
+      params: { limit },
+    }),
+  /** 删除视频生成任务记录 */
+  deleteVideoTask: (taskId: number) =>
+    apiClient.delete<{ success: boolean }>(`/ai-creation/video-tasks/${taskId}`),
+  /** 旧方案：仅识别商品信息 */
+  analyzeProduct: (files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult }>(
+      "/ai-creation/analyze-product",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 300000,
+      },
+    );
+  },
+  generateVideoConcepts: (
+    product_profile: AmazonProductAnalysisResult,
+    market: VideoMarket = "US",
+    duration: VideoDuration = 15,
+    previous_concepts?: VideoConcept[],
+    aspect_ratio: VideoRatio = "9:16",
+  ) =>
+    apiClient.post<{ success: boolean; data: VideoConcept[] }>(
+      "/ai-creation/generate-video-concepts",
+      { product_profile, market, duration, previous_concepts, aspect_ratio },
+      { timeout: 300000 },
+    ),
+  generateVideoPrompts: (product_profile: AmazonProductAnalysisResult, concepts: VideoConcept[]) =>
+    apiClient.post<{ success: boolean; data: VideoPrompt[] }>(
+      "/ai-creation/generate-video-prompts",
+      { product_profile, concepts },
+      { timeout: 300000 },
+    ),
+};
+
 export default apiClient;

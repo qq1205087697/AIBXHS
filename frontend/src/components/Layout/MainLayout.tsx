@@ -48,7 +48,9 @@ import {
   ChevronRight,
   Star,
   AlertTriangle,
+  Sparkles,
   Table2,
+  Video,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -203,12 +205,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/tenants",
     "/stores",
   ];
+  const mediaPaths = ["/ai-creation"];
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
     const keys: string[] = [];
     if (inventoryPaths.includes(currentPath)) keys.push("inventory-group");
     if (systemPaths.includes(currentPath)) keys.push("system-group");
+    if (mediaPaths.includes(currentPath)) keys.push("media-creation");
     return keys;
   });
 
@@ -224,6 +228,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       }
       if (systemPaths.includes(currentPath) && !next.includes("system-group")) {
         next.push("system-group");
+      }
+      if (mediaPaths.includes(currentPath) && !next.includes("media-creation")) {
+        next.push("media-creation");
       }
       return next;
     });
@@ -299,16 +306,27 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             shortLabel: "广告",
           },
         ]
-      : []),
-    ...(hasPermission("product_selection:view")
-      ? [
-          {
-            key: "/product-selection",
-            icon: <Target size={20} />,
-            label: "选品机器人",
-          },
-        ]
-      : []),
+      : []),     
+    ...(hasPermission('product_selection:view')
+      ? [{
+          key: '/product-selection',
+          icon: <Target size={20} />,
+          label: '选品机器人',
+        }] : []),
+    ...(hasPermission('ai_video:use')
+      ? [{
+          key: 'media-creation',
+          icon: <Sparkles size={20} />,
+          label: '媒体创作中心',
+          shortLabel: '媒体',
+          children: [
+            {
+              key: '/ai-creation',
+              icon: <Video size={18} />,
+              label: 'AI视频',
+            },
+          ],
+        }] : []),
     {
       key: "/data-alert",
       icon: <AlertTriangle size={20} />,
@@ -472,7 +490,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/base-table': '底表管理',
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
-      "/product-selection": "选品机器人",
+      '/product-selection': '选品机器人',
+      '/ai-creation': 'AI创作中心',
     };
     return pathMap[location.pathname] || "未知页面";
   };

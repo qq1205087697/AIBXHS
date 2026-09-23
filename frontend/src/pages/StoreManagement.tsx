@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, Select, message,
   Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination, Dropdown, Menu,
-  Spin, Empty,
+  Spin, Empty, Tooltip,
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -33,6 +33,8 @@ interface StoreGroup {
   name: string
   description: string
   store_count: number
+  member_count?: number
+  members?: { id: number; name: string }[]
   created_at: string
 }
 
@@ -602,6 +604,27 @@ const StoreManagement: React.FC = () => {
       key: 'store_count',
       width: 150,
       render: (v: number) => <Tag color="blue">{v} 个店铺</Tag>,
+    },
+    {
+      title: '人员',
+      dataIndex: 'members',
+      key: 'members',
+      width: 260,
+      render: (_: any, record: StoreGroup) => {
+        const members = record.members || []
+        if (members.length === 0) return <span style={{ color: '#bbb' }}>-</span>
+        const visible = members.slice(0, 3)
+        return (
+          <Tooltip title={members.map((m: any) => m.name).join('、')}>
+            <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+              {visible.map((m: any) => (
+                <Tag key={m.id} color="cyan" style={{ marginInlineEnd: 0 }}>{m.name}</Tag>
+              ))}
+              {members.length > 3 && <Tag style={{ marginInlineEnd: 0 }}>+{members.length - 3}</Tag>}
+            </span>
+          </Tooltip>
+        )
+      },
     },
     { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 200 },
     {

@@ -1,0 +1,6 @@
+-- tenant_id=1 备份时间 20260828_181652
+-- 回滚方法：执行以下语句将 deleted_at 恢复为 NULL 即可还原。
+-- 1) 还原配件:
+--   UPDATE products SET deleted_at=NULL WHERE tenant_id=1 AND product_type='accessory';
+-- 2) 还原绑定关系(请替换 ACC_ID_LIST 为 JSON 备份中的配件ID列表):
+--   UPDATE product_bindings SET deleted_at=NULL WHERE accessory_product_id IN (ACC_ID_LIST);
