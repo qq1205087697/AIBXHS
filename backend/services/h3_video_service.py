@@ -10,6 +10,7 @@
 import io
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime
@@ -18,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from config import get_settings
+from services.h3_prompt_optimizer import optimize_h3_prompt
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -40,19 +42,32 @@ ASPECT_RATIO_MAP: Dict[str, str] = {
     "21:9": "21:9 (Ultrawide)",
 }
 
-# 工作流中的固定节点编号（与 workflow_template.json 对应）
-NODE_DURATION = "132"
-NODE_RESOLUTION = "115"
-NODE_REF_IMAGE = "137"
-NODE_H3_CONDITIONING = "136"    # MiniMax H3 节点，ref_images.ref_image_i 挂在这里
-NODE_PROMPT = "138"
-NODE_TURBO = "146"
-NODE_TURBO_STEPS = "144"
-NODE_SEED = "129"
-NEW_IMAGE_NODE_BASE = 200   # 追加参考图时新增 LoadImage 节点的起始编号
+# 工作流中的固定节点编号（与 workflows/h3_workflow_template.json 对应，2026-09-27 三重加速版：
+# UNET 26 → SAGE Attention 27 → Turbo LoRA 29 → TE-Speed 45 → BasicGuider 31）
+NODE_DURATION = "48"          # PrimitiveFloat，时长（秒），输入 value
+NODE_RESOLUTION = "46"        # ResolutionSelector，输入 aspect_ratio / megapixels
+NODE_REF_IMAGE = "42"         # 首张参考图 LoadImage
+NODE_H3_CONDITIONING = "43"   # MiniMaxH3ReferenceToVideo：prompt 直接写在 inputs.prompt，ref_images.ref_image_i 也挂在这里
+NEW_IMAGE_NODE_BASE = 200     # 追加参考图时新增 LoadImage 节点的起始编号（模板最大节点号 51，不会冲突）
 
 _running: set = set()
 _lock = threading.Lock()
+
+# 中文数字 → 序号（参考图最多 9 张）
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _detect_person_picture(prompt: str, image_count: int) -> int:
+    """从方案文本提取人物参考图序号（1-based，0 表示无）。
+
+    方案生成时若参考图含人物，模特字段会带“（人物参考图：第 N 张）”标注。
+    """
+    m = re.search(r"人物参考图\s*[：:]\s*第\s*([0-9一二三四五六七八九]+)\s*张", prompt or "")
+    if not m:
+        return 0
+    token = m.group(1)
+    n = _CN_NUM.get(token) or (int(token) if token.isdigit() else 0)
+    return n if 1 <= n <= image_count else 0
 
 
 class H3VideoError(Exception):
@@ -147,8 +162,15 @@ def _build_workflow(
     resolution: str,
     ratio: str,
     image_names: List[str],
+    with_ref_note: bool = True,
+    person_picture: int = 0,
 ) -> Dict[str, Any]:
-    """读取工作流模板并填入本次生成参数"""
+    """读取工作流模板并填入本次生成参数
+
+    :param with_ref_note: 是否附加中文参考图说明。二次优化后的提示词已按官方格式
+        定义 <Picture N>，不再需要该说明（混入中文会破坏结构化格式）。
+    :param person_picture: 人物参考图序号（1-based，0 表示无），用于回退说明文案。
+    """
     try:
         with open(settings.H3_WORKFLOW_PATH, encoding="utf-8") as f:
             wf = json.load(f)
@@ -156,12 +178,23 @@ def _build_workflow(
         raise H3VideoError(f"读取 H3 工作流模板失败: {e}")
 
     # 提示词中通过 <Picture i> 引用参考图（i 从 1 开始）
-    ref_note = (
-        f"参考图说明：<Picture 1> 至 <Picture {len(image_names)}> 为同一产品的多角度参考图，"
-        "请严格保持商品的外观、颜色、材质、图案与包装一致性。\n\n"
-    ) if image_names else ""
+    if with_ref_note and image_names:
+        if 1 <= person_picture <= len(image_names):
+            ref_note = (
+                f"参考图说明：<Picture {person_picture}> 为人物参考图，模特形象以其为准；"
+                f"其余 <Picture> 为同一产品的多角度参考图，"
+                "请严格保持人物形象与商品外观、颜色、材质、图案、包装的一致性。\n\n"
+            )
+        else:
+            ref_note = (
+                f"参考图说明：<Picture 1> 至 <Picture {len(image_names)}> 为同一产品的多角度参考图，"
+                "请严格保持商品的外观、颜色、材质、图案与包装一致性。\n\n"
+            )
+    else:
+        ref_note = ""
 
-    wf[NODE_PROMPT]["inputs"]["value"] = ref_note + prompt
+    # 提示词直接写在 H3 节点的 prompt 输入上（三重加速版模板没有独立的提示词节点）
+    wf[NODE_H3_CONDITIONING]["inputs"]["prompt"] = ref_note + prompt
     wf[NODE_DURATION]["inputs"]["value"] = float(duration)
     wf[NODE_RESOLUTION]["inputs"]["megapixels"] = RESOLUTION_MP.get(resolution, 0.5)
     wf[NODE_RESOLUTION]["inputs"]["aspect_ratio"] = ASPECT_RATIO_MAP.get(
@@ -179,9 +212,8 @@ def _build_workflow(
         }
         wf[NODE_H3_CONDITIONING]["inputs"][f"ref_images.ref_image_{idx}"] = [node_id, 0]
 
-    # Turbo 加速：H3 与 H3-Lite 当前均开 Turbo 走 8 步
-    wf[NODE_TURBO]["inputs"]["value"] = True
-    wf[NODE_TURBO_STEPS]["inputs"]["value"] = 12
+    # 步数/LoRA/TE-Speed 参数均以模板为准（BasicScheduler 39 已写死 15 步），代码不再覆盖
+    # 随机种子：模板用 rgthree Seed 节点且值为 -1，服务端执行时会自动生成随机种子
 
     return wf
 
@@ -363,12 +395,39 @@ def submit_video_task(
             logger.warning(f"[H3视频] 参考图上传 TOS 失败（不影响生成）: {e}")
     _update_task(task_id, images=json.dumps(image_urls, ensure_ascii=False))
 
-    # 3. 上传参考图并提交工作流
+    # 3. 提示词二次优化：按 H3 官方指南改写为 Ref2VA 六段式英文提示词；失败回退原始方案文本
+    person_picture = _detect_person_picture(prompt, len(images))
+    optimized_prompt = ""
+    if settings.H3_PROMPT_OPTIMIZE:
+        try:
+            optimized_prompt = optimize_h3_prompt(
+                plan_prompt=prompt,
+                duration=duration,
+                ratio=ratio,
+                image_count=len(images),
+                voiceover_language=voiceover_language,
+                product_name=title,
+                person_picture=person_picture,
+            )
+            _update_task(task_id, h3_prompt=optimized_prompt)
+            logger.info(
+                f"[H3视频] 任务 {task_id} 提示词已优化，{len(optimized_prompt)} 字符"
+                + (f"，人物参考 <Picture {person_picture}>" if person_picture else "")
+            )
+        except Exception as e:
+            logger.warning(f"[H3视频] 任务 {task_id} 提示词优化失败，回退原始提示词: {e}")
+
+    # 4. 上传参考图并提交工作流
     try:
         image_names = [_upload_image(i, content) for i, (_, content) in enumerate(images)]
         workflow = _build_workflow(
-            prompt=prompt, duration=duration, resolution=resolution, ratio=ratio,
+            prompt=optimized_prompt or prompt,
+            duration=duration,
+            resolution=resolution,
+            ratio=ratio,
             image_names=image_names,
+            with_ref_note=not optimized_prompt,
+            person_picture=person_picture,
         )
         resp = _api("POST", "/prompt", json={"prompt": workflow})
         h3_prompt_id = resp.json()["prompt_id"]
@@ -381,7 +440,7 @@ def submit_video_task(
     _update_task(task_id, h3_prompt_id=h3_prompt_id, status="生成中")
     logger.info(f"[H3视频] 任务 {task_id} 已提交，ComfyUI ID={h3_prompt_id}")
 
-    # 4. 后台线程轮询进度直到完成
+    # 5. 后台线程轮询进度直到完成
     _ensure_worker(task_id, h3_prompt_id)
 
     db = SessionLocal()
@@ -412,6 +471,7 @@ def _serialize(task) -> Dict[str, Any]:
         "status": task.status,
         "creator_name": task.creator_name or "",
         "prompt": task.prompt or "",
+        "h3_prompt": task.h3_prompt or "",
         "market": task.market,
         "voiceover_language": task.voiceover_language or "自动",
         "model": task.model,

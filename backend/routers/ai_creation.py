@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
+import asyncio
+import io
+import json
 import logging
+import time
 
+from fastapi.responses import StreamingResponse
 from dependencies import get_current_user
 from models.user import User
 from services.ai_creation_service import (
@@ -22,6 +27,25 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ai-creation", tags=["AI 创作中心"])
+
+
+def _sse(payload: dict, event: str = "message") -> str:
+    """SSE 事件帧"""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+class _UploadedBytes:
+    """内存上传文件替身。
+
+    流式响应场景下，FastAPI 依赖清理会在响应体发送前关闭 UploadFile，
+    因此必须先把图片字节读入内存，再交给后台生成任务使用。
+    file 属性提供 seek/read/close 接口，与 _build_user_content 的读取方式兼容。
+    """
+
+    def __init__(self, filename: str, content_type: str, content: bytes):
+        self.filename = filename
+        self.content_type = content_type
+        self.file = io.BytesIO(content)
 
 
 class ProductProfileRequest(BaseModel):
@@ -71,6 +95,9 @@ async def generate_voiceover_plans_endpoint(
     """
     新方案：上传 1~9 张商品参考图，一次性生成产品信息卡 + 3 套口播视频提示词方案。
     specified_types / avoid_types 为顿号或逗号分隔的类型名。
+
+    生成耗时 1~5 分钟以上且期间不回字节，前置网关（nginx 默认 60s 读超时）会报 504。
+    因此改为 SSE 流式响应：每 15 秒发一次心跳保活，完成后以最终事件返回结果。
     """
     _validate_images(files)
 
@@ -89,27 +116,60 @@ async def generate_voiceover_plans_endpoint(
         f"语言={voiceover_language}, 比例={aspect_ratio}"
     )
 
-    try:
-        result = await generate_voiceover_plans(
-            files,
-            duration=duration,
-            target_market=target_market,
-            voiceover_language=voiceover_language,
-            aspect_ratio=aspect_ratio,
-            product_name=product_name,
-            specified_types=_split_types(specified_types),
-            style_preference=style_preference,
-            avoid_types=_split_types(avoid_types),
-            confirmed_card=confirmed_card,
-        )
-    except AIAnalysisError as e:
-        logger.error(f"[AI创作中心] 生成口播方案失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # 返回 StreamingResponse 后上传文件会被依赖清理关闭，先读入内存
+    file_datas = [
+        _UploadedBytes(f.filename or f"image-{i}.jpg", f.content_type or "image/jpeg", await f.read())
+        for i, f in enumerate(files)
+    ]
 
-    return {
-        "success": True,
-        "data": result,
-    }
+    async def _do_generate() -> dict:
+        try:
+            result = await generate_voiceover_plans(
+                file_datas,
+                duration=duration,
+                target_market=target_market,
+                voiceover_language=voiceover_language,
+                aspect_ratio=aspect_ratio,
+                product_name=product_name,
+                specified_types=_split_types(specified_types),
+                style_preference=style_preference,
+                avoid_types=_split_types(avoid_types),
+                confirmed_card=confirmed_card,
+            )
+            return {"success": True, "data": result}
+        except AIAnalysisError as e:
+            logger.error(f"[AI创作中心] 生成口播方案失败: {e}")
+            return {"detail": str(e)}
+        except Exception as e:
+            logger.error(f"[AI创作中心] 生成口播方案异常: {e}")
+            return {"detail": f"生成失败: {e}"}
+
+    async def _stream():
+        gen_task = asyncio.ensure_future(_do_generate())
+        # 心跳 15 秒一次；总上限与前端超时（960s）对齐
+        deadline = time.monotonic() + 950
+        while not gen_task.done():
+            if time.monotonic() > deadline:
+                gen_task.cancel()
+                yield _sse({"detail": "AI 生成超时（约 16 分钟），请稍后重试"}, event="error")
+                return
+            yield ": ping\n\n"
+            await asyncio.sleep(15)
+        payload = gen_task.result()
+        if "detail" in payload:
+            yield _sse(payload, event="error")
+        else:
+            yield _sse(payload)
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # 关闭 nginx 对该响应的缓冲，让心跳实时透传
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/generate-video")

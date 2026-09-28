@@ -152,6 +152,12 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # 回填失败不影响启动
+            # 视频生成任务表新增二次优化后的 H3 结构化提示词字段
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN h3_prompt TEXT NULL COMMENT '优化后的 H3 结构化提示词' AFTER prompt"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
             # 创建 scheduler_locks 表
             create_lock_table_sql = """
                 CREATE TABLE IF NOT EXISTS scheduler_locks (
