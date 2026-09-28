@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     H3_POLL_INTERVAL: int = 15          # 轮询任务状态间隔（秒）
     H3_MAX_WAIT_MINUTES: int = 240      # 单条视频最长等待时间（分钟）
 
+    # H3 提示词二次优化：按官方 h3-prompt-writing 指南把中文方案改写为 Ref2VA 六段式英文提示词
+    H3_PROMPT_OPTIMIZE: bool = True     # 关闭后直接提交原始方案文本
+    H3_PROMPT_MODEL: str = ""           # 优化用文本模型，留空则使用 OPENAI_MODEL
+    H3_PROMPT_GUIDE_DIR: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "prompts"
+    )
+
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
     # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建

@@ -357,6 +357,16 @@ const AICreationCenter: React.FC = () => {
     return files
   }
 
+  // 复制二次优化后的 H3 提示词
+  const copyH3Prompt = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success('已复制 H3 提示词')
+    } catch {
+      message.error('复制失败，请手动选择复制')
+    }
+  }
+
   // 生成三套方案（新方案）：一次调用完成商品分析 + 3 套口播方案
   const handleGeneratePlans = async (
     isRefresh = false,
@@ -1624,7 +1634,7 @@ const AICreationCenter: React.FC = () => {
               </div>
 
               {/* 提示词描述 */}
-              <div>
+              <div style={{ marginBottom: 16 }}>
                 <Text strong style={{ fontSize: 13, display: 'block' }}>提示词描述：</Text>
                 <div
                   style={{
@@ -1640,6 +1650,43 @@ const AICreationCenter: React.FC = () => {
                   {previewTask.prompt || '-'}
                 </div>
               </div>
+
+              {/* 优化后的 H3 结构化提示词：按官方指南二次改写，实际提交给模型 */}
+              {previewTask.h3_prompt && (
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Text strong style={{ fontSize: 13 }}>H3 提示词（优化后）：</Text>
+                    <Button
+                      type="link"
+                      size="small"
+                      style={{ padding: 0 }}
+                      onClick={() => copyH3Prompt(previewTask.h3_prompt || '')}
+                    >
+                      复制
+                    </Button>
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    按官方 h3-prompt-writing 指南改写的 Ref2VA 结构化提示词，实际提交给 H3 模型
+                  </Text>
+                  <div
+                    style={{
+                      marginTop: 6,
+                      fontSize: 12,
+                      lineHeight: 1.7,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      maxHeight: '40vh',
+                      overflowY: 'auto',
+                      background: '#fafafa',
+                      border: '1px solid #f0f0f0',
+                      borderRadius: 4,
+                      padding: 8,
+                    }}
+                  >
+                    {previewTask.h3_prompt}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

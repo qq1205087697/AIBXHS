@@ -25,7 +25,8 @@ class AIVideoTask(BaseModel):
     resolution = Column(String(20), nullable=True, comment="分辨率档位")
     duration = Column(Integer, nullable=True, comment="视频时长（秒）")
     ratio = Column(String(20), nullable=True, comment="视频比例")
-    prompt = Column(Text, nullable=True, comment="提示词")
+    prompt = Column(Text, nullable=True, comment="提示词（用户提交的中文方案）")
+    h3_prompt = Column(Text, nullable=True, comment="二次优化后的 H3 结构化提示词（Ref2VA 六段式英文）")
 
     images = Column(Text, nullable=True, comment="参考图地址列表（JSON 数组）")
     video_url = Column(String(1000), nullable=True, comment="成片公网地址")

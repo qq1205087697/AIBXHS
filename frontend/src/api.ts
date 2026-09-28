@@ -1659,6 +1659,8 @@ export interface AIVideoTask {
   /** 生成者用户名 */
   creator_name: string;
   prompt: string;
+  /** 二次优化后的 H3 结构化提示词（Ref2VA 六段式英文，实际提交给模型） */
+  h3_prompt?: string;
   market: VideoMarket;
   /** 口播语言，「自动」表示跟随目标市场 */
   voiceover_language: string;
@@ -1691,7 +1693,8 @@ export interface GenerateVideoParams {
 }
 
 export const aiCreationApi = {
-  /** 新方案：一次生成产品信息卡 + 3 套口播视频提示词方案 */
+  /** 新方案：一次生成产品信息卡 + 3 套口播视频提示词方案。
+ * 生成耗时 1~5 分钟以上，走 SSE 流式响应（15 秒心跳）防止网关读超时 504 */
   generateVoiceoverPlans: (files: File[], params: VoiceoverPlanParams) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
@@ -1715,14 +1718,73 @@ export const aiCreationApi = {
     if (params.confirmed_card) {
       formData.append("confirmed_card", params.confirmed_card);
     }
-    return apiClient.post<{ success: boolean; data: VoiceoverPlanResult }>(
-      "/ai-creation/generate-voiceover-plans",
-      formData,
-      {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 960000,
-      },
-    );
+
+    const readSse = async (resp: Response) => {
+      const reader = resp.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result: { success: boolean; data: VoiceoverPlanResult } | null = null;
+      const handleFrame = (frame: string) => {
+        const dataLine = frame
+          .split("\n")
+          .find((l) => l.startsWith("data:"));
+        if (!dataLine) return; // 心跳帧（: ping）没有 data 行
+        const payload = JSON.parse(dataLine.slice(5).trim());
+        if (payload.detail) {
+          const err: any = new Error(payload.detail);
+          err.response = { data: { detail: payload.detail } };
+          throw err;
+        }
+        result = payload;
+      };
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+        for (const frame of frames) handleFrame(frame);
+      }
+      if (buffer.trim()) handleFrame(buffer);
+      if (!result) throw new Error("方案生成中断，请重试");
+      return result;
+    };
+
+    const token = localStorage.getItem("token");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 960000);
+    return fetch(`${API_BASE}/ai-creation/generate-voiceover-plans`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body: formData,
+      signal: controller.signal,
+    })
+      .then(async (resp) => {
+        clearTimeout(timer);
+        if (!resp.ok || !resp.body) {
+          // 非 200（401/400 等校验错误）：保持与 axios 错误结构兼容
+          let detail = `请求失败（${resp.status}）`;
+          try {
+            const j = await resp.json();
+            detail = j.detail || detail;
+          } catch {
+            /* 忽略解析失败 */
+          }
+          const err: any = new Error(detail);
+          err.response = { status: resp.status, data: { detail } };
+          throw err;
+        }
+        return { data: await readSse(resp) };
+      })
+      .catch((e: any) => {
+        if (e?.name === "AbortError") {
+          const err: any = new Error("AI 生成超时，请稍后重试");
+          err.response = { data: { detail: err.message } };
+          throw err;
+        }
+        throw e;
+      })
+      .finally(() => clearTimeout(timer));
   },
   /** 立即生成：提交 MiniMax H3 视频生成任务（长时间生成，立即返回任务记录） */
   generateVideo: (files: File[], params: GenerateVideoParams) => {
