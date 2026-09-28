@@ -36,9 +36,10 @@ class Settings(BaseSettings):
     OPENAI_VISION_RESPONSE_FORMAT: str = ""
 
     # MiniMax H3 本地视频生成（ComfyUI API，需 Basic Auth 账号密码）
-    H3_BASE_URL: str = "https://h3.bxhsrpa.com"
-    H3_AUTH_USER: str = "kayn"
-    H3_AUTH_PASSWORD: str = "Kayn7777"
+    
+    H3_BASE_URL: str = ""
+    H3_AUTH_USER: str = ""
+    H3_AUTH_PASSWORD: str = ""
     # 工作流模板默认取工程内文件（跨平台部署可用），需要时用环境变量 H3_WORKFLOW_PATH 覆盖
     H3_WORKFLOW_PATH: str = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "workflows", "h3_workflow_template.json"
