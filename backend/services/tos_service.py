@@ -42,6 +42,8 @@ def _get_tos_client():
         settings.TOS_SECRET_KEY,
         settings.TOS_ENDPOINT,
         settings.TOS_REGION,
+        dns_cache_time=0,  # 关闭 SDK 的全局 DNS 缓存 hook：默认会替换 urllib3 的 create_connection，
+                           # 导致进程内所有 requests 连接（如 H3 轮询）每 15 秒打一行 tos INFO 日志
     )
     logger.info("TOS 客户端已初始化: bucket=%s, endpoint=%s",
                 settings.TOS_BUCKET, settings.TOS_ENDPOINT)
