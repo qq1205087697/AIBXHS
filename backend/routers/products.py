@@ -83,6 +83,7 @@ class ProductUpdate(BaseModel):
     main_image: Optional[str] = None
     images: Optional[List[str]] = None
     video_url: Optional[str] = None
+    videos: Optional[List[str]] = None
     weight: Optional[float] = None
     length: Optional[float] = None
     width: Optional[float] = None
@@ -565,7 +566,7 @@ async def get_products(
                        p.local_warehouse, p.local_inbound_date, p.local_stock_age,
                        COALESCE((SELECT SUM(ri.quantity) FROM replenishment_items ri JOIN replenishment_orders ro ON ro.id = ri.replenishment_order_id WHERE ri.product_id = p.id AND ro.tenant_id = p.tenant_id AND ri.deleted_at IS NULL AND ro.deleted_at IS NULL AND ro.status IN ('pending','purchased')), 0) as replenishment_quantity,
                        COALESCE((SELECT SUM(poi.quantity) FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id WHERE poi.product_id = p.id AND po.tenant_id = p.tenant_id AND poi.deleted_at IS NULL AND po.deleted_at IS NULL AND po.status != 'completed'), 0) as purchased_quantity,
-                       p.no_accessory
+                       p.no_accessory, p.videos
                 FROM products p
                 WHERE {where_clause}
                 {order_by_clause}
@@ -618,6 +619,7 @@ async def get_products(
                 "replenishment_quantity": int(row[27]) if row[27] else 0,
                 "purchased_quantity": int(row[28]) if row[28] else 0,
                 "no_accessory": bool(row[29]) if row[29] is not None else False,
+                "videos": _parse_json_images(row[30]),
             })
         
         # 计算筛选后所有数据的货值总合计
@@ -2255,7 +2257,7 @@ async def get_product(
                    p.main_image, p.images, p.video_url, p.weight, p.length, p.width, p.height,
                    p.status, p.is_robot_monitored, p.created_at, p.config,
                    COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0) as local_quantity,
-                   p.local_warehouse, p.local_inbound_date, p.local_stock_age, p.no_accessory
+                   p.local_warehouse, p.local_inbound_date, p.local_stock_age, p.no_accessory, p.videos
             FROM products p
             WHERE p.id = :product_id AND p.tenant_id = :tenant_id AND p.deleted_at IS NULL
         """)
@@ -2384,6 +2386,7 @@ async def get_product(
             "local_stock_age": int(row[25]) if row[25] else None,
             "local_value": float(local_value) if local_value is not None else None,
             "no_accessory": bool(row[26]) if row[26] is not None else False,
+            "videos": _parse_json_images(row[27]),
             "platform_products": platform_products,
         }
         return {"success": True, "data": product}
@@ -2489,6 +2492,61 @@ async def create_product(
         raise HTTPException(status_code=500, detail=f"创建商品失败: {str(e)}")
 
 
+class ProductVideoBind(BaseModel):
+    video_url: str
+
+
+MAX_PRODUCT_VIDEOS = 6
+
+
+@router.post("/{product_id}/videos")
+async def bind_product_video(
+    product_id: int,
+    body: ProductVideoBind,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("product:edit"))
+):
+    """绑定视频至产品详情（最多 6 个，超出报错「产品已达到视频上限」）"""
+    if not body.video_url.strip():
+        raise HTTPException(status_code=400, detail="视频地址不能为空")
+
+    row = db.execute(
+        text("SELECT video_url, videos, product_code FROM products WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"),
+        {"id": product_id, "tid": current_user.tenant_id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="商品不存在")
+
+    # 兼容历史单视频：videos 为空且 video_url 有值时，先把旧视频并入列表
+    videos = _parse_json_images(row[1])
+    if not videos and row[0]:
+        videos = [row[0]]
+    if body.video_url in videos:
+        raise HTTPException(status_code=400, detail="该视频已绑定至该产品")
+    if len(videos) >= MAX_PRODUCT_VIDEOS:
+        raise HTTPException(status_code=400, detail="产品已达到视频上限")
+
+    # 先在 TOS 复制改名为「产品编码_序号」（与产品直接上传视频的命名一致），
+    # 复制失败则回退绑定原地址，不阻断绑定
+    import logging
+    from services.tos_service import rename_file
+    final_url = body.video_url.strip()
+    try:
+        final_url = rename_file(final_url, f"{row[2]}_{len(videos) + 1}")
+    except Exception as rename_err:
+        logging.getLogger(__name__).warning(
+            "绑定视频 TOS 改名失败，回退原地址: %s, err=%s", body.video_url, rename_err
+        )
+
+    videos.append(final_url)
+    db.execute(
+        text("UPDATE products SET videos = :videos WHERE id = :id AND tenant_id = :tid"),
+        {"videos": _serialize_images(videos), "id": product_id, "tid": current_user.tenant_id},
+    )
+    db.commit()
+    return {"success": True, "data": {"videos": videos}}
+
+
 @router.put("/{product_id}")
 async def update_product(
     product_id: int,
@@ -2564,6 +2622,16 @@ async def update_product(
         if product_data.images is not None:
             updates.append("images = :images")
             params["images"] = _serialize_images(product_data.images)
+
+        # videos 单独处理：空数组也需要支持清空；同步 video_url = 第一个视频，
+        # 保证新旧两个字段一致（兼容只读 video_url 的旧逻辑）
+        if product_data.videos is not None:
+            if len(product_data.videos) > MAX_PRODUCT_VIDEOS:
+                raise HTTPException(status_code=400, detail=f"产品视频最多 {MAX_PRODUCT_VIDEOS} 个")
+            updates.append("videos = :videos")
+            params["videos"] = _serialize_images(product_data.videos)
+            updates.append("video_url = :video_url_sync")
+            params["video_url_sync"] = product_data.videos[0] if product_data.videos else ""
 
         if updates:
             # 准备日志的 before_data（包含所有可更新字段）

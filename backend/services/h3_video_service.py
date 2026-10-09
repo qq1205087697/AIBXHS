@@ -13,6 +13,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -254,17 +255,29 @@ def _update_task(task_id: int, **fields) -> None:
 
 
 def _run_task(task_id: int, h3_prompt_id: str) -> None:
-    """后台线程：轮询任务状态，完成后下载并上传 TOS"""
-    from services import tos_service
+    """后台线程：轮询任务状态，完成后下载并上传 TOS
 
-    with _lock:
-        if task_id in _running:
-            return
-        _running.add(task_id)
+    ComfyUI 串行执行：任务先在 queue_pending 排队，开始执行进入 queue_running，
+    执行完移入 history。据此区分「排队中」与「生成中」。
+    重复启动防护由 _ensure_worker / _prepare_and_run 负责（_running 集合）。
+    """
+    from services import tos_service
 
     logger.info(f"[H3视频] 任务 {task_id}（ComfyUI {h3_prompt_id}）开始轮询")
     interval = max(5, int(settings.H3_POLL_INTERVAL))
     max_polls = max(1, int(settings.H3_MAX_WAIT_MINUTES * 60 / interval))
+    last_status = ""  # 仅状态变化时写库，避免每轮空写
+    started_written = False  # 首次进入「生成中」记录开始时间，耗时不含排队
+
+    def set_status(status: str) -> None:
+        nonlocal last_status, started_written
+        if status != last_status:
+            if status == "生成中" and not started_written:
+                _update_task(task_id, status=status, started_at=datetime.now())
+                started_written = True
+            else:
+                _update_task(task_id, status=status)
+            last_status = status
 
     try:
         for _ in range(max_polls):
@@ -277,7 +290,19 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
 
             item = history.get(h3_prompt_id)
             if item is None:
-                _update_task(task_id, status="生成中")
+                # 不在 history：查队列区分排队/执行中
+                try:
+                    queue = _api("GET", "/queue").json()
+                except Exception as e:
+                    logger.warning(f"[H3视频] 任务 {task_id} 查询队列失败: {e}")
+                    continue
+                running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+                pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+                if h3_prompt_id in running_ids:
+                    set_status("生成中")
+                elif h3_prompt_id in pending_ids:
+                    set_status("排队中")
+                # 两者都不在：瞬态（刚提交待入队/刚完成待写入 history），保持现状
                 continue
 
             status_str = (item.get("status") or {}).get("status_str")
@@ -314,7 +339,8 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                 logger.error(f"[H3视频] 任务 {task_id} 生成失败: {msgs}")
                 return
 
-            _update_task(task_id, status="生成中")
+            # history 里但状态异常，兜底视为执行中
+            set_status("生成中")
 
         _update_task(
             task_id, status="失败",
@@ -331,15 +357,27 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
             _running.discard(task_id)
 
 
-def _ensure_worker(task_id: int, h3_prompt_id: str) -> None:
-    """确保某任务有后台线程在跑（避免重复启动）"""
+def _ensure_worker(task_id: int, h3_prompt_id: Optional[str] = None, *,
+                   prep_kwargs: Optional[Dict[str, Any]] = None) -> None:
+    """确保某任务有后台线程在跑（避免重复启动）
+
+    - prep_kwargs 提供时：先执行准备（上传参考图/提示词优化/提交工作流）再轮询
+    - 否则认为工作流已提交（服务重启恢复场景），直接轮询
+    """
     with _lock:
         if task_id in _running:
             return
-    threading.Thread(
-        target=_run_task, args=(task_id, h3_prompt_id), daemon=True,
-        name=f"h3-video-task-{task_id}",
-    ).start()
+        _running.add(task_id)
+    if prep_kwargs is not None:
+        threading.Thread(
+            target=_prepare_and_run, args=(task_id,), kwargs=prep_kwargs,
+            daemon=True, name=f"h3-video-task-{task_id}",
+        ).start()
+    else:
+        threading.Thread(
+            target=_run_task, args=(task_id, h3_prompt_id), daemon=True,
+            name=f"h3-video-task-{task_id}",
+        ).start()
 
 
 def submit_video_task(
@@ -356,14 +394,15 @@ def submit_video_task(
     model: str,
     market: str,
     voiceover_language: str = "自动",
+    product_code: str = "",
+    product_name: str = "",
 ) -> Dict[str, Any]:
-    """提交视频生成任务：参考图上传 ComfyUI + 落库 + 启动后台轮询
+    """提交视频生成任务：落库后立即返回，准备（上传/优化/提交工作流）与轮询全部在后台线程
 
     :param images: [(文件名, 图片字节)]，1~9 张
     """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
-    from services import tos_service
 
     if not images:
         raise H3VideoError("请至少上传一张参考图")
@@ -376,6 +415,7 @@ def submit_video_task(
         task = AIVideoTask(
             tenant_id=tenant_id, user_id=user_id, creator_name=creator_name,
             title=title, status="排队中", prompt=prompt,
+            product_code=product_code or None, product_name=product_name or None,
             market=market, voiceover_language=voiceover_language, model=model,
             resolution=resolution, duration=duration, ratio=ratio,
         )
@@ -386,68 +426,125 @@ def submit_video_task(
     finally:
         db.close()
 
-    # 2. 参考图存 TOS，供前端「参考图片」展示（原图上传 ComfyUI 后本地不再持有）
-    image_urls: List[str] = []
-    for name, content in images:
-        try:
-            image_urls.append(tos_service.upload_file(content, name, subdir="ai-video"))
-        except Exception as e:
-            logger.warning(f"[H3视频] 参考图上传 TOS 失败（不影响生成）: {e}")
-    _update_task(task_id, images=json.dumps(image_urls, ensure_ascii=False))
-
-    # 3. 提示词二次优化：按 H3 官方指南改写为 Ref2VA 六段式英文提示词；失败回退原始方案文本
-    person_picture = _detect_person_picture(prompt, len(images))
-    optimized_prompt = ""
-    if settings.H3_PROMPT_OPTIMIZE:
-        try:
-            optimized_prompt = optimize_h3_prompt(
-                plan_prompt=prompt,
-                duration=duration,
-                ratio=ratio,
-                image_count=len(images),
-                voiceover_language=voiceover_language,
-                product_name=title,
-                person_picture=person_picture,
-            )
-            _update_task(task_id, h3_prompt=optimized_prompt)
-            logger.info(
-                f"[H3视频] 任务 {task_id} 提示词已优化，{len(optimized_prompt)} 字符"
-                + (f"，人物参考 <Picture {person_picture}>" if person_picture else "")
-            )
-        except Exception as e:
-            logger.warning(f"[H3视频] 任务 {task_id} 提示词优化失败，回退原始提示词: {e}")
-
-    # 4. 上传参考图并提交工作流
-    try:
-        image_names = [_upload_image(i, content) for i, (_, content) in enumerate(images)]
-        workflow = _build_workflow(
-            prompt=optimized_prompt or prompt,
-            duration=duration,
-            resolution=resolution,
-            ratio=ratio,
-            image_names=image_names,
-            with_ref_note=not optimized_prompt,
-            person_picture=person_picture,
-        )
-        resp = _api("POST", "/prompt", json={"prompt": workflow})
-        h3_prompt_id = resp.json()["prompt_id"]
-    except Exception as e:
-        logger.error(f"[H3视频] 任务 {task_id} 提交失败: {e}")
-        _update_task(task_id, status="失败", error_message=str(e)[:900],
-                     finished_at=datetime.now())
-        raise H3VideoError(f"提交 H3 生成任务失败: {e}")
-
-    _update_task(task_id, h3_prompt_id=h3_prompt_id, status="生成中")
-    logger.info(f"[H3视频] 任务 {task_id} 已提交，ComfyUI ID={h3_prompt_id}")
-
-    # 5. 后台线程轮询进度直到完成
-    _ensure_worker(task_id, h3_prompt_id)
+    # 2. 立即返回任务记录；参考图上传/提示词优化/工作流提交全部移入后台线程，
+    #    避免 9 张图时前端转圈数分钟（多张 TOS 上传 + LLM 优化 + 多张 ComfyUI 上传）
+    _ensure_worker(
+        task_id,
+        prep_kwargs={
+            "title": title,
+            "prompt": prompt,
+            "images": images,
+            "duration": duration,
+            "resolution": resolution,
+            "ratio": ratio,
+            "voiceover_language": voiceover_language,
+        },
+    )
 
     db = SessionLocal()
     try:
         return _serialize(db.query(AIVideoTask).filter(AIVideoTask.id == task_id).first())
     finally:
         db.close()
+
+
+def _prepare_and_run(
+    task_id: int,
+    *,
+    title: str,
+    prompt: str,
+    images: List[Tuple[str, bytes]],
+    duration: int,
+    resolution: str,
+    ratio: str,
+    voiceover_language: str,
+) -> None:
+    """后台线程：参考图传 TOS → 提示词二次优化 → 提交工作流 → 轮询直到完成
+
+    全程在后台执行，接口层只负责落库后立即返回。
+    """
+    from services import tos_service
+
+    try:
+        with _lock:
+            _running.add(task_id)
+
+        # 1. 参考图存 TOS（并行上传），供前端「参考图片」展示
+        def _to_tos(item: Tuple[str, bytes]) -> Optional[str]:
+            name, content = item
+            try:
+                return tos_service.upload_file(content, name, subdir="ai-video")
+            except Exception as e:
+                logger.warning(f"[H3视频] 参考图上传 TOS 失败（不影响生成）: {e}")
+                return None
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            urls = [u for u in ex.map(_to_tos, images) if u]
+        if urls:
+            _update_task(task_id, images=json.dumps(urls, ensure_ascii=False))
+
+        # 2. 提示词二次优化：按 H3 官方指南改写为 Ref2VA 六段式英文提示词；失败回退原始方案文本
+        person_picture = _detect_person_picture(prompt, len(images))
+        optimized_prompt = ""
+        if settings.H3_PROMPT_OPTIMIZE:
+            try:
+                optimized_prompt = optimize_h3_prompt(
+                    plan_prompt=prompt,
+                    duration=duration,
+                    ratio=ratio,
+                    image_count=len(images),
+                    voiceover_language=voiceover_language,
+                    product_name=title,
+                    person_picture=person_picture,
+                )
+                _update_task(task_id, h3_prompt=optimized_prompt)
+                logger.info(
+                    f"[H3视频] 任务 {task_id} 提示词已优化，{len(optimized_prompt)} 字符"
+                    + (f"，人物参考 <Picture {person_picture}>" if person_picture else "")
+                )
+            except Exception as e:
+                logger.warning(f"[H3视频] 任务 {task_id} 提示词优化失败，回退原始提示词: {e}")
+
+        # 3. 参考图并行上传 ComfyUI 后提交工作流
+        try:
+            def _to_comfy(item) -> str:
+                idx, (_, content) = item
+                return _upload_image(idx, content)
+
+            with ThreadPoolExecutor(max_workers=5) as ex:
+                image_names = list(ex.map(_to_comfy, enumerate(images)))
+
+            workflow = _build_workflow(
+                prompt=optimized_prompt or prompt,
+                duration=duration,
+                resolution=resolution,
+                ratio=ratio,
+                image_names=image_names,
+                with_ref_note=not optimized_prompt,
+                person_picture=person_picture,
+            )
+            resp = _api("POST", "/prompt", json={"prompt": workflow})
+            h3_prompt_id = resp.json()["prompt_id"]
+        except Exception as e:
+            logger.error(f"[H3视频] 任务 {task_id} 提交失败: {e}")
+            _update_task(task_id, status="失败", error_message=str(e)[:900],
+                         finished_at=datetime.now())
+            with _lock:
+                _running.discard(task_id)
+            return
+
+        # 提交成功仅代表进入 ComfyUI 队列，保持「排队中」；开始执行后由轮询线程按 /queue 判定改「生成中」
+        _update_task(task_id, h3_prompt_id=h3_prompt_id)
+        logger.info(f"[H3视频] 任务 {task_id} 已提交，ComfyUI ID={h3_prompt_id}")
+
+        # 4. 同线程继续轮询进度直到完成（成功后 finally 里清除 _running）
+        _run_task(task_id, h3_prompt_id)
+    except Exception as e:
+        logger.error(f"[H3视频] 任务 {task_id} 准备阶段异常: {e}")
+        _update_task(task_id, status="失败", error_message=str(e)[:900],
+                     finished_at=datetime.now())
+        with _lock:
+            _running.discard(task_id)
 
 
 def _serialize(task) -> Dict[str, Any]:
@@ -458,13 +555,15 @@ def _serialize(task) -> Dict[str, Any]:
         images = json.loads(task.images) if task.images else []
     except Exception:
         images = []
-    # 生成总耗时（秒）：完成时间 - 提交时间
+    # 生成耗时（秒）：完成时间 - 开始生成时间（无开始时间回退提交时间，兼容历史数据）
     cost_seconds = None
-    if task.finished_at and task.created_at:
-        try:
-            cost_seconds = int((task.finished_at - task.created_at).total_seconds())
-        except Exception:
-            cost_seconds = None
+    if task.finished_at:
+        start = task.started_at or task.created_at
+        if start:
+            try:
+                cost_seconds = int((task.finished_at - start).total_seconds())
+            except Exception:
+                cost_seconds = None
     return {
         "id": task.id,
         "title": task.title or "视频生成任务",
@@ -472,6 +571,8 @@ def _serialize(task) -> Dict[str, Any]:
         "creator_name": task.creator_name or "",
         "prompt": task.prompt or "",
         "h3_prompt": task.h3_prompt or "",
+        "product_code": task.product_code or "",
+        "product_name": task.product_name or "",
         "market": task.market,
         "voiceover_language": task.voiceover_language or "自动",
         "model": task.model,
@@ -487,28 +588,71 @@ def _serialize(task) -> Dict[str, Any]:
     }
 
 
-def list_video_tasks(tenant_id: int, limit: int = 20) -> List[Dict[str, Any]]:
-    """租户的视频生成任务列表（按时间倒序，不做账号隔离）。
+def list_video_tasks(
+    tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = ""
+) -> Dict[str, Any]:
+    """租户的视频生成任务列表（按时间倒序，不做账号隔离）。含失败任务及其失败原因。
 
-    失败的任务不返回，不出现在前端生成历史中（记录保留在库里便于排查）。
+    keyword 模糊匹配产品编码 / 产品品名 / 任务标题。
+    返回 {"items": [...], "total": 总条数}，供前端分页。
     """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
+    from sqlalchemy import or_
 
+    page = max(1, page)
+    page_size = min(max(1, page_size), 100)
     db = SessionLocal()
     try:
-        rows = (
-            db.query(AIVideoTask)
-            .filter(
-                AIVideoTask.tenant_id == tenant_id,
-                AIVideoTask.deleted_at.is_(None),
-                AIVideoTask.status != "失败",
+        query = db.query(AIVideoTask).filter(
+            AIVideoTask.tenant_id == tenant_id,
+            AIVideoTask.deleted_at.is_(None),
+        )
+        keyword = (keyword or "").strip()
+        if keyword:
+            like = f"%{keyword}%"
+            query = query.filter(
+                or_(
+                    AIVideoTask.product_code.ilike(like),
+                    AIVideoTask.product_name.ilike(like),
+                    AIVideoTask.title.ilike(like),
+                )
             )
-            .order_by(AIVideoTask.id.desc())
-            .limit(limit)
+        total = query.count()
+        rows = (
+            query.order_by(AIVideoTask.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
             .all()
         )
-        return [_serialize(r) for r in rows]
+        items = [_serialize(r) for r in rows]
+        # 附加已完成的超分结果（按源视频地址匹配，取最新一条），供前端并排对比展示
+        try:
+            from models.video_upscale_task import VideoUpscaleTask
+
+            video_urls = [r.video_url for r in rows if r.video_url]
+            if video_urls:
+                up_rows = (
+                    db.query(VideoUpscaleTask)
+                    .filter(
+                        VideoUpscaleTask.tenant_id == tenant_id,
+                        VideoUpscaleTask.status == "已完成",
+                        VideoUpscaleTask.deleted_at.is_(None),
+                        VideoUpscaleTask.source_video_url.in_(video_urls),
+                    )
+                    .order_by(VideoUpscaleTask.id.desc())
+                    .all()
+                )
+                mapping: Dict[str, str] = {}
+                for up in up_rows:
+                    if up.source_video_url and up.video_url:
+                        mapping.setdefault(up.source_video_url, up.video_url)
+                for r, item in zip(rows, items):
+                    if r.video_url and r.video_url in mapping:
+                        item["upscale_video_url"] = mapping[r.video_url]
+        except Exception as e:
+            logger.warning(f"生成历史附加超分结果失败: {e}")
+        return {"items": items, "total": total}
     finally:
         db.close()
 

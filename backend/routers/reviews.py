@@ -320,16 +320,29 @@ async def get_reviews(
 
         review_data = []
         store_name_map = _load_store_name_map(db, current_user.tenant_id)
-        # 批量取本页差评的 store_id，用于解析店铺名
+        # 批量取本页差评的 store_id 与买家评论图片（reviews_image 为逗号分隔URL）
+        # reviews_image 列在部分环境可能未加，做存在性检查兜底
+        try:
+            has_reviews_image = db.execute(
+                text("SHOW COLUMNS FROM reviews LIKE 'reviews_image'")
+            ).fetchone() is not None
+        except Exception:
+            has_reviews_image = False
+
         store_meta_map = {}
+        review_image_map = {}
         if reviews:
             id_placeholders = ",".join([f":rid_{i}" for i in range(len(reviews))])
             meta_params = {f"rid_{i}": row[0] for i, row in enumerate(reviews)}
+            image_col = ", reviews_image" if has_reviews_image else ""
             meta_rows = db.execute(
-                text(f"SELECT id, store_id FROM reviews WHERE id IN ({id_placeholders})"),
+                text(f"SELECT id, store_id{image_col} FROM reviews WHERE id IN ({id_placeholders})"),
                 meta_params
             ).fetchall()
-            store_meta_map = {r[0]: r[1] for r in meta_rows}
+            for r in meta_rows:
+                store_meta_map[r[0]] = r[1]
+                if has_reviews_image and r[2]:
+                    review_image_map[r[0]] = [u.strip() for u in str(r[2]).split(",") if u.strip()]
         for idx, row in enumerate(reviews):
             review_id = row[0]
             
@@ -407,6 +420,7 @@ async def get_reviews(
                 "id": str(review_id),
                 "asin": row[1] or "",
                 "productName": row[product_name_idx] or row[1] or "未知商品",
+                "reviewImages": review_image_map.get(review_id, []),
                 "storeName": store_name_map.get(store_meta_map.get(review_id), ""),
                 "rating": row[3],
                 "title": row[4] or "",

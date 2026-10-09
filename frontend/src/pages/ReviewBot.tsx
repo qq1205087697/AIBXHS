@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Card, Row, Col, List, Button, Alert, Tag, Statistic, Divider, Space, Avatar, Modal, Checkbox, Pagination, message, Input, Select, DatePicker, Dropdown, MenuProps, Table, Tooltip, Spin } from 'antd'
+import { Card, Row, Col, List, Button, Alert, Tag, Statistic, Divider, Space, Avatar, Modal, Checkbox, Pagination, message, Input, Select, DatePicker, Dropdown, MenuProps, Table, Tooltip, Spin, Image } from 'antd'
 import {
   MessageSquare,
   AlertTriangle,
@@ -24,6 +24,7 @@ interface ReviewItem {
   id: string
   asin: string
   productName: string
+  reviewImages?: string[]
   title?: string
   rating: number
   originalText: string
@@ -718,7 +719,45 @@ const ReviewBot: React.FC = () => {
                   style={{ marginRight: 12, flexShrink: 0, '--ant-checkbox-color': currentTheme.primary } as React.CSSProperties}
                 />
                 <List.Item.Meta
-                  avatar={<Avatar style={{ backgroundColor: currentTheme.avatarBg, flexShrink: 0 }}>{item.author[0]}</Avatar>}
+                  avatar={
+                    item.reviewImages && item.reviewImages.length > 0 ? (
+                      <div style={{ position: 'relative', flexShrink: 0, lineHeight: 0 }}>
+                        {/* 预览组包含该差评的全部图片：隐藏多余图片占位，放大后可左右切换 */}
+                        <Image.PreviewGroup>
+                          <Image
+                            src={item.reviewImages[0]}
+                            width={40}
+                            height={40}
+                            style={{ objectFit: 'cover', borderRadius: 4 }}
+                            loading="lazy"
+                          />
+                          {item.reviewImages.slice(1).map((url, idx) => (
+                            <Image key={`hidden-${idx}`} src={url} style={{ display: 'none' }} />
+                          ))}
+                        </Image.PreviewGroup>
+                        {item.reviewImages.length > 1 && (
+                          <span
+                            style={{
+                              position: 'absolute',
+                              right: -6,
+                              top: -6,
+                              background: 'rgba(0,0,0,0.6)',
+                              color: '#fff',
+                              borderRadius: 10,
+                              fontSize: 10,
+                              padding: '1px 5px',
+                              lineHeight: 1.4,
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            +{item.reviewImages.length - 1}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <Avatar style={{ backgroundColor: currentTheme.avatarBg, flexShrink: 0 }}>{item.author[0]}</Avatar>
+                    )
+                  }
                   title={
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', minWidth: 0 }}>
                       <span style={{ fontWeight: 'bold', color: '#000', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -929,6 +968,29 @@ const ReviewBot: React.FC = () => {
             </div>
 
             <Divider style={{ margin: '8px 0' }} />
+
+            {/* 买家评论附图（reviews_image，逗号分隔多张） */}
+            {Array.isArray(selectedReview.reviewImages) && selectedReview.reviewImages.length > 0 && (
+              <>
+                <div>
+                  <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>📷 买家评论图片</h3>
+                  <Image.PreviewGroup>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                      {selectedReview.reviewImages.map((url, idx) => (
+                        <Image
+                          key={`review-img-${idx}`}
+                          src={url}
+                          width={72}
+                          height={72}
+                          style={{ objectFit: 'cover', borderRadius: 6 }}
+                        />
+                      ))}
+                    </div>
+                  </Image.PreviewGroup>
+                </div>
+                <Divider style={{ margin: '8px 0' }} />
+              </>
+            )}
 
             <div>
               <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>

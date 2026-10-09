@@ -251,3 +251,16 @@ code {
   scrollbar-width: thin;
   scrollbar-color: #d9d9d9 transparent;
 }
+
+/* 图片预览层：左右切换按钮紧贴图片左右外侧（antd 默认贴屏幕最边缘，不显眼）。
+   按钮位置由 utils/previewSwitch.ts 实测预览图片包围盒后写入
+   --preview-switch-left/right（距视口左/右边缘 px），JS 未测量前用兜底值。 */
+.ant-image-preview-switch-left {
+  left: var(--preview-switch-left, 8px) !important;
+  inset-inline-start: var(--preview-switch-left, 8px) !important;
+}
+
+.ant-image-preview-switch-right {
+  right: var(--preview-switch-right, 8px) !important;
+  inset-inline-end: var(--preview-switch-right, 8px) !important;
+}

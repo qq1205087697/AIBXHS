@@ -12,6 +12,7 @@ import {
   Button,
   Popover,
   Empty,
+  Input,
   Spin,
   Modal,
 } from "antd";
@@ -46,11 +47,13 @@ import {
   Contact,
   ChevronLeft,
   ChevronRight,
+  Search,
   Star,
   AlertTriangle,
   Sparkles,
   Table2,
   Video,
+  Film,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -79,6 +82,7 @@ interface Notification {
 const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const [menuSearchText, setMenuSearchText] = useState("");
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout, hasPermission } = useAuth();
@@ -325,6 +329,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               icon: <Video size={18} />,
               label: 'AI视频',
             },
+            {
+              key: '/upscale-center',
+              icon: <Film size={18} />,
+              label: '高清处理',
+            },
           ],
         }] : []),
     {
@@ -463,6 +472,33 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     },
   ].filter((item) => !item.children || item.children.length > 0);
 
+  // 菜单搜索：按名称过滤菜单项，分组内有命中子项时保留分组并展开
+  const menuKeyword = menuSearchText.trim().toLowerCase();
+  const isMenuSearching = menuKeyword.length > 0;
+  const filteredMenuItems = isMenuSearching
+    ? menuItems
+        .map((item: any) => {
+          if (item.children) {
+            const matchedChildren = item.children.filter((c: any) =>
+              String(c.label || "").toLowerCase().includes(menuKeyword),
+            );
+            if (matchedChildren.length > 0) {
+              return { ...item, children: matchedChildren };
+            }
+            return String(item.label || "").toLowerCase().includes(menuKeyword)
+              ? item
+              : null;
+          }
+          return String(item.label || "").toLowerCase().includes(menuKeyword)
+            ? item
+            : null;
+        })
+        .filter(Boolean)
+    : menuItems;
+  const searchedOpenKeys = filteredMenuItems
+    .filter((item: any) => item.children)
+    .map((item: any) => item.key);
+
   const getPageTitle = () => {
     const pathMap: Record<string, string> = {
       "/": "首页",
@@ -491,7 +527,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
       '/product-selection': '选品机器人',
-      '/ai-creation': 'AI创作中心',
+      '/ai-creation': 'AI视频',
+      '/upscale-center': '高清处理',
     };
     return pathMap[location.pathname] || "未知页面";
   };
@@ -777,16 +814,53 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               )}
             </div>
 
+            {/* 菜单搜索框（折叠时显示搜索图标，点击展开侧边栏） */}
+            {collapsed ? (
+              <div
+                style={{
+                  padding: "8px 0",
+                  flexShrink: 0,
+                  display: "flex",
+                  justifyContent: "center",
+                }}
+              >
+                <Button
+                  type="text"
+                  icon={<Search size={18} />}
+                  onClick={() => setCollapsed(false)}
+                />
+              </div>
+            ) : (
+              <div style={{ padding: "0 12px 8px", flexShrink: 0 }}>
+                <Input
+                  size="small"
+                  placeholder="搜索菜单..."
+                  prefix={<Search size={14} color="#999" />}
+                  value={menuSearchText}
+                  onChange={(e) => setMenuSearchText(e.target.value)}
+                  allowClear
+                />
+              </div>
+            )}
+
             {/* 菜单区域 */}
             {collapsed ? (
               renderCollapsedMenu()
+            ) : isMenuSearching && filteredMenuItems.length === 0 ? (
+              <Empty
+                description="无匹配菜单"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                style={{ marginTop: 48 }}
+              />
             ) : (
               <Menu
                 mode="inline"
                 selectedKeys={[location.pathname]}
-                openKeys={openKeys}
+                openKeys={isMenuSearching ? searchedOpenKeys : openKeys}
                 onOpenChange={(keys) => setOpenKeys(keys)}
-                items={menuItems.map(({ shortLabel, ...rest }: any) => rest)}
+                items={filteredMenuItems.map(
+                  ({ shortLabel, ...rest }: any) => rest,
+                )}
                 onClick={({ key }) => navigate(key)}
                 style={
                   {

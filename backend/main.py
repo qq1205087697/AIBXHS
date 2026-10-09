@@ -205,6 +205,13 @@ async def startup_event():
     except Exception as e:
         logger.error(f"H3 视频任务恢复失败: {e}")
 
+    try:
+        from services.upscale_service import resume_pending_tasks as resume_upscale_tasks
+        resume_upscale_tasks()
+        logger.info("超分未完成任务已恢复监听")
+    except Exception as e:
+        logger.error(f"超分任务恢复失败: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭事件"""
