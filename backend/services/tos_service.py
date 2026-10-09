@@ -177,6 +177,56 @@ def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
     return upload_file(file_bytes, file_name, content_type=content_type, subdir="videos", custom_name=custom_name)
 
 
+def rename_file(src_url: str, new_name: str) -> str:
+    """服务端复制对象为新名称（保留原对象），返回新公网 URL。
+
+    用于 AI视频/高清处理结果绑定产品时改名为「产品编码_序号」：
+    仅在桶内复制（CopyObject），不下载上传大文件，也不删除源对象
+    （AI视频/高清处理任务历史仍引用源地址）。复制失败抛异常，由调用方决定回退。
+    """
+    from urllib.parse import urlparse, unquote
+
+    settings = get_settings()
+    client = _get_tos_client()
+
+    src_key = unquote(urlparse(src_url).path.lstrip("/"))
+    _, ext = os.path.splitext(src_key)
+    ext = ext.lower() or ".mp4"
+
+    prefix = (settings.TOS_PREFIX or "").strip("/")
+    new_key = f"{prefix}/videos/{new_name}{ext}" if prefix else f"videos/{new_name}{ext}"
+
+    try:
+        import tos
+    except ImportError:
+        raise RuntimeError("未安装 tos SDK，请运行: pip install tos==2.9.2")
+
+    copy_kwargs = {
+        "bucket": settings.TOS_BUCKET,
+        "key": new_key,
+        "src_bucket": settings.TOS_BUCKET,
+        "src_key": src_key,
+    }
+    try:
+        # 新版 SDK 支持 copy 时携带 ACL
+        copy_kwargs["acl"] = tos.ACLType.ACL_Public_Read
+        client.copy_object(**copy_kwargs)
+    except (AttributeError, TypeError):
+        # 旧版 SDK 签名不同，先复制再补 ACL
+        copy_kwargs.pop("acl", None)
+        client.copy_object(**copy_kwargs)
+        try:
+            client.put_object_acl(
+                bucket=settings.TOS_BUCKET, key=new_key, acl=tos.ACLType.ACL_Public_Read
+            )
+        except Exception:
+            pass
+
+    new_url = _build_public_url(new_key)
+    logger.info("TOS 复制改名: %s -> %s", src_key, new_key)
+    return new_url
+
+
 def delete_file(file_url: str) -> bool:
     """根据公网 URL 删除 TOS 中的对象（可选清理用）"""
     try:

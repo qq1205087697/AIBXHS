@@ -7,7 +7,6 @@ import {
   Typography,
   Space,
   Divider,
-  Tabs,
   message,
   Empty,
   Modal,
@@ -37,9 +36,13 @@ import {
   DownOutlined,
   FormOutlined,
   MoreOutlined,
+  SearchOutlined,
+  EyeOutlined,
+  LinkOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
+import BindProductModal from '../components/BindProductModal'
 import {
   aiCreationApi,
   productsApi,
@@ -60,6 +63,59 @@ const { TextArea } = Input
 const MAX_IMAGES = 9
 const MAX_PROMPT_LENGTH = 4000
 const PRODUCT_PAGE_SIZE = 8
+
+// ===== 变高清（Topaz 星光 2.6）：放大倍数与 2K 上限自动计算 =====
+// 处理后总像素不得超过 2K（2560×1440），否则运行时长过久；倍数按 0.05 卡位拖动
+const TARGET_2K_PIXELS = 2560 * 1440
+const maxScaleFor = (w?: number | null, h?: number | null): number => {
+  if (!w || !h || w <= 0 || h <= 0) return 1
+  return Math.min(4, Math.max(1, Math.sqrt(TARGET_2K_PIXELS / (w * h))))
+}
+// 2K 上限落到 0.05 卡位（不低于 1 倍）
+const maxCardScaleFor = (w?: number | null, h?: number | null): number =>
+  Math.max(1, Math.floor(maxScaleFor(w, h) * 20) / 20)
+const evenDim = (v: number) => Math.max(2, Math.round(v / 2) * 2)
+const formatMp = (w?: number | null, h?: number | null): string => {
+  if (!w || !h) return '-'
+  return `${((w * h) / 1000000).toFixed(1)}MP`
+}
+// 耗时格式化：60 秒内显示「N 秒」，超过显示「N 分 M 秒」
+const formatCost = (s?: number | null): string => {
+  if (s == null) return '-'
+  if (s < 60) return `${s} 秒`
+  return `${Math.floor(s / 60)} 分 ${s % 60} 秒`
+}
+// 由任务的分辨率档位 + 画面比例得出源视频分辨率（H3 官方尺寸表，multiple of 32）
+const H3_SIZE_TABLE: Record<string, [number, number]> = {
+  '0.2': [608, 352],
+  '0.3': [736, 416],
+  '0.4': [864, 480],
+  '0.5': [960, 544],
+  '0.6': [1056, 608],
+  '0.7': [1152, 640],
+  '0.8': [1216, 672],
+  '0.9': [1280, 736],
+  '768P': [1344, 768],
+}
+const RATIO_VALUE: Record<string, number> = {
+  '1:1': 1,
+  '4:3': 4 / 3,
+  '3:4': 3 / 4,
+  '21:9': 21 / 9,
+}
+const round32 = (v: number) => Math.max(32, Math.round(v / 32) * 32)
+const estimateSourceRes = (task: AIVideoTask | null): { w: number; h: number } | null => {
+  if (!task) return null
+  const base = H3_SIZE_TABLE[task.resolution] || H3_SIZE_TABLE['0.5']
+  // 16:9 / 9:16 直接用官方表（互为转置）
+  if (task.ratio === '16:9') return { w: base[0], h: base[1] }
+  if (task.ratio === '9:16') return { w: base[1], h: base[0] }
+  // 其他比例按面积与宽高比推算，宽高取 32 的倍数；auto 按主流竖屏估算
+  const rv = RATIO_VALUE[task.ratio] ?? 9 / 16
+  const area = base[0] * base[1]
+  const h = round32(Math.sqrt(area / rv))
+  return { w: round32(h * rv), h }
+}
 
 interface ProductOptionItem {
   id: number
@@ -189,6 +245,14 @@ const AICreationCenter: React.FC = () => {
   const [history, setHistory] = useState<AIVideoTask[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
   const [previewTask, setPreviewTask] = useState<AIVideoTask | null>(null)
+  // ===== 绑定至产品 / 变高清（仅已完成任务）=====
+  const [bindModalOpen, setBindModalOpen] = useState(false)
+  const [bindTask, setBindTask] = useState<AIVideoTask | null>(null)
+  const [upscaleModalOpen, setUpscaleModalOpen] = useState(false)
+  const [upscaleTask, setUpscaleTask] = useState<AIVideoTask | null>(null)
+  const [upscaleRes, setUpscaleRes] = useState<{ w: number; h: number } | null>(null)
+  const [upscaleScale, setUpscaleScale] = useState<number | null>(null)
+  const [upscaleSubmitting, setUpscaleSubmitting] = useState(false)
   const [hoverId, setHoverId] = useState<number | null>(null)
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null)
   const localInputRef = useRef<HTMLInputElement>(null)
@@ -201,6 +265,16 @@ const AICreationCenter: React.FC = () => {
   const [productPage, setProductPage] = useState(1)
   const [productLoading, setProductLoading] = useState(false)
   const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([])
+  // 从产品库选图时记录来源产品（编码/品名随任务落库）
+  const [selectedProducts, setSelectedProducts] = useState<ProductOptionItem[]>([])
+
+  // 参考图变动后：旧方案与商品分析全部失效（否则旧产品名会混入下一次方案生成）
+  const invalidatePlans = () => {
+    setConceptsDirty(true)
+    setResult(null)
+    setDraftProduct(null)
+    setProductDraftDirty(false)
+  }
 
   // 追加本地图片文件（校验类型与数量上限）—— 改图后方案失效，需重新生成
   const appendFiles = (files: File[]) => {
@@ -208,7 +282,7 @@ const AICreationCenter: React.FC = () => {
     if (images.length < files.length) {
       message.error('存在非图片文件，已自动忽略')
     }
-    if (images.length > 0) setConceptsDirty(true)
+    if (images.length > 0) invalidatePlans()
     setFileList((prev) => {
       const remain = MAX_IMAGES - prev.length
       if (images.length > remain) {
@@ -233,7 +307,7 @@ const AICreationCenter: React.FC = () => {
   }
 
   const handleRemoveImage = (uid: string) => {
-    setConceptsDirty(true)
+    invalidatePlans()
     setFileList((prev) => {
       const target = prev.find((f) => f.uid === uid)
       if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
@@ -246,6 +320,7 @@ const AICreationCenter: React.FC = () => {
       if (f.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(f.thumbUrl)
     })
     setFileList([])
+    setSelectedProducts([])
     setResult(null)
     setConcepts(null)
     setConceptsDirty(false)
@@ -315,11 +390,18 @@ const AICreationCenter: React.FC = () => {
   }
 
   // ===== 生成历史（后端任务表）：进入页面拉取，未完成的任务每 15 秒轮询一次 =====
-  const loadTasks = async () => {
+  const [historyPage, setHistoryPage] = useState(1)
+  const [historyPageSize, setHistoryPageSize] = useState(20)
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyKeyword, setHistoryKeyword] = useState('')
+  const keywordTimerRef = useRef<number | null>(null)
+
+  const loadTasks = async (page = historyPage, size = historyPageSize, kw = historyKeyword) => {
     setTasksLoading(true)
     try {
-      const resp = await aiCreationApi.listVideoTasks(20)
-      setHistory(resp.data.data || [])
+      const resp = await aiCreationApi.listVideoTasks(page, size, kw)
+      setHistory(resp.data.data.items || [])
+      setHistoryTotal(resp.data.data.total || 0)
     } catch {
       // 拉取失败时保留原有列表，避免界面闪烁
     } finally {
@@ -327,16 +409,29 @@ const AICreationCenter: React.FC = () => {
     }
   }
 
+  // 历史搜索：300ms 防抖后回到第 1 页重新加载
+  const handleHistoryKeywordChange = (kw: string) => {
+    setHistoryKeyword(kw)
+    if (keywordTimerRef.current) window.clearTimeout(keywordTimerRef.current)
+    keywordTimerRef.current = window.setTimeout(() => {
+      setHistoryPage(1)
+      loadTasks(1, historyPageSize, kw)
+    }, 300)
+  }
+
   useEffect(() => {
-    loadTasks()
+    loadTasks(1)
+    setHistoryPage(1)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
     const running = history.some((t) => t.status === '排队中' || t.status === '生成中')
     if (!running) return
-    const timer = window.setInterval(loadTasks, 15000)
+    const timer = window.setInterval(() => loadTasks(historyPage), 15000)
     return () => window.clearInterval(timer)
-  }, [history])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, historyPage, historyPageSize, historyKeyword])
 
   // 收集所有图片为 File：本地文件直接用，产品图片 URL 需下载转 File
   const collectFiles = async (): Promise<File[]> => {
@@ -460,11 +555,15 @@ const AICreationCenter: React.FC = () => {
         market,
         voiceover_language: voiceoverLanguage,
         title,
+        product_code: selectedProducts[0]?.product_code || '',
+        product_name: selectedProducts[0]?.name || '',
       })
       const task = resp.data.data
-      setHistory((prev) => [task, ...prev.filter((t) => t.id !== task.id)].slice(0, 20))
+      // 新任务在最前：跳回第 1 页刷新
+      setHistoryPage(1)
+      loadTasks(1)
       setActiveHistoryId(task.id)
-      message.success('视频生成任务已提交，生成中（约 25~40 分钟）')
+      message.success('视频生成任务已提交，排队中')
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '提交视频生成任务失败')
     } finally {
@@ -500,8 +599,8 @@ const AICreationCenter: React.FC = () => {
     }
     setPromptText(item.prompt)
     setActiveHistoryId(item.id)
-    // 图片与参数已换，原方案失效，需重新生成
-    setConceptsDirty(true)
+    // 图片与参数已换，原方案与商品分析失效，需重新生成
+    invalidatePlans()
     message.success('已填入该历史的参考图、提示词与参数')
   }
 
@@ -521,21 +620,66 @@ const AICreationCenter: React.FC = () => {
     })
   }
 
-  const removeHistory = async (id: number) => {
-    setActiveHistoryId((prev) => (prev === id ? null : prev))
-    setHistory((prev) => prev.filter((h) => h.id !== id))
-    try {
-      await aiCreationApi.deleteVideoTask(id)
-    } catch {
-      message.error('删除失败，请稍后重试')
-    }
+  const removeHistory = (id: number) => {
+    Modal.confirm({
+      title: '确认删除',
+      content: '删除后不可恢复，确定要删除该条生成记录吗？',
+      centered: true,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setActiveHistoryId((prev) => (prev === id ? null : prev))
+        try {
+          await aiCreationApi.deleteVideoTask(id)
+          // 当前页删空且不是第 1 页时回退上一页，否则刷新当前页
+          if (history.length <= 1 && historyPage > 1) {
+            setHistoryPage(historyPage - 1)
+            loadTasks(historyPage - 1)
+          } else {
+            loadTasks()
+          }
+        } catch {
+          message.error('删除失败，请稍后重试')
+        }
+      },
+    })
   }
 
-  const handleClearHistory = async () => {
-    const ids = history.map((h) => h.id)
-    setHistory([])
-    setActiveHistoryId(null)
-    await Promise.allSettled(ids.map((id) => aiCreationApi.deleteVideoTask(id)))
+  // ===== 绑定至产品 / 变高清 =====
+  const openBindModal = (item: AIVideoTask) => {
+    setBindTask(item)
+    setBindModalOpen(true)
+  }
+
+  const openUpscaleModal = (item: AIVideoTask) => {
+    setUpscaleTask(item)
+    // 分辨率档位 + 画面比例直接换算，默认拉满 2K 上限卡位
+    const res = estimateSourceRes(item)
+    setUpscaleRes(res)
+    setUpscaleScale(res ? maxCardScaleFor(res.w, res.h) : null)
+    setUpscaleModalOpen(true)
+  }
+
+  // 提交超分任务（不跳转，提示去高清处理页面看进度）
+  const handleUpscaleSubmit = async () => {
+    if (!upscaleTask?.video_url || !upscaleRes || !upscaleScale) return
+    setUpscaleSubmitting(true)
+    try {
+      await aiCreationApi.createUpscaleTask({
+        title: upscaleTask.title || '超分任务',
+        source_video_url: upscaleTask.video_url,
+        source_width: upscaleRes.w,
+        source_height: upscaleRes.h,
+        scale: upscaleScale,
+      })
+      message.success('高清处理任务已提交，可在「媒体创作中心 → 高清处理」页面查看进度')
+      setUpscaleModalOpen(false)
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '提交失败')
+    } finally {
+      setUpscaleSubmitting(false)
+    }
   }
 
   // ===== 商品信息编辑（默认收起，展开后可改，保存后重新生成方案）=====
@@ -682,7 +826,7 @@ const AICreationCenter: React.FC = () => {
         message.warning(`最多上传 ${MAX_IMAGES} 张图片`)
       }
       const urls = freshUrls.slice(0, Math.max(0, remain))
-      if (urls.length > 0) setConceptsDirty(true)
+      if (urls.length > 0) invalidatePlans()
       const items: UploadFile[] = urls.map((url, i) => ({
         uid: `pm-${Date.now()}-${i}`,
         name: url.split('/').pop() || 'product-image',
@@ -691,6 +835,12 @@ const AICreationCenter: React.FC = () => {
         thumbUrl: url,
       }))
       return [...prev, ...items]
+    })
+    // 记录选图来源产品（编码/品名随任务落库，供历史搜索与展示）
+    const matched = productOptions.filter((p) => selectedImageUrls.some((u) => p.images?.includes(u)))
+    setSelectedProducts((prev) => {
+      const ids = new Set(prev.map((p) => p.id))
+      return [...prev, ...matched.filter((p) => !ids.has(p.id))]
     })
     setSelectedImageUrls([])
     setProductModalOpen(false)
@@ -1099,14 +1249,20 @@ const AICreationCenter: React.FC = () => {
         </Space>
       }
       extra={
-        history.length > 0 ? (
-          <Button type="text" size="small" icon={<ClearOutlined />} onClick={handleClearHistory}>
-            清空
-          </Button>
+        history.length > 0 || historyKeyword ? (
+          <Input
+            size="small"
+            allowClear
+            prefix={<SearchOutlined style={{ color: '#999' }} />}
+            placeholder="搜索产品编码 / 品名"
+            style={{ width: 190 }}
+            value={historyKeyword}
+            onChange={(e) => handleHistoryKeywordChange(e.target.value)}
+          />
         ) : null
       }
-      style={{ flex: 1, minWidth: 0 }}
-      bodyStyle={{ padding: 16 }}
+      style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+      styles={{ body: { flex: 1, minHeight: 0, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
     >
       {history.length === 0 ? (
         tasksLoading ? (
@@ -1117,7 +1273,7 @@ const AICreationCenter: React.FC = () => {
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无生成历史" />
         )
       ) : (
-        <div style={{ maxHeight: 520, overflowY: 'auto' }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {history.map((item) => (
             <div
               key={item.id}
@@ -1157,18 +1313,27 @@ const AICreationCenter: React.FC = () => {
                 <Text strong ellipsis style={{ fontSize: 13, flex: '0 1 auto', minWidth: 0 }}>
                   {item.title}
                 </Text>
-                {/* 生成中：紧贴标题右侧转圈；已完成：紧贴标题右侧显示生成总耗时 */}
+                {/* 排队中/生成中：紧贴标题右侧转圈；失败：红色标签；已完成：紧贴标题右侧显示生成总耗时 */}
                 {item.status === '排队中' || item.status === '生成中' ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                     <Spin size="small" />
-                    <Text type="secondary" style={{ fontSize: 12 }}>生成中</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {item.status === '排队中' ? '排队中' : '生成中'}
+                    </Text>
                   </span>
+                ) : item.status === '失败' ? (
+                  <Tag color="error" style={{ flexShrink: 0, marginRight: 0 }}>
+                    失败
+                  </Tag>
                 ) : item.status === '已完成' && item.cost_seconds != null ? (
                   <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                    耗时 {item.cost_seconds} 秒
+                    耗时 {formatCost(item.cost_seconds)}
                   </Text>
                 ) : null}
                 <div style={{ flex: 1 }} />
+                <Button icon={<EyeOutlined />} onClick={() => setPreviewTask(item)}>
+                  详情
+                </Button>
                 <Button icon={<FormOutlined />} onClick={() => restoreHistory(item)}>
                   编辑
                 </Button>
@@ -1176,6 +1341,23 @@ const AICreationCenter: React.FC = () => {
                   trigger={['click']}
                   menu={{
                     items: [
+                      ...(item.status === '已完成' && item.video_url
+                        ? [
+                            {
+                              key: 'bind',
+                              label: '绑定至产品',
+                              icon: <LinkOutlined />,
+                              onClick: () => openBindModal(item),
+                            },
+                            {
+                              key: 'upscale',
+                              label: '变高清',
+                              icon: <ThunderboltOutlined />,
+                              disabled: !!item.upscale_video_url,
+                              onClick: () => openUpscaleModal(item),
+                            },
+                          ]
+                        : []),
                       {
                         key: 'delete',
                         label: '删除记录',
@@ -1206,10 +1388,31 @@ const AICreationCenter: React.FC = () => {
                   }}
                 >
                   <Text type="secondary" style={{ fontSize: 12 }}>
+                    {item.product_code && (
+                      <span style={{ color: currentTheme.primary }}>
+                        [{item.product_code}] {item.product_name || ''}
+                        {' · '}
+                      </span>
+                    )}
                     {item.created_at} · {item.creator_name || '-'} · {getMarketLabel(item.market)} · {getModelLabel(item.model)} · {item.resolution} · {item.duration}秒 · {getRatioLabel(item.ratio)} · {truncatePrompt(item.prompt)}
                   </Text>
                 </Tooltip>
               </div>
+
+              {/* 失败原因：直接展示，超长悬停看全文 */}
+              {item.status === '失败' && item.error_message && (
+                <div style={{ marginTop: 2 }}>
+                  <Tooltip
+                    title={item.error_message}
+                    overlayStyle={{ maxWidth: 560 }}
+                    overlayInnerStyle={{ maxWidth: 560, maxHeight: 300, overflowY: 'auto', fontSize: 12, lineHeight: 1.7 }}
+                  >
+                    <Text type="danger" style={{ fontSize: 12, display: 'block', maxWidth: '100%' }} ellipsis>
+                      失败原因：{item.error_message}
+                    </Text>
+                  </Tooltip>
+                </div>
+              )}
 
               {/* 成片小窗：悬停时循环播放，点击打开全屏弹窗 */}
               {item.video_url && (
@@ -1242,7 +1445,32 @@ const AICreationCenter: React.FC = () => {
           ))}
         </div>
       )}
-    </Card>
+        {history.length > 0 && (
+          <div style={{ flexShrink: 0, marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+            <Pagination
+              size="small"
+              current={historyPage}
+              pageSize={historyPageSize}
+              total={historyTotal}
+              showSizeChanger
+              showQuickJumper
+              showTotal={(total) => `共 ${total} 条`}
+              pageSizeOptions={[10, 20, 50, 100]}
+              onChange={(p, s) => {
+                if (s !== historyPageSize) {
+                  // 切换每页条数：回到第 1 页
+                  setHistoryPageSize(s)
+                  setHistoryPage(1)
+                  loadTasks(1, s)
+                } else {
+                  setHistoryPage(p)
+                  loadTasks(p)
+                }
+              }}
+            />
+          </div>
+        )}
+      </Card>
   )
 
   const renderSpeechTab = () => (
@@ -1540,13 +1768,89 @@ const AICreationCenter: React.FC = () => {
         </div>
       </div>
 
-      {/* 右侧：生成历史 + 参考图片（独立滚动） */}
-      <div style={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>
+      {/* 右侧：生成历史（拉满到页面底部，列表内部滚动） */}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {renderHistoryCard()}
       </div>
 
       {renderPlanModal()}
       {renderProductModal()}
+
+      {/* 绑定至产品：选择产品后把视频写入产品详情（无视频小窗） */}
+      <BindProductModal
+        open={bindModalOpen}
+        videoUrl={bindTask?.video_url || ''}
+        onClose={() => setBindModalOpen(false)}
+      />
+
+      {/* 视频高清放大：显示品名 + 倍数滑杆（0.05 卡位，自动按 2K 上限截断） */}
+      <Modal
+        open={upscaleModalOpen}
+        title="视频高清放大"
+        okText="提交任务"
+        cancelText="取消"
+        centered
+        confirmLoading={upscaleSubmitting}
+        okButtonProps={{ disabled: !upscaleScale }}
+        onOk={handleUpscaleSubmit}
+        onCancel={() => setUpscaleModalOpen(false)}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text strong>品名：</Text>
+          <Text>{upscaleTask?.product_name || upscaleTask?.title || '-'}</Text>
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <Text strong>当前分辨率：</Text>
+          {upscaleRes ? (
+            <Text>
+              {upscaleRes.w}×{upscaleRes.h}（{formatMp(upscaleRes.w, upscaleRes.h)}）
+            </Text>
+          ) : (
+            <Text type="secondary">读取中…</Text>
+          )}
+        </div>
+        <div
+          style={{
+            border: '1px solid #f0f0f0',
+            borderRadius: 8,
+            padding: '12px 16px 8px',
+          }}
+        >
+          <div style={{ marginBottom: 2 }}>
+            <Text strong style={{ fontSize: 13 }}>
+              放大倍数
+            </Text>
+            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              最高不超过 2K 画质（自动限制）
+            </Text>
+          </div>
+          <Slider
+            min={1}
+            max={upscaleRes ? maxCardScaleFor(upscaleRes.w, upscaleRes.h) : 1}
+            step={0.05}
+            value={upscaleScale ?? 1}
+            disabled={!upscaleRes}
+            onChange={(v) => setUpscaleScale(v)}
+            tooltip={{ formatter: (v) => `×${Number(v ?? 0).toFixed(2)}` }}
+          />
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              当前倍数：×{(upscaleScale ?? 1).toFixed(2)}
+            </Text>
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              处理后分辨率：
+              {upscaleRes
+                ? `${evenDim(upscaleRes.w * (upscaleScale ?? 1))}×${evenDim(upscaleRes.h * (upscaleScale ?? 1))}（${formatMp(
+                    evenDim(upscaleRes.w * (upscaleScale ?? 1)),
+                    evenDim(upscaleRes.h * (upscaleScale ?? 1)),
+                  )}）`
+                : '-'}
+            </Text>
+          </div>
+        </div>
+      </Modal>
 
       {/* 成片全屏预览：左侧视频，右侧参数 */}
       <Modal
@@ -1695,27 +1999,9 @@ const AICreationCenter: React.FC = () => {
   )
 
   return (
-    <div style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
-      <Tabs
-        className="ai-creation-tabs"
-        defaultActiveKey="speech"
-        items={[
-          {
-            key: 'speech',
-            label: '口播带货',
-            children: renderSpeechTab(),
-          },
-          {
-            key: 'image-to-video',
-            label: '图转视频',
-            children: (
-              <Card styles={{ body: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 480 } }}>
-                <Empty description="图转视频功能开发中，敬请期待" />
-              </Card>
-            ),
-          },
-        ]}
-      />
+    // 保留 ai-creation-tabs 类名：复用细滚动条样式
+    <div className="ai-creation-tabs" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
+      {renderSpeechTab()}
     </div>
   )
 }

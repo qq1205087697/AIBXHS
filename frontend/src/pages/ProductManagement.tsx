@@ -9,7 +9,7 @@ import apiClient from '../api'
 import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
-import TosUpload from '../components/TosUpload'
+import { VideosUpload } from '../components/TosUpload'
 import ImagesUpload from '../components/ImagesUpload'
 import ImageGallery from '../components/ImageGallery'
 import { useResponsive } from '../hooks/useResponsive'
@@ -29,6 +29,8 @@ interface Product {
   main_image: string
   images?: string[]
   video_url: string
+  /** 产品视频列表（最多 6 个，AI视频「绑定至产品」写入） */
+  videos?: string[]
   weight: number | null
   length: number | null
   width: number | null
@@ -691,7 +693,7 @@ const productAttributeLabelMap: Record<string, string> = {
       sale_price: product.sale_price,
       main_image: product.main_image,
       images: product.images?.length ? product.images : (product.main_image ? [product.main_image] : []),
-      video_url: product.video_url,
+      videos: product.videos?.length ? product.videos : (product.video_url ? [product.video_url] : []),
       weight: product.weight,
       length: product.length,
       width: product.width,
@@ -2828,6 +2830,7 @@ const productAttributeLabelMap: Record<string, string> = {
       <Modal
         title={editingProduct ? '编辑商品' : '新增商品'}
         open={modalOpen}
+        destroyOnClose
         onOk={handleSubmit}
         onCancel={() => setModalOpen(false)}
         width={res.isMobile ? '95vw' : 720}
@@ -2897,8 +2900,8 @@ const productAttributeLabelMap: Record<string, string> = {
           <Form.Item name="images" label="产品图片">
             <ImagesUpload placeholder="上传产品图片" maxCount={9} customName={form.getFieldValue('product_code') || undefined} />
           </Form.Item>
-          <Form.Item name="video_url" label="产品视频">
-            <TosUpload type="video" placeholder="上传产品视频" />
+          <Form.Item name="videos" label="产品视频">
+            <VideosUpload placeholder="上传产品视频" />
           </Form.Item>
           <Divider orientation="left" plain>尺寸/重量</Divider>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
@@ -3470,6 +3473,7 @@ const productAttributeLabelMap: Record<string, string> = {
       <Modal
         title={detailEditMode ? '编辑商品' : `商品详情 - ${detailModalProduct?.name || ''}`}
         open={detailModalOpen}
+        destroyOnClose
         onCancel={() => {
           setDetailModalOpen(false)
           setDetailEditMode(false)
@@ -3638,8 +3642,8 @@ const productAttributeLabelMap: Record<string, string> = {
                     <Form.Item name="images" label="产品图片">
                       <ImagesUpload placeholder="上传产品图片" maxCount={9} customName={form.getFieldValue('product_code') || undefined} />
                     </Form.Item>
-                    <Form.Item name="video_url" label="产品视频">
-                      <TosUpload type="video" placeholder="上传产品视频" />
+                    <Form.Item name="videos" label="产品视频">
+                      <VideosUpload placeholder="上传产品视频" />
                     </Form.Item>
                     <Divider orientation="left" plain>尺寸/重量</Divider>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
@@ -3712,15 +3716,26 @@ const productAttributeLabelMap: Record<string, string> = {
                         </Card>
                       ) : null
                     })()}
-                    {detailModalProduct.video_url && (
-                      <Card size="small" title="产品视频">
-                        <video
-                          src={detailModalProduct.video_url}
-                          controls
-                          style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto' }}
-                        />
-                      </Card>
-                    )}
+                    {(() => {
+                      const galleryVideos = detailModalProduct.videos?.length
+                        ? detailModalProduct.videos
+                        : detailModalProduct.video_url
+                          ? [detailModalProduct.video_url]
+                          : []
+                      return galleryVideos.length > 0 ? (
+                        <Card size="small" title={`产品视频（${galleryVideos.length}）`}>
+                          {galleryVideos.map((v, i) => (
+                            <video
+                              key={i}
+                              src={v}
+                              controls
+                              preload="metadata"
+                              style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto 8px' }}
+                            />
+                          ))}
+                        </Card>
+                      ) : null
+                    })()}
                   </div>
                 )
               )}

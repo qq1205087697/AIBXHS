@@ -15,6 +15,8 @@ class AIVideoTask(BaseModel):
     user_id = Column(Integer, nullable=False, index=True, comment="提交用户ID")
     creator_name = Column(String(100), nullable=True, comment="生成者用户名")
     title = Column(String(200), nullable=True, comment="任务标题（产品名）")
+    product_code = Column(String(50), nullable=True, index=True, comment="产品编码（从产品管理选图时记录）")
+    product_name = Column(String(200), nullable=True, comment="产品品名（从产品管理选图时记录）")
     status = Column(String(20), nullable=False, default="排队中", index=True,
                     comment="状态：排队中/生成中/已完成/失败")
 
@@ -32,5 +34,6 @@ class AIVideoTask(BaseModel):
     video_url = Column(String(1000), nullable=True, comment="成片公网地址")
 
     h3_prompt_id = Column(String(100), nullable=True, index=True, comment="ComfyUI 任务ID")
+    started_at = Column(DateTime(timezone=True), nullable=True, comment="开始生成时间（首次进入「生成中」）")
     error_message = Column(String(1000), nullable=True, comment="失败原因")
     finished_at = Column(DateTime(timezone=True), nullable=True, comment="完成时间")

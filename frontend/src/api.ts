@@ -1671,6 +1671,11 @@ export interface AIVideoTask {
   /** 本次生成使用的参考图地址 */
   images: string[];
   video_url: string | null;
+  /** 从产品管理选图提交时记录的产品编码/品名 */
+  product_code?: string;
+  product_name?: string;
+  /** 已完成的超分结果（后端按源视频地址匹配附加），用于并排对比展示 */
+  upscale_video_url?: string;
   /** ComfyUI 任务 ID */
   h3_prompt_id: string;
   /** 生成总耗时（秒），未完成为 null */
@@ -1690,6 +1695,25 @@ export interface GenerateVideoParams {
   /** 口播语言，'auto' 表示跟随目标市场 */
   voiceover_language: VoiceoverLanguage;
   title: string;
+  /** 从产品管理选图提交时记录的产品编码/品名 */
+  product_code?: string;
+  product_name?: string;
+}
+
+/** 视频超分（Topaz 星光 2.6）任务 */
+export interface VideoUpscaleTask {
+  id: number;
+  title: string;
+  creator_name: string;
+  source_video_url: string;
+  source_width?: number | null;
+  source_height?: number | null;
+  scale?: number | null;
+  status: string;
+  error_message?: string;
+  video_url?: string;
+  created_at: string;
+  cost_seconds?: number | null;
 }
 
 export const aiCreationApi = {
@@ -1801,6 +1825,8 @@ export const aiCreationApi = {
       params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
     );
     formData.append("title", params.title);
+    formData.append("product_code", params.product_code || "");
+    formData.append("product_name", params.product_name || "");
     return apiClient.post<{ success: boolean; data: AIVideoTask }>(
       "/ai-creation/generate-video",
       formData,
@@ -1810,14 +1836,43 @@ export const aiCreationApi = {
       },
     );
   },
-  /** 视频生成任务列表（含状态与成片地址） */
-  listVideoTasks: (limit = 20) =>
-    apiClient.get<{ success: boolean; data: AIVideoTask[] }>("/ai-creation/video-tasks", {
-      params: { limit },
-    }),
+  /** 视频生成任务列表（分页 + 关键词搜索，含状态与成片地址） */
+  listVideoTasks: (page = 1, pageSize = 20, keyword = "") =>
+    apiClient.get<{ success: boolean; data: { items: AIVideoTask[]; total: number } }>(
+      "/ai-creation/video-tasks",
+      { params: { page, page_size: pageSize, keyword } },
+    ),
   /** 删除视频生成任务记录 */
   deleteVideoTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-creation/video-tasks/${taskId}`),
+  /** 提交视频超分任务（Topaz 星光 2.6，后台下载/上传/入队/轮询） */
+  createUpscaleTask: (params: {
+    title: string;
+    source_video_url: string;
+    source_width?: number;
+    source_height?: number;
+    scale: number;
+  }) =>
+    apiClient.post<{ success: boolean; data: VideoUpscaleTask }>(
+      "/ai-creation/upscale-tasks",
+      params,
+      { timeout: 300000 },
+    ),
+  /** 超分任务列表（分页 + 标题搜索） */
+  listUpscaleTasks: (page = 1, pageSize = 20, keyword = "") =>
+    apiClient.get<{ success: boolean; data: { items: VideoUpscaleTask[]; total: number } }>(
+      "/ai-creation/upscale-tasks",
+      { params: { page, page_size: pageSize, keyword } },
+    ),
+  /** 删除超分任务 */
+  deleteUpscaleTask: (taskId: number) =>
+    apiClient.delete<{ success: boolean }>(`/ai-creation/upscale-tasks/${taskId}`),
+  /** 绑定视频至产品详情（最多 6 个，超出报「产品已达到视频上限」） */
+  bindProductVideo: (productId: number, videoUrl: string) =>
+    apiClient.post<{ success: boolean; data: { videos: string[] } }>(
+      `/products/${productId}/videos`,
+      { video_url: videoUrl },
+    ),
   /** 旧方案：仅识别商品信息 */
   analyzeProduct: (files: File[]) => {
     const formData = new FormData();

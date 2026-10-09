@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     H3_POLL_INTERVAL: int = 15          # 轮询任务状态间隔（秒）
     H3_MAX_WAIT_MINUTES: int = 240      # 单条视频最长等待时间（分钟）
 
+    # 视频超分（Topaz 星光 2.6）工作流模板，与 H3 共用同一台 ComfyUI
+    UPSCALE_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "upscale_workflow_template.json"
+    )
+
     # H3 提示词二次优化：按官方 h3-prompt-writing 指南把中文方案改写为 Ref2VA 六段式英文提示词
     H3_PROMPT_OPTIMIZE: bool = True     # 关闭后直接提交原始方案文本
     H3_PROMPT_MODEL: str = ""           # 优化用文本模型，留空则使用 OPENAI_MODEL

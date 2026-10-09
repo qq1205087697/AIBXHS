@@ -158,6 +158,51 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # 列已存在则忽略
+            # 视频生成任务表新增开始生成时间（首次进入「生成中」时记录，耗时=完成时间-开始时间，不含排队）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN started_at DATETIME NULL COMMENT '开始生成时间' AFTER h3_prompt_id"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增产品编码/品名（从产品管理选图提交时记录，用于历史搜索与展示）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN product_code VARCHAR(50) NULL COMMENT '产品编码' AFTER title"))
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN product_name VARCHAR(200) NULL COMMENT '产品品名' AFTER product_code"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 产品表新增多视频字段（JSON 数组，最多 6 个）
+            try:
+                conn.execute(text("ALTER TABLE products ADD COLUMN videos TEXT NULL COMMENT '产品视频列表（JSON 数组，最多6个）' AFTER video_url"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频超分任务表（Topaz 星光 2.6）
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS video_upscale_tasks (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tenant_id INT NOT NULL,
+                    user_id INT NULL,
+                    creator_name VARCHAR(100) NULL,
+                    title VARCHAR(200) NULL,
+                    source_video_url VARCHAR(1000) NOT NULL,
+                    source_width INT NULL,
+                    source_height INT NULL,
+                    scale FLOAT NULL,
+                    status VARCHAR(20) DEFAULT '排队中',
+                    error_message TEXT NULL,
+                    video_url VARCHAR(1000) NULL,
+                    comfy_prompt_id VARCHAR(64) NULL,
+                    started_at DATETIME NULL,
+                    finished_at DATETIME NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    deleted_at DATETIME NULL,
+                    INDEX idx_upscale_tenant (tenant_id),
+                    INDEX idx_upscale_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            conn.commit()
             # 创建 scheduler_locks 表
             create_lock_table_sql = """
                 CREATE TABLE IF NOT EXISTS scheduler_locks (

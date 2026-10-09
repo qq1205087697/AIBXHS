@@ -183,6 +183,8 @@ async def generate_video_endpoint(
     market: str = Form("US"),
     voiceover_language: str = Form("自动"),
     title: str = Form("视频生成任务"),
+    product_code: str = Form(""),
+    product_name: str = Form(""),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -216,6 +218,8 @@ async def generate_video_endpoint(
             model=model,
             market=market,
             voiceover_language=voiceover_language,
+            product_code=product_code,
+            product_name=product_name,
         )
     except H3VideoError as e:
         logger.error(f"[AI创作中心] 提交视频生成失败: {e}")
@@ -226,11 +230,93 @@ async def generate_video_endpoint(
 
 @router.get("/video-tasks")
 async def list_video_tasks_endpoint(
-    limit: int = 20,
+    page: int = 1,
+    page_size: int = 10,
+    keyword: str = "",
     current_user: User = Depends(get_current_user),
 ):
     """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询"""
-    return {"success": True, "data": list_video_tasks(current_user.tenant_id, limit=limit)}
+    return {
+        "success": True,
+        "data": list_video_tasks(
+            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+        ),
+    }
+
+
+# ============================================================
+# 视频超分（Topaz 星光 2.6，与 H3 共用同一台 ComfyUI）
+# ============================================================
+
+class UpscaleTaskCreate(BaseModel):
+    title: str = ""
+    source_video_url: str
+    source_width: int = 0
+    source_height: int = 0
+    scale: float = 2.0
+
+
+@router.post("/upscale-tasks")
+async def create_upscale_task(
+    body: UpscaleTaskCreate,
+    current_user: User = Depends(get_current_user),
+):
+    """提交视频超分任务：源视频（TOS 地址）+ 放大倍数，后台下载/上传/入队/轮询"""
+    from services.upscale_service import submit_upscale_task, UpscaleError
+
+    if not body.source_video_url.strip():
+        raise HTTPException(status_code=400, detail="缺少源视频地址")
+    logger.info(
+        f"[AI创作中心] 用户 {current_user.id} 提交超分任务: 倍数={body.scale}, "
+        f"源={body.source_width}x{body.source_height}"
+    )
+    try:
+        task = submit_upscale_task(
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+            creator_name=current_user.username,
+            title=body.title or "超分任务",
+            source_video_url=body.source_video_url.strip(),
+            source_width=body.source_width,
+            source_height=body.source_height,
+            scale=body.scale,
+        )
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": task}
+
+
+@router.get("/upscale-tasks")
+async def list_upscale_tasks_endpoint(
+    page: int = 1,
+    page_size: int = 20,
+    keyword: str = "",
+    current_user: User = Depends(get_current_user),
+):
+    """超分任务列表（分页 + 标题搜索），用于高清处理页面与进度轮询"""
+    from services.upscale_service import list_upscale_tasks
+
+    return {
+        "success": True,
+        "data": list_upscale_tasks(
+            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+        ),
+    }
+
+
+@router.delete("/upscale-tasks/{task_id}")
+async def delete_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """删除超分任务（软删除）"""
+    from services.upscale_service import delete_upscale_task, UpscaleError
+
+    try:
+        delete_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True}
 
 
 @router.delete("/video-tasks/{task_id}")
