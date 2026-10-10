@@ -29,11 +29,41 @@ body {
 /* 允许内容区横向滚动以适配小屏 */
 .ant-layout-content {
   overflow-x: auto;
+  /* 关键：允许 flex 子项收缩，防止内部宽图表（recharts）把整页撑到内容最小宽度 */
+  min-width: 0;
 }
 
 code {
   font-family:
     source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+}
+
+/* 购物车预警表格：加大单元格内边距，列间隔更宽松 */
+.buybox-table .ant-table-thead > tr > th,
+.buybox-table .ant-table-tbody > tr > td {
+  padding: 10px 18px;
+}
+
+/* 购物车预警：鼠标悬停行时浮现单条「已处理」按钮 */
+.buybox-table .ant-table-row .row-process-btn {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.buybox-table .ant-table-row:hover .row-process-btn {
+  opacity: 1;
+}
+
+/* 数据驾驶舱悬浮球板块锚点：滚动定位时预留顶部导航高度 */
+#section-kpi,
+#section-alerts,
+#section-compare,
+#section-top10,
+#section-sku-trend,
+#section-aging,
+#section-ad-ratio,
+#section-buybox,
+#section-shipment {
+  scroll-margin-top: 76px;
 }
 
 /* 主题色变量 */

@@ -484,6 +484,35 @@ CREATE TABLE IF NOT EXISTS `product_aging_inventory` (
     KEY `ix_pai_date_store_sku` (`date`, `store`, `sku`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商品超库龄库存表';
 
+-- 商品购物车（BuyBox）状态表
+CREATE TABLE IF NOT EXISTS `product_buybox` (
+    `id` INT NOT NULL AUTO_INCREMENT COMMENT '记录ID',
+    `date` DATE NOT NULL COMMENT '日期',
+    `sku` VARCHAR(200) NOT NULL COMMENT 'SKU',
+    `product_name` VARCHAR(500) DEFAULT NULL COMMENT '品名',
+    `store` VARCHAR(100) NOT NULL COMMENT '店铺',
+    `status` VARCHAR(50) DEFAULT NULL COMMENT '状态',
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted_at` DATETIME DEFAULT NULL COMMENT '删除时间',
+    PRIMARY KEY (`id`),
+    KEY `ix_pbb_date_store_sku` (`date`, `store`, `sku`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商品购物车BuyBox状态表';
+
+-- 货件通知表
+CREATE TABLE IF NOT EXISTS `product_shipment_notice` (
+    `id` INT NOT NULL AUTO_INCREMENT COMMENT '记录ID',
+    `date` DATE NOT NULL COMMENT '日期',
+    `store` VARCHAR(100) NOT NULL COMMENT '店铺',
+    `shipment_code` VARCHAR(100) NOT NULL COMMENT '货件编码',
+    `status` VARCHAR(50) DEFAULT NULL COMMENT '状态',
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted_at` DATETIME DEFAULT NULL COMMENT '删除时间',
+    PRIMARY KEY (`id`),
+    KEY `ix_psn_date_store_code` (`date`, `store`, `shipment_code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='货件通知表';
+
 -- =====================================================
 -- 初始化数据
 -- =====================================================

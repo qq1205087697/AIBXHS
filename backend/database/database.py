@@ -63,6 +63,7 @@ def init_db():
         from models import ad_campaign
         from models import ad_report
         from models import ad_daily
+        from models import group_message
 
         # 导入所有模型类
         from models.tenant import Tenant
@@ -217,7 +218,7 @@ def init_db():
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='调度器分布式锁表';
             """
             conn.execute(text(create_lock_table_sql))
-            
+
             # 创建 product_selections 表（作为备份，以防 ORM 创建失败）
             create_product_selection_table_sql = """
                 CREATE TABLE IF NOT EXISTS product_selections (
