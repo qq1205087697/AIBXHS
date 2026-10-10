@@ -233,6 +233,7 @@ def _init_tenant_permissions_and_admin_role(db: Session, tenant_id: int):
         {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 46},
         {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 47},
         {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 48},
+        {"name": "差评推送配置", "code": "robot:review:push_config", "type": "function", "module": "差评机器人", "sort_order": 49},
         {"name": "差评机器人KPI卡片", "code": "robot:review:kpi", "type": "function", "module": "差评机器人", "sort_order": 48},
         # 邮件机器人
         {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
@@ -241,6 +242,8 @@ def _init_tenant_permissions_and_admin_role(db: Session, tenant_id: int):
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        # 媒体创作中心
+        {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         # 挪货管理
         {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 55},
         {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 56},

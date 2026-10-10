@@ -89,6 +89,7 @@ def init_db():
             AdCampaignDaily, AdKeywordDaily, AdSearchTermDaily,
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
         )
+        from models.ai_video_task import AIVideoTask
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)
@@ -106,6 +107,11 @@ def init_db():
                 conn.execute(text("ALTER TABLE review_analyses ADD COLUMN department VARCHAR(20) NULL COMMENT '问题板块:operations/purchasing/warehouse/design'"))
             except Exception as e:
                 print(f"添加 review_analyses.department 字段失败（可能已存在）: {e}")
+            # 差评分析表新增多板块字段（逗号分隔，一条差评可属多个板块）
+            try:
+                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"))
+            except Exception as e:
+                print(f"添加 review_analyses.departments 字段失败（可能已存在）: {e}")
             conn.commit()
         
         print("数据库表结构创建成功")
@@ -113,6 +119,91 @@ def init_db():
         # 手动创建 scheduler_locks 和 product_selections 表
         from sqlalchemy import text
         with engine.connect() as conn:
+            # 视频生成任务表新增口播语言字段（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN voiceover_language VARCHAR(30) NULL COMMENT '口播语言' AFTER market"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增租户字段（历史按租户隔离），并回填存量数据
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN tenant_id INT NOT NULL DEFAULT 0 COMMENT '租户ID' AFTER id"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增生成者字段，并按提交用户回填
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN creator_name VARCHAR(100) NULL COMMENT '生成者用户名' AFTER user_id"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            try:
+                conn.execute(text(
+                    "UPDATE ai_video_tasks t JOIN users u ON t.user_id = u.id "
+                    "SET t.creator_name = u.username WHERE t.creator_name IS NULL OR t.creator_name = ''"
+                ))
+                conn.commit()
+            except Exception:
+                pass  # 回填失败不影响启动
+            try:
+                conn.execute(text(
+                    "UPDATE ai_video_tasks t JOIN users u ON t.user_id = u.id "
+                    "SET t.tenant_id = u.tenant_id WHERE t.tenant_id = 0"
+                ))
+                conn.commit()
+            except Exception:
+                pass  # 回填失败不影响启动
+            # 视频生成任务表新增二次优化后的 H3 结构化提示词字段
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN h3_prompt TEXT NULL COMMENT '优化后的 H3 结构化提示词' AFTER prompt"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增开始生成时间（首次进入「生成中」时记录，耗时=完成时间-开始时间，不含排队）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN started_at DATETIME NULL COMMENT '开始生成时间' AFTER h3_prompt_id"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频生成任务表新增产品编码/品名（从产品管理选图提交时记录，用于历史搜索与展示）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN product_code VARCHAR(50) NULL COMMENT '产品编码' AFTER title"))
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN product_name VARCHAR(200) NULL COMMENT '产品品名' AFTER product_code"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 产品表新增多视频字段（JSON 数组，最多 6 个）
+            try:
+                conn.execute(text("ALTER TABLE products ADD COLUMN videos TEXT NULL COMMENT '产品视频列表（JSON 数组，最多6个）' AFTER video_url"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
+            # 视频超分任务表（Topaz 星光 2.6）
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS video_upscale_tasks (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tenant_id INT NOT NULL,
+                    user_id INT NULL,
+                    creator_name VARCHAR(100) NULL,
+                    title VARCHAR(200) NULL,
+                    source_video_url VARCHAR(1000) NOT NULL,
+                    source_width INT NULL,
+                    source_height INT NULL,
+                    scale FLOAT NULL,
+                    status VARCHAR(20) DEFAULT '排队中',
+                    error_message TEXT NULL,
+                    video_url VARCHAR(1000) NULL,
+                    comfy_prompt_id VARCHAR(64) NULL,
+                    started_at DATETIME NULL,
+                    finished_at DATETIME NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    deleted_at DATETIME NULL,
+                    INDEX idx_upscale_tenant (tenant_id),
+                    INDEX idx_upscale_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """))
+            conn.commit()
             # 创建 scheduler_locks 表
             create_lock_table_sql = """
                 CREATE TABLE IF NOT EXISTS scheduler_locks (
@@ -196,6 +287,13 @@ def init_db():
             # 头程改为3位小数（如果需要）
             try:
                 conn.execute(text("ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'"))
+                conn.commit()
+            except Exception:
+                pass
+
+            # products 表新增无配件标记字段（如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE products ADD COLUMN no_accessory TINYINT(1) NOT NULL DEFAULT 0 COMMENT '无配件标记(是:数据补齐不再提示未绑配件)'"))
                 conn.commit()
             except Exception:
                 pass

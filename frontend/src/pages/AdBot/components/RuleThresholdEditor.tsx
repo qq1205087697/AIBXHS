@@ -8,6 +8,9 @@ interface RuleThresholdEditorProps {
   onChange: (value: number) => void;
   label: string;
   unit?: string;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 const RuleThresholdEditor: React.FC<RuleThresholdEditorProps> = ({
@@ -15,6 +18,9 @@ const RuleThresholdEditor: React.FC<RuleThresholdEditorProps> = ({
   onChange,
   label,
   unit,
+  min,
+  max,
+  step = 0.01,
 }) => {
   return (
     <Space direction="vertical" size={4} style={{ width: "100%" }}>
@@ -27,6 +33,9 @@ const RuleThresholdEditor: React.FC<RuleThresholdEditorProps> = ({
           onChange={(v) => onChange(typeof v === "number" ? v : 0)}
           style={{ width: 140 }}
           precision={2}
+          min={min}
+          max={max}
+          step={step}
         />
         {unit && <Text type="secondary">{unit}</Text>}
       </Space>

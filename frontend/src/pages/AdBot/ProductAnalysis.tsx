@@ -9,7 +9,7 @@ import {
   Spin,
   message,
 } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, DownloadOutlined } from "@ant-design/icons";
 import { adsApi } from "../../api";
 import { useTheme } from "../../contexts/ThemeContext";
 import dayjs from "dayjs";
@@ -43,6 +43,8 @@ const ProductAnalysis: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [sortBy, setSortBy] = useState<string | undefined>(undefined);
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [filterOptions, setFilterOptions] = useState<FilterOptions>({
     countries: [],
     stores: [],
@@ -57,6 +59,7 @@ const ProductAnalysis: React.FC = () => {
     dayjs(),
   ]);
   const [selectedCampaign, setSelectedCampaign] = useState<string | undefined>(undefined);
+  const [exporting, setExporting] = useState(false);
 
   const fetchFilterOptions = useCallback(async (country?: string) => {
     try {
@@ -100,6 +103,10 @@ const ProductAnalysis: React.FC = () => {
       if (dateRange?.[0]) params.date_from = dateRange[0].format("YYYY-MM-DD");
       if (dateRange?.[1]) params.date_to = dateRange[1].format("YYYY-MM-DD");
       if (selectedCampaign) params.campaign_name = selectedCampaign;
+      if (sortBy) {
+        params.sort_by = sortBy;
+        params.sort_order = sortOrder;
+      }
 
       const res = await adsApi.search(params);
       if (res.data.success) {
@@ -111,7 +118,7 @@ const ProductAnalysis: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, selectedCountries, selectedStores, dateRange, selectedCampaign]);
+  }, [page, pageSize, sortBy, sortOrder, selectedCountries, selectedStores, dateRange, selectedCampaign]);
 
   useEffect(() => {
     fetchFilterOptions();
@@ -124,6 +131,36 @@ const ProductAnalysis: React.FC = () => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const params: any = { report_type: "product" };
+      if (selectedCountries.length) params.country = selectedCountries;
+      if (selectedStores.length) params.account = selectedStores;
+      if (dateRange?.[0]) params.date_from = dateRange[0].format("YYYY-MM-DD");
+      if (dateRange?.[1]) params.date_to = dateRange[1].format("YYYY-MM-DD");
+      if (selectedCampaign) params.campaign_name = selectedCampaign;
+      const res = await adsApi.export(params);
+      const blob = new Blob([res.data as unknown as BlobPart], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `product_${dayjs().format("YYYYMMDD_HHmmss")}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      message.success("导出成功");
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || "未知错误";
+      message.error(`导出失败: ${detail}`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleCountryChange = (values: string[]) => {
     setSelectedCountries(values);
@@ -172,12 +209,14 @@ const ProductAnalysis: React.FC = () => {
       title: "订单",
       dataIndex: "orders",
       key: "orders",
+      sorter: true,
       render: (v: number) => v || 0,
     },
     {
       title: "CTR",
       dataIndex: "ctr",
       key: "ctr",
+      sorter: true,
       render: (v: number) => `${((v || 0) * 100).toFixed(2)}%`,
     },
   ];
@@ -231,6 +270,13 @@ const ProductAnalysis: React.FC = () => {
           >
             刷新
           </Button>
+          <Button
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            onClick={handleExport}
+          >
+            导出
+          </Button>
         </Space>
       </Card>
 
@@ -246,9 +292,17 @@ const ProductAnalysis: React.FC = () => {
             showSizeChanger: true,
             showTotal: (t) => `共 ${t} 条`,
           }}
-          onChange={(p) => {
+          onChange={(p, _f, sorter) => {
             setPage(p.current || 1);
             setPageSize(p.pageSize || 20);
+            const s = Array.isArray(sorter) ? sorter[0] : sorter;
+            if (s && s.field && s.order) {
+              setSortBy(s.field as string);
+              setSortOrder(s.order === "ascend" ? "asc" : "desc");
+              setPage(1);
+            } else if (s && !s.order) {
+              setSortBy(undefined);
+            }
           }}
           size="small"
           scroll={{ x: 750 }}

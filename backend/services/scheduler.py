@@ -152,13 +152,12 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 选品评分：抓取是SQL直写数据库，后端无法被动感知，改为5分钟轮询新记录（算分+高分自动AI分析）
     scheduler.add_job(
         recalc_product_selection_scores_job,
-        trigger="cron",
-        hour=7,
-        minute=0,
-        id="daily_product_selection_recalc",
-        name="每日选品数据评分计算",
+        trigger=IntervalTrigger(minutes=5),
+        id="product_selection_recalc_polling",
+        name="选品评分轮询计算（新抓取自动算分+高分自动AI分析）",
         replace_existing=True
     )
 
@@ -169,6 +168,16 @@ def init_scheduler():
         minute=0,
         id="overdue_purchase_check",
         name="检查超期未入库采购单",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
+        cleanup_expired_ad_data_job,
+        trigger="cron",
+        hour=3,
+        minute=0,
+        id="ad_data_cleanup",
+        name="广告数据清理任务",
         replace_existing=True
     )
 
@@ -286,6 +295,7 @@ def analyze_unanalyzed_reviews_job():
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
+    from services.chat_service import DEPARTMENT_PROMPT_RULES, _normalize_departments
 
     LOCK_KEY = "daily_review_analysis"
     db = SessionLocal()
@@ -363,14 +373,9 @@ def analyze_unanalyzed_reviews_job():
 2. medium（第二级）：质量不好、破损、少件、缺配件、损坏
 3. low（第三级）：其他所有场景
 
-部门板块分类规则（department字段，必须输出以下四个之一）：
-- operations（运营板块）：文案问题、产品货不对板
-- purchasing（采购板块）：质量不好、字母/印刷出错
-- warehouse（仓库板块）：损坏
-- design（美工板块）：尺寸、颜色、图片、夸大
-根据评论内容判断最符合的板块，无法判断时归入operations。
+""" + DEPARTMENT_PROMPT_RULES + """
 
-输出JSON: {{"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[],"summary":"","importance_level":"high|medium|low","department":"operations|purchasing|warehouse|design"}}"""
+输出JSON: {"sentiment":"负面","sentiment_score":3,"key_points":[],"topics":[],"suggestions":[{"department":"purchasing","text":"建议1"}],"summary":"","importance_level":"high|medium|low","departments":["operations","purchasing","warehouse","design"]}"""
 
                 response = client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -391,9 +396,10 @@ def analyze_unanalyzed_reviews_job():
                     ar = {"sentiment": "negative", "sentiment_score": 3, "key_points": [], "topics": [], "suggestions": [], "summary": rc[:200]}
 
                 # 保存AI分析结果（使用ON DUPLICATE KEY UPDATE避免并发重复插入）
+                depts_str = _normalize_departments(ar.get("departments") or ar.get("department"))
                 thread_db.execute(text("""
-                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department)
-                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw, :dept)
+                    INSERT INTO review_analyses (tenant_id, review_id, model, sentiment, sentiment_score, key_points, topics, suggestions, summary, raw_response, department, departments)
+                    VALUES (:tid, :rid, :model, :sentiment, :score, :kp, :topics, :sug, :sum, :raw, :dept, :depts)
                     ON DUPLICATE KEY UPDATE
                         sentiment = VALUES(sentiment),
                         sentiment_score = VALUES(sentiment_score),
@@ -402,13 +408,14 @@ def analyze_unanalyzed_reviews_job():
                         suggestions = VALUES(suggestions),
                         summary = VALUES(summary),
                         raw_response = VALUES(raw_response),
-                        department = VALUES(department)
+                        department = VALUES(department),
+                        departments = VALUES(departments)
                 """), {
                     "tid": tenant_id, "rid": review_id, "model": settings.OPENAI_MODEL,
                     "sentiment": ar.get("sentiment", "negative"), "score": ar.get("sentiment_score", 3),
                     "kp": json.dumps(ar.get("key_points", [])), "topics": json.dumps(ar.get("topics", [])),
                     "sug": json.dumps(ar.get("suggestions", [])), "sum": ar.get("summary", ""), "raw": rc,
-                    "dept": ar.get("department", "")
+                    "dept": depts_str.split(",")[0] if depts_str else "", "depts": depts_str
                 })
                 # 更新重要性等级
                 importance_level = ar.get("importance_level", "low")
@@ -451,7 +458,7 @@ def analyze_unanalyzed_reviews_job():
 
 
 def push_daily_review_notifications_job():
-    """每天早上8点：推送未处理差评通知给对应部门所有人员"""
+    """每天早上8点：推送未处理差评通知给对应店铺分组的所有人员"""
     from database.database import SessionLocal
     from sqlalchemy import text
     from datetime import datetime, date
@@ -485,24 +492,24 @@ def push_daily_review_notifications_job():
         logger.info(f"今天 ({today}) 尚未推送通知，开始处理...")
 
         # 检查各表是否存在
-        has_dept_table = False
-        has_user_dept_table = False
+        has_group_table = False
+        has_user_stores_table = False
         has_notifications_table = False
         has_importance_level = False
 
         try:
-            check = db.execute(text("SHOW TABLES LIKE 'departments'"))
-            has_dept_table = check.fetchone() is not None
-            logger.info(f"departments 表: {'存在' if has_dept_table else '不存在'}")
+            check = db.execute(text("SHOW TABLES LIKE 'store_groups'"))
+            has_group_table = check.fetchone() is not None
+            logger.info(f"store_groups 表: {'存在' if has_group_table else '不存在'}")
         except Exception as e:
-            logger.error(f"检查 departments 表失败: {e}")
+            logger.error(f"检查 store_groups 表失败: {e}")
         
         try:
-            check = db.execute(text("SHOW TABLES LIKE 'user_departments'"))
-            has_user_dept_table = check.fetchone() is not None
-            logger.info(f"user_departments 表: {'存在' if has_user_dept_table else '不存在'}")
+            check = db.execute(text("SHOW TABLES LIKE 'user_stores'"))
+            has_user_stores_table = check.fetchone() is not None
+            logger.info(f"user_stores 表: {'存在' if has_user_stores_table else '不存在'}")
         except Exception as e:
-            logger.error(f"检查 user_departments 表失败: {e}")
+            logger.error(f"检查 user_stores 表失败: {e}")
         
         try:
             check = db.execute(text("SHOW TABLES LIKE 'notifications'"))
@@ -519,37 +526,37 @@ def push_daily_review_notifications_job():
             logger.error(f"检查 importance_level 字段失败: {e}")
 
         # 检查必须的表是否都存在
-        if not has_dept_table or not has_user_dept_table or not has_notifications_table:
+        if not has_group_table or not has_user_stores_table or not has_notifications_table:
             logger.warning("必要表不存在，跳过通知推送")
-            logger.warning(f"需要的表: departments={has_dept_table}, user_departments={has_user_dept_table}, notifications={has_notifications_table}")
+            logger.warning(f"需要的表: store_groups={has_group_table}, user_stores={has_user_stores_table}, notifications={has_notifications_table}")
             return
 
         # 查询未处理的差评（status为new, read, processing）
-        # 只对 high 和 medium 重要级别的差评发送通知
+        # 按差评所属店铺的店铺分组归类，只对 high 和 medium 重要级别的差评发送通知
         if has_importance_level:
             logger.info("使用包含 importance_level 的查询")
             pending_query = text("""
                 SELECT r.id, r.asin, r.title, r.rating, r.importance_level, r.status,
-                       s.department_id, d.name as dept_name
+                       s.group_id, sg.name as group_name, r.tenant_id
                 FROM reviews r
                 LEFT JOIN stores s ON r.store_id = s.id
-                LEFT JOIN departments d ON s.department_id = d.id
+                LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
                 WHERE r.rating <= 3
                   AND r.status IN ('new', 'read', 'processing')
-                  AND s.department_id IS NOT NULL
+                  AND s.group_id IS NOT NULL
                   AND r.importance_level IN ('high', 'medium')
             """)
         else:
             logger.info("使用不包含 importance_level 的查询")
             pending_query = text("""
                 SELECT r.id, r.asin, r.title, r.rating, r.status,
-                       s.department_id, d.name as dept_name
+                       s.group_id, sg.name as group_name, r.tenant_id
                 FROM reviews r
                 LEFT JOIN stores s ON r.store_id = s.id
-                LEFT JOIN departments d ON s.department_id = d.id
+                LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
                 WHERE r.rating <= 3
                   AND r.status IN ('new', 'read', 'processing')
-                  AND s.department_id IS NOT NULL
+                  AND s.group_id IS NOT NULL
             """)
         
         logger.info("执行差评查询...")
@@ -565,61 +572,69 @@ def push_daily_review_notifications_job():
         logger.info("差评详情:")
         for i, row in enumerate(pending_reviews[:5]):
             if has_importance_level:
-                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 重要性={row[4]}, 状态={row[5]}, 部门ID={row[6]}, 部门名={row[7]}")
+                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 重要性={row[4]}, 状态={row[5]}, 分组ID={row[6]}, 分组名={row[7]}")
             else:
-                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 状态={row[4]}, 部门ID={row[5]}, 部门名={row[6]}")
+                logger.info(f"  [{i+1}] ID={row[0]}, ASIN={row[1]}, 评分={row[3]}, 状态={row[4]}, 分组ID={row[5]}, 分组名={row[6]}")
         if len(pending_reviews) > 5:
             logger.info(f"  ... 还有 {len(pending_reviews) - 5} 条")
 
-        # 按部门分组统计
-        dept_stats = {}
+        # 按店铺分组统计（租户+分组为唯一键）
+        group_stats = {}
         for row in pending_reviews:
             if has_importance_level:
-                dept_id = row[6]
-                dept_name = row[7] or f"部门{dept_id}"
+                group_id = row[6]
+                group_name = row[7] or f"分组{group_id}"
+                tenant_id = row[8]
             else:
-                dept_id = row[5]
-                dept_name = row[6] or f"部门{dept_id}"
+                group_id = row[5]
+                group_name = row[6] or f"分组{group_id}"
+                tenant_id = row[7]
             
-            if dept_id not in dept_stats:
-                dept_stats[dept_id] = {"name": dept_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": []}
-            dept_stats[dept_id]["total"] += 1
+            key = (tenant_id, group_id)
+            if key not in group_stats:
+                group_stats[key] = {"tenant_id": tenant_id, "group_id": group_id, "name": group_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": []}
+            group_stats[key]["total"] += 1
             
             if has_importance_level:
                 level = str(row[4]) if row[4] else "medium"
                 if level == "high":
-                    dept_stats[dept_id]["high"] += 1
+                    group_stats[key]["high"] += 1
                 elif level == "medium":
-                    dept_stats[dept_id]["medium"] += 1
+                    group_stats[key]["medium"] += 1
                 else:
-                    dept_stats[dept_id]["low"] += 1
+                    group_stats[key]["low"] += 1
             else:
-                dept_stats[dept_id]["medium"] += 1
+                group_stats[key]["medium"] += 1
             
-            dept_stats[dept_id]["review_ids"].append(str(row[0]))
+            group_stats[key]["review_ids"].append(str(row[0]))
 
-        logger.info(f"按部门分组完成，共 {len(dept_stats)} 个部门有未处理差评")
-        for dept_id, stats in dept_stats.items():
-            logger.info(f"  部门 {stats['name']} (ID={dept_id}): 总计={stats['total']}, 严重={stats['high']}, 中等={stats['medium']}, 轻微={stats['low']}")
+        logger.info(f"按店铺分组完成，共 {len(group_stats)} 个分组有未处理差评")
+        for key, stats in group_stats.items():
+            logger.info(f"  分组 {stats['name']} (ID={stats['group_id']}, 租户={stats['tenant_id']}): 总计={stats['total']}, 严重={stats['high']}, 中等={stats['medium']}, 轻微={stats['low']}")
 
-        # 为每个部门的成员推送通知
+        # 为每个店铺分组的成员推送通知
         notification_count = 0
         notification_rows = []
-        for dept_id, stats in dept_stats.items():
-            logger.info(f"处理部门 {stats['name']} (ID={dept_id})...")
+        for key, stats in group_stats.items():
+            tenant_id = stats["tenant_id"]
+            logger.info(f"处理店铺分组 {stats['name']} (ID={stats['group_id']}, 租户={tenant_id})...")
             
-            members = db.execute(
-                text("SELECT user_id FROM user_departments WHERE department_id = :did"),
-                {"did": dept_id}
-            ).fetchall()
-            logger.info(f"  找到 {len(members)} 个部门成员")
+            # 分组成员 = 被分配了该分组下店铺的用户（user_stores -> stores）
+            members = db.execute(text("""
+                SELECT DISTINCT us.user_id
+                FROM user_stores us
+                INNER JOIN stores s ON us.store_id = s.id
+                INNER JOIN users u ON u.id = us.user_id AND u.deleted_at IS NULL
+                WHERE s.group_id = :gid AND us.tenant_id = :tid AND s.deleted_at IS NULL
+            """), {"gid": stats["group_id"], "tid": tenant_id}).fetchall()
+            logger.info(f"  找到 {len(members)} 个分组成员")
 
             if not members:
-                logger.warning(f"  部门 {stats['name']} 没有成员，跳过")
+                logger.warning(f"  分组 {stats['name']} 没有成员，跳过")
                 continue
 
             title = f"【{stats['name']}】未处理差评提醒"
-            content = f"您所在的部门「{stats['name']}」有 {stats['total']} 条未处理差评（严重: {stats['high']}，中等: {stats['medium']}，轻微: {stats['low']}），请及时处理。"
+            content = f"您所在的店铺分组「{stats['name']}」有 {stats['total']} 条未处理差评（严重: {stats['high']}，中等: {stats['medium']}，轻微: {stats['low']}），请及时处理。"
             logger.info(f"  通知标题: {title}")
             logger.info(f"  通知内容: {content}")
 
@@ -654,7 +669,7 @@ def push_daily_review_notifications_job():
                 logger.error(f"批量写入通知失败: {e}")
 
         db.commit()
-        logger.info(f"========== 推送完成！共推送 {notification_count} 条通知，覆盖 {len(dept_stats)} 个部门 ==========")
+        logger.info(f"========== 推送完成！共推送 {notification_count} 条通知，覆盖 {len(group_stats)} 个店铺分组 ==========")
 
     except Exception as e:
         logger.error(f"每日通知推送任务失败: {e}")
@@ -666,13 +681,223 @@ def push_daily_review_notifications_job():
         db.close()
 
 
-def recalc_product_selection_scores_job():
-    """每天早上7点：检查是否有新抓取的选品数据，有则自动计算评分"""
-    from database.database import SessionLocal
-    from sqlalchemy import text
+# ========== 选品评分公式（模块级，供定时任务与自动AI分析共用） ==========
+
+def _sel_r2(x):
+    return round(float(x), 2)
+
+def _sel_calc_rating(rating, review_count):
+    if rating is None:
+        return 20.0
+    r = round(rating, 1)
+    # 只按星级评分（抓取数据评论数普遍<10条，不再按评论数分档）
+    if r >= 4.8: base = 18.0
+    elif r >= 4.5: base = 16.0
+    elif r >= 4.2: base = 13.0
+    elif r >= 4.0: base = 10.0
+    else: base = 5.0
+    # 评论极少(≤3条)时参考价值低，打9折
+    if (review_count or 0) <= 3:
+        base = round(base * 0.9, 1)
+    return base
+
+def _sel_calc_sales(s):
+    s = s or 0
+    if s == 0: return 0.0
+    if 1 <= s <= 5: return 3.0
+    if 6 <= s <= 10: return 6.0
+    if 11 <= s <= 15: return 9.0
+    if 16 <= s <= 20: return 12.0
+    if 21 <= s <= 25: return 15.0
+    if 26 <= s <= 30: return 18.0
+    return 20.0
+
+def _sel_calc_penalty(rs):
+    # 阈值与新星级阶梯对齐
+    if rs >= 16: return 1.00
+    elif rs >= 13: return 0.95
+    elif rs >= 10: return 0.85
+    elif rs >= 5: return 0.70
+    else: return 0.50
+
+def _sel_calc_composite(pf, ts, ss):
+    return round(pf * ts * 0.6 + ss * 5 * 0.4, 2)
+
+def _sel_calc_traffic(traffic_trend_str):
     import math
     import statistics
     import ast
+    import json as _json
+    if not traffic_trend_str:
+        return 0.0, ""
+    try:
+        month_volume = ast.literal_eval(traffic_trend_str)
+    except Exception:
+        return 0.0, ""
+    if not isinstance(month_volume, dict) or not month_volume:
+        return 0.0, ""
+
+    values = [v for v in month_volume.values() if isinstance(v, (int, float))]
+    n = len(values)
+    if n == 0:
+        return 0.0, ""
+
+    result = {
+        "趋势方向强度分": 0.0,
+        "趋势一致性分": 0.0,
+        "相对增长倍数分": 0.0,
+        "月均增长率分": 0.0,
+        "趋势连续性分": 0.0,
+        "波动惩罚分": 0.0,
+        "趋势总分": 0.0,
+        "历史最低值": _sel_r2(min(values)),
+        "最新月份值": _sel_r2(values[-1]),
+        "增长倍数": 0.0,
+        "月均增长率": 0.0,
+        "波动系数CV": 0.0,
+    }
+
+    if n >= 6:
+        last_avg = sum(values[-3:]) / 3
+        prev_avg = sum(values[-6:-3]) / 3
+        R = last_avg / prev_avg if prev_avg > 0 else 0
+        result["趋势方向强度分"] = _sel_r2(max(0, min(25, (R - 1) * 18)))
+
+    if n >= 6:
+        up = sum(1 for i in range(1, 6) if values[-6 + i] > values[-7 + i])
+        result["趋势一致性分"] = _sel_r2((up / 5) * 10)
+
+    if n >= 2 and min(values) > 0:
+        G = values[-1] / min(values)
+        result["增长倍数"] = _sel_r2(G)
+        result["相对增长倍数分"] = _sel_r2(max(0, min(20, math.log2(G) * 6)))
+
+    if n >= 4 and values[-4] > 0:
+        M = (values[-1] / values[-4]) ** (1 / 4) - 1
+        result["月均增长率"] = _sel_r2(M)
+        result["月均增长率分"] = _sel_r2(max(0, min(10, M * 120)))
+
+    if n >= 2:
+        cur = max_streak = 0
+        for i in range(1, n):
+            if values[i] > values[i - 1]:
+                cur += 1
+                max_streak = max(max_streak, cur)
+            else:
+                cur = 0
+        mapping = {2: 3, 3: 6, 4: 9, 5: 12}
+        result["趋势连续性分"] = 15 if max_streak >= 6 else mapping.get(max_streak, 0)
+
+    if n >= 6:
+        last_6 = values[-6:]
+        mean = statistics.mean(last_6)
+        std = statistics.pstdev(last_6)
+        CV = std / mean if mean > 0 else 0
+        result["波动系数CV"] = _sel_r2(CV)
+        if CV <= 0.25: result["波动惩罚分"] = 10
+        elif CV <= 0.35: result["波动惩罚分"] = 7
+        elif CV <= 0.50: result["波动惩罚分"] = 4
+
+    total = (
+        result["趋势方向强度分"]
+        + result["趋势一致性分"]
+        + result["相对增长倍数分"]
+        + result["月均增长率分"]
+        + result["趋势连续性分"]
+        + result["波动惩罚分"]
+    )
+    raw_total = max(0, total)
+    result["趋势总分"] = _sel_r2(raw_total)
+
+    # 放大到满分100
+    max_possible = 90
+    final_score = round((raw_total / max_possible) * 100, 2) if max_possible > 0 else 0.0
+
+    return final_score, _json.dumps(result, ensure_ascii=False)
+
+
+def _auto_analyze_selection_task(selection_id: int, tenant_id: int):
+    """自动AI分析单条选品：查数据 → AI(侵权+季节性) → 算分写库（独立短连接，线程内运行）"""
+    import asyncio
+    from database.database import SessionLocal
+    from services.ai_analysis_service import analyze_product_selection
+    from sqlalchemy import text as _text
+
+    db = SessionLocal()
+    try:
+        db.execute(_text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+        row = db.execute(_text("""
+            SELECT id, product_title, url, asin, image_url, rating, review_count, keywords,
+                   price, commission, first_leg_cost, last_mile_cost, weight_kg,
+                   cost_at_15_profit, product_type, monthly_sales, traffic_trend
+            FROM product_selections
+            WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
+        """), {"id": selection_id, "tid": tenant_id}).fetchone()
+        if not row:
+            return
+        product_data = {
+            "product_title": row[1], "url": row[2] or "", "asin": row[3] or "",
+            "image_url": row[4] or "", "rating": row[5], "review_count": row[6],
+            "keywords": row[7] or "", "price": float(row[8]) if row[8] is not None else None,
+            "commission": float(row[9]) if row[9] is not None else None,
+            "first_leg_cost": float(row[10]) if row[10] is not None else None,
+            "last_mile_cost": float(row[11]) if row[11] is not None else None,
+            "weight_kg": float(row[12]) if row[12] is not None else None,
+            "cost_at_15_profit": float(row[13]) if row[13] is not None else None,
+            "product_type": row[14] or "", "monthly_sales": row[15],
+            "traffic_trend": row[16] or "",
+        }
+        rating, review_count, monthly_sales = row[5], row[6], row[15]
+    finally:
+        db.close()
+
+    ai_result = asyncio.run(analyze_product_selection(product_data))
+    if not ai_result:
+        logger.warning(f"选品 {selection_id} 自动AI分析失败")
+        return
+
+    rating_score = _sel_calc_rating(rating, review_count)
+    sales_score = _sel_calc_sales(monthly_sales)
+    penalty_factor = _sel_calc_penalty(rating_score)
+    traffic_score, traffic_score_result = _sel_calc_traffic(product_data.get("traffic_trend"))
+    composite_score = _sel_calc_composite(penalty_factor, traffic_score, sales_score)
+
+    db = SessionLocal()
+    try:
+        db.execute(_text("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'"))
+        db.execute(_text("""
+            UPDATE product_selections SET
+                seasonality = :seasonality,
+                infringement_analysis = :infringement_analysis,
+                infringement_conclusion = :infringement_conclusion,
+                traffic_score_result = :tsr, traffic_score = :ts,
+                sales_score = :ss, rating_score = :rs,
+                penalty_factor = :pf, composite_score = :cs,
+                ai_raw_response = :raw, updated_at = NOW()
+            WHERE id = :id
+        """), {
+            "id": selection_id,
+            "seasonality": ai_result.get("seasonality", ""),
+            "infringement_analysis": ai_result.get("infringement_analysis", ""),
+            "infringement_conclusion": ai_result.get("infringement_conclusion", ""),
+            "tsr": traffic_score_result, "ts": traffic_score,
+            "ss": sales_score, "rs": rating_score,
+            "pf": penalty_factor, "cs": composite_score,
+            "raw": __import__("json").dumps(ai_result, ensure_ascii=False),
+        })
+        db.commit()
+        logger.info(f"选品 {selection_id} 自动AI分析完成")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"选品 {selection_id} 自动AI分析写入失败: {e}")
+    finally:
+        db.close()
+
+
+def recalc_product_selection_scores_job():
+    """每天早上7点兜底：为未计算评分的选品记录补算（正常情况下新抓取入库时已实时计算），并对高分未分析的记录自动触发AI分析"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
     import json
 
     LOCK_KEY = "daily_product_selection_recalc"
@@ -695,148 +920,17 @@ def recalc_product_selection_scores_job():
 
         if not rows:
             logger.info("没有需要计算评分的新选品数据")
-            release_distributed_lock(db, LOCK_KEY)
-            db.close()
-            return
-
-        logger.info(f"发现 {len(rows)} 条待计算的选品记录")
-
-        def r2(x):
-            return round(float(x), 2)
-
-        def calc_rating(rating, review_count):
-            if rating is None:
-                return 20.0
-            r = round(rating, 1)
-            # 只按星级评分（抓取数据评论数普遍<10条，不再按评论数分档）
-            if r >= 4.8: base = 18.0
-            elif r >= 4.5: base = 16.0
-            elif r >= 4.2: base = 13.0
-            elif r >= 4.0: base = 10.0
-            else: base = 5.0
-            # 评论极少(≤3条)时参考价值低，打9折
-            if (review_count or 0) <= 3:
-                base = round(base * 0.9, 1)
-            return base
-
-        def calc_sales(s):
-            s = s or 0
-            if s == 0: return 0.0
-            if 1 <= s <= 5: return 3.0
-            if 6 <= s <= 10: return 6.0
-            if 11 <= s <= 15: return 9.0
-            if 16 <= s <= 20: return 12.0
-            if 21 <= s <= 25: return 15.0
-            if 26 <= s <= 30: return 18.0
-            return 20.0
-
-        def calc_penalty(rs):
-            # 阈值与新星级阶梯对齐
-            if rs >= 16: return 1.00
-            elif rs >= 13: return 0.95
-            elif rs >= 10: return 0.85
-            elif rs >= 5: return 0.70
-            else: return 0.50
-
-        def calc_composite(pf, ts, ss):
-            return round(pf * ts * 0.6 + ss * 5 * 0.4, 2)
-
-        def calc_traffic(traffic_trend_str):
-            if not traffic_trend_str:
-                return 0.0, ""
-            try:
-                month_volume = ast.literal_eval(traffic_trend_str)
-            except Exception:
-                return 0.0, ""
-            if not isinstance(month_volume, dict) or not month_volume:
-                return 0.0, ""
-
-            values = [v for v in month_volume.values() if isinstance(v, (int, float))]
-            n = len(values)
-            if n == 0:
-                return 0.0, ""
-
-            result = {
-                "趋势方向强度分": 0.0,
-                "趋势一致性分": 0.0,
-                "相对增长倍数分": 0.0,
-                "月均增长率分": 0.0,
-                "趋势连续性分": 0.0,
-                "波动惩罚分": 0.0,
-                "趋势总分": 0.0,
-                "历史最低值": r2(min(values)),
-                "最新月份值": r2(values[-1]),
-                "增长倍数": 0.0,
-                "月均增长率": 0.0,
-                "波动系数CV": 0.0,
-            }
-
-            if n >= 6:
-                last_avg = sum(values[-3:]) / 3
-                prev_avg = sum(values[-6:-3]) / 3
-                R = last_avg / prev_avg if prev_avg > 0 else 0
-                result["趋势方向强度分"] = r2(max(0, min(25, (R - 1) * 18)))
-
-            if n >= 6:
-                up = sum(1 for i in range(1, 6) if values[-6 + i] > values[-7 + i])
-                result["趋势一致性分"] = r2((up / 5) * 10)
-
-            if n >= 2 and min(values) > 0:
-                G = values[-1] / min(values)
-                result["增长倍数"] = r2(G)
-                result["相对增长倍数分"] = r2(max(0, min(20, math.log2(G) * 6)))
-
-            if n >= 4 and values[-4] > 0:
-                M = (values[-1] / values[-4]) ** (1 / 4) - 1
-                result["月均增长率"] = r2(M)
-                result["月均增长率分"] = r2(max(0, min(10, M * 120)))
-
-            if n >= 2:
-                cur = max_streak = 0
-                for i in range(1, n):
-                    if values[i] > values[i - 1]:
-                        cur += 1
-                        max_streak = max(max_streak, cur)
-                    else:
-                        cur = 0
-                mapping = {2: 3, 3: 6, 4: 9, 5: 12}
-                result["趋势连续性分"] = 15 if max_streak >= 6 else mapping.get(max_streak, 0)
-
-            if n >= 6:
-                last_6 = values[-6:]
-                mean = statistics.mean(last_6)
-                std = statistics.pstdev(last_6)
-                CV = std / mean if mean > 0 else 0
-                result["波动系数CV"] = r2(CV)
-                if CV <= 0.25: result["波动惩罚分"] = 10
-                elif CV <= 0.35: result["波动惩罚分"] = 7
-                elif CV <= 0.50: result["波动惩罚分"] = 4
-
-            total = (
-                result["趋势方向强度分"]
-                + result["趋势一致性分"]
-                + result["相对增长倍数分"]
-                + result["月均增长率分"]
-                + result["趋势连续性分"]
-                + result["波动惩罚分"]
-            )
-            raw_total = max(0, total)
-            result["趋势总分"] = r2(raw_total)
-
-            # 放大到满分100
-            max_possible = 90
-            final_score = round((raw_total / max_possible) * 100, 2) if max_possible > 0 else 0.0
-
-            return final_score, json.dumps(result, ensure_ascii=False)
+        else:
+            logger.info(f"发现 {len(rows)} 条待计算的选品记录")
 
         updated = 0
         for row in rows:
             rid = row[0]
-            rating_score = calc_rating(row[1], row[2])
-            sales_score = calc_sales(row[3])
-            penalty_factor = calc_penalty(rating_score)
-            traffic_score, traffic_result_json = calc_traffic(row[4])
-            composite_score = calc_composite(penalty_factor, traffic_score, sales_score)
+            rating_score = _sel_calc_rating(row[1], row[2])
+            sales_score = _sel_calc_sales(row[3])
+            penalty_factor = _sel_calc_penalty(rating_score)
+            traffic_score, traffic_result_json = _sel_calc_traffic(row[4])
+            composite_score = _sel_calc_composite(penalty_factor, traffic_score, sales_score)
 
             db.execute(text("""
                 UPDATE product_selections SET
@@ -861,6 +955,27 @@ def recalc_product_selection_scores_job():
 
         db.commit()
         logger.info(f"========== 选品评分计算完成：共更新 {updated} 条记录 ==========")
+
+        # 自动AI分析兜底：综合评分>=65 且未做过AI分析的记录（新抓取入库时已实时触发，此处处理历史/失败数据）
+        pending_rows = db.execute(text("""
+            SELECT id, tenant_id FROM product_selections
+            WHERE deleted_at IS NULL
+              AND composite_score IS NOT NULL AND composite_score >= 65
+              AND (infringement_analysis IS NULL OR infringement_analysis = '')
+        """)).fetchall()
+        if pending_rows:
+            logger.info(f"发现 {len(pending_rows)} 条高分选品待自动AI分析")
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = [pool.submit(_auto_analyze_selection_task, r[0], r[1]) for r in pending_rows]
+                for f in futures:
+                    try:
+                        f.result(timeout=900)
+                    except Exception as e:
+                        logger.error(f"选品自动AI分析任务异常: {e}")
+            logger.info("========== 选品自动AI分析批次结束 ==========")
+        else:
+            logger.info("没有需要自动AI分析的高分选品记录")
 
     except Exception as e:
         logger.error(f"每日选品评分计算任务失败: {e}")
@@ -1050,3 +1165,38 @@ def check_overdue_purchase_orders_job():
         db.rollback()
     finally:
         db.close()
+
+
+def cleanup_expired_ad_data_job():
+    """每天凌晨3点：清理超过保留期的广告数据（7张表分批硬删除）
+
+    - 通过 ad_retention_service.cleanup_expired_data 执行
+    - 使用独立 db session，异常仅记录日志
+    - 不传 tenant_id，清理所有租户的过期数据
+    """
+    from database.database import SessionLocal
+
+    logger.info("========== 开始执行广告数据清理任务 ==========")
+    db = SessionLocal()
+    try:
+        from services.ad_retention_service import cleanup_expired_data
+        result = cleanup_expired_data(db, tenant_id=None)
+        logger.info(
+            f"广告数据清理任务完成 cutoff_date={result.get('cutoff_date')} "
+            f"total_deleted={result.get('total_deleted', 0)} "
+            f"success={result.get('success_count', 0)} "
+            f"failed={result.get('failed_count', 0)}"
+        )
+        for tbl in result.get("tables", []):
+            err_msg = tbl.get("error")
+            logger.info(
+                f"  表 {tbl.get('table')}: 删除 {tbl.get('deleted', 0)} 条 "
+                + (f"错误: {err_msg}" if err_msg else "成功")
+            )
+    except Exception as e:
+        logger.error(f"广告数据清理任务失败: {e}", exc_info=True)
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        db.close()
+        logger.info("========== 广告数据清理任务执行结束 ==========")

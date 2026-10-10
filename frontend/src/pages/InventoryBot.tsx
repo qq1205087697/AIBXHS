@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Card,
   Row,
@@ -59,6 +59,7 @@ interface OverviewData {
   yellow_count: number;
   green_count: number;
   snapshot_date: string;
+  latest_updated_at?: string | null;
   stockout_top10: StockoutItem[];
   overstock_top10: OverstockItem[];
 }
@@ -176,6 +177,333 @@ const truncateText = (text: string, maxLen: number): string => {
   return text.length > maxLen ? text.substring(0, maxLen) + "..." : text;
 };
 
+// ==================== 国家 / 大区（区域）工具 ====================
+// 国家代码 -> 中文名
+const SITE_CODE_TO_COUNTRY: Record<string, string> = {
+  US: "美国",
+  USA: "美国",
+  UK: "英国",
+  GB: "英国",
+  DE: "德国",
+  FR: "法国",
+  IT: "意大利",
+  ES: "西班牙",
+  JP: "日本",
+  CA: "加拿大",
+  MX: "墨西哥",
+  AU: "澳大利亚",
+  NL: "荷兰",
+  SE: "瑞典",
+  PL: "波兰",
+  BE: "比利时",
+  IE: "爱尔兰",
+  AT: "奥地利",
+  TR: "土耳其",
+  SG: "新加坡",
+  AE: "阿联酋",
+  SA: "沙特阿拉伯",
+  EG: "埃及",
+  IN: "印度",
+  BR: "巴西",
+};
+
+// 中文国家名 -> 大区
+export const COUNTRY_TO_CONTINENT: Record<string, string> = {
+  英国: "欧洲",
+  德国: "欧洲",
+  法国: "欧洲",
+  意大利: "欧洲",
+  西班牙: "欧洲",
+  荷兰: "欧洲",
+  瑞典: "欧洲",
+  波兰: "欧洲",
+  比利时: "欧洲",
+  爱尔兰: "欧洲",
+  奥地利: "欧洲",
+  土耳其: "欧洲",
+  美国: "北美洲",
+  加拿大: "北美洲",
+  墨西哥: "北美洲",
+  日本: "亚洲",
+  新加坡: "亚洲",
+  印度: "亚洲",
+  阿联酋: "亚洲",
+  巴西: "中南美洲",
+  澳大利亚: "大洋洲",
+  沙特阿拉伯: "中东",
+  埃及: "中东",
+};
+
+// 中文国家名 -> 代码（供店铺标签匹配）
+const COUNTRY_TO_CODE: Record<string, string> = {
+  美国: "US",
+  英国: "UK",
+  德国: "DE",
+  法国: "FR",
+  意大利: "IT",
+  西班牙: "ES",
+  日本: "JP",
+  加拿大: "CA",
+  墨西哥: "MX",
+  澳大利亚: "AU",
+  荷兰: "NL",
+  瑞典: "SE",
+  波兰: "PL",
+  比利时: "BE",
+  爱尔兰: "IE",
+  奥地利: "AT",
+  土耳其: "TR",
+  新加坡: "SG",
+  阿联酋: "AE",
+  沙特阿拉伯: "SA",
+  埃及: "EG",
+  印度: "IN",
+  巴西: "BR",
+};
+
+const CONTINENT_ORDER = [
+  "欧洲",
+  "北美洲",
+  "亚洲",
+  "中南美洲",
+  "大洋洲",
+  "中东",
+];
+
+// 根据中文国家名获取大区，未知国家归入"其他"
+const getContinent = (country: string): string => {
+  if (!country) return "其他";
+  for (const key of Object.keys(COUNTRY_TO_CONTINENT)) {
+    if (country.includes(key)) return COUNTRY_TO_CONTINENT[key];
+  }
+  return "其他";
+};
+
+// 将扁平 options [{value,label}] 按大区分组，返回 [{label, items}] 结构，
+// 供级联筛选面板（左大区 / 右成员）直接使用；无需再塞「X（全选）」选项，
+// 「整合欧洲」等需求由面板内「选择本组」勾选实现。
+const buildGroupedOptions = (
+  options: { value: string; label: string }[],
+  regionOf: (value: string) => string,
+): { label: string; items: { value: string; label: string }[] }[] => {
+  const groups: Record<string, { value: string; label: string }[]> = {};
+  for (const opt of options) {
+    const region = regionOf(opt.value);
+    (groups[region] ||= []).push(opt);
+  }
+  const result: { label: string; items: { value: string; label: string }[] }[] = [];
+  for (const continent of CONTINENT_ORDER) {
+    if (groups[continent] && groups[continent].length > 0) {
+      result.push({ label: continent, items: groups[continent] });
+      delete groups[continent];
+    }
+  }
+  const leftovers = Object.values(groups).flat();
+  if (leftovers.length > 0) {
+    result.push({ label: "其他", items: leftovers });
+  }
+  return result;
+};
+
+// 根据国家名或国家代码判断店铺所属大区（店铺标签形如 "品牌-US" / "品牌-美国" / "品牌"）
+const getStoreContinentFromLabel = (label: string): string => {
+  for (const [code, country] of Object.entries(SITE_CODE_TO_COUNTRY)) {
+    if (label.includes(`-${code}`) || label.includes(`-${country}`)) {
+      return getContinent(country);
+    }
+  }
+  // 尝试直接匹配中文国家名
+  for (const country of Object.keys(COUNTRY_TO_CONTINENT)) {
+    if (label.includes(country)) return COUNTRY_TO_CONTINENT[country];
+  }
+  return "其他";
+};
+
+// 表格"国家"列规范化：代码->中文；合并值（顿号）逐项映射后保留
+const normalizeCountry = (value: string): string => {
+  if (!value) return "-";
+  return value
+    .split("、")
+    .map((c) => {
+      const trimmed = c.trim();
+      if (!trimmed) return trimmed;
+      return SITE_CODE_TO_COUNTRY[trimmed.toUpperCase()] || trimmed;
+    })
+    .join("、");
+};
+
+// ==================== 级联筛选面板（领星风格） ====================
+// 左：大区列表；右：该大区成员；顶部搜索、底部 取消/确定。
+// 大区行可一次性勾选「选择本组」，从而天然实现「整合欧洲/北美洲…」，
+// 下拉里不再堆砌「欧洲（全选）」这类冗余选项。
+
+interface CascaderGroup {
+  label: string;
+  items: { value: string; label: string }[];
+}
+
+interface CascadingFilterProps {
+  title: string;
+  placeholder?: string;
+  value: string[];
+  groups: CascaderGroup[];
+  onChange: (values: string[]) => void;
+  width?: number;
+}
+
+const CascadingFilter: React.FC<CascadingFilterProps> = ({
+  title,
+  placeholder = "请选择",
+  value,
+  groups,
+  onChange,
+  width = 180,
+}) => {
+  const [open, setOpen] = useState(false);
+  const [activeGroup, setActiveGroup] = useState<string>("");
+  const [draft, setDraft] = useState<string[]>(value);
+  const [keyword, setKeyword] = useState("");
+
+  const handleOpenChange = (next: boolean) => {
+    if (next) {
+      setDraft([...value]);
+      setKeyword("");
+      const first =
+        groups.find((g) => g.items.length > 0)?.label ??
+        groups[0]?.label ??
+        "";
+      setActiveGroup((prev) =>
+        prev && groups.some((g) => g.label === prev) ? prev : first,
+      );
+    }
+    setOpen(next);
+  };
+
+  const currentGroup =
+    groups.find((g) => g.label === activeGroup) ?? groups[0];
+
+  const kw = keyword.trim().toLowerCase();
+  const filteredItems = (currentGroup?.items ?? []).filter((it) =>
+    it.label.toLowerCase().includes(kw),
+  );
+  const groupAllChecked =
+    (currentGroup?.items.length ?? 0) > 0 &&
+    (currentGroup?.items ?? []).every((it) => draft.includes(it.value));
+  const groupIndeterminate =
+    !groupAllChecked &&
+    (currentGroup?.items ?? []).some((it) => draft.includes(it.value));
+
+  const toggleItem = (v: string, checked: boolean) => {
+    setDraft((prev) =>
+      checked ? [...new Set([...prev, v])] : prev.filter((x) => x !== v),
+    );
+  };
+  const toggleGroup = (checked: boolean) => {
+    if (!currentGroup) return;
+    setDraft((prev) => {
+      const set = new Set(prev);
+      if (checked) currentGroup.items.forEach((it) => set.add(it.value));
+      else currentGroup.items.forEach((it) => set.delete(it.value));
+      return [...set];
+    });
+  };
+
+  const handleConfirm = () => {
+    onChange(draft);
+    setOpen(false);
+  };
+
+  const selectedCount = value.length;
+
+  const content = (
+    <div className="inv-cascader-pop">
+      <div className="inv-cascader-left">
+        {groups.map((g) => (
+          <div
+            key={g.label}
+            className={`inv-cascader-group${g.label === activeGroup ? " active" : ""}`}
+            onClick={() => {
+              setActiveGroup(g.label);
+              setKeyword("");
+            }}
+          >
+            <span className="inv-cascader-group-name">{g.label}</span>
+            <span className="inv-cascader-group-count">{g.items.length}</span>
+          </div>
+        ))}
+      </div>
+      <div className="inv-cascader-right">
+        <Input
+          size="small"
+          allowClear
+          prefix={<Search size={13} color="#bbb" />}
+          placeholder={`搜索${title}`}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+        />
+        <div className="inv-cascader-selectall">
+          <Checkbox
+            checked={groupAllChecked}
+            indeterminate={groupIndeterminate}
+            onChange={(e) => toggleGroup(e.target.checked)}
+          >
+            选择{activeGroup || "全部"}
+          </Checkbox>
+        </div>
+        <div className="inv-cascader-items">
+          {filteredItems.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="无匹配项"
+              style={{ marginTop: 20, marginBottom: 8 }}
+            />
+          ) : (
+            filteredItems.map((it) => (
+              <div key={it.value} className="inv-cascader-item">
+                <Checkbox
+                  checked={draft.includes(it.value)}
+                  onChange={(e) => toggleItem(it.value, e.target.checked)}
+                >
+                  {it.label}
+                </Checkbox>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      <div className="inv-cascader-footer">
+        <Button size="small" onClick={() => setOpen(false)}>
+          取消
+        </Button>
+        <Button size="small" type="primary" onClick={handleConfirm}>
+          确定
+        </Button>
+      </div>
+    </div>
+  );
+
+  return (
+    <Popover
+      content={content}
+      trigger="click"
+      open={open}
+      onOpenChange={handleOpenChange}
+      placement="bottomLeft"
+      getPopupContainer={(trigger) => trigger.parentElement ?? document.body}
+    >
+      <Button
+        className={`inv-cascader-trigger${selectedCount > 0 ? " has-value" : ""}`}
+        style={{ width }}
+      >
+        <span className="inv-cascader-trigger-text">
+          {selectedCount > 0 ? `${title}（${selectedCount}）` : placeholder}
+        </span>
+        <ChevronDown size={14} color="#999" />
+      </Button>
+    </Popover>
+  );
+};
+
 // ==================== Component ====================
 
 const InventoryBot: React.FC = () => {
@@ -275,7 +603,7 @@ const InventoryBot: React.FC = () => {
     pageSize: 20,
     showSizeChanger: true,
     showTotal: (t) => `共 ${t} 条`,
-    pageSizeOptions: ["10", "20", "50", "100"],
+    pageSizeOptions: ["10", "20", "50", "100", "200"],
   });
 
   // --- Sorting ---
@@ -511,14 +839,15 @@ const InventoryBot: React.FC = () => {
   };
 
   const handleAccountFilterChange = (values: string[]) => {
-    setAccountFilter(values || []);
+    const next = [...new Set(values || [])];
+    setAccountFilter(next);
     setPagination((prev) => ({ ...prev, current: 1 }));
     fetchInventoryList(
       1,
       pagination.pageSize,
       searchText,
       tableRiskFilter,
-      values || [],
+      next,
       countryFilter,
       sortField,
       sortOrder,
@@ -527,7 +856,7 @@ const InventoryBot: React.FC = () => {
   };
 
   const handleCountryFilterChange = (values: string[]) => {
-    const selectedCountries = values || [];
+    const selectedCountries = [...new Set(values || [])];
     setCountryFilter(selectedCountries);
     setAccountFilter([]); // 清空店铺筛选，因为换了国家后店铺列表会变
     setPagination((prev) => ({ ...prev, current: 1 }));
@@ -537,31 +866,8 @@ const InventoryBot: React.FC = () => {
       // 店铺格式是 "店铺名-国家代码"，如 "JeVenis-US"
       // 国家选项是中文，需要匹配店铺中的国家代码
       const filteredStores = allAccountOptions.filter((store) => {
-        // 店铺值格式: "店铺名-US" 或 "店铺名-美国"
         return selectedCountries.some((country) => {
-          // 尝试匹配国家代码或国家名称
-          const countryCodeMap: Record<string, string> = {
-            美国: "US",
-            英国: "UK",
-            德国: "DE",
-            法国: "FR",
-            意大利: "IT",
-            西班牙: "ES",
-            日本: "JP",
-            加拿大: "CA",
-            墨西哥: "MX",
-            澳大利亚: "AU",
-            荷兰: "NL",
-            瑞典: "SE",
-            波兰: "PL",
-            比利时: "BE",
-            新加坡: "SG",
-            阿联酋: "AE",
-            印度: "IN",
-            巴西: "BR",
-          };
-          const code = countryCodeMap[country] || country;
-          // 检查店铺值是否包含国家代码
+          const code = COUNTRY_TO_CODE[country] || country;
           return (
             store.value.includes(`-${code}`) ||
             store.value.includes(`-${country}`)
@@ -570,7 +876,6 @@ const InventoryBot: React.FC = () => {
       });
       setAccountOptions(filteredStores);
     } else {
-      // 没有选择国家，显示所有店铺
       setAccountOptions(allAccountOptions);
     }
 
@@ -747,7 +1052,10 @@ const InventoryBot: React.FC = () => {
       return;
     }
     try {
-      const response = await inventoryApi.getSummaryChildren(record.asin, record.account);
+      const response = await inventoryApi.getSummaryChildren(
+        record.asin,
+        record.account,
+      );
       const data = response.data?.data || [];
       const children = (Array.isArray(data) ? data : []).map((c) => ({
         ...c,
@@ -1286,7 +1594,8 @@ const InventoryBot: React.FC = () => {
       title: "国家",
       dataIndex: "country",
       key: "country",
-      width: 80,
+      width: 100,
+      render: (val: string) => <span>{normalizeCountry(val)}</span>,
     },
     {
       title: "FBA库存",
@@ -1912,9 +2221,11 @@ const InventoryBot: React.FC = () => {
                 okText="确定"
                 cancelText="取消"
               >
-                <Tag color="default" style={{ cursor: "pointer" }}>
-                  不做了
-                </Tag>
+                <Tooltip title="已标记为「停售」，该商品将从风险TOP10与数量统计中排除。点击可清除标记。">
+                  <Tag color="default" style={{ cursor: "pointer" }}>
+                    停售
+                  </Tag>
+                </Tooltip>
               </Popconfirm>
             ) : record.is_holiday ? (
               <Popconfirm
@@ -1945,9 +2256,13 @@ const InventoryBot: React.FC = () => {
                 okText="确定"
                 cancelText="取消"
               >
-                <Tag color="purple" style={{ cursor: "pointer" }}>
-                  {record.is_holiday}
-                </Tag>
+                <Tooltip
+                  title={`已标记为「${record.is_holiday}」节日商品，将从风险TOP10与数量统计中排除。点击可清除标记。`}
+                >
+                  <Tag color="purple" style={{ cursor: "pointer" }}>
+                    {record.is_holiday}
+                  </Tag>
+                </Tooltip>
               </Popconfirm>
             ) : (
               <Dropdown
@@ -1963,7 +2278,7 @@ const InventoryBot: React.FC = () => {
                         { key: "其他", label: "其他" },
                       ],
                     },
-                    { key: "discontinued", label: "不做了", danger: true },
+                    { key: "discontinued", label: "停售", danger: true },
                   ],
                   onClick: async ({ key }) => {
                     try {
@@ -2002,9 +2317,11 @@ const InventoryBot: React.FC = () => {
                 }}
                 trigger={["click"]}
               >
-                <Button type="link" size="small">
-                  标记
-                </Button>
+                <Tooltip title="对该商品执行「标记」：标记节日类型或「停售」，标记后将从断货风险TOP10、冗余TOP10及数量统计中排除。">
+                  <Button type="link" size="small">
+                    标记
+                  </Button>
+                </Tooltip>
               </Dropdown>
             )}
           </Space>
@@ -2081,6 +2398,20 @@ const InventoryBot: React.FC = () => {
     });
   }, [inventoryColumns, columnVisibility, frozenColumns]);
 
+  /** 表格总宽 = 当前可见列宽之和。
+   *  替代硬编码 1620：列可增删/隐藏时保持与真实列宽一致，
+   *  避免 fixed 布局下 max(1620, 列宽和) 造成的列挤压与右侧空白拖拽区。
+   *  注意：返回值为 number，作为 useEffect 依赖时按值比较，
+   *  不会因 childWrappedColumns 每次 render 换新引用而重复触发。 */
+  const tableScrollX = useMemo(
+    () =>
+      childWrappedColumns.reduce<number>(
+        (sum, col) => sum + (Number((col as any).width) || 120),
+        0,
+      ),
+    [childWrappedColumns],
+  );
+
   const inboundColumns: ColumnsType<InboundDetail> = [
     {
       title: "货件单号",
@@ -2140,13 +2471,116 @@ const InventoryBot: React.FC = () => {
 
   const snapshotDate = overviewData?.snapshot_date || "";
 
+  // 按大区分组：国家筛选面板（级联）
+  const countryGroups = useMemo<CascaderGroup[]>(
+    () => buildGroupedOptions(countryOptions, getContinent),
+    [countryOptions],
+  );
+  // 按大区分组：店铺筛选面板（随国家联动变化的 accountOptions）
+  const storeGroups = useMemo<CascaderGroup[]>(
+    () =>
+      buildGroupedOptions(accountOptions, (v) => {
+        const found = accountOptions.find((o) => o.value === v);
+        return getStoreContinentFromLabel(found?.label ?? v);
+      }),
+    [accountOptions],
+  );
+
+  // 表格横向滚动条（置于分页控件上方）所需的引用与同步逻辑
+  const hScrollAreaRef = useRef<HTMLDivElement | null>(null); // 包裹 Table，用于捕获滚动与定位内部滚动容器
+  const hScrollBarRef = useRef<HTMLDivElement | null>(null); // 自定义横向滚动条
+  const hScrollFillerRef = useRef<HTMLDivElement | null>(null); // 滚动条内部占位，宽度=表格内容宽度
+  const syncingHScroll = useRef(false);
+  const hScrollTicking = useRef(false); // 横向滚动同步按帧节流，保证 500条/页 大表拖拽丝滑
+
+  // 定位表格实际的横向滚动容器（优先最外层 .ant-table-content，其次 .ant-table-body）
+  const getHScrollEl = (): HTMLElement | null => {
+    const root = hScrollAreaRef.current;
+    if (!root) return null;
+    const content = root.querySelector<HTMLElement>(".ant-table-content");
+    const body = root.querySelector<HTMLElement>(".ant-table-body");
+    if (content && content.scrollWidth > content.clientWidth) return content;
+    if (body && body.scrollWidth > body.clientWidth) return body;
+    return content || body;
+  };
+
+  // 自定义滚动条滚动 -> 同步表格横向位置（按帧节流）
+  // 优化（C1）：进入即比对「条/表」当前 scrollLeft，
+  // 差值 < 1px 视为已同步直接返回，打断「条→表→条」的冗余同步回合，
+  // 把每次拖拽手势的 repaint 从 2 次压到 1 次，缓解 500 行大表横向卡顿。
+  const handleControlScroll = () => {
+    const bar = hScrollBarRef.current;
+    if (!bar) return;
+    const el = getHScrollEl();
+    if (!el) return;
+    if (Math.abs(el.scrollLeft - bar.scrollLeft) < 1) return;
+    if (syncingHScroll.current || hScrollTicking.current) return;
+    hScrollTicking.current = true;
+    requestAnimationFrame(() => {
+      hScrollTicking.current = false;
+      if (syncingHScroll.current) return;
+      const el2 = getHScrollEl();
+      if (!el2) return;
+      syncingHScroll.current = true;
+      el2.scrollLeft = bar.scrollLeft;
+      syncingHScroll.current = false;
+    });
+  };
+
+  // 表格横向滚动 -> 同步自定义滚动条位置（按帧节流）
+  // 优化（C1）：同上，差值 < 1px 直接返回，避免「表→条→表」冗余回合。
+  const handleAreaScroll = () => {
+    const el = getHScrollEl();
+    if (!el) return;
+    const bar = hScrollBarRef.current;
+    if (!bar) return;
+    if (Math.abs(el.scrollLeft - bar.scrollLeft) < 1) return;
+    if (syncingHScroll.current || hScrollTicking.current) return;
+    hScrollTicking.current = true;
+    requestAnimationFrame(() => {
+      hScrollTicking.current = false;
+      if (syncingHScroll.current) return;
+      const bar2 = hScrollBarRef.current;
+      if (!bar2) return;
+      syncingHScroll.current = true;
+      bar2.scrollLeft = el.scrollLeft;
+      syncingHScroll.current = false;
+    });
+  };
+
+  // 数据 / 列 / 容器宽度变化后，把滚动条占位宽度校准为表格内容实际宽度
+  useEffect(() => {
+    const root = hScrollAreaRef.current;
+    const filler = hScrollFillerRef.current;
+    if (!root || !filler) return;
+
+    const sync = () => {
+      const el = getHScrollEl();
+      if (!el) return;
+      // + 纵向滚动条宽度：让自定义条的最大 scrollLeft 与表体完全一致，
+      // 否则拖到底会差出一条纵向滚动条的宽度（约 15px）。
+      const vBar = el.offsetWidth - el.clientWidth;
+      const w = Math.max(el.scrollWidth + vBar, el.clientWidth);
+      filler.style.width = `${w}px`;
+    };
+
+    const raf = requestAnimationFrame(sync);
+    // 容器宽度变化（窗口缩放 / 侧边栏折叠）也需重新校准
+    const ro = new ResizeObserver(sync);
+    ro.observe(root);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [displayList, tableLoading, total, tableScrollX]);
+
   return (
     <div
       style={{
         height: "100%",
         overflowY: "auto",
         overflowX: "hidden",
-        padding: "0 0 24px 0",
+        padding: "0 0 0 0",
       }}
     >
       {contextHolder}
@@ -2162,10 +2596,28 @@ const InventoryBot: React.FC = () => {
           gap: 12,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 16, flex: 1 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 16,
+            flex: 1,
+            flexWrap: "wrap",
+          }}
+        >
           {snapshotDate && (
-            <span style={{ color: "#888", fontSize: 13 }}>
-              数据更新时间: {snapshotDate}
+            <span
+              style={{
+                color: "#555",
+                fontSize: 13,
+                background: "#fafafa",
+                border: "1px solid #eee",
+                borderRadius: 4,
+                padding: "3px 10px",
+              }}
+              title="数据日期为库存快照的业务日期"
+            >
+              数据日期: <b>{snapshotDate}</b>
             </span>
           )}
           <Button
@@ -3066,68 +3518,54 @@ const InventoryBot: React.FC = () => {
             value={searchText}
             onChange={(e) => handleSearch(e.target.value)}
           />
-          <Select
-            mode="multiple"
+          <CascadingFilter
+            title="国家"
             placeholder="筛选国家（先选）"
-            allowClear
-            showSearch
-            style={{ width: 140 }}
+            width={160}
             value={countryFilter}
+            groups={countryGroups}
             onChange={handleCountryFilterChange}
-            options={countryOptions}
-            maxTagCount={2}
-            filterOption={(input, option) =>
-              (option?.label as string)
-                ?.toLowerCase()
-                .includes(input.toLowerCase())
-            }
           />
-          <Select
-            mode="multiple"
+          <CascadingFilter
+            title="店铺"
             placeholder="筛选店铺（后选）"
-            allowClear
-            showSearch
-            style={{ width: 180 }}
+            width={210}
             value={accountFilter}
+            groups={storeGroups}
             onChange={handleAccountFilterChange}
-            options={accountOptions}
-            maxTagCount={2}
-            filterOption={(input, option) =>
-              (option?.label as string)
-                ?.toLowerCase()
-                .includes(input.toLowerCase())
-            }
           />
-          <Select
-            placeholder="产品状态"
-            style={{ width: 140 }}
-            value={holidayFilter}
-            onChange={(value) => {
-              setHolidayFilter(value);
-              setPagination((prev) => ({ ...prev, current: 1 }));
-              fetchInventoryList(
-                1,
-                pagination.pageSize,
-                searchText,
-                tableRiskFilter,
-                accountFilter,
-                countryFilter,
-                sortField,
-                sortOrder,
-                value,
-              );
-            }}
-            options={[
-              { label: "正常产品", value: "only_non_holiday" },
-              { label: "节日产品-全部", value: "only_holiday" },
-              { label: "圣诞", value: "holiday_圣诞" },
-              { label: "万圣", value: "holiday_万圣" },
-              { label: "跨年", value: "holiday_跨年" },
-              { label: "其他", value: "holiday_其他" },
-              { label: "不做了", value: "only_discontinued" },
-              { label: "全部", value: "all" },
-            ]}
-          />
+          <Tooltip title="标记说明：标记为「节日」或「停售」的商品，将从断货风险TOP10、冗余库存TOP10及数量统计中自动排除。">
+            <Select
+              placeholder="产品状态"
+              style={{ width: 140 }}
+              value={holidayFilter}
+              onChange={(value) => {
+                setHolidayFilter(value);
+                setPagination((prev) => ({ ...prev, current: 1 }));
+                fetchInventoryList(
+                  1,
+                  pagination.pageSize,
+                  searchText,
+                  tableRiskFilter,
+                  accountFilter,
+                  countryFilter,
+                  sortField,
+                  sortOrder,
+                  value,
+                );
+              }}
+              options={[
+                { label: "正常产品", value: "only_non_holiday" },
+                { label: "节日产品-全部", value: "only_holiday" },
+                { label: "圣诞", value: "holiday_圣诞" },
+                { label: "万圣", value: "holiday_万圣" },
+                { label: "跨年", value: "holiday_跨年" },
+                { label: "其他", value: "holiday_其他" },
+                { label: "停售", value: "only_discontinued" },
+                { label: "全部", value: "all" },
+              ]}
+            />
+          </Tooltip>
           <Button
             icon={<RefreshCw size={16} />}
             onClick={handleSyncFeishu}
@@ -3206,6 +3644,157 @@ const InventoryBot: React.FC = () => {
         }
         .risk-row-green:hover td {
           background: #f6ffed !important;
+        }
+        /* ===== 库存明细表：只保留分页上方的自定义横向滚动条 =====
+           根因：antd 5.29.3 在 .ant-table-wrapper .ant-table 上注入了
+           scrollbar-color（antd/es/table/style/index.js:54，默认
+           rgba(0,0,0,0.25) rgba(5,5,5,0.06)）。该属性可继承；
+           Chrome ≥121 一旦命中标准滚动条属性，就会整条忽略 ::-webkit-scrollbar
+           规则 —— 这正是此前 height:0 屡改无效的原因。
+           对策：在本页作用域内把标准属性复位为 auto，回落到 WebKit 伪元素渲染路径。
+           作用域：.inv-detail-hscroll 仅加在本页表格的包裹 div 上，
+           避免影响全站其他 antd Table。 */
+        .inv-detail-hscroll .ant-table-body,
+        .inv-detail-hscroll .ant-table-content,
+        .inv-detail-hscroll .ant-table-header {
+          scrollbar-color: auto;
+          scrollbar-width: auto;
+        }
+        /* 优化（C2）：固定列在横向滚动时由浏览器逐帧更新 sticky 位置。
+           显式提升为合成层，把「主线程重排+重绘」降级为「仅合成」，
+           直接缓解 500 行大表横向拖拽时固定列跟随的卡顿。
+           仅作用于固定列单元格（数量很少），不波及 11500 个普通单元格，
+           避免 will-change 撑爆 GPU 显存。 */
+        .inv-detail-hscroll .ant-table-cell-fix-left,
+        .inv-detail-hscroll .ant-table-cell-fix-right {
+          will-change: transform;
+        }
+        /* 隐藏 rc-table 在「scroll.x + 冻结列」时渲染的原生底部横向滚动条
+           （.ant-table-sticky-scroll，内含 .ant-table-sticky-scroll-bar）。
+           横向滑动统一由分页上方的自定义滚动条 .table-h-scroll 承担，
+           否则冻结列场景会出现第二条横向滑条。
+           注：本规则此前仅存在于工作区、从未提交，合并时被丢弃。 */
+        .inv-detail-hscroll .ant-table-sticky-scroll {
+          display: none;
+        }
+        /* height 控制横向滚动条厚度 → 0 即隐藏横向条，保留纵向条。
+           故意不写 width：纵向滚动条保持浏览器默认厚度，避免与 rc-table 的
+           scrollbarSize 补偿值不一致，导致表头 / 表体列错位。 */
+        .inv-detail-hscroll .ant-table-body::-webkit-scrollbar,
+        .inv-detail-hscroll .ant-table-content::-webkit-scrollbar,
+        .inv-detail-hscroll .ant-table-header::-webkit-scrollbar {
+          height: 0;
+        }
+        .inv-detail-hscroll .ant-table-body::-webkit-scrollbar-thumb,
+        .inv-detail-hscroll .ant-table-content::-webkit-scrollbar-thumb,
+        .inv-detail-hscroll .ant-table-header::-webkit-scrollbar-thumb {
+          background: #c5c5c5;
+          border-radius: 5px;
+        }
+        /* 自定义横向滚动条样式
+           刻意不写 scrollbar-width / scrollbar-color：一旦命中标准滚动条属性，
+           Chrome ≥121 会整条忽略下面的 ::-webkit-scrollbar 规则。
+           本元素不在 .ant-table 内，不会继承 antd 注入的 scrollbar-color，
+           因此 WebKit 伪元素可直接生效，厚度稳定为 10px。 */
+        .table-h-scroll::-webkit-scrollbar {
+          height: 10px;
+        }
+        .table-h-scroll::-webkit-scrollbar-track {
+          background: #f0f0f0;
+          border-radius: 5px;
+        }
+        .table-h-scroll::-webkit-scrollbar-thumb {
+          background: #c5c5c5;
+          border-radius: 5px;
+        }
+        .table-h-scroll::-webkit-scrollbar-thumb:hover {
+          background: #a8a8a8;
+        }
+        /* 非 WebKit（Firefox）兜底：标准滚动条属性只能整体着色，
+           无法只隐藏横向一条，故此处仅做视觉收敛，功能不受影响。 */
+        @supports not selector(::-webkit-scrollbar) {
+          .table-h-scroll {
+            scrollbar-width: thin;
+            scrollbar-color: #c5c5c5 #f0f0f0;
+          }
+        }
+        /* ===== 级联筛选面板（领星风格） ===== */
+        .inv-cascader-trigger {
+          display: inline-flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0 8px;
+          text-align: left;
+        }
+        .inv-cascader-trigger.has-value {
+          color: #262626;
+          border-color: #91caff;
+        }
+        .inv-cascader-trigger-text {
+          flex: 1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .inv-cascader-pop {
+          position: relative;
+          display: flex;
+          width: 420px;
+          height: 320px;
+          font-size: 13px;
+        }
+        .inv-cascader-left {
+          width: 110px;
+          border-right: 1px solid #f0f0f0;
+          overflow-y: auto;
+          padding: 4px 0;
+        }
+        .inv-cascader-group {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 8px 12px;
+          cursor: pointer;
+          color: #595959;
+          border-left: 2px solid transparent;
+        }
+        .inv-cascader-group:hover {
+          background: #f5f5f5;
+        }
+        .inv-cascader-group.active {
+          background: #e6f4ff;
+          border-left-color: #1677ff;
+          color: #1677ff;
+          font-weight: 600;
+        }
+        .inv-cascader-group-count {
+          font-size: 12px;
+          color: #bfbfbf;
+        }
+        .inv-cascader-right {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          padding: 8px 12px;
+        }
+        .inv-cascader-selectall {
+          padding: 6px 0;
+          border-bottom: 1px solid #f5f5f5;
+          margin-bottom: 4px;
+        }
+        .inv-cascader-items {
+          flex: 1;
+          overflow-y: auto;
+        }
+        .inv-cascader-item {
+          padding: 4px 0;
+        }
+        .inv-cascader-footer {
+          position: absolute;
+          right: 12px;
+          bottom: 10px;
+          display: flex;
+          gap: 8px;
         }
       `}</style>
       {/* ===== 5. Inventory Detail Table ===== */}
@@ -3376,53 +3965,97 @@ const InventoryBot: React.FC = () => {
         bordered={false}
         style={{ borderRadius: 8 }}
       >
-        <Table
-          columns={childWrappedColumns}
-          dataSource={displayList}
-          rowKey={(record: any) =>
-            record._isChild ? `child_${record.id}` : record.id
-          }
-          loading={tableLoading}
-          pagination={false}
-          onChange={handleTableChange}
-          scroll={{ x: 1620, y: "calc(100vh - 380px)" }}
-          size="small"
-          rowClassName={(record) => {
-            let classes = [];
-            if (
-              record.summary_flag === "共享库存" ||
-              record.summary_flag === "是"
-            ) {
-              classes.push("summary-row");
+        {/* 作用域锚点：.inv-detail-hscroll 用于把页面内 <style> 中的表格
+            滚动条规则收敛到本页表格，避免全局污染其他页面的 antd Table */}
+        <div
+          ref={hScrollAreaRef}
+          className="inv-detail-hscroll"
+          onScroll={handleAreaScroll}
+        >
+          <Table
+            columns={childWrappedColumns}
+            dataSource={displayList}
+            rowKey={(record: any) =>
+              record._isChild ? `child_${record.id}` : record.id
             }
-            if (record.risk_level === "red") {
-              classes.push("risk-row-red");
-            } else if (record.risk_level === "yellow") {
-              classes.push("risk-row-yellow");
-            } else if (record.risk_level === "green") {
-              classes.push("risk-row-green");
-            }
-            return classes.join(" ");
-          }}
-        />
+            loading={tableLoading}
+            pagination={false}
+            onChange={handleTableChange}
+            scroll={{ x: tableScrollX, y: "calc(100vh - 380px)" }}
+            size="small"
+            rowClassName={(record) => {
+              let classes = [];
+              if (
+                record.summary_flag === "共享库存" ||
+                record.summary_flag === "是"
+              ) {
+                classes.push("summary-row");
+              }
+              if (record.risk_level === "red") {
+                classes.push("risk-row-red");
+              } else if (record.risk_level === "yellow") {
+                classes.push("risk-row-yellow");
+              } else if (record.risk_level === "green") {
+                classes.push("risk-row-green");
+              }
+              return classes.join(" ");
+            }}
+          />
+        </div>
         {total > 0 && (
           <div
             style={{
-              display: "flex",
-              justifyContent: "flex-end",
-              padding: "16px 0 0",
+              position: "sticky",
+              bottom: 0,
+              background: "#fff",
+              borderTop: "1px solid #f0f0f0",
+              boxShadow: "0 -4px 8px rgba(0,0,0,0.03)",
+              zIndex: 10,
+              padding: "6px 0 0",
             }}
           >
-            <Pagination
-              current={pagination.current || 1}
-              pageSize={pagination.pageSize || 20}
-              total={total}
-              showTotal={(t) => `共 ${t} 条`}
-              showSizeChanger
-              pageSizeOptions={["10", "20", "50", "100", "200", "500"]}
-              onChange={handlePageChange}
-              onShowSizeChange={handlePageChange}
-            />
+            {/* 自定义横向滚动条：控制数据表左右滑动，置于分页控件上方 */}
+            <div
+              ref={hScrollBarRef}
+              className="table-h-scroll"
+              onScroll={handleControlScroll}
+              style={{
+                overflowX: "auto",
+                overflowY: "hidden",
+                height: 14,
+              }}
+            >
+              <div
+                ref={hScrollFillerRef}
+                style={{
+                  height: 1,
+                  width: "100%",
+                  pointerEvents: "auto",
+                }}
+              />
+            </div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                padding: "12px 0 0",
+              }}
+            >
+              {/* 每页上限收敛到 200：500 行时 rc-table 无虚拟滚动，
+                  约 11500 单元格全量渲染，横向拖拽卡顿；方向 C
+                  （相等守卫 + will-change 合成层）缓解后仍不如降量彻底。
+                  此处封顶 200，DOM 体量减半，配合 C 已足够顺滑。 */}
+              <Pagination
+                current={pagination.current || 1}
+                pageSize={pagination.pageSize || 20}
+                total={total}
+                showTotal={(t) => `共 ${t} 条`}
+                showSizeChanger
+                pageSizeOptions={["10", "20", "50", "100", "200"]}
+                onChange={handlePageChange}
+                onShowSizeChange={handlePageChange}
+              />
+            </div>
           </div>
         )}
       </Card>

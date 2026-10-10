@@ -48,7 +48,7 @@ def _log(msg: str):
     _import_status["step"] = msg
 
 
-def _do_import(file_path: str = None, file_content: bytes = None, filename: str = None):
+def _do_import(file_path: str = None, file_content: bytes = None, filename: str = None, tenant_id: int = 1):
     """后台导入任务"""
     global _import_status
     
@@ -112,7 +112,7 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
                 df[col] = df[col].fillna("").astype(str)
         
         df["snapshot_date"] = today
-        df["tenant_id"] = 1
+        df["tenant_id"] = tenant_id
         _log("数据清洗完成")
 
         # 动态计算总库存：fba_stock + fba_inbound + local_inventory - inspection_quantity
@@ -137,8 +137,9 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
             existing_rows = db.execute(text("""
                 SELECT id, asin, account, country, summary_flag, snapshot_date
                 FROM inventory_snapshots
+                WHERE tenant_id = :tid
                 ORDER BY snapshot_date DESC
-            """)).fetchall()
+            """), {"tid": tenant_id}).fetchall()
         except Exception:
             existing_rows = []
 
@@ -290,7 +291,7 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
                     details = _parse_inbound_details_fast(raw_detail)
                     for d in details:
                         inbound_records.append({
-                            "tenant_id": 1,
+                            "tenant_id": tenant_id,
                             "snapshot_id": snapshot_ids[idx],
                             "asin": row.get("asin", ""),
                             "account": row.get("account", ""),
@@ -503,7 +504,8 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
             db,
             snapshot_date=today.isoformat(),
             snapshot_ids=None,  # 不限制 snapshot_ids，计算当天全部快照
-            progress_callback=_calc_progress
+            progress_callback=_calc_progress,
+            tenant_id=tenant_id
         )
         _import_status["replen_count"] = calc_result.get("total", 0)
         _log(f"replenishment_decisions 计算完成: {calc_result}")
@@ -551,7 +553,7 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         db.close()
 
 
-def start_import_async(file_path: str = None, file_content: bytes = None, filename: str = None) -> dict:
+def start_import_async(file_path: str = None, file_content: bytes = None, filename: str = None, tenant_id: int = 1) -> dict:
     """启动异步导入任务"""
     global _import_status
     
@@ -574,7 +576,7 @@ def start_import_async(file_path: str = None, file_content: bytes = None, filena
     # 启动后台线程
     thread = threading.Thread(
         target=_do_import,
-        args=(file_path, file_content, filename),
+        args=(file_path, file_content, filename, tenant_id),
         daemon=True
     )
     thread.start()

@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import time
 import logging
 import platform
 
@@ -51,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
  
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation
 from config import get_settings
 
 settings = get_settings()
@@ -109,6 +110,8 @@ app.include_router(replenishment.router)
 app.include_router(shipments.router)
 app.include_router(suppliers.router)
 app.include_router(upload.router)
+app.include_router(ai_creation.router)
+app.include_router(base_table.router)
 
 app.include_router(ads.router, prefix="/api")
 app.include_router(ad_rules.router, prefix="/api")
@@ -198,6 +201,20 @@ async def startup_event():
     except Exception as e:
         logger.error(f"定时任务调度器启动失败: {e}")
 
+    try:
+        from services.h3_video_service import resume_pending_tasks
+        resume_pending_tasks()
+        logger.info("H3 视频未完成任务已恢复监听")
+    except Exception as e:
+        logger.error(f"H3 视频任务恢复失败: {e}")
+
+    try:
+        from services.upscale_service import resume_pending_tasks as resume_upscale_tasks
+        resume_upscale_tasks()
+        logger.info("超分未完成任务已恢复监听")
+    except Exception as e:
+        logger.error(f"超分任务恢复失败: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭事件"""
@@ -248,6 +265,34 @@ async def serve_static_middleware(request: Request, call_next):
     
     return await call_next(request)
 
+# 请求日志中间件：为每个 API 请求记录发起用户（从 JWT 解码，不查数据库）
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    path = request.url.path
+    if path == "/api/health":
+        return await call_next(request)
+
+    user_desc = "匿名"
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        try:
+            from jose import jwt
+            payload = jwt.decode(auth[7:].strip(), settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            user_desc = f"用户 {payload.get('sub') or payload.get('uid')}(ID:{payload.get('uid')})"
+        except Exception:
+            user_desc = "无效token"
+
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed = (time.perf_counter() - start) * 1000
+        logger.error(f"{user_desc} {request.method} {path} 500 - {elapsed:.0f}ms")
+        raise
+    elapsed = (time.perf_counter() - start) * 1000
+    logger.info(f"{user_desc} {request.method} {path} {response.status_code} - {elapsed:.0f}ms")
+    return response
+
 if __name__ == "__main__":
     import uvicorn
     from config import get_settings
@@ -262,6 +307,7 @@ if __name__ == "__main__":
         port=settings.PORT,
         reload=False,
         log_level="info",
+        access_log=False,
         workers=workers,
         limit_concurrency=1000,
         timeout_keep_alive=5

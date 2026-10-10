@@ -43,6 +43,13 @@ class ProductSelection(BaseModel):
     ai_raw_response = Column(Text, nullable=True, comment="AI原始返回")
     status = Column(String(50), nullable=True, comment="审批状态: pending(待审批)/approved(已审批)")
 
+    # 申请选品信息
+    ali_1688_url = Column(String(1000), nullable=True, comment="1688链接")
+    purchase_price = Column(DECIMAL(12, 2), nullable=True, comment="采购价格(CNY)")
+    purchase_quantity = Column(Integer, nullable=True, comment="采购数量")
+    applicant_id = Column(Integer, nullable=True, comment="选品申请人ID")
+    store_group_id = Column(Integer, nullable=True, comment="申请店铺分组ID")
+
     tenant = relationship("Tenant", back_populates="product_selections")
 
     __table_args__ = (

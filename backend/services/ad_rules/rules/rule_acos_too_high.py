@@ -3,14 +3,14 @@
 
 条件: ACOS > 30% 且 spend >= $10
 优先级: 高
-数据源: AdCampaignDaily
+数据源: AdReportSnapshot
 """
 import logging
 from typing import List
 from datetime import date
 from sqlalchemy.orm import Session
 
-from models.ad_daily import AdCampaignDaily
+from models.ad_report import AdReportSnapshot
 from services.ad_rules.constants import RuleThresholds
 from services.ad_rules.rule_base import BaseOptimizationRule, RuleResult
 
@@ -32,16 +32,32 @@ class AcosTooHighRule(BaseOptimizationRule):
     def description(self) -> str:
         return "ACOS 超过 30% 且花费达到 $10 门槛，广告投入产出比偏低"
 
+    @property
+    def rule_type(self) -> str:
+        return "adjust_bid"
+
+    @property
+    def conditions(self) -> List[dict]:
+        return [
+            {"metric": "acos", "operator": ">", "threshold": RuleThresholds.ACOS_TOO_HIGH_THRESHOLD, "unit": "%"},
+            {"metric": "spend", "operator": ">=", "threshold": RuleThresholds.ACOS_TOO_HIGH_MIN_SPEND, "unit": "$"},
+        ]
+
+    @property
+    def actions(self) -> List[str]:
+        return ["降低竞价", "暂停高ACOS关键词", "优化广告结构"]
+
     def evaluate(self, db: Session, tenant_id: int, evaluation_date: date) -> List[RuleResult]:
         """评估规则，返回触发结果列表"""
         results: List[RuleResult] = []
         try:
             records = (
-                db.query(AdCampaignDaily)
+                db.query(AdReportSnapshot)
                 .filter(
-                    AdCampaignDaily.tenant_id == tenant_id,
-                    AdCampaignDaily.date == evaluation_date,
-                    AdCampaignDaily.deleted_at.is_(None),
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.deleted_at.is_(None),
                 )
                 .all()
             )
@@ -65,7 +81,7 @@ class AcosTooHighRule(BaseOptimizationRule):
                             rule_name=self.name,
                             rule_priority=self.priority,
                             target_type="campaign",
-                            target_id=str(record.campaign_id) if record.campaign_id else "",
+                            target_id=str(record.campaign_name) if record.campaign_name else "",
                             target_name=record.campaign_name or "",
                             triggered=True,
                             current_value=round(acos, 4),
@@ -80,11 +96,11 @@ class AcosTooHighRule(BaseOptimizationRule):
                                 f"且花费 ${spend:.2f} 达到门槛 ${min_spend:.0f}，"
                                 f"广告投入产出比偏低"
                             ),
-                            store_id=record.store_id,
+                            store_id=None,
                         ))
                 except Exception as row_err:
                     logger.warning(
-                        f"[{self.name}] 处理记录 campaign_id={record.campaign_id} 失败: {row_err}"
+                        f"[{self.name}] 处理记录 campaign_name={record.campaign_name} 失败: {row_err}"
                     )
                     continue
 

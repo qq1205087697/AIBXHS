@@ -35,6 +35,30 @@ class Settings(BaseSettings):
     OPENAI_VISION_MODEL: str = ""
     OPENAI_VISION_RESPONSE_FORMAT: str = ""
 
+    # MiniMax H3 本地视频生成（ComfyUI API，需 Basic Auth 账号密码）
+    
+    H3_BASE_URL: str = ""
+    H3_AUTH_USER: str = ""
+    H3_AUTH_PASSWORD: str = ""
+    # 工作流模板默认取工程内文件（跨平台部署可用），需要时用环境变量 H3_WORKFLOW_PATH 覆盖
+    H3_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "h3_workflow_template.json"
+    )
+    H3_POLL_INTERVAL: int = 15          # 轮询任务状态间隔（秒）
+    H3_MAX_WAIT_MINUTES: int = 240      # 单条视频最长等待时间（分钟）
+
+    # 视频超分（Topaz 星光 2.6）工作流模板，与 H3 共用同一台 ComfyUI
+    UPSCALE_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "upscale_workflow_template.json"
+    )
+
+    # H3 提示词二次优化：按官方 h3-prompt-writing 指南把中文方案改写为 Ref2VA 六段式英文提示词
+    H3_PROMPT_OPTIMIZE: bool = True     # 关闭后直接提交原始方案文本
+    H3_PROMPT_MODEL: str = ""           # 优化用文本模型，留空则使用 OPENAI_MODEL
+    H3_PROMPT_GUIDE_DIR: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "prompts"
+    )
+
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
     # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建

@@ -20,21 +20,19 @@ const { Text } = Typography;
 
 interface ExecutionLog {
   id: number;
-  executed_at: string;
+  execution_time: string;
   rule_name: string;
   action: string;
-  target: string;
+  target_name: string;
   status: string;
-  executor: string;
+  executed_by: string;
   result: any;
   error_message: string | null;
 }
 
 const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
-  success: { color: "green", label: "成功" },
-  failed: { color: "red", label: "失败" },
-  error: { color: "red", label: "失败" },
-  pending: { color: "orange", label: "执行中" },
+  "成功": { color: "green", label: "成功" },
+  "失败": { color: "red", label: "失败" },
 };
 
 const ExecutionLogView: React.FC = () => {
@@ -78,8 +76,8 @@ const ExecutionLogView: React.FC = () => {
   const columns: ColumnsType<ExecutionLog> = [
     {
       title: "时间",
-      dataIndex: "executed_at",
-      key: "executed_at",
+      dataIndex: "execution_time",
+      key: "execution_time",
       width: 170,
       render: (v: string) =>
         v ? dayjs(v).format("YYYY-MM-DD HH:mm:ss") : "-",
@@ -99,8 +97,8 @@ const ExecutionLogView: React.FC = () => {
     },
     {
       title: "目标",
-      dataIndex: "target",
-      key: "target",
+      dataIndex: "target_name",
+      key: "target_name",
       width: 160,
       ellipsis: true,
     },
@@ -116,8 +114,8 @@ const ExecutionLogView: React.FC = () => {
     },
     {
       title: "执行人",
-      dataIndex: "executor",
-      key: "executor",
+      dataIndex: "executed_by",
+      key: "executed_by",
       width: 100,
       render: (v: string) => v || "系统",
     },

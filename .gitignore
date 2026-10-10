@@ -44,3 +44,10 @@ docs/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# AI 工作目录（本地会话与记忆数据，不入仓）
+.workbuddy/
+
+# 前端构建产物（backend/static 是 frontend/dist 的部署拷贝，由 npm run build 生成，
+# 不入库；部署时执行：cd frontend && npm run build && cp -r dist/* ../backend/static/）
+backend/static/

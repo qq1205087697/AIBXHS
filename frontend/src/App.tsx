@@ -9,6 +9,7 @@ import InventoryBot from "./pages/InventoryBot";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
+import AdBotPage from "./pages/AdBot";
 import RatingOptimizationBot from "./pages/RatingOptimizationBot";
 import DataAlertBot from "./pages/DataAlertBot";
 import OrgManagement from "./pages/OrgManagement";
@@ -23,12 +24,15 @@ import StockTransferManagement from './pages/StockTransferManagement'
 import ShipmentManagement from './pages/ShipmentManagement'
 import SupplierManagement from './pages/SupplierManagement'
 import WarehouseManagement from './pages/WarehouseManagement'
+import BaseTableManagement from './pages/BaseTableManagement'
 import TenantManagement from "./pages/TenantManagement";
-import PermissionManagement from './pages/PermissionManagement'
-import ProductSelection from './pages/ProductSelection'
+import PermissionManagement from "./pages/PermissionManagement";
+import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
+import ProductSelection from "./pages/ProductSelection";
+import AICreationCenter from './pages/AICreationCenter';
+import UpscaleCenter from './pages/UpscaleCenter';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
-
 
 function AppRoutes() {
   return (
@@ -125,18 +129,18 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      <Route 
-        path="/data-alert" 
+      <Route
+        path="/data-alert"
         element={
           <ProtectedRoute>
             <MainLayout>
               <DataAlertBot />
             </MainLayout>
           </ProtectedRoute>
-        } 
+        }
       />
-      <Route 
-        path="/org" 
+      <Route
+        path="/org"
         element={
           <ProtectedRoute>
             <MainLayout>
@@ -256,6 +260,16 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/base-table"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <BaseTableManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/tenants"
         element={
           <ProtectedRoute>
@@ -281,6 +295,36 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <PermissionManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/inventory/allocate-test"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AllocateShipmentTest />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/ai-creation"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AICreationCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/upscale-center"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <UpscaleCenter />
             </MainLayout>
           </ProtectedRoute>
         }

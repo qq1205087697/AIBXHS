@@ -3,14 +3,14 @@
 
 条件: budget > $30 且 spend < budget x 50%
 优先级: 高
-数据源: AdCampaignDaily
+数据源: AdReportSnapshot
 """
 import logging
 from typing import List
 from datetime import date
 from sqlalchemy.orm import Session
 
-from models.ad_daily import AdCampaignDaily
+from models.ad_report import AdReportSnapshot
 from services.ad_rules.constants import RuleThresholds
 from services.ad_rules.rule_base import BaseOptimizationRule, RuleResult
 
@@ -32,16 +32,32 @@ class BudgetUnderSpendRule(BaseOptimizationRule):
     def description(self) -> str:
         return "日预算超过 $30 但花费不足预算的 50%，预算未被有效利用"
 
+    @property
+    def rule_type(self) -> str:
+        return "increase_budget"
+
+    @property
+    def conditions(self) -> List[dict]:
+        return [
+            {"metric": "budget", "operator": ">=", "threshold": RuleThresholds.BUDGET_UNDER_SPEND_MIN_BUDGET, "unit": "$"},
+            {"metric": "budget_utilization", "operator": "<", "threshold": RuleThresholds.BUDGET_UNDER_SPEND_RATIO, "unit": ""},
+        ]
+
+    @property
+    def actions(self) -> List[str]:
+        return ["增加预算", "优化投放时段"]
+
     def evaluate(self, db: Session, tenant_id: int, evaluation_date: date) -> List[RuleResult]:
         """评估规则，返回触发结果列表"""
         results: List[RuleResult] = []
         try:
             records = (
-                db.query(AdCampaignDaily)
+                db.query(AdReportSnapshot)
                 .filter(
-                    AdCampaignDaily.tenant_id == tenant_id,
-                    AdCampaignDaily.date == evaluation_date,
-                    AdCampaignDaily.deleted_at.is_(None),
+                    AdReportSnapshot.tenant_id == tenant_id,
+                    AdReportSnapshot.report_type == "campaign",
+                    AdReportSnapshot.date == evaluation_date,
+                    AdReportSnapshot.deleted_at.is_(None),
                 )
                 .all()
             )
@@ -51,12 +67,17 @@ class BudgetUnderSpendRule(BaseOptimizationRule):
 
             for record in records:
                 try:
-                    budget = float(record.budget) if record.budget is not None else 0.0
                     spend = float(record.spend) if record.spend is not None else 0.0
+                    budget_util = float(record.budget_utilization) if record.budget_utilization is not None else 0.0
+
+                    # 反推 budget：spend / budget_utilization（仅当 utilization > 0 时有效）
+                    if budget_util <= 0:
+                        continue
+                    budget = spend / budget_util
 
                     # 条件: budget > $30 且 spend < budget x 50%
-                    if budget > min_budget and budget > 0:
-                        spend_ratio = spend / budget
+                    if budget > min_budget:
+                        spend_ratio = budget_util  # 直接使用 Excel 原始 budget_utilization
                         if spend_ratio < ratio_threshold:
                             condition_metrics = {
                                 "budget": round(budget, 2),
@@ -67,7 +88,7 @@ class BudgetUnderSpendRule(BaseOptimizationRule):
                                 rule_name=self.name,
                                 rule_priority=self.priority,
                                 target_type="campaign",
-                                target_id=str(record.campaign_id) if record.campaign_id else "",
+                                target_id=str(record.campaign_name) if record.campaign_name else "",
                                 target_name=record.campaign_name or "",
                                 triggered=True,
                                 current_value=round(spend_ratio, 4),
@@ -82,11 +103,11 @@ class BudgetUnderSpendRule(BaseOptimizationRule):
                                     f"（利用率 {spend_ratio * 100:.1f}%），"
                                     f"低于阈值 {ratio_threshold * 100:.0f}%，预算未被有效利用"
                                 ),
-                                store_id=record.store_id,
+                                store_id=None,
                             ))
                 except Exception as row_err:
                     logger.warning(
-                        f"[{self.name}] 处理记录 campaign_id={record.campaign_id} 失败: {row_err}"
+                        f"[{self.name}] 处理记录 campaign_name={record.campaign_name} 失败: {row_err}"
                     )
                     continue
 

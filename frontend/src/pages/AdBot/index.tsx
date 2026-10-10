@@ -8,6 +8,8 @@ import ProductAnalysis from "./ProductAnalysis";
 import SuggestionManagement from "./SuggestionManagement";
 import RuleConfig from "./RuleConfig";
 import ExecutionLogView from "./ExecutionLogView";
+import AdImport from "./AdImport";
+import AdRetention from "./AdRetention";
 
 const AdBotPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState("overview");
@@ -21,6 +23,8 @@ const AdBotPage: React.FC = () => {
     { key: "suggestion", label: "建议", children: <SuggestionManagement /> },
     { key: "rule", label: "规则", children: <RuleConfig /> },
     { key: "log", label: "日志", children: <ExecutionLogView /> },
+    { key: "import", label: "数据导入", children: <AdImport /> },
+    { key: "retention", label: "数据保留", children: <AdRetention /> },
   ];
 
   return (
