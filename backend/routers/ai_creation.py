@@ -84,6 +84,7 @@ async def generate_voiceover_plans_endpoint(
     duration: int = Form(15),
     target_market: str = Form("美国"),
     voiceover_language: str = Form("自动"),
+    video_type: str = Form("口播带货"),
     aspect_ratio: str = Form("9:16"),
     product_name: str = Form(""),
     specified_types: Optional[str] = Form(None),
@@ -93,7 +94,8 @@ async def generate_voiceover_plans_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     """
-    新方案：上传 1~9 张商品参考图，一次性生成产品信息卡 + 3 套口播视频提示词方案。
+    新方案：上传 1~9 张商品参考图，一次性生成产品信息卡 + 3 套视频提示词方案。
+    video_type：口播带货（含口播台词）/ 产品展示（纯画面展示，无台词）。
     specified_types / avoid_types 为顿号或逗号分隔的类型名。
 
     生成耗时 1~5 分钟以上且期间不回字节，前置网关（nginx 默认 60s 读超时）会报 504。
@@ -111,7 +113,7 @@ async def generate_voiceover_plans_endpoint(
         raise HTTPException(status_code=400, detail="视频时长仅支持 5 / 10 / 15 秒")
 
     logger.info(
-        f"[AI创作中心] 用户 {current_user.id} 请求生成口播方案："
+        f"[AI创作中心] 用户 {current_user.id} 请求生成方案（{video_type}）："
         f"{len(files)} 张图, 时长={duration}s, 市场={target_market}, "
         f"语言={voiceover_language}, 比例={aspect_ratio}"
     )
@@ -135,6 +137,7 @@ async def generate_voiceover_plans_endpoint(
                 style_preference=style_preference,
                 avoid_types=_split_types(avoid_types),
                 confirmed_card=confirmed_card,
+                video_type=video_type,
             )
             return {"success": True, "data": result}
         except AIAnalysisError as e:
@@ -182,6 +185,7 @@ async def generate_video_endpoint(
     model: str = Form("minimax-h3"),
     market: str = Form("US"),
     voiceover_language: str = Form("自动"),
+    video_type: str = Form("口播带货"),
     title: str = Form("视频生成任务"),
     product_code: str = Form(""),
     product_name: str = Form(""),
@@ -218,6 +222,7 @@ async def generate_video_endpoint(
             model=model,
             market=market,
             voiceover_language=voiceover_language,
+            video_type=video_type,
             product_code=product_code,
             product_name=product_name,
         )
@@ -317,6 +322,58 @@ async def delete_upscale_task_endpoint(
     except UpscaleError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"success": True}
+
+
+@router.get("/upscale-tasks/{task_id}/download")
+async def download_upscale_video(
+    task_id: int,
+    target: str = "result",
+    current_user: User = Depends(get_current_user),
+):
+    """下载超分任务的源视频/超分结果（target: result=超分结果 / source=源视频）
+
+    服务端代理 TOS 下载并附带 Content-Disposition 下载文件名：
+    浏览器对跨域 <a download> 不生效，必须由同源接口流式返回。
+    """
+    import re
+    from urllib.parse import quote
+    from database.database import SessionLocal
+    from models.video_upscale_task import VideoUpscaleTask
+
+    db = SessionLocal()
+    try:
+        task = db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.id == task_id,
+            VideoUpscaleTask.tenant_id == current_user.tenant_id,
+            VideoUpscaleTask.deleted_at.is_(None),
+        ).first()
+    finally:
+        db.close()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    url = (task.video_url if target == "result" else task.source_video_url) or ""
+    if not url:
+        raise HTTPException(status_code=400, detail="该任务暂无可下载的视频")
+
+    # 文件名：任务标题（清理非法字符）_超分结果/源视频.mp4
+    safe_title = re.sub(r'[\\/:*?"<>|\r\n]', "_", (task.title or f"upscale-{task_id}")).strip()[:60]
+    safe_title = safe_title or f"upscale-{task_id}"
+    m = re.search(r"(\.[a-zA-Z0-9]{2,5})$", url.split("?")[0])
+    ext = m.group(1).lower() if m else ".mp4"
+    label = "超分结果" if target == "result" else "源视频"
+    filename = f"{safe_title}_{label}{ext}"
+
+    def _stream():
+        import requests as _requests
+        with _requests.get(url, stream=True, timeout=(10, 600)) as r:
+            r.raise_for_status()
+            for chunk in r.iter_content(1 << 20):
+                if chunk:
+                    yield chunk
+
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    return StreamingResponse(_stream(), media_type="video/mp4", headers=headers)
 
 
 @router.delete("/video-tasks/{task_id}")

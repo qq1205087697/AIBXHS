@@ -118,6 +118,12 @@ def init_db():
         # 手动创建 scheduler_locks 和 product_selections 表
         from sqlalchemy import text
         with engine.connect() as conn:
+            # 视频生成任务表新增视频类型字段（口播带货/产品展示，如果不存在）
+            try:
+                conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN video_type VARCHAR(20) NULL COMMENT '视频类型：口播带货/产品展示' AFTER status"))
+                conn.commit()
+            except Exception:
+                pass  # 列已存在则忽略
             # 视频生成任务表新增口播语言字段（如果不存在）
             try:
                 conn.execute(text("ALTER TABLE ai_video_tasks ADD COLUMN voiceover_language VARCHAR(30) NULL COMMENT '口播语言' AFTER market"))

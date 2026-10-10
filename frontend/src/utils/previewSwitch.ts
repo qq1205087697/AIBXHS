@@ -14,14 +14,23 @@ const GAP = 56 // 按钮 44px + 12px 间距，按钮外缘与图片边缘的间�
 
 let pollTimer: number | null = null
 
+const MIN_IMG_SIZE = 80 // 过滤关闭/切换动画中的缩小态与隐藏预览层的 0×0 图
+
 const updateSwitchPosition = () => {
-  const img = document.querySelector<HTMLElement>('.ant-image-preview-img')
-  if (!img) return
-  const rect = img.getBoundingClientRect()
-  if (rect.width <= 0 && rect.height <= 0) return
+  // 页面可能同时残留多个预览层（关闭后 display:none 的 wrap 仍挂在 DOM），
+  // 只测量"可见 wrap 内、尺寸足够大"的预览图，取面积最大者
+  let best: DOMRect | null = null
+  document.querySelectorAll<HTMLElement>('.ant-image-preview-img').forEach((img) => {
+    const wrap = img.closest<HTMLElement>('.ant-image-preview-wrap')
+    if (wrap && getComputedStyle(wrap).display === 'none') return
+    const rect = img.getBoundingClientRect()
+    if (rect.width < MIN_IMG_SIZE || rect.height < MIN_IMG_SIZE) return
+    if (!best || rect.width * rect.height > best.width * best.height) best = rect
+  })
+  if (!best) return
   const viewportW = window.innerWidth
-  const left = Math.max(8, Math.round(rect.left - GAP))
-  const right = Math.max(8, Math.round(viewportW - rect.right - GAP))
+  const left = Math.max(8, Math.round(best.left - GAP))
+  const right = Math.max(8, Math.round(viewportW - best.right - GAP))
   const rootStyle = document.documentElement.style
   rootStyle.setProperty('--preview-switch-left', `${left}px`)
   rootStyle.setProperty('--preview-switch-right', `${right}px`)

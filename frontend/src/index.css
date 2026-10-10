@@ -264,3 +264,8 @@ code {
   right: var(--preview-switch-right, 8px) !important;
   inset-inline-end: var(--preview-switch-right, 8px) !important;
 }
+
+/* 视频对比弹窗：音量滑杆隐藏拖动圆头（antd 圆点画在 handle 的 ::after 伪元素上，内联样式盖不掉） */
+.volume-slider .ant-slider-handle {
+  display: none;
+}
