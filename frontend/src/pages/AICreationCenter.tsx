@@ -54,6 +54,7 @@ import {
   VideoModel,
   VideoResolution,
   VoiceoverLanguage,
+  VideoType,
   AIVideoTask,
 } from '../api'
 
@@ -187,6 +188,12 @@ const VOICEOVER_LANGUAGE_OPTIONS: { label: string; value: VoiceoverLanguage }[] 
   })),
 ]
 
+// 视频类型：口播带货=现有方案逻辑（含口播台词）；产品展示=纯画面展示拍摄方案（无台词）
+const VIDEO_TYPE_OPTIONS: { label: string; desc: string; value: VideoType }[] = [
+  { label: '口播带货', desc: '模特出镜口播带货台词', value: '口播带货' },
+  { label: '产品展示', desc: '纯画面展示，无口播台词', value: '产品展示' },
+]
+
 const MODEL_OPTIONS: { label: string; desc: string; value: VideoModel }[] = [
   { label: 'MiniMax H3', desc: '适合批量测款与日常上新', value: 'minimax-h3' },
 ]
@@ -231,6 +238,7 @@ const AICreationCenter: React.FC = () => {
   const [conceptsDirty, setConceptsDirty] = useState(false)
   const [loading, setLoading] = useState(false)
   const [market, setMarket] = useState<VideoMarket>('US')
+  const [videoType, setVideoType] = useState<VideoType>('口播带货')
   const [voiceoverLanguage, setVoiceoverLanguage] = useState<VoiceoverLanguage>('auto')
   const [duration, setDuration] = useState<VideoDuration>(15)
   const [ratio, setRatio] = useState<VideoRatio>('9:16')
@@ -245,6 +253,8 @@ const AICreationCenter: React.FC = () => {
   const [history, setHistory] = useState<AIVideoTask[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
   const [previewTask, setPreviewTask] = useState<AIVideoTask | null>(null)
+  // 生成历史缩略图大图预览：记录当前打开的历史项 id 与图片下标（受控，支持"+N"直达后面的图）
+  const [historyPreview, setHistoryPreview] = useState<{ id: number; index: number } | null>(null)
   // ===== 绑定至产品 / 变高清（仅已完成任务）=====
   const [bindModalOpen, setBindModalOpen] = useState(false)
   const [bindTask, setBindTask] = useState<AIVideoTask | null>(null)
@@ -377,7 +387,9 @@ const AICreationCenter: React.FC = () => {
 
   const formatSelectedConcept = (concept: VideoConcept): string => {
     const lines: string[] = []
-    lines.push(`[目标语言]：${resolveVoiceoverLanguageName()}口播`)
+    if (videoType !== '产品展示') {
+      lines.push(`[目标语言]：${resolveVoiceoverLanguageName()}口播`)
+    }
     lines.push(`[情节]：${concept.story}`)
     lines.push(`[模特]：${concept.character}`)
     lines.push(`[环境]：${concept.environment}`)
@@ -433,6 +445,22 @@ const AICreationCenter: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history, historyPage, historyPageSize, historyKeyword])
 
+  // 下载 URL 图片为 Blob：先浏览器直连，被 CORS 拦截或网络失败时改走后端代理
+  const fetchImageBlob = async (url: string): Promise<Blob | null> => {
+    try {
+      const resp = await fetch(url)
+      if (resp.ok) return await resp.blob()
+    } catch {
+      // 直连失败（跨域等），尝试后端代理
+    }
+    try {
+      const resp = await aiCreationApi.proxyImage(url)
+      return resp.data
+    } catch {
+      return null
+    }
+  }
+
   // 收集所有图片为 File：本地文件直接用，产品图片 URL 需下载转 File
   const collectFiles = async (): Promise<File[]> => {
     const files: File[] = []
@@ -440,12 +468,9 @@ const AICreationCenter: React.FC = () => {
       if (f.originFileObj instanceof File) {
         files.push(f.originFileObj)
       } else if (f.url || f.thumbUrl) {
-        try {
-          const resp = await fetch(f.url || f.thumbUrl!)
-          const blob = await resp.blob()
+        const blob = await fetchImageBlob(f.url || f.thumbUrl!)
+        if (blob) {
           files.push(new File([blob], f.name || `image-${f.uid}.jpg`, { type: blob.type || 'image/jpeg' }))
-        } catch {
-          // 单张图片下载失败时跳过
         }
       }
     }
@@ -485,6 +510,7 @@ const AICreationCenter: React.FC = () => {
         duration,
         target_market: getMarketLabel(market),
         voiceover_language: voiceoverLanguage,
+        video_type: videoType,
         aspect_ratio: ratio,
         product_name: productForState?.product_name_cn || result?.product_name_cn || '',
         avoid_types:
@@ -554,6 +580,7 @@ const AICreationCenter: React.FC = () => {
         model,
         market,
         voiceover_language: voiceoverLanguage,
+        video_type: videoType,
         title,
         product_code: selectedProducts[0]?.product_code || '',
         product_name: selectedProducts[0]?.name || '',
@@ -592,6 +619,7 @@ const AICreationCenter: React.FC = () => {
     setResolution(item.resolution)
     setDuration(item.duration)
     setRatio(item.ratio)
+    setVideoType(item.video_type === '产品展示' ? '产品展示' : '口播带货')
     if (item.voiceover_language) {
       setVoiceoverLanguage(
         (item.voiceover_language === '自动' ? 'auto' : item.voiceover_language) as VoiceoverLanguage
@@ -1290,20 +1318,47 @@ const AICreationCenter: React.FC = () => {
               {/* 第一行：左上角参考图缩略图 + 标题 + 编辑 + 更多 */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {item.images.length > 0 && (
-                  <Image.PreviewGroup>
+                  <Image.PreviewGroup
+                    preview={{
+                      visible: historyPreview?.id === item.id,
+                      current: historyPreview?.id === item.id ? historyPreview.index : 0,
+                      // 仅负责关闭；打开时下标由缩略图/"+N"的 onClick 写入，
+                      // 不能在这里写 index——rc-image 在布局效果阶段才回调 onVisibleChange，会覆盖先写入的下标
+                      onVisibleChange: (vis) => {
+                        if (!vis) setHistoryPreview(null)
+                      },
+                      onChange: (cur) =>
+                        setHistoryPreview((prev) =>
+                          prev && prev.id === item.id ? { ...prev, index: cur } : prev,
+                        ),
+                    }}
+                  >
                     <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
                       {item.images.slice(0, 3).map((url, i) => (
-                        <Image
+                        // 外层 span 记录所点缩略图下标：rc-image 打开预览后冒泡到此，覆盖为"从第几张打开"
+                        <span
                           key={`${item.id}-${i}`}
-                          src={url}
-                          width={32}
-                          height={32}
-                          style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
-                          preview={{ mask: false }}
-                        />
+                          onClick={() => setHistoryPreview({ id: item.id, index: i })}
+                          style={{ display: 'inline-flex', lineHeight: 0, cursor: 'zoom-in' }}
+                        >
+                          <Image
+                            src={url}
+                            width={32}
+                            height={32}
+                            style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
+                            preview={{ mask: false }}
+                          />
+                        </span>
+                      ))}
+                      {/* 前三张之后的图片以隐藏方式纳入预览组：放大后可左右切换查看全部 */}
+                      {item.images.slice(3).map((url, i) => (
+                        <Image key={`${item.id}-hidden-${i}`} src={url} style={{ display: 'none' }} />
                       ))}
                       {item.images.length > 3 && (
-                        <span style={{ fontSize: 12, color: '#999', alignSelf: 'center' }}>
+                        <span
+                          onClick={() => setHistoryPreview({ id: item.id, index: 3 })}
+                          style={{ fontSize: 12, color: '#999', alignSelf: 'center', cursor: 'pointer', userSelect: 'none' }}
+                        >
                           +{item.images.length - 3}
                         </span>
                       )}
@@ -1633,6 +1688,32 @@ const AICreationCenter: React.FC = () => {
           bodyStyle={{ padding: 16 }}
         >
           <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+            <Text strong style={{ flexShrink: 0 }}>视频类型：</Text>
+            <Select<VideoType>
+              value={videoType}
+              onChange={(v) => {
+                // 切换类型后旧方案（口播/展示体系不同）失效，需重新生成
+                if (v !== videoType) {
+                  setVideoType(v)
+                  invalidatePlans()
+                  setConcepts(null)
+                }
+              }}
+              style={{ flex: 1, minWidth: 0 }}
+              disabled={loading}
+              options={VIDEO_TYPE_OPTIONS.map((opt) => ({
+                value: opt.value,
+                label: (
+                  <span>
+                    {opt.label}
+                    <span style={{ color: '#999', fontSize: 12, marginLeft: 8 }}>{opt.desc}</span>
+                  </span>
+                ),
+              }))}
+            />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
             <Text strong style={{ flexShrink: 0 }}>目标市场：</Text>
             <Select<VideoMarket>
               value={market}
@@ -1645,16 +1726,18 @@ const AICreationCenter: React.FC = () => {
             />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
-            <Text strong style={{ flexShrink: 0 }}>口播语言：</Text>
-            <Select<VoiceoverLanguage>
-              value={voiceoverLanguage}
-              onChange={setVoiceoverLanguage}
-              style={{ flex: 1, minWidth: 0 }}
-              disabled={loading}
-              options={VOICEOVER_LANGUAGE_OPTIONS}
-            />
-          </div>
+          {videoType === '口播带货' && (
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+              <Text strong style={{ flexShrink: 0 }}>口播语言：</Text>
+              <Select<VoiceoverLanguage>
+                value={voiceoverLanguage}
+                onChange={setVoiceoverLanguage}
+                style={{ flex: 1, minWidth: 0 }}
+                disabled={loading}
+                options={VOICEOVER_LANGUAGE_OPTIONS}
+              />
+            </div>
+          )}
 
           <div style={{ position: 'relative' }}>
             <TextArea
@@ -1906,7 +1989,10 @@ const AICreationCenter: React.FC = () => {
                 { label: '视频长度：', value: `${previewTask.duration} 秒` },
                 { label: '视频比例：', value: getRatioLabel(previewTask.ratio) },
                 { label: '销售国家/地区：', value: getMarketLabel(previewTask.market) },
-                { label: '目标语言：', value: getVoiceoverLabel(previewTask) },
+                { label: '视频类型：', value: previewTask.video_type || '口播带货' },
+                ...(previewTask.video_type === '产品展示'
+                  ? []
+                  : [{ label: '目标语言：', value: getVoiceoverLabel(previewTask) }]),
               ].map((row) => (
                 <div key={row.label} style={{ marginBottom: 16 }}>
                   <Text strong style={{ fontSize: 13, display: 'block' }}>{row.label}</Text>

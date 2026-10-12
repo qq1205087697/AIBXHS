@@ -27,6 +27,32 @@ const UpscaleCenter: React.FC = () => {
   const [previewTask, setPreviewTask] = useState<VideoUpscaleTask | null>(null)
   const [bindOpen, setBindOpen] = useState(false)
   const [bindUrl, setBindUrl] = useState('')
+  const [downloadingId, setDownloadingId] = useState<number | null>(null)
+
+  // 下载源视频/超分结果（入口：对比弹窗「更多」菜单）：走后端代理流式下载（跨域 <a download> 不生效）
+  const handleDownload = async (item: VideoUpscaleTask, target: 'source' | 'result' = 'source') => {
+    if (downloadingId != null) return
+    const useTarget = target === 'result' && !item.video_url ? 'source' : target
+    setDownloadingId(item.id)
+    message.loading({ content: '正在下载视频，请稍候...', key: `dl-${item.id}`, duration: 0 })
+    try {
+      const res = await aiCreationApi.downloadUpscaleVideo(item.id, useTarget)
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'video/mp4' }))
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${item.title || `upscale-${item.id}`}_${useTarget === 'result' ? '超分结果' : '源视频'}.mp4`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      message.success('下载成功')
+    } catch {
+      message.error('下载失败，请稍后重试')
+    } finally {
+      message.destroy(`dl-${item.id}`)
+      setDownloadingId(null)
+    }
+  }
 
   const loadTasks = async (p = page, size = pageSize, kw = keyword) => {
     setLoading(true)
@@ -328,6 +354,9 @@ const UpscaleCenter: React.FC = () => {
         sourceUrl={previewTask?.source_video_url || ''}
         resultUrl={previewTask?.video_url}
         onClose={() => setPreviewTask(null)}
+        onDownload={(target) => {
+          if (previewTask) handleDownload(previewTask, target)
+        }}
       />
 
       {/* 绑定至产品（与 AI视频页共用） */}

@@ -1623,6 +1623,9 @@ export type VoiceoverLanguage =
   | 'auto' | 'English' | 'German' | 'French' | 'Spanish' | 'Italian'
   | 'Japanese' | 'Korean' | 'Portuguese' | 'Arabic';
 
+/** 视频类型：口播带货（含口播台词）/ 产品展示（纯画面展示，无台词） */
+export type VideoType = '口播带货' | '产品展示';
+
 export interface VoiceoverPlanParams {
   /** 视频时长（10~30 秒） */
   duration: VideoDuration;
@@ -1630,6 +1633,8 @@ export interface VoiceoverPlanParams {
   target_market: string;
   /** 口播语言 */
   voiceover_language: VoiceoverLanguage;
+  /** 视频类型（默认口播带货） */
+  video_type?: VideoType;
   /** 画面比例 */
   aspect_ratio: VideoRatio;
   /** 产品名称（可空，模型会从图片识别） */
@@ -1664,6 +1669,8 @@ export interface AIVideoTask {
   market: VideoMarket;
   /** 口播语言，「自动」表示跟随目标市场 */
   voiceover_language: string;
+  /** 视频类型：口播带货/产品展示 */
+  video_type?: string;
   model: VideoModel;
   resolution: VideoResolution;
   duration: VideoDuration;
@@ -1694,6 +1701,8 @@ export interface GenerateVideoParams {
   market: VideoMarket;
   /** 口播语言，'auto' 表示跟随目标市场 */
   voiceover_language: VoiceoverLanguage;
+  /** 视频类型（默认口播带货） */
+  video_type?: VideoType;
   title: string;
   /** 从产品管理选图提交时记录的产品编码/品名 */
   product_code?: string;
@@ -1728,6 +1737,7 @@ export const aiCreationApi = {
       "voiceover_language",
       params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
     );
+    formData.append("video_type", params.video_type || "口播带货");
     formData.append("aspect_ratio", params.aspect_ratio);
     formData.append("product_name", params.product_name || "");
     if (params.specified_types?.length) {
@@ -1810,6 +1820,13 @@ export const aiCreationApi = {
       })
       .finally(() => clearTimeout(timer));
   },
+  /** 代理取图：图片 URL 浏览器直连被 CORS 拦截时（如 TOS 桶未配置跨域），由后端代取图片字节 */
+  proxyImage: (url: string) =>
+    apiClient.get<Blob>("/ai-creation/proxy-image", {
+      params: { url },
+      responseType: "blob",
+      timeout: 60000,
+    }),
   /** 立即生成：提交 MiniMax H3 视频生成任务（长时间生成，立即返回任务记录） */
   generateVideo: (files: File[], params: GenerateVideoParams) => {
     const formData = new FormData();
@@ -1824,6 +1841,7 @@ export const aiCreationApi = {
       "voiceover_language",
       params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
     );
+    formData.append("video_type", params.video_type || "口播带货");
     formData.append("title", params.title);
     formData.append("product_code", params.product_code || "");
     formData.append("product_name", params.product_name || "");
@@ -1867,6 +1885,13 @@ export const aiCreationApi = {
   /** 删除超分任务 */
   deleteUpscaleTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-creation/upscale-tasks/${taskId}`),
+  /** 下载超分任务视频（target: result=超分结果 / source=源视频），blob 流式下载 */
+  downloadUpscaleVideo: (taskId: number, target: "result" | "source") =>
+    apiClient.get(`/ai-creation/upscale-tasks/${taskId}/download`, {
+      params: { target },
+      responseType: "blob",
+      timeout: 600000,
+    }),
   /** 绑定视频至产品详情（最多 6 个，超出报「产品已达到视频上限」） */
   bindProductVideo: (productId: number, videoUrl: string) =>
     apiClient.post<{ success: boolean; data: { videos: string[] } }>(

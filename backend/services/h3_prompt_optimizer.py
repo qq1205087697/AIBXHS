@@ -36,19 +36,29 @@ REQUIRED_SECTIONS = (
     "non_diegetic_music",
 )
 
-_SYSTEM_RULES = f"""【本次改写任务的硬性要求】
+# 两种视频类型的通用规则
+_COMMON_RULES = f"""【本次改写任务的硬性要求】
 1. 只输出六段式正文，章节顺序固定为 subject_definitions、summary、retention_analysis、detailed_description、overall_soundscape、non_diegetic_music；除章节名与正文外不要输出任何解释，也不要使用 Markdown 代码块围栏。
 2. 参考图按连接顺序编号：依次为 <Picture 1>、<Picture 2>……（张数以用户消息为准），分两类处理：
    - 商品图：同一件商品的多角度照片，在 subject_definitions 中定义成商品 <Subject N>，后续章节保持商品外观、颜色、材质、图案、包装一致；
    - 人物参考图：用户消息若标明"人物参考"对应某个 <Picture N>，该图即人物参考，需单独定义人物 <Subject N>：面部特征、发型发色、眼睛、肤色、身形等身份特征必须与该图及方案中的模特描述一致，且视频全程不变；服装以方案描述为准（可与参考图中的穿着不同），同样保持全程一致。
    用户消息未标明人物参考时，所有参考图均按商品图处理。
-3. 正文写英文；模特与商品用可读英文描述；口播台词保留原语言，写成 <d>[English] 台词</d>（原台词若为其他语言，方括号内换成对应语言名）。
+3. 正文写英文；模特与商品用可读英文描述。
 4. 分镜按方案中的镜头顺序改写为 [Shot 1]、[Shot 2]……；[Shot 1] 不带时间戳，之后的镜头用 "At MM:SS.mmm," 标出切换时间；时间必须与用户给出的总时长一致，最后一个镜头结束在总时长处。
-5. 说话人统一编号：第一次出镜说话的人标 (S1)，同一人后续沿用同一编号；每句台词前都要交代说话人、语气与说话状态（持续讲话、口型清晰、边说边做动作等），保证模型生成时嘴部动作与台词同步。
-6. 每个镜头要写清构图、主体外形与位置、环境与光线、动作与状态变化、镜头运动、当前声音，以及参考素材真正生效的位置；参考生成类任务的 detailed_description 通常 350~500 个英文词。
-7. overall_soundscape 写环境音与动作音；方案里的背景音乐写进 non_diegetic_music；确实没有音乐时写 N/A。
-8. 把方案里的中文标记（如【自拍】【内容】、口播：）全部转写成英文镜头语言，不要原样保留中文。
-9. 全文总长度不超过 {MAX_PROMPT_CHARS} 个字符；超长时优先压缩次要场景描述，但六段结构、镜头切分与全部台词必须完整保留。"""
+5. 每个镜头要写清构图、主体外形与位置、环境与光线、动作与状态变化、镜头运动、当前声音，以及参考素材真正生效的位置；参考生成类任务的 detailed_description 通常 350~500 个英文词。
+6. overall_soundscape 写环境音与动作音；方案里的背景音乐写进 non_diegetic_music；确实没有音乐时写 N/A。
+7. 把方案里的中文标记（如【自拍】【特写】【内容】、口播：）全部转写成英文镜头语言，不要原样保留中文。
+8. 全文总长度不超过 {MAX_PROMPT_CHARS} 个字符；超长时优先压缩次要场景描述，但六段结构与镜头切分必须完整保留。"""
+
+# 口播带货：台词 + 说话人规则
+_VOICEOVER_RULES = """【口播带货追加要求】
+9. 台词保留原语言，写成 <d>[English] 台词</d>（原台词若为其他语言，方括号内换成对应语言名）；方案中每个镜头的"口播：xxx"即台词，一句都不能丢。
+10. 说话人统一编号：第一次出镜说话的人标 (S1)，同一人后续沿用同一编号；每句台词前都要交代说话人、语气与说话状态（持续讲话、口型清晰、边说边做动作等），保证模型生成时嘴部动作与台词同步。"""
+
+# 产品展示：无台词，音频只有环境音/动作音/音乐
+_SHOWCASE_RULES = """【产品展示追加要求】
+9. 方案为纯产品展示（无口播台词）：全文不得出现 <d> 台词标签、说话人编号或任何对白；方案中人物（如有）只做操作与展示动作，不要安排说话、张嘴动作。
+10. 音频只有环境音、产品动作音（如开合、倒水、按键、脚步声）与背景音乐；overall_soundscape 按镜头写环境音与动作音，non_diegetic_music 写方案中的背景音乐。"""
 
 
 class H3PromptOptimizeError(Exception):
@@ -67,12 +77,19 @@ def _load_guide(filename: str) -> str:
         raise H3PromptOptimizeError(f"读取 H3 提示词指南失败: {path}: {e}")
 
 
-def _build_system_prompt() -> str:
-    """系统提示词：官方指南原文 + 本次改写要求"""
+def _build_system_prompt(video_type: str = "口播带货") -> str:
+    """系统提示词：官方指南原文 + 本次改写要求（按视频类型追加台词/无台词规则）"""
+    is_showcase = (video_type or "口播带货") == "产品展示"
+    intro = (
+        "用户会给你一份中文的产品展示视频方案（纯画面展示，无口播台词）"
+        if is_showcase
+        else "用户会给你一份中文的带货口播视频方案（含人物、场景、分镜与口播台词）"
+    )
+    rules = _COMMON_RULES + "\n" + (_SHOWCASE_RULES if is_showcase else _VOICEOVER_RULES)
     return (
         "你是 MiniMax H3 视频模型的上下文预处理系统（官方 H3-Context-IR 的开源替代实现）。\n"
-        "用户会给你一份中文的带货口播视频方案（含人物、场景、分镜与口播台词），"
-        "你需要把它改写为 H3 Ref2VA（全参考模式）可直接消费的英文结构化提示词。\n\n"
+        + intro
+        + "，你需要把它改写为 H3 Ref2VA（全参考模式）可直接消费的英文结构化提示词。\n\n"
         "必须严格遵守以下两份官方提示词指南的字段名、章节顺序、参考标签、时间表示法与用词规范"
         "（两份指南冲突时以 Ref2VA 指南为准）：\n\n"
         "===== 指南一：基础模式（镜头、运镜、说话人、台词、音效的通用写法）=====\n"
@@ -80,7 +97,7 @@ def _build_system_prompt() -> str:
         + "\n\n===== 指南二：全参考模式 Ref2VA（六段式结构、参考标签与留存分析）=====\n"
         + _load_guide(GUIDE_REF2VA)
         + "\n"
-        + _SYSTEM_RULES
+        + rules
     )
 
 
@@ -93,22 +110,30 @@ def _build_user_prompt(
     voiceover_language: str,
     product_name: str,
     person_picture: int = 0,
+    video_type: str = "口播带货",
 ) -> str:
     """用户消息：视频参数 + 待改写的中文方案"""
+    is_showcase = (video_type or "口播带货") == "产品展示"
     person_note = (
         f"<Picture {person_picture}> 是人物参考图，其余参考图为同一商品的多角度照片。"
         if 1 <= person_picture <= image_count
         else "无人物参考图，所有参考图均为同一商品的多角度照片。"
     )
+    voiceover_note = (
+        "无（纯产品展示，不生成任何台词）"
+        if is_showcase
+        else voiceover_language
+    )
+    plan_label = "【待改写的中文产品展示视频方案】" if is_showcase else "【待改写的中文口播视频方案】"
     return f"""【视频参数】
 总时长：{duration} 秒
 画面比例：{ratio}
 参考图数量：{image_count} 张（连接顺序即 <Picture 1> … <Picture {image_count}>）
 人物参考：{person_note}
-口播语言：{voiceover_language}
+口播语言：{voiceover_note}
 产品名称：{product_name or "（未提供，请按方案内容归纳）"}
 
-【待改写的中文口播视频方案】
+{plan_label}
 {plan_prompt}
 """
 
@@ -129,10 +154,12 @@ def optimize_h3_prompt(
     voiceover_language: str = "自动",
     product_name: str = "",
     person_picture: int = 0,
+    video_type: str = "口播带货",
 ) -> str:
     """把中文方案改写为 H3 Ref2VA 六段式英文提示词。
 
     :param person_picture: 人物参考图序号（1-based，0 表示无人物参考图）
+    :param video_type: 口播带货（含台词与说话人）/ 产品展示（无台词，音频仅环境音与音乐）
     失败时抛 H3PromptOptimizeError，由调用方回退到原始方案文本。
     """
     if not settings.OPENAI_API_KEY:
@@ -144,7 +171,7 @@ def optimize_h3_prompt(
     client = OpenAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_API_BASE)
 
     messages = [
-        {"role": "system", "content": _build_system_prompt()},
+        {"role": "system", "content": _build_system_prompt(video_type)},
         {
             "role": "user",
             "content": _build_user_prompt(
@@ -155,12 +182,13 @@ def optimize_h3_prompt(
                 voiceover_language=voiceover_language,
                 product_name=product_name,
                 person_picture=person_picture,
+                video_type=video_type,
             ),
         },
     ]
 
     logger.info(
-        f"[H3提示词优化] 调用模型 {model}，方案 {len(plan_prompt)} 字符，"
+        f"[H3提示词优化] 调用模型 {model}，视频类型 {video_type}，方案 {len(plan_prompt)} 字符，"
         f"参考图 {image_count} 张，时长 {duration}s"
     )
 

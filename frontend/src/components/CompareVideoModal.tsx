@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Button, Modal, Spin, Typography } from 'antd'
-import { CaretRightOutlined, FullscreenOutlined, PauseOutlined } from '@ant-design/icons'
+import { Button, Dropdown, Modal, Slider, Spin, Typography } from 'antd'
+import { CaretRightOutlined, DownloadOutlined, FullscreenOutlined, MoreOutlined, PauseOutlined } from '@ant-design/icons'
 
 const { Text } = Typography
 
@@ -10,6 +10,21 @@ const fmt = (s: number): string => {
   const sec = Math.floor(s % 60)
   return `${m}:${String(sec).padStart(2, '0')}`
 }
+
+/** Material 风格音量图标：off=喇叭斜线（静音），否则喇叭+声波 */
+const VolumeIcon: React.FC<{ off?: boolean }> = ({ off }) => (
+  <span role="img" aria-label="volume" style={{ display: 'inline-flex', fontSize: 14, lineHeight: 1 }}>
+    <svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor">
+      <path
+        d={
+          off
+            ? 'M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z'
+            : 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'
+        }
+      />
+    </svg>
+  </span>
+)
 
 /** 视频对比播放器：左右并排同步播放。
  *  左源视频为主控，右超分结果通过 rAF 逐帧循环同步：
@@ -21,20 +36,32 @@ const CompareVideoModal: React.FC<{
   sourceUrl: string
   resultUrl?: string
   onClose: () => void
-}> = ({ open, title, sourceUrl, resultUrl, onClose }) => {
+  /** 可选下载回调：source=源视频 / result=超分结果 */
+  onDownload?: (target: 'source' | 'result') => void
+}> = ({ open, title, sourceUrl, resultUrl, onClose, onDownload }) => {
   const [ready, setReady] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [solo, setSolo] = useState<{ url: string; label: string } | null>(null)
+  const [muted, setMuted] = useState(false)
+  const [volume, setVolume] = useState(1)
+  const [volHover, setVolHover] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const masterRef = useRef<HTMLVideoElement | null>(null)
   const slaveRef = useRef<HTMLVideoElement | null>(null)
   const rafRef = useRef(0)
   const rangeRef = useRef<HTMLInputElement | null>(null)
   const timeTextRef = useRef<HTMLSpanElement | null>(null)
 
-  // 打开弹窗：等两个视频都缓冲就绪（canplay）后才开始播放，保证起点同步
+  // 打开弹窗：等两个视频都缓冲就绪（canplay）后才开始播放，保证起点同步。
+  // 关闭时重置 playing/solo/ready，避免再次打开（可能换了视频）残留上一场的状态
   useEffect(() => {
     if (!open) {
       setReady(false)
+      setPlaying(false)
+      setSolo(null)
+      setMuted(false)
+      setVolume(1)
+      setSpeed(1)
       return
     }
     let cancelled = false
@@ -53,7 +80,15 @@ const CompareVideoModal: React.FC<{
     Promise.all([waitCanplay(masterRef.current), waitCanplay(slaveRef.current)]).then(() => {
       if (cancelled) return
       setReady(true)
-      masterRef.current?.play().catch(() => {})
+      const m = masterRef.current
+      m?.play().catch(() => {
+        // 浏览器拦截有声自动播放时：降级为静音播放兜底，避免卡在第一帧
+        if (m) {
+          m.muted = true
+          setMuted(true)
+          m.play().catch(() => {})
+        }
+      })
     })
     return () => {
       cancelled = true
@@ -99,6 +134,20 @@ const CompareVideoModal: React.FC<{
 
   useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
 
+  // 声音：双屏默认播源视频音轨；单独全屏时切到对应视频的音轨；两路永远只有一路出声避免重叠
+  useEffect(() => {
+    if (!open) return
+    const audibleSlave = solo?.label === '超分结果'
+    if (masterRef.current) {
+      masterRef.current.muted = muted || audibleSlave
+      masterRef.current.volume = volume
+    }
+    if (slaveRef.current) {
+      slaveRef.current.muted = !audibleSlave || muted
+      slaveRef.current.volume = volume
+    }
+  }, [muted, volume, solo, open])
+
   const hardSync = () => {
     const m = masterRef.current
     const s = slaveRef.current
@@ -117,6 +166,13 @@ const CompareVideoModal: React.FC<{
     if (!m) return
     if (m.paused) m.play().catch(() => {})
     else m.pause()
+  }
+
+  // 倍速：只改主控播放速率，右视频由同步循环/ratechange 跟随
+  const changeSpeed = (v: number) => {
+    setSpeed(v)
+    const m = masterRef.current
+    if (m) m.playbackRate = v
   }
 
   // 单视频全屏小按钮
@@ -202,7 +258,84 @@ const CompareVideoModal: React.FC<{
         </div>
 
         {/* 横跨两个视频的自定义进度条 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, position: 'relative' }}>
+          {/* 音量 + 更多：悬浮在进度条末端上方，悬停音量时向左展开音量滑杆 */}
+          <div
+            style={{
+              position: 'absolute',
+              right: 0,
+              bottom: '100%',
+              marginBottom: 2,
+              zIndex: 4,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+            onMouseEnter={() => setVolHover(true)}
+            onMouseLeave={() => setVolHover(false)}
+          >
+            <div
+              style={{
+                width: volHover ? 72 : 0,
+                opacity: volHover ? 1 : 0,
+                overflow: 'hidden',
+                transition: 'width 0.2s ease, opacity 0.2s ease',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              <Slider
+                min={0}
+                max={1}
+                step={0.05}
+                value={muted ? 0 : volume}
+                tooltip={{ open: false }}
+                onChange={(v) => {
+                  setVolume(v)
+                  if (v > 0 && muted) setMuted(false)
+                  else if (v === 0 && !muted) setMuted(true)
+                }}
+                className="volume-slider"
+                style={{ margin: '0 6px', width: 60 }}
+              />
+            </div>
+            <Button
+              size="small"
+              icon={<VolumeIcon off={muted || volume === 0} />}
+              onClick={() => setMuted(!muted)}
+              title={muted ? '开启声音' : '静音'}
+            />
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                selectedKeys: [String(speed)],
+                onClick: ({ key }) => {
+                  if (key === 'dl-source') onDownload?.('source')
+                  else if (key === 'dl-result') onDownload?.('result')
+                  else changeSpeed(Number(key))
+                },
+                items: [
+                  { key: 'dl-source', icon: <DownloadOutlined />, label: '下载源视频' },
+                  { key: 'dl-result', icon: <DownloadOutlined />, label: '下载超分结果', disabled: !resultUrl || !onDownload },
+                  { type: 'divider' },
+                  {
+                    key: 'speed',
+                    label: '播放速度',
+                    children: [
+                      { key: '0.5', label: '0.5x' },
+                      { key: '0.75', label: '0.75x' },
+                      { key: '1', label: '1.0x（正常）' },
+                      { key: '1.25', label: '1.25x' },
+                      { key: '1.5', label: '1.5x' },
+                      { key: '2', label: '2.0x' },
+                    ],
+                  },
+                ],
+              }}
+            >
+              <Button size="small" icon={<MoreOutlined />} title="更多" />
+            </Dropdown>
+          </div>
           <Button size="small" icon={playing ? <PauseOutlined /> : <CaretRightOutlined />} onClick={togglePlay} />
           <input
             ref={rangeRef}

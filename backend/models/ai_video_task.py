@@ -21,6 +21,7 @@ class AIVideoTask(BaseModel):
                     comment="状态：排队中/生成中/已完成/失败")
 
     # 生成参数
+    video_type = Column(String(20), nullable=True, comment="视频类型：口播带货/产品展示")
     market = Column(String(20), nullable=True, comment="目标市场")
     voiceover_language = Column(String(30), nullable=True, comment="口播语言")
     model = Column(String(50), nullable=True, comment="视频模型")

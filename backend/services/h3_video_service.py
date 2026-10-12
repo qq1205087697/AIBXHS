@@ -394,6 +394,7 @@ def submit_video_task(
     model: str,
     market: str,
     voiceover_language: str = "自动",
+    video_type: str = "口播带货",
     product_code: str = "",
     product_name: str = "",
 ) -> Dict[str, Any]:
@@ -416,8 +417,8 @@ def submit_video_task(
             tenant_id=tenant_id, user_id=user_id, creator_name=creator_name,
             title=title, status="排队中", prompt=prompt,
             product_code=product_code or None, product_name=product_name or None,
-            market=market, voiceover_language=voiceover_language, model=model,
-            resolution=resolution, duration=duration, ratio=ratio,
+            market=market, voiceover_language=voiceover_language, video_type=video_type,
+            model=model, resolution=resolution, duration=duration, ratio=ratio,
         )
         db.add(task)
         db.commit()
@@ -438,6 +439,7 @@ def submit_video_task(
             "resolution": resolution,
             "ratio": ratio,
             "voiceover_language": voiceover_language,
+            "video_type": video_type,
         },
     )
 
@@ -458,6 +460,7 @@ def _prepare_and_run(
     resolution: str,
     ratio: str,
     voiceover_language: str,
+    video_type: str = "口播带货",
 ) -> None:
     """后台线程：参考图传 TOS → 提示词二次优化 → 提交工作流 → 轮询直到完成
 
@@ -496,6 +499,7 @@ def _prepare_and_run(
                     voiceover_language=voiceover_language,
                     product_name=title,
                     person_picture=person_picture,
+                    video_type=video_type,
                 )
                 _update_task(task_id, h3_prompt=optimized_prompt)
                 logger.info(
@@ -575,6 +579,7 @@ def _serialize(task) -> Dict[str, Any]:
         "product_name": task.product_name or "",
         "market": task.market,
         "voiceover_language": task.voiceover_language or "自动",
+        "video_type": task.video_type or "口播带货",
         "model": task.model,
         "resolution": task.resolution,
         "duration": task.duration,
