@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Modal, Select, message } from 'antd'
+import { Modal, Select, Spin, message } from 'antd'
 import { productsApi, aiCreationApi } from '../api'
 
 interface ProductOption {
@@ -7,6 +7,8 @@ interface ProductOption {
   product_code: string
   name: string
 }
+
+const PAGE_SIZE = 50
 
 /** 绑定视频至产品详情（AI视频页 / 高清处理页共用），选择产品后写入产品 videos 列表 */
 const BindProductModal: React.FC<{
@@ -17,21 +19,41 @@ const BindProductModal: React.FC<{
   const [products, setProducts] = useState<ProductOption[]>([])
   const [productId, setProductId] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(false)
+  // 懒加载游标与请求序号：序号用于丢弃过期请求（搜索会打断进行中的翻页加载）
+  const keywordRef = useRef('')
+  const pageRef = useRef(1)
+  const seqRef = useRef(0)
   const searchTimer = useRef<number | null>(null)
 
-  const fetchProducts = async (kw: string) => {
+  const fetchProducts = async (kw: string, page = 1) => {
+    const seq = ++seqRef.current
+    setLoading(true)
     try {
       const res = await productsApi.getList({
         search: kw || undefined,
-        page: 1,
-        page_size: 50,
+        page,
+        page_size: PAGE_SIZE,
         product_type: 'finished',
       })
-      const payload: any = res.data?.data
-      const items: any[] = Array.isArray(payload) ? payload : payload?.items || []
-      setProducts(items.map((p) => ({ id: p.id, product_code: p.product_code || '', name: p.name || '' })))
+      if (seq !== seqRef.current) return
+      const items: any[] = res.data?.data || []
+      const totalCount: number = res.data?.total || 0
+      keywordRef.current = kw
+      pageRef.current = page
+      setTotal(totalCount)
+      const mapped = items.map((p) => ({ id: p.id, product_code: p.product_code || '', name: p.name || '' }))
+      setProducts((prev) => {
+        if (page === 1) return mapped
+        // 追加下一页，按 id 去重，避免重复请求时出现重复选项
+        const seen = new Set(prev.map((p) => p.id))
+        return [...prev, ...mapped.filter((p) => !seen.has(p.id))]
+      })
     } catch {
-      message.error('获取产品列表失败')
+      if (seq === seqRef.current) message.error('获取产品列表失败')
+    } finally {
+      if (seq === seqRef.current) setLoading(false)
     }
   }
 
@@ -39,6 +61,7 @@ const BindProductModal: React.FC<{
     if (open) {
       setProductId(null)
       setProducts([])
+      setTotal(0)
       fetchProducts('')
     }
   }, [open])
@@ -46,6 +69,14 @@ const BindProductModal: React.FC<{
   const handleSearch = (kw: string) => {
     if (searchTimer.current) window.clearTimeout(searchTimer.current)
     searchTimer.current = window.setTimeout(() => fetchProducts(kw), 300)
+  }
+
+  // 下拉滚动到距底部 40px 内时加载下一页
+  const handlePopupScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 40) return
+    if (loading || products.length === 0 || products.length >= total) return
+    fetchProducts(keywordRef.current, pageRef.current + 1)
   }
 
   const handleOk = async () => {
@@ -85,8 +116,10 @@ const BindProductModal: React.FC<{
         style={{ width: '100%' }}
         value={productId ?? undefined}
         onSearch={handleSearch}
+        onPopupScroll={handlePopupScroll}
         onChange={(v) => setProductId(v ?? null)}
-        notFoundContent="无匹配产品"
+        loading={loading && products.length > 0}
+        notFoundContent={loading ? <Spin size="small" /> : '无匹配产品'}
         options={products.map((p) => ({
           value: p.id,
           label: p.product_code ? `[${p.product_code}] ${p.name}` : p.name,
