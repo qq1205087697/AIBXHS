@@ -1820,6 +1820,13 @@ export const aiCreationApi = {
       })
       .finally(() => clearTimeout(timer));
   },
+  /** 代理取图：图片 URL 浏览器直连被 CORS 拦截时（如 TOS 桶未配置跨域），由后端代取图片字节 */
+  proxyImage: (url: string) =>
+    apiClient.get<Blob>("/ai-creation/proxy-image", {
+      params: { url },
+      responseType: "blob",
+      timeout: 60000,
+    }),
   /** 立即生成：提交 MiniMax H3 视频生成任务（长时间生成，立即返回任务记录） */
   generateVideo: (files: File[], params: GenerateVideoParams) => {
     const formData = new FormData();

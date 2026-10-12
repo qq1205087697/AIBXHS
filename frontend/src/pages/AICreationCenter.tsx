@@ -445,6 +445,22 @@ const AICreationCenter: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history, historyPage, historyPageSize, historyKeyword])
 
+  // 下载 URL 图片为 Blob：先浏览器直连，被 CORS 拦截或网络失败时改走后端代理
+  const fetchImageBlob = async (url: string): Promise<Blob | null> => {
+    try {
+      const resp = await fetch(url)
+      if (resp.ok) return await resp.blob()
+    } catch {
+      // 直连失败（跨域等），尝试后端代理
+    }
+    try {
+      const resp = await aiCreationApi.proxyImage(url)
+      return resp.data
+    } catch {
+      return null
+    }
+  }
+
   // 收集所有图片为 File：本地文件直接用，产品图片 URL 需下载转 File
   const collectFiles = async (): Promise<File[]> => {
     const files: File[] = []
@@ -452,12 +468,9 @@ const AICreationCenter: React.FC = () => {
       if (f.originFileObj instanceof File) {
         files.push(f.originFileObj)
       } else if (f.url || f.thumbUrl) {
-        try {
-          const resp = await fetch(f.url || f.thumbUrl!)
-          const blob = await resp.blob()
+        const blob = await fetchImageBlob(f.url || f.thumbUrl!)
+        if (blob) {
           files.push(new File([blob], f.name || `image-${f.uid}.jpg`, { type: blob.type || 'image/jpeg' }))
-        } catch {
-          // 单张图片下载失败时跳过
         }
       }
     }

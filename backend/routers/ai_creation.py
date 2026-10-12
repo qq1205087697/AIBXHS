@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
+from urllib.parse import urlparse
 import asyncio
+import httpx
 import io
 import json
 import logging
 import time
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from dependencies import get_current_user
 from models.user import User
 from services.ai_creation_service import (
@@ -62,6 +64,47 @@ class GeneratePromptsRequest(BaseModel):
 
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
+
+
+# 代理取图域名白名单（后缀匹配）：TOS 桶未配置 CORS，浏览器 fetch 会被拦截，
+# 由后端代取字节；顺带覆盖亚马逊图片 CDN 以兜底其偶发跨域限制
+PROXY_IMAGE_HOST_SUFFIXES = (
+    "volces.com",             # 火山引擎 TOS
+    "media-amazon.com",       # 亚马逊图片 CDN
+    "ssl-images-amazon.com",  # 亚马逊图片 CDN（旧域名）
+)
+PROXY_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+
+@router.get("/proxy-image")
+async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
+    """服务端代取图片字节。
+
+    历史记录编辑回填、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
+    TOS 桶未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
+    此时前端改走本接口由后端下载并回传图片字节。
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="无效的图片地址")
+    host = parsed.hostname.lower()
+    if not any(host == s or host.endswith("." + s) for s in PROXY_IMAGE_HOST_SUFFIXES):
+        raise HTTPException(status_code=400, detail="该图片域名不在代理白名单内")
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+            if not content_type.startswith("image/"):
+                raise HTTPException(status_code=400, detail="目标地址不是图片")
+            data = resp.content
+    except httpx.HTTPError as e:
+        logger.warning(f"[AI创作中心] 代理取图失败: {url}, err={e}")
+        raise HTTPException(status_code=502, detail="图片下载失败，请重试")
+    if len(data) > PROXY_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="图片过大，请重新上传")
+    return Response(content=data, media_type=content_type)
 
 
 def _validate_images(files: List[UploadFile]) -> None:
