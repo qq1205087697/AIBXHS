@@ -29,11 +29,13 @@ import {
   Divider,
   Pagination,
   Radio,
+  Image,
 } from "antd";
 import type { TablePaginationConfig, ColumnsType } from "antd/es/table";
 import type { UploadProps } from "antd";
 import {
   Package,
+  Image as ImageIcon,
   AlertTriangle,
   AlertCircle,
   CheckCircle,
@@ -105,6 +107,9 @@ interface OverstockItem {
 
 interface InventoryItem {
   id: number;
+  image_url?: string;
+  /** 展开包装出的共享库存子行标记（构造 displayList 时动态附加） */
+  _isChild?: boolean;
   asin: string;
   sku: string;
   fnsku: string;
@@ -685,6 +690,7 @@ const InventoryBot: React.FC = () => {
   // --- Column settings states ---
   const COLUMN_META = useMemo(
     () => [
+      { key: "image_url", label: "图片" },
       { key: "asin", label: "ASIN" },
       { key: "sku", label: "SKU" },
       { key: "product_name", label: "品名" },
@@ -1756,6 +1762,45 @@ const InventoryBot: React.FC = () => {
           );
         }
         return val || "-";
+      },
+    },
+    {
+      title: "图片",
+      dataIndex: "image_url",
+      key: "image_url",
+      width: 70,
+      render: (_: any, record: InventoryItem) => {
+        // 子行（共享库存明细）与父行同产品，不重复显示图片
+        if (record._isChild) return "-";
+        const url = record.image_url;
+        const fallback = (
+          <div
+            style={{
+              width: 40,
+              height: 40,
+              background: "#f0f0f0",
+              borderRadius: 4,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <ImageIcon size={16} color="#ccc" />
+          </div>
+        );
+        return url ? (
+          <Image
+            src={url}
+            width={40}
+            height={40}
+            style={{ objectFit: "cover", borderRadius: 4 }}
+            preview={{ mask: false }}
+            loading="lazy"
+            fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjZjBmMGYwIi8+PC9zdmc+"
+          />
+        ) : (
+          fallback
+        );
       },
     },
     {

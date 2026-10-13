@@ -1405,6 +1405,33 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
     }
 
 
+def _page_product_images(db: Session, tenant_id: int, product_names) -> dict:
+    """按产品名称批量取 products.main_image（名称精确匹配）。
+
+    关联键实测（2026-10-13，正式库）：products.asin 与 product_code 和库存快照
+    完全对不上（匹配率 0%）；唯一可用关联是 products.name ↔ snapshot.product_name，
+    匹配率 73.2%（10806/14771 ASIN），其中 9123 有图。同名单多行取任一非空图。
+    失败静默返回空 dict（图片是纯展示增强，不允许影响列表主链路）。
+    """
+    names = [n for n in set(product_names or []) if n]
+    if not names:
+        return {}
+    try:
+        # 原生 SQL：Product 模型与实际库结构脱节（模型写 image_url，库实际是 main_image），
+        # 走 ORM 会在属性解析时就炸，故直接查列。
+        from sqlalchemy import bindparam, text as _text
+        _sql = _text(
+            "SELECT name, main_image FROM products "
+            "WHERE tenant_id = :tid AND name IN :names "
+            "AND main_image IS NOT NULL AND main_image != '' AND deleted_at IS NULL"
+        ).bindparams(bindparam("names", expanding=True))
+        rows = db.execute(_sql, {"tid": tenant_id, "names": names}).all()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
+
+
+
 def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_level=None,
                      replenishment_status: str = None, account: str = None,
                      country: str = None, holiday_filter: str = None,
@@ -1559,6 +1586,8 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
         )
 
     items = []
+    _name_img = _page_product_images(
+        db, tenant_id, [snap.product_name for snap, _ in results])
     for snap, dec in results:
         risk_map_r = {"红": "red", "黄": "yellow", "绿": "green"}
         local_qty = snap.local_inventory or 0
@@ -1569,6 +1598,7 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
             _f_status, _f_force = _display_verdict(snap)
         items.append({
             "id": snap.id, "asin": snap.asin, "sku": snap.sku, "fnsku": snap.fnsku,
+            "image_url": _name_img.get(snap.product_name),
             "msku": snap.msku, "product_name": snap.product_name, "account": snap.account,
             "country": snap.country, "category": snap.category, "brand": snap.brand,
             "replenishment_status": snap.replenishment_status,
@@ -1882,6 +1912,8 @@ def get_summary_children(db: Session, tenant_id: int, asin: str, parent_account:
         return "KEEP", 0
 
     out = []
+    _name_img = _page_product_images(
+        db, tenant_id, [c.product_name for c in children])
     for c in children:
         _status, _force = _child_verdict(c)
         if _status != "KEEP":
@@ -1889,6 +1921,7 @@ def get_summary_children(db: Session, tenant_id: int, asin: str, parent_account:
         out.append({
             "id": c.id,
             "asin": c.asin,
+            "image_url": _name_img.get(c.product_name),
             "sku": c.sku,
             "fnsku": c.fnsku,
             "msku": c.msku,
