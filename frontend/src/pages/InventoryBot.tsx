@@ -4231,10 +4231,17 @@ const InventoryBot: React.FC = () => {
           border-radius: 5px;
         }
         /* 自定义横向滚动条样式
-           刻意不写 scrollbar-width / scrollbar-color：一旦命中标准滚动条属性，
-           Chrome ≥121 会整条忽略下面的 ::-webkit-scrollbar 规则。
+           scrollbar-color 刻意不写（同理避免命中标准属性）；scrollbar-width
+           必须显式 auto——见上方断继承注释。
            本元素不在 .ant-table 内，不会继承 antd 注入的 scrollbar-color，
            因此 WebKit 伪元素可直接生效，厚度稳定为 10px。 */
+        /* 必须显式写 auto 断掉继承：祖先 .inv-page-scroll 的 scrollbar-width:none
+           是继承属性，会被本元素继承 → Chrome ≥121 命中标准属性后整条忽略
+           下面的 ::-webkit-scrollbar 样式 → 沉底条消失、原生条漏出。 */
+        .table-h-scroll {
+          scrollbar-width: auto;
+          -ms-overflow-style: auto;
+        }
         .table-h-scroll::-webkit-scrollbar {
           height: 10px;
         }
