@@ -16,19 +16,22 @@ import DataAlertBot from "./pages/DataAlertBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
 import ProductManagement from "./pages/ProductManagement";
-import InboundManagement from "./pages/InboundManagement";
-import OutboundManagement from "./pages/OutboundManagement";
-import PurchaseManagement from "./pages/PurchaseManagement";
-import ReplenishmentManagement from "./pages/ReplenishmentManagement";
-import OperationLogs from "./pages/OperationLogs";
-import StockTransferManagement from "./pages/StockTransferManagement";
-import ShipmentManagement from "./pages/ShipmentManagement";
-import SupplierManagement from "./pages/SupplierManagement";
-import WarehouseManagement from "./pages/WarehouseManagement";
+import InboundManagement from './pages/InboundManagement'
+import OutboundManagement from './pages/OutboundManagement'
+import PurchaseManagement from './pages/PurchaseManagement'
+import ReplenishmentManagement from './pages/ReplenishmentManagement'
+import OperationLogs from './pages/OperationLogs'
+import StockTransferManagement from './pages/StockTransferManagement'
+import ShipmentManagement from './pages/ShipmentManagement'
+import SupplierManagement from './pages/SupplierManagement'
+import WarehouseManagement from './pages/WarehouseManagement'
+import BaseTableManagement from './pages/BaseTableManagement'
 import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from "./pages/PermissionManagement";
 import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
+import AICreationCenter from './pages/AICreationCenter';
+import UpscaleCenter from './pages/UpscaleCenter';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -268,6 +271,16 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/base-table"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <BaseTableManagement />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/tenants"
         element={
           <ProtectedRoute>
@@ -303,6 +316,26 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <AllocateShipmentTest />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/ai-creation"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AICreationCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/upscale-center"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <UpscaleCenter />
             </MainLayout>
           </ProtectedRoute>
         }

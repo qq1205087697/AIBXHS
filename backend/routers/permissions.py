@@ -177,6 +177,100 @@ async def delete_role(
     return {"success": True, "message": "删除成功"}
 
 
+class RoleCopyRequest(BaseModel):
+    name: str
+    code: str
+    description: Optional[str] = None
+
+
+@router.post("/roles/{role_id}/copy")
+async def copy_role(
+    role_id: int,
+    data: RoleCopyRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user)
+):
+    """复制角色（含权限，不含用户）"""
+    # 检查源角色是否存在
+    src_role = db.execute(text("""
+        SELECT id, code FROM roles WHERE id = :id AND tenant_id = :tenant_id AND deleted_at IS NULL
+    """), {"id": role_id, "tenant_id": current_user.tenant_id}).fetchone()
+    if not src_role:
+        raise HTTPException(status_code=404, detail="源角色不存在")
+
+    # 清理输入
+    cleaned_code = clean_string(data.code) if data.code else ""
+    if not cleaned_code:
+        raise HTTPException(status_code=400, detail="角色编码不能为空")
+
+    # 检查角色编码是否已存在
+    existing = db.execute(text("""
+        SELECT id FROM roles WHERE tenant_id = :tenant_id AND code = :code AND deleted_at IS NULL
+    """), {"tenant_id": current_user.tenant_id, "code": cleaned_code}).fetchone()
+    if existing:
+        raise HTTPException(status_code=400, detail="角色编码已存在")
+
+    # 创建新角色
+    result = db.execute(text("""
+        INSERT INTO roles (tenant_id, name, code, description, is_system, sort_order, created_at, updated_at)
+        VALUES (:tenant_id, :name, :code, :description, :is_system, :sort_order, NOW(), NOW())
+    """), {
+        "tenant_id": current_user.tenant_id,
+        "name": data.name,
+        "code": cleaned_code,
+        "description": data.description,
+        "is_system": False,
+        "sort_order": 0,
+    })
+    new_role_id = result.lastrowid
+
+    # 复制源角色的所有权限到新角色
+    # 管理员角色默认拥有全部权限（role_permissions 无显式记录），复制时取该租户全部权限
+    src_perms = db.execute(text("""
+        SELECT permission_id FROM role_permissions
+        WHERE role_id = :role_id AND tenant_id = :tenant_id AND deleted_at IS NULL
+    """), {"role_id": role_id, "tenant_id": current_user.tenant_id}).fetchall()
+
+    if not src_perms and src_role[1] == "admin":
+        src_perms = db.execute(text("""
+            SELECT id FROM permissions
+            WHERE tenant_id = :tenant_id AND deleted_at IS NULL
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+
+    for perm in src_perms:
+        perm_id = perm[0]
+        # 检查是否已存在（含软删除的记录，恢复即可）
+        existing_rp = db.execute(text("""
+            SELECT id FROM role_permissions
+            WHERE role_id = :role_id AND permission_id = :permission_id AND tenant_id = :tenant_id
+        """), {
+            "role_id": new_role_id,
+            "permission_id": perm_id,
+            "tenant_id": current_user.tenant_id,
+        }).fetchone()
+        if existing_rp:
+            db.execute(text("""
+                UPDATE role_permissions SET deleted_at = NULL, updated_at = NOW()
+                WHERE role_id = :role_id AND permission_id = :permission_id AND tenant_id = :tenant_id
+            """), {
+                "role_id": new_role_id,
+                "permission_id": perm_id,
+                "tenant_id": current_user.tenant_id,
+            })
+        else:
+            db.execute(text("""
+                INSERT INTO role_permissions (tenant_id, role_id, permission_id, created_at, updated_at)
+                VALUES (:tenant_id, :role_id, :permission_id, NOW(), NOW())
+            """), {
+                "tenant_id": current_user.tenant_id,
+                "role_id": new_role_id,
+                "permission_id": perm_id,
+            })
+
+    db.commit()
+    return {"success": True, "message": "角色复制成功", "data": {"id": new_role_id}}
+
+
 # ============== 权限管理 ==============
 
 @router.get("/permissions")
@@ -529,6 +623,10 @@ async def init_default_permissions(
         {"name": "编辑选品", "code": "product_selection:edit", "type": "function", "module": "选品管理", "sort_order": 7},
         {"name": "删除选品", "code": "product_selection:delete", "type": "function", "module": "选品管理", "sort_order": 8},
         {"name": "审批选品", "code": "product_selection:approve", "type": "function", "module": "选品管理", "sort_order": 9},
+        {"name": "申请选品", "code": "product_selection:submit", "type": "function", "module": "选品管理", "sort_order": 10},
+        {"name": "选品利润设置", "code": "product_selection:settings", "type": "function", "module": "选品管理", "sort_order": 11},
+        # 底表管理
+        {"name": "查看底表", "code": "base_table:view", "type": "function", "module": "底表管理", "sort_order": 5},
         # 平台商品管理
         {"name": "查看平台商品", "code": "platform:view", "type": "function", "module": "产品管理", "sort_order": 6},
         {"name": "新增平台商品", "code": "platform:create", "type": "function", "module": "产品管理", "sort_order": 7},
@@ -584,6 +682,7 @@ async def init_default_permissions(
         {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 46},
         {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 47},
         {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 48},
+        {"name": "差评推送配置", "code": "robot:review:push_config", "type": "function", "module": "差评机器人", "sort_order": 49},
         # 邮件机器人
         {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
         {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
@@ -595,6 +694,8 @@ async def init_default_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        # 媒体创作中心
+        {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -664,6 +765,10 @@ async def add_missing_permissions(
         {"name": "编辑选品", "code": "product_selection:edit", "type": "function", "module": "选品管理", "sort_order": 7},
         {"name": "删除选品", "code": "product_selection:delete", "type": "function", "module": "选品管理", "sort_order": 8},
         {"name": "审批选品", "code": "product_selection:approve", "type": "function", "module": "选品管理", "sort_order": 9},
+        {"name": "申请选品", "code": "product_selection:submit", "type": "function", "module": "选品管理", "sort_order": 10},
+        {"name": "选品利润设置", "code": "product_selection:settings", "type": "function", "module": "选品管理", "sort_order": 11},
+        # 底表管理
+        {"name": "查看底表", "code": "base_table:view", "type": "function", "module": "底表管理", "sort_order": 5},
         # 平台商品管理
         {"name": "查看平台商品", "code": "platform:view", "type": "function", "module": "产品管理", "sort_order": 6},
         {"name": "新增平台商品", "code": "platform:create", "type": "function", "module": "产品管理", "sort_order": 7},
@@ -680,6 +785,7 @@ async def add_missing_permissions(
         {"name": "查看差评", "code": "robot:review:view", "type": "function", "module": "差评机器人", "sort_order": 46},
         {"name": "AI分析差评", "code": "robot:review:analyze", "type": "function", "module": "差评机器人", "sort_order": 47},
         {"name": "管理差评状态", "code": "robot:review:manage", "type": "function", "module": "差评机器人", "sort_order": 48},
+        {"name": "差评推送配置", "code": "robot:review:push_config", "type": "function", "module": "差评机器人", "sort_order": 49},
         # 邮件机器人
         {"name": "查看邮件", "code": "robot:email:view", "type": "function", "module": "邮件机器人", "sort_order": 57},
         {"name": "AI回复邮件", "code": "robot:email:reply", "type": "function", "module": "邮件机器人", "sort_order": 58},
@@ -691,6 +797,8 @@ async def add_missing_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        # 媒体创作中心
+        {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -785,6 +893,37 @@ async def add_missing_permissions(
                         VALUES (:tenant_id, :role_id, :perm_id, NOW(), NOW())
                     """), {"tenant_id": tenant_id, "role_id": admin_role[0], "perm_id": perm_id})
     
+    # 迁移旧「AI创作中心」权限到「媒体创作中心-AI视频」（保留角色绑定关系）
+    legacy_perm = db.execute(text("""
+        SELECT id FROM permissions
+        WHERE tenant_id = :tid AND code = 'ai_creation:use' AND deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchone()
+    new_perm = db.execute(text("""
+        SELECT id FROM permissions
+        WHERE tenant_id = :tid AND code = 'ai_video:use' AND deleted_at IS NULL
+    """), {"tid": tenant_id}).fetchone()
+    if legacy_perm and new_perm and legacy_perm[0] != new_perm[0]:
+        # 新旧并存：把旧权限的角色绑定迁移到新权限后软删旧权限
+        db.execute(text("""
+            UPDATE role_permissions SET permission_id = :new_pid, updated_at = NOW()
+            WHERE permission_id = :old_pid AND deleted_at IS NULL
+              AND id NOT IN (
+                SELECT id FROM (SELECT id FROM role_permissions
+                                WHERE permission_id = :new_pid AND deleted_at IS NULL) t
+              )
+        """), {"new_pid": new_perm[0], "old_pid": legacy_perm[0]})
+        db.execute(text("""
+            UPDATE permissions SET deleted_at = NOW(), updated_at = NOW()
+            WHERE id = :pid
+        """), {"pid": legacy_perm[0]})
+    elif legacy_perm and not new_perm:
+        # 仅存在旧权限：原地改码改名（角色绑定不受影响）
+        db.execute(text("""
+            UPDATE permissions
+            SET code = 'ai_video:use', name = 'AI视频', module = '媒体创作中心', updated_at = NOW()
+            WHERE id = :pid
+        """), {"pid": legacy_perm[0]})
+
     # 规范化已有权限的模块和名称（防止之前的数据错乱）
     fix_map = [
         {"code": "inbound:confirm", "name": "审批入库", "module": "入库管理"},

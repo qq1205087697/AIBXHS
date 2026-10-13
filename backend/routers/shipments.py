@@ -824,7 +824,7 @@ async def export_shipment_detail(
 
         from fastapi.responses import StreamingResponse
         from urllib.parse import quote
-        filename = f"发货单_{order[1]}.xlsx"
+        filename = f"发货单_{order[1]}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         encoded_filename = quote(filename)
         return StreamingResponse(
             output,
