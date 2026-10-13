@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import {
   Card,
   Row,
@@ -22,7 +28,7 @@ import {
   Checkbox,
   Divider,
   Pagination,
-  Dropdown,
+  Radio,
 } from "antd";
 import type { TablePaginationConfig, ColumnsType } from "antd/es/table";
 import type { UploadProps } from "antd";
@@ -44,9 +50,12 @@ import {
   Download,
   RefreshCw,
   Columns,
+  Pin,
+  PinOff,
+  Lock,
 } from "lucide-react";
 import { UploadOutlined, DownloadOutlined } from "@ant-design/icons";
-import { inventoryApi, localInventoryApi } from "../api";
+import { inventoryApi, localInventoryApi, tagsApi } from "../api";
 import { useTheme } from "../contexts/ThemeContext";
 import { useAuth } from "../contexts/AuthContext";
 import { useResponsive } from "../hooks/useResponsive";
@@ -124,8 +133,13 @@ interface InventoryItem {
   replenishment_reason?: string;
   age_12_plus?: number;
   gross_margin?: number;
+  return_rate_30d?: number;
+  return_rate_60d?: number;
   is_holiday?: string;
   is_discontinued?: boolean;
+  force_replenish?: number;
+  filter_status?: string;
+  tag_locked?: number;
 }
 
 interface InboundDetail {
@@ -291,7 +305,8 @@ const buildGroupedOptions = (
     const region = regionOf(opt.value);
     (groups[region] ||= []).push(opt);
   }
-  const result: { label: string; items: { value: string; label: string }[] }[] = [];
+  const result: { label: string; items: { value: string; label: string }[] }[] =
+    [];
   for (const continent of CONTINENT_ORDER) {
     if (groups[continent] && groups[continent].length > 0) {
       result.push({ label: continent, items: groups[continent] });
@@ -369,9 +384,7 @@ const CascadingFilter: React.FC<CascadingFilterProps> = ({
       setDraft([...value]);
       setKeyword("");
       const first =
-        groups.find((g) => g.items.length > 0)?.label ??
-        groups[0]?.label ??
-        "";
+        groups.find((g) => g.items.length > 0)?.label ?? groups[0]?.label ?? "";
       setActiveGroup((prev) =>
         prev && groups.some((g) => g.label === prev) ? prev : first,
       );
@@ -379,8 +392,7 @@ const CascadingFilter: React.FC<CascadingFilterProps> = ({
     setOpen(next);
   };
 
-  const currentGroup =
-    groups.find((g) => g.label === activeGroup) ?? groups[0];
+  const currentGroup = groups.find((g) => g.label === activeGroup) ?? groups[0];
 
   const kw = keyword.trim().toLowerCase();
   const filteredItems = (currentGroup?.items ?? []).filter((it) =>
@@ -563,6 +575,8 @@ const InventoryBot: React.FC = () => {
     { label: "本地仓库存", value: "local_inventory" },
     { label: "总库存", value: "total_stock" },
     { label: "毛利率", value: "gross_margin" },
+    { label: "30天退货率", value: "return_rate_30d" },
+    { label: "60天退货率", value: "return_rate_60d" },
     { label: "日均销量", value: "daily_sales" },
     { label: "7天销量", value: "sales_7d" },
     { label: "14天销量", value: "sales_14d" },
@@ -576,6 +590,9 @@ const InventoryBot: React.FC = () => {
     { label: "补货状态", value: "replenishment_status" },
     { label: "节日类型", value: "is_holiday" },
     { label: "停售", value: "is_discontinued" },
+    { label: "强制补货", value: "force_replenish" },
+    { label: "人工锁定", value: "tag_locked" },
+    { label: "过滤状态", value: "filter_status" },
   ];
 
   // --- Data states ---
@@ -615,7 +632,7 @@ const InventoryBot: React.FC = () => {
     undefined,
   );
   const [holidayFilter, setHolidayFilter] =
-    useState<string>("only_non_holiday");
+    useState<string>("all");
 
   // --- Modal states ---
   const [inboundModalVisible, setInboundModalVisible] = useState(false);
@@ -678,6 +695,8 @@ const InventoryBot: React.FC = () => {
       { key: "inspection_quantity", label: "查验货件" },
       { key: "total_stock", label: "总库存" },
       { key: "gross_margin", label: "毛利率" },
+      { key: "return_rate_30d", label: "30天退货率" },
+      { key: "return_rate_60d", label: "60天退货率" },
       { key: "local_inventory", label: "本地仓" },
       { key: "daily_sales", label: "日均销量" },
       { key: "sales_7d", label: "7天销量" },
@@ -689,6 +708,9 @@ const InventoryBot: React.FC = () => {
       { key: "suggest_qty", label: "建议补货" },
       { key: "age_12_plus", label: "12月+库龄" },
       { key: "risk_level", label: "风险等级" },
+      { key: "tag_holiday", label: "节日标签" },
+      { key: "force_replenish", label: "强制补货" },
+      { key: "tag_locked", label: "人工锁定" },
     ],
     [],
   );
@@ -707,10 +729,26 @@ const InventoryBot: React.FC = () => {
 
   // ==================== Data Fetching ====================
 
-  const fetchOverview = useCallback(async () => {
+  const fetchOverview = useCallback(async (over?: {
+    keyword?: string;
+    holiday?: string;
+    account?: string[];
+    country?: string[];
+  }) => {
     try {
       setOverviewLoading(true);
-      const response = await inventoryApi.getOverview();
+      // 概览与列表同口径：带上当前筛选，使面板「总SKU数」= 表格该筛选下的条数。
+      // handler 里状态更新是异步的，故支持传 over 显式覆盖（用新值而非旧 state）。
+      const kw = over?.keyword !== undefined ? over.keyword : searchText;
+      const hf = over?.holiday !== undefined ? over.holiday : holidayFilter;
+      const ac = over?.account !== undefined ? over.account : accountFilter;
+      const co = over?.country !== undefined ? over.country : countryFilter;
+      const params: any = {};
+      if (kw) params.keyword = kw;
+      if (hf) params.holiday_filter = hf;
+      if (ac && ac.length > 0) params.account = ac;
+      if (co && co.length > 0) params.country = co;
+      const response = await inventoryApi.getOverview(params);
       const data = response.data?.data || response.data;
       if (data) {
         setOverviewData(data);
@@ -721,7 +759,7 @@ const InventoryBot: React.FC = () => {
     } finally {
       setOverviewLoading(false);
     }
-  }, [messageApi]);
+  }, [messageApi, searchText, holidayFilter, accountFilter, countryFilter]);
 
   const fetchLocalSummary = useCallback(async () => {
     try {
@@ -751,6 +789,8 @@ const InventoryBot: React.FC = () => {
     ) => {
       try {
         setTableLoading(true);
+        // 列表刷新后旧勾选可能已不在当前视图 → 清空，避免批量操作作用到不可见行
+        setSelectedRowKeys([]);
         const params: any = {
           page,
           page_size: pageSize,
@@ -761,7 +801,8 @@ const InventoryBot: React.FC = () => {
         if (country && country.length > 0) params.country = country;
         if (sortF) params.sort_field = sortF;
         if (sortOrd) params.sort_order = sortOrd;
-        if (holiday && holiday !== "all") params.holiday_filter = holiday;
+        // 始终显式传 holiday_filter（含 "all"）：后端据此区分「全部=不过滤」与「未指定=按 KEEP 过滤」
+        if (holiday) params.holiday_filter = holiday;
 
         console.log("发送请求参数:", params);
 
@@ -787,7 +828,12 @@ const InventoryBot: React.FC = () => {
   );
 
   useEffect(() => {
-    fetchOverview();
+    fetchOverview({
+      keyword: searchText,
+      holiday: holidayFilter,
+      account: accountFilter,
+      country: countryFilter,
+    });
     fetchLocalSummary();
     fetchInventoryList(
       1,
@@ -836,6 +882,7 @@ const InventoryBot: React.FC = () => {
       sortOrder,
       holidayFilter,
     );
+     fetchOverview({ keyword: value });
   };
 
   const handleAccountFilterChange = (values: string[]) => {
@@ -853,6 +900,7 @@ const InventoryBot: React.FC = () => {
       sortOrder,
       holidayFilter,
     );
+    fetchOverview({ account: next });
   };
 
   const handleCountryFilterChange = (values: string[]) => {
@@ -890,6 +938,7 @@ const InventoryBot: React.FC = () => {
       sortOrder,
       holidayFilter,
     );
+    fetchOverview({ country: selectedCountries, account: [] });
   };
 
   const handleTableChange = (
@@ -991,6 +1040,85 @@ const InventoryBot: React.FC = () => {
     }
   };
 
+  // ==================== 行级标签：人工锁定徽标 → 居中弹窗（查看/解除，K5） ====================
+  // 作用域 = (asin, account)：点哪一行就只作用于哪一店铺行（汇总行会展开到其共享库存子行）。
+  const [lockModal, setLockModal] = useState<{
+    open: boolean;
+    asin: string;
+    account: string;
+    loading: boolean;
+    tags: any[];
+  }>({ open: false, asin: "", account: "", loading: false, tags: [] });
+
+  /** 刷新主列表 + 概览（操作列各处共用；**并行**发起，串行会多花 ~650ms） */
+  const refreshInventory = useCallback(() => {
+    void Promise.all([
+      fetchInventoryList(
+        pagination.current || 1,
+        pagination.pageSize || 20,
+        searchText,
+        tableRiskFilter,
+        accountFilter,
+        countryFilter,
+        sortField,
+        sortOrder,
+        holidayFilter,
+      ),
+      fetchOverview(),
+    ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    fetchInventoryList,
+    fetchOverview,
+    pagination.current,
+    pagination.pageSize,
+    searchText,
+    tableRiskFilter,
+    accountFilter,
+    countryFilter,
+    sortField,
+    sortOrder,
+    holidayFilter,
+  ]);
+
+  const openLockModal = async (asin: string, account?: string) => {
+    const acct = account || "";
+    setLockModal({ open: true, asin, account: acct, loading: true, tags: [] });
+    try {
+      const res: any = await tagsApi.list({ asin, account: acct, page_size: 50 });
+      const items =
+        res?.data?.data?.items || res?.data?.items || [];
+      setLockModal({ open: true, asin, account: acct, loading: false, tags: items });
+    } catch (error: any) {
+      setLockModal((m) => ({ ...m, loading: false }));
+      messageApi.error(error?.response?.data?.detail || "获取标签失败");
+    }
+  };
+
+  const releaseLockedTag = async (tag: any, clear: boolean) => {
+    try {
+      let res: any;
+      if (tag.tag_type === "force_replenish") {
+        res = await tagsApi.clearForceReplenish(lockModal.asin, lockModal.account);
+      } else {
+        res = await tagsApi.unlockHoliday(
+          lockModal.asin, tag.tag_value, clear, lockModal.account);
+      }
+      const changed = res?.data?.data?.changed;
+      if (changed === false) {
+        messageApi.warning("未找到可解除的标签（可能已被解除）");
+      } else {
+        messageApi.success(
+          clear ? "已解除锁定并清除标签" : "已解除锁定，恢复自动管辖",
+        );
+      }
+      await openLockModal(lockModal.asin, lockModal.account);
+      refreshInventory();
+    } catch (error: any) {
+      messageApi.error(error?.response?.data?.detail || "操作失败");
+    }
+  };
+
   const handleViewInbound = async (asin: string, account?: string) => {
     try {
       setInboundAsin(asin);
@@ -1087,6 +1215,92 @@ const InventoryBot: React.FC = () => {
     }
     return result;
   }, [inventoryList, expandedParentIds, childrenMap]);
+
+  // ==================== 批量操作：行勾选 + 批量取消标记 / 批量取消强制补货 ====================
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
+
+  /** 已勾选行对应的原始记录（子行不可勾选：汇总行的操作已覆盖其共享库存子行） */
+  const selectedRecords = useMemo(
+    () =>
+      displayList.filter(
+        (r: any) => !r._isChild && selectedRowKeys.includes(r.id),
+      ),
+    [displayList, selectedRowKeys],
+  );
+
+  /** 批量取消标记（停售/节日）——后端按 snapshot_ids 批量清并自动覆盖汇总行子行 */
+  const batchClearMark = () => {
+    const recs = selectedRecords;
+    if (!recs.length) return;
+    Modal.confirm({
+      title: `批量取消标记（已选 ${recs.length} 行）`,
+      content:
+        "将清除所选行的「节日 / 停售」标记（含自动打标写入的节日标签，并抑制其被自动加回）；所选行若为汇总行，会连同其共享库存子行一起清除。确定继续吗？",
+      okText: "确定取消标记",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setBatchLoading(true);
+        try {
+          const ids = recs.map((r: any) => r.id);
+          const res: any = await inventoryApi.markProductStatus(ids, "clear");
+          const n = res?.data?.data?.suppressed_tags;
+          messageApi.success(
+            `已批量取消标记 ${ids.length} 行${n ? `（并清除 ${n} 条节日标签）` : ""}`,
+          );
+          setSelectedRowKeys([]);
+          refreshInventory();
+        } catch (error: any) {
+          messageApi.error(error?.response?.data?.detail || "批量取消标记失败");
+          return Promise.reject();
+        } finally {
+          setBatchLoading(false);
+        }
+      },
+    });
+  };
+
+  /** 批量取消强制补货——按 (asin, account) 行级解除，逐行并发调用 */
+  const batchClearForce = () => {
+    const recs = selectedRecords;
+    if (!recs.length) return;
+    Modal.confirm({
+      title: `批量取消强制补货（已选 ${recs.length} 行）`,
+      content:
+        "将解除所选行的强制补货标签；所选行若为汇总行，会连同其共享库存子行一起解除。确定继续吗？",
+      okText: "确定解除",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setBatchLoading(true);
+        try {
+          const results = await Promise.allSettled(
+            recs.map((r: any) =>
+              tagsApi.clearForceReplenish(r.asin, r.account),
+            ),
+          );
+          const changed = results.filter(
+            (x: any) =>
+              x.status === "fulfilled" && x.value?.data?.data?.changed !== false,
+          ).length;
+          const skipped = results.filter(
+            (x: any) =>
+              x.status === "fulfilled" && x.value?.data?.data?.changed === false,
+          ).length;
+          const failed = results.length - changed - skipped;
+          if (changed) messageApi.success(`已解除强制补货 ${changed} 行`);
+          if (skipped) messageApi.warning(`${skipped} 行本就没有强制补货标签`);
+          if (failed) messageApi.error(`${failed} 行解除失败`);
+          setSelectedRowKeys([]);
+          refreshInventory();
+        } finally {
+          setBatchLoading(false);
+        }
+      },
+    });
+  };
+
 
   const handleFileUpload = async (file: File) => {
     try {
@@ -1914,6 +2128,56 @@ const InventoryBot: React.FC = () => {
       },
     },
     {
+      title: "30天退货率",
+      dataIndex: "return_rate_30d",
+      key: "return_rate_30d",
+      width: 100,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "return_rate_30d"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") {
+          return <span style={{ color: "#999" }}>-</span>;
+        }
+        if (val === null || val === undefined) return "-";
+        return (
+          <span style={{ color: val > 0 ? "#cf1322" : "#999", fontWeight: 500 }}>
+            {(val * 100).toFixed(2)}%
+          </span>
+        );
+      },
+    },
+    {
+      title: "60天退货率",
+      dataIndex: "return_rate_60d",
+      key: "return_rate_60d",
+      width: 100,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "return_rate_60d"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") {
+          return <span style={{ color: "#999" }}>-</span>;
+        }
+        if (val === null || val === undefined) return "-";
+        return (
+          <span style={{ color: val > 0 ? "#cf1322" : "#999", fontWeight: 500 }}>
+            {(val * 100).toFixed(2)}%
+          </span>
+        );
+      },
+    },
+    {
       title: "本地仓",
       dataIndex: "local_inventory",
       key: "local_inventory",
@@ -2166,9 +2430,90 @@ const InventoryBot: React.FC = () => {
       },
     },
     {
+      // 节日标签列：展示本行生效的节日标记（快照标记 ∪ 生效节日标签，后端已按逗号合并）。
+      // 操作列的按钮不再显示节日文本（改为「标记 / 取消标记」），节日内容统一在本列呈现。
+      title: "节日标签",
+      dataIndex: "is_holiday",
+      key: "tag_holiday",
+      width: 130,
+      align: "center",
+      render: (val: any, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") return null;
+        const vals = String(val ?? "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean);
+        if (!vals.length) return <Tag color="default">-</Tag>;
+        return (
+          <span>
+            {vals.map((v) => (
+              <Tag color="purple" key={v} style={{ marginInlineEnd: 2 }}>
+                {v}
+              </Tag>
+            ))}
+          </span>
+        );
+      },
+    },
+    {
+      title: "强制补货",
+      dataIndex: "force_replenish",
+      key: "force_replenish",
+      width: 100,
+      align: "center",
+      render: (val: any, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") {
+          return null;
+        }
+        if (record.force_replenish === 1) {
+          return (
+            <Tooltip title="强制补货标签生效中：该商品无视节日/负利润排除，始终参与补货。">
+              <Tag color="gold" icon={<Pin size={12} />}>
+                强制补货
+              </Tag>
+            </Tooltip>
+          );
+        }
+        return <Tag color="default">-</Tag>;
+      },
+    },
+    {
+      title: "人工锁定",
+      dataIndex: "tag_locked",
+      key: "tag_locked",
+      width: 100,
+      align: "center",
+      render: (_: any, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") {
+          return null;
+        }
+        if (record.tag_locked === 1) {
+          return (
+            <Tooltip title="该店铺行有生效中的人工标签（K5 人工锁定优先）：自动打标不会覆盖或清除。点击查看并解除锁定。">
+              <Tag
+                color="purple"
+                icon={<Lock size={12} />}
+                style={{ cursor: "pointer" }}
+                onClick={() => openLockModal(record.asin, record.account)}
+              >
+                人工锁定
+              </Tag>
+            </Tooltip>
+          );
+        }
+        return <Tag color="default">-</Tag>;
+      },
+    },
+    {
       title: "操作",
       key: "action",
-      width: 200,
+      // 宽度必须容纳「在途详情 + 强制补货 + 第3槽(标记/停售/节日)」同时出现的最坏情形。
+      // 真机实测（Chromium 1600x900）固定部分：padding 8+8、在途详情 94、gap 4、
+      // 强制补货 94、gap 4 = 212px；第3槽按最长 K6 节日名「感恩节黑五」留 84px
+      // （Tag 内 maxWidth，见下方节日渲染）→ 合计 296px，取 310 留 14px 余量。
+      // 原 width:200 时单元格 scrollWidth=248、溢出 48px，导致第 3 槽的「标记」
+      // 被 sticky 容器完全裁掉（实测 visibleW=0），即本缺陷根因。
+      width: 310,
       fixed: "right",
       render: (_: any, record: InventoryItem) => {
         if (record.summary_flag === "共享库存") {
@@ -2183,7 +2528,7 @@ const InventoryBot: React.FC = () => {
           return msg;
         };
         return (
-          <Space size={4}>
+          <Space size={4} style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
             <Button
               type="link"
               size="small"
@@ -2192,137 +2537,210 @@ const InventoryBot: React.FC = () => {
             >
               在途详情
             </Button>
-            {record.is_discontinued === true ? (
-              <Popconfirm
-                title="清除标记"
-                description={confirmMessage("清除停售标记")}
-                onConfirm={async () => {
-                  try {
-                    await inventoryApi.markProductStatus([record.id], "clear");
-                    messageApi.success("已清除标记");
-                    fetchInventoryList(
-                      pagination.current || 1,
-                      pagination.pageSize || 20,
-                      searchText,
-                      tableRiskFilter,
-                      accountFilter,
-                      countryFilter,
-                      sortField,
-                      sortOrder,
-                      holidayFilter,
-                    );
-                    fetchOverview();
-                  } catch (error: any) {
-                    messageApi.error(
-                      error?.response?.data?.detail || "操作失败",
-                    );
-                  }
-                }}
-                okText="确定"
-                cancelText="取消"
-              >
-                <Tooltip title="已标记为「停售」，该商品将从风险TOP10与数量统计中排除。点击可清除标记。">
-                  <Tag color="default" style={{ cursor: "pointer" }}>
-                    停售
-                  </Tag>
-                </Tooltip>
-              </Popconfirm>
-            ) : record.is_holiday ? (
-              <Popconfirm
-                title="清除标记"
-                description={confirmMessage("清除节日标记")}
-                onConfirm={async () => {
-                  try {
-                    await inventoryApi.markProductStatus([record.id], "clear");
-                    messageApi.success("已清除标记");
-                    fetchInventoryList(
-                      pagination.current || 1,
-                      pagination.pageSize || 20,
-                      searchText,
-                      tableRiskFilter,
-                      accountFilter,
-                      countryFilter,
-                      sortField,
-                      sortOrder,
-                      holidayFilter,
-                    );
-                    fetchOverview();
-                  } catch (error: any) {
-                    messageApi.error(
-                      error?.response?.data?.detail || "操作失败",
-                    );
-                  }
-                }}
-                okText="确定"
-                cancelText="取消"
-              >
-                <Tooltip
-                  title={`已标记为「${record.is_holiday}」节日商品，将从风险TOP10与数量统计中排除。点击可清除标记。`}
-                >
-                  <Tag color="purple" style={{ cursor: "pointer" }}>
-                    {record.is_holiday}
-                  </Tag>
-                </Tooltip>
-              </Popconfirm>
-            ) : (
-              <Dropdown
-                menu={{
-                  items: [
-                    {
-                      key: "holiday",
-                      label: "标记节日",
-                      children: [
-                        { key: "圣诞", label: "圣诞" },
-                        { key: "万圣", label: "万圣" },
-                        { key: "跨年", label: "跨年" },
-                        { key: "其他", label: "其他" },
-                      ],
-                    },
-                    { key: "discontinued", label: "停售", danger: true },
-                  ],
-                  onClick: async ({ key }) => {
-                    try {
-                      if (key === "discontinued") {
-                        await inventoryApi.markProductStatus(
-                          [record.id],
-                          "discontinued",
+            {record.force_replenish === 1 ? (
+              // 与「强制补货」按钮同结构（icon + 4 字），保证两态等宽 —— 否则第 3 槽
+              // 「标记」的 X 位置随行漂移（实测 22px，操作列横向不对齐的根因）。
+              // 确认弹窗用页面中心 Modal（与「设置强制补货」一致），不用锚定 Popconfirm。
+              <Button
+                type="link"
+                size="small"
+                danger
+                icon={<PinOff size={14} />}
+                onClick={() => {
+                  Modal.confirm({
+                    title: `解除强制补货：${record.asin}${record.account ? "（" + record.account + "）" : ""}`,
+                    content:
+                      "解除后该店铺行将恢复常规过滤规则（节日/负利润排除重新生效）。确定解除吗？",
+                    okText: "确定解除",
+                    cancelText: "取消",
+                    okButtonProps: { danger: true },
+                    onOk: async () => {
+                      try {
+                        const res: any = await tagsApi.clearForceReplenish(
+                          record.asin,
+                          record.account,
                         );
-                        messageApi.success("已标记为停售");
-                      } else {
-                        await inventoryApi.markProductStatus(
-                          [record.id],
-                          "holiday",
-                          key,
+                        const changed = res?.data?.data?.changed;
+                        if (changed === false) {
+                          messageApi.warning(
+                            "未找到可解除的强制补货标签（可能已被解除）",
+                          );
+                        } else {
+                          messageApi.success("已解除强制补货标签");
+                        }
+                        refreshInventory();
+                      } catch (error: any) {
+                        messageApi.error(
+                          error?.response?.data?.detail || "操作失败",
                         );
-                        messageApi.success(`已标记为${key}`);
+                        return Promise.reject();
                       }
-                      fetchInventoryList(
-                        pagination.current || 1,
-                        pagination.pageSize || 20,
-                        searchText,
-                        tableRiskFilter,
-                        accountFilter,
-                        countryFilter,
-                        sortField,
-                        sortOrder,
-                        holidayFilter,
-                      );
-                      fetchOverview();
-                    } catch (error: any) {
-                      messageApi.error(
-                        error?.response?.data?.detail || "操作失败",
-                      );
-                    }
-                  },
+                    },
+                  });
                 }}
-                trigger={["click"]}
               >
-                <Tooltip title="对该商品执行「标记」：标记节日类型或「停售」，标记后将从断货风险TOP10、冗余TOP10及数量统计中排除。">
-                  <Button type="link" size="small">
-                    标记
-                  </Button>
-                </Tooltip>
-              </Dropdown>
+                解除强制
+              </Button>
+            ) : (
+              <Button
+                type="link"
+                size="small"
+                icon={<Pin size={14} />}
+                onClick={() => {
+                  let reason = "";
+                  Modal.confirm({
+                    title: `设置强制补货：${record.asin}${record.account ? "（" + record.account + "）" : ""}`,
+                    content: (
+                      <div>
+                        <p style={{ marginBottom: 4 }}>
+                          该店铺行将无视节日/负利润排除，始终参与补货（停售除外）。
+                          若本行为汇总行，将一并作用于其共享库存子行。
+                        </p>
+                        <Input.TextArea
+                          placeholder="必填：请填写设置理由（如「黑五蓄水，运营总监确认」）"
+                          onChange={(e) => (reason = e.target.value)}
+                        />
+                      </div>
+                    ),
+                    okText: "确认设置",
+                    cancelText: "取消",
+                    onOk: async () => {
+                      if (!reason.trim()) {
+                        messageApi.error("设置强制补货必须填写理由");
+                        return Promise.reject();
+                      }
+                      try {
+                        await tagsApi.setForceReplenish(
+                          record.asin,
+                          reason.trim(),
+                          record.sku,
+                          record.account,
+                        );
+                        messageApi.success("已设置强制补货标签");
+                        fetchInventoryList(
+                          pagination.current || 1,
+                          pagination.pageSize || 20,
+                          searchText,
+                          tableRiskFilter,
+                          accountFilter,
+                          countryFilter,
+                          sortField,
+                          sortOrder,
+                          holidayFilter,
+                        );
+                      } catch (error: any) {
+                        messageApi.error(
+                          error?.response?.data?.detail || "操作失败",
+                        );
+                        return Promise.reject();
+                      }
+                    },
+                  });
+                }}
+              >
+                强制补货
+              </Button>
+            )}
+            {record.is_discontinued === true || record.is_holiday ? (
+              // 已标记 → 显示「取消标记」（不再显示节日文本，节日内容见「节日标签」列）。
+              // 确认统一用页面中心 Modal；**不再使用锚定 Popconfirm**（曾与外层 Modal 双弹窗）。
+              <Button
+                type="link"
+                size="small"
+                danger
+                onClick={() => {
+                  Modal.confirm({
+                    title: `取消标记：${record.asin}${record.account ? "（" + record.account + "）" : ""}`,
+                    content: confirmMessage(
+                      "取消标记（同时清除节日/停售标记；若节日来自自动打标，会一并抑制该标签，自动打标不会再自动加回）",
+                    ),
+                    okText: "确定取消",
+                    cancelText: "关闭",
+                    okButtonProps: { danger: true },
+                    onOk: async () => {
+                      try {
+                        const res: any = await inventoryApi.markProductStatus(
+                          [record.id],
+                          "clear",
+                        );
+                        const n = res?.data?.data?.suppressed_tags;
+                        messageApi.success(
+                          n ? `已取消标记（并清除 ${n} 条节日标签）` : "已取消标记",
+                        );
+                        refreshInventory();
+                      } catch (error: any) {
+                        messageApi.error(
+                          error?.response?.data?.detail || "操作失败",
+                        );
+                      }
+                    },
+                  });
+                }}
+              >
+                取消标记
+              </Button>
+            ) : (
+              // 未标记 → 「标记」：页面中心 Modal 内选择标记类型（含停售），不再用锚定下拉菜单
+              <Button
+                type="link"
+                size="small"
+                onClick={() => {
+                  let markType = "圣诞";
+                  Modal.confirm({
+                    title: `标记：${record.asin}${record.account ? "（" + record.account + "）" : ""}`,
+                    content: (
+                      <div>
+                        <p style={{ marginBottom: 6 }}>
+                          标记后该行将从断货风险TOP10、冗余库存TOP10及数量统计中排除。
+                        </p>
+                        <Radio.Group
+                          defaultValue="圣诞"
+                          onChange={(e) => (markType = e.target.value)}
+                        >
+                          <Radio.Button value="圣诞">圣诞</Radio.Button>
+                          <Radio.Button value="万圣">万圣</Radio.Button>
+                          <Radio.Button value="跨年">跨年</Radio.Button>
+                          <Radio.Button value="其他">其他</Radio.Button>
+                          <Radio.Button value="__discontinued__">
+                            停售
+                          </Radio.Button>
+                        </Radio.Group>
+                        <p style={{ marginTop: 6, marginBottom: 0, color: "#999", fontSize: 12 }}>
+                          若本行为汇总行，将一并作用于其共享库存子行。
+                        </p>
+                      </div>
+                    ),
+                    okText: "确认标记",
+                    cancelText: "取消",
+                    onOk: async () => {
+                      try {
+                        if (markType === "__discontinued__") {
+                          await inventoryApi.markProductStatus(
+                            [record.id],
+                            "discontinued",
+                          );
+                          messageApi.success("已标记为停售");
+                        } else {
+                          await inventoryApi.markProductStatus(
+                            [record.id],
+                            "holiday",
+                            markType,
+                          );
+                          messageApi.success(`已标记为${markType}`);
+                        }
+                        refreshInventory();
+                      } catch (error: any) {
+                        messageApi.error(
+                          error?.response?.data?.detail || "操作失败",
+                        );
+                        return Promise.reject();
+                      }
+                    },
+                  });
+                }}
+              >
+                标记
+              </Button>
             )}
           </Space>
         );
@@ -2338,11 +2756,16 @@ const InventoryBot: React.FC = () => {
     "country",
     "local_inventory",
     "gross_margin",
+    "return_rate_30d",
+    "return_rate_60d",
     "daily_sales",
     "sales_7d",
     "sales_14d",
     "daily_avg_7d",
     "daily_avg_14d",
+    "force_replenish",
+    "tag_locked",
+    "is_holiday",
   ]);
 
   const childWrappedColumns = useMemo(() => {
@@ -2384,10 +2807,49 @@ const InventoryBot: React.FC = () => {
               </span>
             );
           }
+          if (dataKey.startsWith("return_rate_")) {
+            // 子行退货率：与主行口径一致，小数 → 百分比
+            if (val === null || val === undefined)
+              return <span style={{ color: "#ccc" }}>-</span>;
+            return (
+              <span
+                style={{
+                  color: val > 0 ? "#cf1322" : "#999",
+                  fontWeight: 500,
+                }}
+              >
+                {(val * 100).toFixed(2)}%
+              </span>
+            );
+          }
           if (dataKey === "daily_sales") {
             if (val == null || val === undefined)
               return <span style={{ color: "#ccc" }}>-</span>;
             return <span style={{ fontWeight: 500 }}>{val.toFixed(2)}</span>;
+          }
+          if (dataKey === "tag_locked") {
+            // 子行与父行同产品维度（c.asin == 父 asin），标识应一致；点击同样可解除
+            return val === 1 ? (
+              <Tooltip title="该店铺行有人工锁定标签（K5）。点击查看并解除锁定。">
+                <Tag
+                  color="purple"
+                  icon={<Lock size={12} />}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => openLockModal(record.asin, record.account)}
+                >
+                  人工锁定
+                </Tag>
+              </Tooltip>
+            ) : (
+              <span style={{ color: "#ccc" }}>-</span>
+            );
+          }
+          if (dataKey === "force_replenish") {
+            return val === 1 ? (
+              <Tag color="gold">强制补货</Tag>
+            ) : (
+              <span style={{ color: "#ccc" }}>-</span>
+            );
           }
           if (CHILD_REAL_FIELDS.has(dataKey)) {
             return val ?? "-";
@@ -3553,8 +4015,10 @@ const InventoryBot: React.FC = () => {
                   sortOrder,
                   value,
                 );
+                fetchOverview({ holiday: value });
               }}
               options={[
+                { label: "全部", value: "all" },
                 { label: "正常产品", value: "only_non_holiday" },
                 { label: "节日产品-全部", value: "only_holiday" },
                 { label: "圣诞", value: "holiday_圣诞" },
@@ -3562,7 +4026,6 @@ const InventoryBot: React.FC = () => {
                 { label: "跨年", value: "holiday_跨年" },
                 { label: "其他", value: "holiday_其他" },
                 { label: "停售", value: "only_discontinued" },
-                { label: "全部", value: "all" },
               ]}
             />
           </Tooltip>
@@ -3572,6 +4035,25 @@ const InventoryBot: React.FC = () => {
             loading={syncingFeishu}
           >
             {syncButtonLabel}
+          </Button>
+          {/* 批量操作：作用于表格勾选的行（表头勾选=全选本页） */}
+          <Button
+            danger
+            disabled={!selectedRecords.length}
+            loading={batchLoading}
+            onClick={batchClearMark}
+          >
+            批量取消标记
+            {selectedRecords.length ? `(${selectedRecords.length})` : ""}
+          </Button>
+          <Button
+            danger
+            disabled={!selectedRecords.length}
+            loading={batchLoading}
+            onClick={batchClearForce}
+          >
+            批量取消强制补货
+            {selectedRecords.length ? `(${selectedRecords.length})` : ""}
           </Button>
           {tableRiskFilter && tableRiskFilter.length > 0 && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -3978,6 +4460,14 @@ const InventoryBot: React.FC = () => {
             rowKey={(record: any) =>
               record._isChild ? `child_${record.id}` : record.id
             }
+            rowSelection={{
+              selectedRowKeys,
+              onChange: (keys) => setSelectedRowKeys(keys),
+              // 子行不可勾选：其所属汇总行的操作已覆盖共享库存子行，避免重复操作
+              getCheckboxProps: (record: any) => ({
+                disabled: record._isChild === true,
+              }),
+            }}
             loading={tableLoading}
             pagination={false}
             onChange={handleTableChange}
@@ -4071,7 +4561,7 @@ const InventoryBot: React.FC = () => {
         open={inboundModalVisible}
         onCancel={() => setInboundModalVisible(false)}
         footer={null}
-        width={res.isMobile ? '95vw' : 800}
+        width={res.isMobile ? "95vw" : 800}
       >
         <Spin spinning={inboundLoading}>
           {inboundDetails && inboundDetails.length > 0 ? (
@@ -4104,7 +4594,7 @@ const InventoryBot: React.FC = () => {
         onCancel={() => setExportModalVisible(false)}
         onOk={handleConfirmExport}
         confirmLoading={exporting}
-        width={res.isMobile ? '95vw' : 600}
+        width={res.isMobile ? "95vw" : 600}
       >
         <div style={{ marginBottom: 16 }}>
           <Space>
@@ -4180,7 +4670,7 @@ const InventoryBot: React.FC = () => {
         }}
         footer={null}
         destroyOnClose
-        width={res.isMobile ? '95vw' : 520}
+        width={res.isMobile ? "95vw" : 520}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div>
@@ -4250,6 +4740,111 @@ const InventoryBot: React.FC = () => {
             </div>
           )}
         </div>
+      </Modal>
+      {/* 行级标签（K5）：查看/解除该店铺行的标签 —— 页面中心弹窗 */}
+      <Modal
+        open={lockModal.open}
+        title={`人工锁定标签：${lockModal.asin}${lockModal.account ? "（" + lockModal.account + "）" : "（全部店铺）"}`}
+        centered
+        width={760}
+        footer={null}
+        onCancel={() => setLockModal((m) => ({ ...m, open: false }))}
+      >
+        <Table
+          size="small"
+          rowKey={(r: any) => r.id}
+          loading={lockModal.loading}
+          pagination={false}
+          dataSource={lockModal.tags}
+          columns={[
+            {
+              title: "作用域",
+              dataIndex: "account",
+              width: 170,
+              render: (v: string) =>
+                v ? (
+                  <span>{v}</span>
+                ) : (
+                  <Tag color="blue">全部店铺</Tag>
+                ),
+            },
+            {
+              title: "类型",
+              dataIndex: "tag_type",
+              width: 96,
+              render: (v: string) => (v === "force_replenish" ? "强制补货" : "节日"),
+            },
+            {
+              title: "值",
+              dataIndex: "tag_value",
+              width: 120,
+              render: (v: string) => (v === "1" ? "-" : v),
+            },
+            {
+              title: "来源",
+              dataIndex: "source",
+              width: 80,
+              render: (v: string) => (v === "manual" ? "人工" : "自动"),
+            },
+            {
+              title: "状态",
+              key: "st",
+              width: 110,
+              render: (_: any, r: any) =>
+                r.active !== 1 ? (
+                  <Tag>已失效</Tag>
+                ) : r.locked === 1 ? (
+                  <Tag color="red">人工锁定</Tag>
+                ) : (
+                  <Tag color="blue">自动管辖</Tag>
+                ),
+            },
+            {
+              title: "操作",
+              key: "op",
+              render: (_: any, r: any) => {
+                if (r.active !== 1) return "-";
+                if (r.tag_type === "force_replenish") {
+                  return (
+                    <Button
+                      type="link"
+                      size="small"
+                      danger
+                      onClick={() => releaseLockedTag(r, true)}
+                    >
+                      解除强制补货
+                    </Button>
+                  );
+                }
+                if (r.locked === 1) {
+                  return (
+                    <Space size={4}>
+                      <Button
+                        type="link"
+                        size="small"
+                        onClick={() => releaseLockedTag(r, false)}
+                      >
+                        解除锁定
+                      </Button>
+                      <Button
+                        type="link"
+                        size="small"
+                        danger
+                        onClick={() => releaseLockedTag(r, true)}
+                      >
+                        解除并清除
+                      </Button>
+                    </Space>
+                  );
+                }
+                return "-";
+              },
+            },
+          ]}
+        />
+        <p style={{ color: "#999", marginTop: 8, marginBottom: 0 }}>
+          人工锁定（K5）：自动打标不会覆盖或清除锁定标签；解除后恢复自动管辖。
+        </p>
       </Modal>
     </div>
   );

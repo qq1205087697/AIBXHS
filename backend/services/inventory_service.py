@@ -4,10 +4,304 @@ import numpy as np
 from datetime import date, datetime, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text, or_, and_, select
+from sqlalchemy import func, text, or_, and_, select, tuple_
 from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
 from database.database import engine
 from utils.excel_reader import safe_read_excel
+
+
+def _merge_holiday_values(*sources) -> str:
+    """节日多值合并（Q-2 / US-2 AC2）：委托 tag_service 的单一实现。
+
+    tag_service 导入失败时退化为「首个非空值原样返回」，保证查询链路不因标签模块异常而 500。
+    """
+    try:
+        from services.tag_service import merge_holiday_values
+        return merge_holiday_values(*sources)
+    except Exception as e:
+        print(f"[inventory_service] 节日多值合并回退（tag_service 不可用）: {e}")
+        for src in sources:
+            if not src:
+                continue
+            if isinstance(src, (list, tuple, set)):
+                return ",".join(str(v) for v in src if v)
+            return str(src)
+        return ""
+
+
+# ====================== 行级标签（asin, account）SQL 条件helper ======================
+# 标签作用域口径：account='' 为通配（该 ASIN 全部店铺行），否则精确匹配该店铺行。
+# 所有「过滤条件」必须与 show（resolve_row_tags）同源，否则出现「筛选用一套、展示用另一套」。
+
+def _row_key_expr():
+    """快照行的标签作用域键 (asin, coalesce(account,''))。
+
+    用 coalesce 规避 NULL：tuple_(asin, NULL).in_(...) 会返回 NULL，
+    在 `~cond`（非节日判定）里会把整行滤掉（SQL 三值逻辑陷阱）。
+    """
+    return tuple_(InventorySnapshot.asin, func.coalesce(InventorySnapshot.account, ""))
+
+
+def _tag_holiday_conds(db: Session, tenant_id: int):
+    """节日标签的两个子查询：(通配 asin 集合, 精确 (asin,account) 对集合)。
+
+    条件与 tag_service.load_active_tags 严格一致：
+    tenant + active=1 + 未软删 + tag_type='holiday' + tag_value 非空。
+    """
+    from models.tag import ProductTag
+
+    base = db.query(ProductTag.asin, ProductTag.account).filter(
+        ProductTag.tenant_id == tenant_id,
+        ProductTag.active == 1,
+        ProductTag.deleted_at.is_(None),
+        ProductTag.tag_type == "holiday",
+        ProductTag.tag_value != "",
+    )
+    wild = base.filter(ProductTag.account == "").with_entities(ProductTag.asin)
+    pairs = base.filter(ProductTag.account != "").with_entities(
+        ProductTag.asin, ProductTag.account)
+    return wild, pairs
+
+
+def _row_has_holiday_tag_cond(wild_subq, pairs_subq):
+    """SQL 条件：该快照行命中节日标签（通配 asin ∪ 本行精确）。"""
+    return or_(
+        InventorySnapshot.asin.in_(wild_subq),
+        _row_key_expr().in_(pairs_subq),
+    )
+
+
+def _force_override_cond(tags) -> Optional[object]:
+    """SQL 条件：该快照行命中强制补货（override 豁免节日/负利润排除）。
+
+    无任何强制标签时返回 None。
+    """
+    force_keys = (tags or {}).get("force") or set()
+    if not force_keys:
+        return None
+    wild = [a for a, c in force_keys if not c]
+    pairs = [(a, c) for a, c in force_keys if c]
+    conds = []
+    if wild:
+        conds.append(InventorySnapshot.asin.in_(wild))
+    if pairs:
+        conds.append(_row_key_expr().in_(pairs))
+    return conds[0] if len(conds) == 1 else or_(*conds)
+
+
+# ====================== 可见快照过滤（列表 / 概览 / 导出 共用单一实现） ======================
+# 背景（2026-09-29）：库存概览曾是**第三份**独立实现的过滤逻辑（只认快照列、不认标签），
+# 导致面板「总SKU数」与表格 total 口径不一致。现统一由下面三个 helper 提供过滤，
+# 任何过滤口径变更只需改这一处。
+
+def visible_store_names(db: Session, tenant_id: int, user_id: int, user_role: str):
+    """用户可见店铺名列表：None = 不做隔离；[] = 无可见店铺（应返回空结果）。"""
+    if not (user_id and user_role and user_role != "admin"):
+        return None
+    rows = db.execute(
+        text("""
+            SELECT s.inventory_name
+            FROM user_stores us
+            JOIN stores s ON us.store_id = s.id
+            WHERE us.user_id = :uid AND us.tenant_id = :tid
+            AND s.status = 'active'
+            AND s.inventory_name IS NOT NULL
+            AND s.inventory_name != ''
+        """),
+        {"uid": user_id, "tid": tenant_id},
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+COUNTRY_SITE_MAP = {
+    '美国': ['美国', '美国站', 'US', 'USA'], '英国': ['英国', 'UK'], '德国': ['德国', 'DE'],
+    '法国': ['法国', 'FR'], '意大利': ['意大利', 'IT'], '西班牙': ['西班牙', 'ES'],
+    '日本': ['日本', 'JP'], '加拿大': ['加拿大', 'CA'], '墨西哥': ['墨西哥', 'MX'],
+    '澳大利亚': ['澳大利亚', 'AU'], '荷兰': ['荷兰', 'NL'], '瑞典': ['瑞典', 'SE'],
+    '波兰': ['波兰', 'PL'], '比利时': ['比利时', 'BE'], '爱尔兰': ['爱尔兰', 'IE'],
+    '新加坡': ['新加坡', 'SG'], '阿联酋': ['阿联酋', 'AE'], '印度': ['印度', 'IN'],
+    '巴西': ['巴西', 'BR'], '土耳其': ['土耳其', 'TR'],
+}
+
+
+def build_visible_snapshots(db: Session, tenant_id: int, latest, *, keyword=None,
+                            holiday_filter=None, account=None, country=None,
+                            user_stores=None):
+    """统一的「可见快照 id」限定（不含 KEEP 语义 —— 那个要引用决策表，见 build_keep_cond）。
+
+    覆盖：租户 + 快照日 + 未软删、共享库存/孤儿规则、用户店铺隔离、关键词、
+    节日枚举筛选（快照列 ∪ 行级标签，口径同展示）、店铺 / 国家。
+    返回 Query 或 ``None``（None = 用户无可见店铺）。
+    """
+    q = db.query(InventorySnapshot.id).filter(
+        InventorySnapshot.tenant_id == tenant_id,
+        InventorySnapshot.snapshot_date == latest,
+        InventorySnapshot.deleted_at.is_(None),
+        or_(
+            InventorySnapshot.summary_flag != "共享库存",
+            InventorySnapshot.summary_flag.is_(None),
+            # 孤儿子行：summary_flag='共享库存' 但该 ASIN 在最新日期没有 summary_flag='是' 的父汇总行
+            and_(
+                InventorySnapshot.summary_flag == "共享库存",
+                ~InventorySnapshot.asin.in_(
+                    db.query(InventorySnapshot.asin).filter(
+                        InventorySnapshot.snapshot_date == latest,
+                        InventorySnapshot.deleted_at.is_(None),
+                        InventorySnapshot.summary_flag == "是",
+                    )
+                ),
+            ),
+        ),
+    )
+
+    # 用户数据隔离
+    if user_stores is not None:
+        if not user_stores:
+            return None
+        store_conditions = _build_account_filter(user_stores)
+        if store_conditions:
+            q = q.filter(or_(*store_conditions))
+
+    if keyword:
+        kw = f"%{keyword}%"
+        q = q.filter(
+            (InventorySnapshot.asin.like(kw))
+            | (InventorySnapshot.sku.like(kw))
+            | (InventorySnapshot.product_name.like(kw))
+            | (InventorySnapshot.account.like(kw))
+        )
+
+    # 节日筛选（行级：快照列 ∪ 生效节日标签；account='' 为通配全部店铺）
+    if holiday_filter and holiday_filter != "all":
+        _wild_subq, _pairs_subq = _tag_holiday_conds(db, tenant_id)
+        if holiday_filter == "only_non_holiday":
+            q = q.filter(
+                (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None)),
+                ~_row_has_holiday_tag_cond(_wild_subq, _pairs_subq),
+            ).filter(
+                (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None))  # noqa: E712
+            )
+        elif holiday_filter == "only_holiday":
+            q = q.filter(
+                or_(
+                    and_(InventorySnapshot.is_holiday.isnot(None),
+                         InventorySnapshot.is_holiday != ""),
+                    _row_has_holiday_tag_cond(_wild_subq, _pairs_subq),
+                )
+            ).filter(
+                (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None))  # noqa: E712
+            )
+        elif holiday_filter == "only_discontinued":
+            q = q.filter(InventorySnapshot.is_discontinued == True)  # noqa: E712
+        elif holiday_filter.startswith("holiday_"):
+            holiday_type = holiday_filter[len("holiday_"):]
+            from models.tag import ProductTag as _PTagType
+            _tb = db.query(_PTagType.asin, _PTagType.account).filter(
+                _PTagType.tenant_id == tenant_id,
+                _PTagType.active == 1,
+                _PTagType.deleted_at.is_(None),
+                _PTagType.tag_type == "holiday",
+                _PTagType.tag_value == holiday_type,
+            )
+            q = q.filter(
+                or_(
+                    InventorySnapshot.is_holiday == holiday_type,
+                    InventorySnapshot.asin.in_(
+                        _tb.filter(_PTagType.account == "").with_entities(_PTagType.asin)
+                    ),
+                    _row_key_expr().in_(
+                        _tb.filter(_PTagType.account != "").with_entities(
+                            _PTagType.asin, _PTagType.account)
+                    ),
+                )
+            )
+
+    # 店铺 / 国家
+    if account:
+        account_conditions = _build_account_filter(account)
+        if account_conditions:
+            q = q.filter(or_(*account_conditions))
+    elif country:
+        country_conditions = []
+        for c in ([country] if isinstance(country, str) else country):
+            for code in COUNTRY_SITE_MAP.get(c, [c]):
+                country_conditions.append(InventorySnapshot.country.like(f"%{code}%"))
+        if country_conditions:
+            q = q.filter(or_(*country_conditions))
+    return q
+
+
+def build_keep_cond(db: Session, tenant_id: int, holiday_filter):
+    """KEEP 语义（引用决策表）：返回条件或 None（None = 不过滤，即「全部」）。
+
+    holiday_filter 语义：
+      None/""            → 按 KEEP 过滤（向后兼容非 UI 调用）
+      "all"              → 不过滤：真正显示全部（含节日排除/负利润/停售）
+      "only_non_holiday" → 正常产品 = KEEP 口径
+      其余               → 不做 KEEP 过滤（只按各自条件筛）
+    """
+    if holiday_filter not in (None, "", "only_non_holiday"):
+        return None
+    try:
+        from services.tag_service import get_filter_config
+        _threshold = get_filter_config(db)["negative_margin_threshold"]
+    except Exception:
+        _threshold = 0
+    from models.tag import ProductTag
+    force_subq = db.query(ProductTag.asin, ProductTag.account).filter(
+        ProductTag.tenant_id == tenant_id,
+        ProductTag.tag_type == "force_replenish",
+        ProductTag.active == 1,
+        ProductTag.deleted_at.is_(None),
+    )
+    _fw = force_subq.filter(ProductTag.account == "").with_entities(ProductTag.asin)
+    _fp = force_subq.filter(ProductTag.account != "").with_entities(
+        ProductTag.asin, ProductTag.account)
+    # override 豁免节日/负利润排除，但不豁免停售（K3：停售最高）
+    force_alive = and_(
+        or_(InventorySnapshot.asin.in_(_fw), _row_key_expr().in_(_fp)),
+        or_(InventorySnapshot.is_discontinued == False, InventorySnapshot.is_discontinued.is_(None)),  # noqa: E712
+    )
+    _wild_subq, _pairs_subq = _tag_holiday_conds(db, tenant_id)
+    return or_(
+        # 有决策行：按过滤引擎裁决口径（replenishment_decisions.filter_status 单一消费点）
+        and_(ReplenishmentDecision.id.isnot(None),
+             ReplenishmentDecision.filter_status == "KEEP"),
+        # 无决策行：快照级兜底判定（口径与引擎一致）
+        and_(ReplenishmentDecision.id.is_(None),
+             or_(InventorySnapshot.is_discontinued == False, InventorySnapshot.is_discontinued.is_(None)),  # noqa: E712
+             or_(force_alive,
+                 and_(or_(InventorySnapshot.is_holiday == "", InventorySnapshot.is_holiday.is_(None)),
+                      ~_row_has_holiday_tag_cond(_wild_subq, _pairs_subq),
+                      or_(InventorySnapshot.gross_margin.is_(None),
+                          InventorySnapshot.gross_margin >= _threshold)))),
+    )
+
+
+def build_inventory_query(db: Session, tenant_id: int, latest, valid_subquery, keep_cond,
+                          risk_level=None, replenishment_status=None):
+    """统一的「可见行」查询（快照 LEFT JOIN 决策），列表 / 概览共用。"""
+    q = db.query(InventorySnapshot, ReplenishmentDecision).outerjoin(
+        ReplenishmentDecision,
+        (ReplenishmentDecision.snapshot_id == InventorySnapshot.id)
+        & (ReplenishmentDecision.snapshot_date == latest)
+        & (ReplenishmentDecision.tenant_id == tenant_id),
+    ).filter(
+        InventorySnapshot.tenant_id == tenant_id,
+        InventorySnapshot.id.in_(valid_subquery),
+        InventorySnapshot.deleted_at.is_(None),
+    )
+    if keep_cond is not None:
+        q = q.filter(keep_cond)
+    if risk_level:
+        risk_map = {"red": "红", "yellow": "黄", "green": "绿"}
+        rls = [risk_map.get(rl, rl)
+               for rl in ([risk_level] if isinstance(risk_level, str) else risk_level)]
+        q = q.filter(ReplenishmentDecision.risk_level.in_(rls))
+    if replenishment_status:
+        q = q.filter(InventorySnapshot.replenishment_status == replenishment_status)
+    return q
+
 
 # Excel中文名 -> 数据库字段名 映射
 # 注意：采购配置字段（purchase_plan_days, purchase_lead_time, qc_days 等）不导入数据库
@@ -61,6 +355,14 @@ FIELD_MAPPING = {
     "9-12个月库龄": "age_9_12",
     "12个月以上库龄": "age_12_plus",
     "毛利率": "gross_margin",
+    # 退货率：与 gross_margin（毛利率）同策略 —— 不放进 NUMERIC_FIELDS，
+    # 不做 fillna(0)，空值在 UPDATE 时跳过、INSERT 时写 NULL
+    "3天退货率": "return_rate_3d",
+    "7天退货率": "return_rate_7d",
+    "14天退货率": "return_rate_14d",
+    "30天退货率": "return_rate_30d",
+    "60天退货率": "return_rate_60d",
+    "90天退货率": "return_rate_90d",
 }
 
 NUMERIC_FIELDS = [
@@ -972,130 +1274,124 @@ def calculate_replenishment(db: Session, snapshot_date: str = None, snapshot_ids
 
     # 软删除由 UPSERT 自动处理，无需手动 DELETE
 
-    return _calculate_replenishment_fast(db, df, snapshot_ids, target_date, progress_callback=progress_callback, tenant_id=tenant_id or 1)
+    return _finish_calculate(db, df, snapshot_ids, target_date, progress_callback, tenant_id)
 
 
-def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> dict:
-    """获取库存概览"""
-    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(InventorySnapshot.tenant_id == tenant_id).scalar()
+def _finish_calculate(db: Session, df: pd.DataFrame, snapshot_ids: list, target_date: date, progress_callback, tenant_id) -> dict:
+    """计算落库 + 过滤引擎标记（K2 可计算不显示：决策行照常写入，展示口径由 filter_status 控制）"""
+    result = _calculate_replenishment_fast(db, df, snapshot_ids, target_date, progress_callback=progress_callback, tenant_id=tenant_id or 1)
+    try:
+        from services.tag_service import apply_tags_to_decisions
+        tag_result = apply_tags_to_decisions(db, tenant_id or 1, snapshot_ids=snapshot_ids)
+        result["filter_status_counts"] = tag_result.get("status_counts", {})
+    except Exception as e:
+        # 过滤引擎失败不影响补货计算主链路（决策行 filter_status 保持默认 KEEP）
+        print(f"[WARN] 过滤引擎标记失败（不影响补货计算）: {e}")
+    return result
+
+
+def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, user_role: str = None,
+                           keyword: str = None, holiday_filter: str = None,
+                           account: str = None, country: str = None) -> dict:
+    """库存概览（面板卡片 + TOP10）。
+
+    **与列表同口径**：过滤一律走 build_visible_snapshots + build_keep_cond + build_inventory_query
+    （2026-09-29 前这里是第三份独立实现，只认快照列不认标签 → 面板「总SKU数」与表格 total 对不上）。
+    同时支持与列表相同的筛选参数，使面板能跟随当前筛选。
+    """
+    latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(
+        InventorySnapshot.tenant_id == tenant_id).scalar()
+    empty = {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0,
+             "snapshot_date": None, "latest_updated_at": None,
+             "stockout_top10": [], "overstock_top10": []}
     if not latest:
-        return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
-                "snapshot_date": None, "latest_updated_at": None, "stockout_top10": [], "overstock_top10": []}
+        return empty
 
-    # 最新快照的最近更新时间（运营据此判断数据新鲜度）
     latest_updated_at = db.query(func.max(InventorySnapshot.updated_at)).filter(
         InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
     ).scalar()
 
-    # 构建基础查询（排除共享库存、节日产品和停售产品）
-    base_query = db.query(InventorySnapshot).filter(
-        InventorySnapshot.tenant_id == tenant_id,
-        InventorySnapshot.snapshot_date == latest,
-        InventorySnapshot.deleted_at.is_(None),
-        (InventorySnapshot.summary_flag != "共享库存") | (InventorySnapshot.summary_flag.is_(None)),
-        # 排除节日产品（is_holiday != ""）
-        (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None)),
-        # 排除停售产品
-        (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None)),
+    user_stores = visible_store_names(db, tenant_id, user_id, user_role)
+    valid_subquery = build_visible_snapshots(
+        db, tenant_id, latest, keyword=keyword, holiday_filter=holiday_filter,
+        account=account, country=country, user_stores=user_stores,
     )
+    if valid_subquery is None:
+        # 用户无可见店铺
+        return {**empty, "snapshot_date": latest.isoformat(),
+                "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None}
 
-    # 用户数据隔离
-    if user_id and user_role and user_role != "admin":
-        from sqlalchemy import text as sql_text
-        # 直接通过 user_stores 表获取用户被分配的店铺
-        user_store_rows = db.execute(
-            sql_text("""
-                SELECT s.inventory_name
-                FROM user_stores us
-                JOIN stores s ON us.store_id = s.id
-                WHERE us.user_id = :uid AND us.tenant_id = :tid
-                AND s.status = 'active'
-                AND s.inventory_name IS NOT NULL
-                AND s.inventory_name != ''
-            """),
-            {"uid": user_id, "tid": tenant_id}
-        ).fetchall()
-        user_stores = [s[0] for s in user_store_rows]
-        if user_stores:
-            store_conditions = _build_account_filter(user_stores)
-            base_query = base_query.filter(or_(*store_conditions)) if store_conditions else base_query
-        else:
-            return {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0, 
-                    "snapshot_date": latest.isoformat(), 
-                    "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None,
-                    "stockout_top10": [], "overstock_top10": []}
+    keep_cond = build_keep_cond(db, tenant_id, holiday_filter)
+    joined = build_inventory_query(db, tenant_id, latest, valid_subquery, keep_cond)
 
-    # 统计
-    total = base_query.count()
+    # 总数（= 列表 total 同口径）
+    total = joined.count()
 
-    # 获取有效的 snapshot_ids（使用子查询，避免将 4 万条 ID 取回应用层）
-    valid_snap_ids_subquery = base_query.with_entities(InventorySnapshot.id)
-
-    # 用 LEFT JOIN 统计风险等级：无决策的快照计入"绿"，确保 red+yellow+green=total
-    risk_counts_rows = db.query(
-        func.coalesce(ReplenishmentDecision.risk_level, '绿'),
-        func.count(InventorySnapshot.id)
-    ).outerjoin(
-        ReplenishmentDecision,
-        and_(
-            ReplenishmentDecision.snapshot_id == InventorySnapshot.id,
-            ReplenishmentDecision.tenant_id == tenant_id,
-            ReplenishmentDecision.snapshot_date == latest,
-            ReplenishmentDecision.deleted_at.is_(None),
-        )
-    ).filter(
-        InventorySnapshot.id.in_(valid_snap_ids_subquery)
-    ).group_by(
-        func.coalesce(ReplenishmentDecision.risk_level, '绿')
-    ).all()
+    # 风险分布：无决策的快照计入「绿」，保证 red+yellow+green = total
+    risk_key = func.coalesce(ReplenishmentDecision.risk_level, '绿')
+    risk_counts_rows = joined.with_entities(
+        risk_key, func.count(InventorySnapshot.id)
+    ).group_by(risk_key).all()
     risk_counts = {row[0]: row[1] for row in risk_counts_rows}
     red = risk_counts.get("红", 0)
     yellow = risk_counts.get("黄", 0)
     green = risk_counts.get("绿", 0)
 
-    # TOP10
+    # 可见行 id 子查询（TOP10 与总数同口径）
+    visible_ids = joined.with_entities(InventorySnapshot.id)
+
+    # TOP10：断货风险（可售天数升序）
     stockout_ids = db.query(ReplenishmentDecision.snapshot_id).filter(
         ReplenishmentDecision.tenant_id == tenant_id,
         ReplenishmentDecision.snapshot_date == latest,
         ReplenishmentDecision.deleted_at.is_(None),
-        ReplenishmentDecision.snapshot_id.in_(valid_snap_ids_subquery),
+        ReplenishmentDecision.snapshot_id.in_(visible_ids),
     ).order_by(ReplenishmentDecision.days_of_supply.asc()).limit(10).all()
     snap_ids = [r[0] for r in stockout_ids]
 
     stockout_items = []
     if snap_ids:
-        snaps = {s.id: s for s in db.query(InventorySnapshot).filter(InventorySnapshot.tenant_id == tenant_id, InventorySnapshot.id.in_(snap_ids), InventorySnapshot.deleted_at.is_(None)).all()}
-        decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(ReplenishmentDecision.tenant_id == tenant_id, ReplenishmentDecision.snapshot_id.in_(snap_ids), ReplenishmentDecision.deleted_at.is_(None)).all()}
+        snaps = {x.id: x for x in db.query(InventorySnapshot).filter(
+            InventorySnapshot.tenant_id == tenant_id,
+            InventorySnapshot.id.in_(snap_ids),
+            InventorySnapshot.deleted_at.is_(None)).all()}
+        decs = {d.snapshot_id: d for d in db.query(ReplenishmentDecision).filter(
+            ReplenishmentDecision.tenant_id == tenant_id,
+            ReplenishmentDecision.snapshot_id.in_(snap_ids),
+            ReplenishmentDecision.deleted_at.is_(None)).all()}
         for sid in snap_ids:
             if sid in snaps and sid in decs:
-                s, d = snaps[sid], decs[sid]
+                x, d = snaps[sid], decs[sid]
                 stockout_items.append({
-                    "asin": s.asin, "product_name": s.product_name, "account": s.account,
-                    "country": s.country, "days_of_supply": d.days_of_supply,
-                    "fba_stock": s.fba_stock, "daily_sales": s.daily_sales,
+                    "asin": x.asin, "product_name": x.product_name, "account": x.account,
+                    "country": x.country, "days_of_supply": d.days_of_supply,
+                    "fba_stock": x.fba_stock, "daily_sales": x.daily_sales,
                     "stockout_date": d.stockout_date_calc or "-",
-                    "total_stock": (s.fba_stock or 0) + (s.fba_inbound or 0) + (s.local_inventory or 0) - (s.inspection_quantity or 0), "age_0_3": s.age_0_3, "age_3_6": s.age_3_6,
-                    "age_6_9": s.age_6_9, "age_9_12": s.age_9_12, "age_12_plus": s.age_12_plus,
+                    "total_stock": (x.fba_stock or 0) + (x.fba_inbound or 0) + (x.local_inventory or 0) - (x.inspection_quantity or 0),
+                    "age_0_3": x.age_0_3, "age_3_6": x.age_3_6,
+                    "age_6_9": x.age_6_9, "age_9_12": x.age_9_12, "age_12_plus": x.age_12_plus,
                     "suggest_qty": int(d.suggest_qty) if d.suggest_qty else 0,
                     "reason": d.reason or "",
                 })
 
+    # TOP10：冗余库存（12月+库龄降序）
     overstock_top10 = []
     overstock_snaps = db.query(InventorySnapshot).filter(
         InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
-        InventorySnapshot.id.in_(valid_snap_ids_subquery),
+        InventorySnapshot.id.in_(visible_ids),
     ).order_by(InventorySnapshot.age_12_plus.desc()).limit(10).all()
     if overstock_snaps:
         overstock_top10 = [{
-            "asin": s.asin, "product_name": s.product_name, "account": s.account,
-            "country": s.country, "total_stock": (s.fba_stock or 0) + (s.fba_inbound or 0) + (s.local_inventory or 0) - (s.inspection_quantity or 0),
-            "age_0_3": s.age_0_3, "age_3_6": s.age_3_6, "age_6_9": s.age_6_9,
-            "age_9_12": s.age_9_12, "age_12_plus": s.age_12_plus,
-        } for s in overstock_snaps]
+            "asin": x.asin, "product_name": x.product_name, "account": x.account,
+            "country": x.country,
+            "total_stock": (x.fba_stock or 0) + (x.fba_inbound or 0) + (x.local_inventory or 0) - (x.inspection_quantity or 0),
+            "age_0_3": x.age_0_3, "age_3_6": x.age_3_6, "age_6_9": x.age_6_9,
+            "age_9_12": x.age_9_12, "age_12_plus": x.age_12_plus,
+        } for x in overstock_snaps]
 
     return {
         "snapshot_date": latest.isoformat(),
@@ -1142,149 +1438,22 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
     if not latest:
         return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
-    # 1. 筛选要展示的 snapshot_ids
-    #    - 普通行（summary_flag != '共享库存'）直接显示
-    #    - 子行（summary_flag='共享库存'）只显示"孤儿子行"——即 ASIN 没有对应父汇总行（summary_flag='是'）的子行
-    #      有父汇总行的子行通过父行展开按钮加载（get_summary_children API），主列表不重复显示
-    valid_snapshot_query = db.query(InventorySnapshot.id).filter(
-        InventorySnapshot.tenant_id == tenant_id,
-        InventorySnapshot.snapshot_date == latest,
-        InventorySnapshot.deleted_at.is_(None),
-        or_(
-            InventorySnapshot.summary_flag != "共享库存",
-            InventorySnapshot.summary_flag.is_(None),
-            # 孤儿子行：summary_flag='共享库存' 但该 ASIN 在最新日期没有 summary_flag='是' 的父汇总行
-            and_(
-                InventorySnapshot.summary_flag == "共享库存",
-                ~InventorySnapshot.asin.in_(
-                    db.query(InventorySnapshot.asin).filter(
-                        InventorySnapshot.snapshot_date == latest,
-                        InventorySnapshot.deleted_at.is_(None),
-                        InventorySnapshot.summary_flag == "是"
-                    )
-                )
-            )
-        )
+    # 1. 可见快照限定（列表 / 概览 / 导出 共用同一实现，避免口径漂移）
+    user_stores = visible_store_names(db, tenant_id, user_id, user_role)
+    valid_snapshot_subquery = build_visible_snapshots(
+        db, tenant_id, latest, keyword=keyword, holiday_filter=holiday_filter,
+        account=account, country=country, user_stores=user_stores,
     )
+    if valid_snapshot_subquery is None:
+        # 用户有部门但没有关联店铺，返回空
+        return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
-    # 应用用户数据隔离
-    if user_stores is not None:
-        if len(user_stores) == 0:
-            # 用户有部门但没有关联店铺，返回空数据
-            return {"items": [], "total": 0, "page": page, "page_size": page_size}
-        # 使用精确匹配 + 汇总行边界匹配，支持多店铺集合数据（如 "D-EU-DE、D-EU-FR"）
-        store_conditions = _build_account_filter(user_stores)
-        if store_conditions:
-            valid_snapshot_query = valid_snapshot_query.filter(or_(*store_conditions))
-
-    if keyword:
-        kw = f"%{keyword}%"
-        valid_snapshot_query = valid_snapshot_query.filter(
-            (InventorySnapshot.asin.like(kw)) |
-            (InventorySnapshot.sku.like(kw)) |
-            (InventorySnapshot.product_name.like(kw)) |
-            (InventorySnapshot.account.like(kw))
-        )
-
-    # 节日产品筛选
-    if holiday_filter and holiday_filter != "all":
-        if holiday_filter == "only_non_holiday":
-            # 正常产品：非节日且未停售
-            valid_snapshot_query = valid_snapshot_query.filter(
-                (InventorySnapshot.is_holiday == "") | (InventorySnapshot.is_holiday.is_(None))
-            ).filter(
-                (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None))
-            )
-        elif holiday_filter == "only_holiday":
-            # 所有节日产品（未停售）
-            valid_snapshot_query = valid_snapshot_query.filter(
-                (InventorySnapshot.is_holiday != "") & (InventorySnapshot.is_holiday.isnot(None))
-            ).filter(
-                (InventorySnapshot.is_discontinued == False) | (InventorySnapshot.is_discontinued.is_(None))
-            )
-        elif holiday_filter == "only_discontinued":
-            # 停售产品
-            valid_snapshot_query = valid_snapshot_query.filter(
-                InventorySnapshot.is_discontinued == True
-            )
-        elif holiday_filter.startswith("holiday_"):
-            # 按具体节日类型筛选（如 holiday_圣诞 / holiday_万圣 / holiday_跨年 / holiday_其他）
-            holiday_type = holiday_filter[len("holiday_"):]
-            valid_snapshot_query = valid_snapshot_query.filter(
-                InventorySnapshot.is_holiday == holiday_type
-            )
-
-    # 国家和店铺筛选逻辑：
-    # 1. 如果只选国家：筛选该国家的所有库存（基于店铺字段匹配）
-    # 2. 如果只选店铺：筛选包含该店铺的所有库存
-    # 3. 如果同时选国家和店铺：以店铺筛选为准（店铺已包含国家信息）
-
-    if account:
-        # account 参数是 "店铺-国家" 格式（如 "JeVenis-US"）
-        # 使用精确匹配 + 汇总行边界匹配，避免 'G-UK' 误匹配 'Roaring-UK-UK'
-        account_conditions = _build_account_filter(account)
-        if account_conditions:
-            valid_snapshot_query = valid_snapshot_query.filter(or_(*account_conditions))
-    elif country:
-        # 只选了国家，没选店铺：基于 country 字段筛选
-        # 将国家名称转换为站点代码进行匹配
-        country_to_site_map = {
-            '美国': ['美国', '美国站', 'US', 'USA'],
-            '英国': ['英国', 'UK'],
-            '德国': ['德国', 'DE'],
-            '法国': ['法国', 'FR'],
-            '意大利': ['意大利', 'IT'],
-            '西班牙': ['西班牙', 'ES'],
-            '日本': ['日本', 'JP'],
-            '加拿大': ['加拿大', 'CA'],
-            '墨西哥': ['墨西哥', 'MX'],
-            '澳大利亚': ['澳大利亚', 'AU'],
-            '荷兰': ['荷兰', 'NL'],
-            '瑞典': ['瑞典', 'SE'],
-            '波兰': ['波兰', 'PL'],
-            '比利时': ['比利时', 'BE'],
-            '爱尔兰': ['爱尔兰', 'IE'],
-            '新加坡': ['新加坡', 'SG'],
-            '阿联酋': ['阿联酋', 'AE'],
-            '印度': ['印度', 'IN'],
-            '巴西': ['巴西', 'BR'],
-            '土耳其': ['土耳其', 'TR'],
-        }
-        
-        # 构建国家筛选条件：匹配 country 字段
-        country_conditions = []
-        country_list = [country] if isinstance(country, str) else country
-        for c in country_list:
-            site_codes = country_to_site_map.get(c, [c])
-            for code in site_codes:
-                country_conditions.append(InventorySnapshot.country.like(f"%{code}%"))
-        
-        if country_conditions:
-            valid_snapshot_query = valid_snapshot_query.filter(or_(*country_conditions))
-
-    # 改用子查询，避免把 4 万条 ID 取回应用层
-    valid_snapshot_subquery = valid_snapshot_query
-
-    # 3. 构建主查询，使用子查询筛选
-    query = db.query(InventorySnapshot, ReplenishmentDecision).outerjoin(
-        ReplenishmentDecision,
-        (ReplenishmentDecision.snapshot_id == InventorySnapshot.id) &
-        (ReplenishmentDecision.snapshot_date == latest) &
-        (ReplenishmentDecision.tenant_id == tenant_id)
-    ).filter(
-        InventorySnapshot.tenant_id == tenant_id,
-        InventorySnapshot.id.in_(valid_snapshot_subquery),
-        InventorySnapshot.deleted_at.is_(None)
+    # 3. 构建主查询（可见行 = 快照 LEFT JOIN 决策；KEEP 语义由 build_keep_cond 统一提供）
+    query = build_inventory_query(
+        db, tenant_id, latest, valid_snapshot_subquery,
+        build_keep_cond(db, tenant_id, holiday_filter),
+        risk_level=risk_level, replenishment_status=replenishment_status,
     )
-
-    # 如果有风险等级筛选，添加 WHERE 条件（outerjoin + WHERE 会自然过滤掉无匹配的行）
-    if risk_level:
-        risk_map = {"red": "红", "yellow": "黄", "green": "绿"}
-        rls = [risk_map.get(rl, rl) for rl in ([risk_level] if isinstance(risk_level, str) else risk_level)]
-        query = query.filter(ReplenishmentDecision.risk_level.in_(rls))
-
-    if replenishment_status:
-        query = query.filter(InventorySnapshot.replenishment_status == replenishment_status)
 
     if sort_field == 'days_of_supply':
         order_col = ReplenishmentDecision.days_of_supply.desc() if sort_order == 'desc' else ReplenishmentDecision.days_of_supply.asc()
@@ -1322,10 +1491,82 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
     total = query.count()
     results = query.offset((page - 1) * page_size).limit(page_size).all()
 
+    # 行级标签（K5 人工锁定 + K3 裁决数据源）：
+    # 作用域为 (asin, account)，account='' 为通配（该 ASIN 全部店铺）。
+    # 这里按当前页 asin 局部加载，形状与 tag_service.load_active_tags 一致，
+    # 再统一用 resolve_row_tags / row_is_locked 解析，保证与引擎（apply_tags_to_decisions）同源。
+    _page_asins = list({snap.asin for snap, _ in results if snap.asin})
+    _page_tags = {"force": set(), "holidays": {}, "locked": set()}
+    _resolve_row_tags = None
+    _row_is_locked = None
+    if _page_asins:
+        try:
+            from models.tag import ProductTag as _PTag
+            from services.tag_service import (
+                resolve_row_tags as _resolve_row_tags, row_is_locked as _row_is_locked)
+            _tag_rows = db.query(
+                _PTag.asin, _PTag.account, _PTag.tag_type, _PTag.tag_value, _PTag.locked
+            ).filter(
+                _PTag.tenant_id == tenant_id,
+                _PTag.active == 1,
+                _PTag.deleted_at.is_(None),
+                _PTag.asin.in_(_page_asins),
+            ).all()
+            for _asin, _acct, _type, _val, _locked in _tag_rows:
+                _key = (_asin, (_acct or "").strip())
+                if _locked:
+                    _page_tags["locked"].add(_key)
+                # force_replenish 的 tag_value 恒为 "1"
+                if _type == "force_replenish":
+                    _page_tags["force"].add(_key)
+                # 只有 holiday 类型的 tag_value 才是节日名
+                if _type == "holiday" and _val:
+                    _page_tags["holidays"].setdefault(_key, []).append(_val)
+        except Exception as e:
+            print(f"[inventory_service] 读取标签失败，tag_locked/is_holiday 多值回退: {e}")
+
+    def _row_tags_of(snap) -> dict:
+        """该快照行的有效标签（通配 ∪ 本行）。"""
+        if _resolve_row_tags is None:
+            return {}
+        return _resolve_row_tags(_page_tags, snap.asin, snap.account)
+
+    def _row_locked_of(snap) -> int:
+        if _row_is_locked is None:
+            return 0
+        return 1 if _row_is_locked(_page_tags, snap.asin, snap.account) else 0
+
+    # 无决策行时的展示兜底（口径统一 §9.6-U1）：与过滤兜底同源，走 K3 单一裁决入口实时计算。
+    # 否则「仅标签节日」的产品在 only_holiday 视图里 filter_status 仍显示 KEEP、导出为「参与补货」。
+    # 决策行存在时仍以物化 filter_status 为准（单一消费点，K2）。
+    _fb_threshold = 0
+    _fb_evaluate = None
+    try:
+        from services.tag_service import evaluate_status as _fb_es, get_filter_config as _fb_gfc
+        _fb_threshold = _fb_gfc(db)["negative_margin_threshold"]
+        _fb_evaluate = _fb_es
+    except Exception as _e:
+        print(f"[inventory_service] 读取阈值/裁决函数失败，无决策行展示回退 KEEP: {_e}")
+
+    def _display_verdict(snap):
+        """无决策行时的单行裁决，与 get_summary_children._child_verdict 同构。
+        is_discontinued 必须传 bool（evaluate_status 用 `is False` 判 override 资格）。"""
+        if _fb_evaluate is None:
+            return "KEEP", 0
+        return _fb_evaluate(
+            bool(snap.is_discontinued), (snap.is_holiday or ""), snap.gross_margin,
+            _row_tags_of(snap), _fb_threshold,
+        )
+
     items = []
     for snap, dec in results:
         risk_map_r = {"红": "red", "黄": "yellow", "绿": "green"}
         local_qty = snap.local_inventory or 0
+        if dec is not None:
+            _f_status = dec.filter_status or "KEEP"
+            _f_force = int(dec.force_replenish or 0)
+        else:
+            _f_status, _f_force = _display_verdict(snap)
         items.append({
             "id": snap.id, "asin": snap.asin, "sku": snap.sku, "fnsku": snap.fnsku,
             "msku": snap.msku, "product_name": snap.product_name, "account": snap.account,
@@ -1349,8 +1590,15 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
             "replenishment_reason": dec.reason if dec else "",
             "inspection_quantity": snap.inspection_quantity or 0,
             "gross_margin": snap.gross_margin,
-            "is_holiday": snap.is_holiday or "",
+            "return_rate_30d": snap.return_rate_30d,
+            "return_rate_60d": snap.return_rate_60d,
+            # 多值合并（Q-2 / US-2 AC2）：快照单值 ∪ **本行**生效节日标签值（通配 ∪ 本行）
+            "is_holiday": _merge_holiday_values(
+                snap.is_holiday, _row_tags_of(snap).get("holidays", {}).get(snap.asin)),
             "is_discontinued": snap.is_discontinued if snap.is_discontinued is not None else False,
+            "force_replenish": _f_force,
+            "filter_status": _f_status,
+            "tag_locked": _row_locked_of(snap),
         })
 
     # 汇总行的 local_inventory = 子行 local_inventory 之和
@@ -1586,37 +1834,99 @@ def get_summary_children(db: Session, tenant_id: int, asin: str, parent_account:
 
     children = query.order_by(InventorySnapshot.account, InventorySnapshot.country).all()
 
-    return [{
-        "id": c.id,
-        "asin": c.asin,
-        "sku": c.sku,
-        "fnsku": c.fnsku,
-        "msku": c.msku,
-        "product_name": c.product_name,
-        "account": c.account,
-        "country": c.country,
-        "category": c.category,
-        "brand": c.brand,
-        "fba_stock": c.fba_stock,
-        "fba_available": c.fba_available,
-        "fba_pending_transfer": c.fba_pending_transfer,
-        "fba_in_transfer": c.fba_in_transfer,
-        "fba_inbound_processing": c.fba_inbound_processing,
-        "fba_inbound": c.fba_inbound,
-        "total_stock": (c.fba_stock or 0) + (c.fba_inbound or 0) + (c.local_inventory or 0) - (c.inspection_quantity or 0),
-        "daily_sales": round(c.daily_sales, 2) if c.daily_sales is not None else None,
-        "sales_7d": c.sales_7d,
-        "sales_14d": c.sales_14d,
-        "days_of_supply": c.days_supply_total,
-        "stockout_date": c.stockout_date.isoformat() if c.stockout_date else None,
-        "risk_level": None,
-        "summary_flag": c.summary_flag,
-        "suggest_qty": None,
-        "replenishment_reason": None,
-        "inspection_quantity": c.inspection_quantity or 0,
-        "local_inventory": c.local_inventory or 0,
-        "gross_margin": c.gross_margin,
-    } for c in children]
+    # 标签系统（K2/K3）：子行与主列表同口径 —— 直接调用 K3 单一裁决入口
+    # evaluate_status（与 replenishment_decisions.filter_status 同源），
+    # 不再在子行另写一份优先级链，避免两套实现造成口径漂移（《系统设计》§3.6 同步点 5）。
+    try:
+        from services.tag_service import (
+            load_active_tags, get_filter_config, evaluate_status,
+            resolve_row_tags, row_is_locked)
+        _tags = load_active_tags(db, tenant_id)
+        _threshold = get_filter_config(db)["negative_margin_threshold"]
+    except Exception as e:
+        print(f"[inventory_service] 子行标签引擎加载失败，退化为快照级判定: {e}")
+        _tags = {"force": set(), "holidays": {}, "locked": set()}
+        _threshold = 0
+        evaluate_status = None
+        resolve_row_tags = None
+        row_is_locked = None
+
+    def _child_tags(c) -> dict:
+        """子行有效标签（通配 ∪ 本行 account）。"""
+        if resolve_row_tags is None:
+            return {}
+        return resolve_row_tags(_tags, c.asin, c.account)
+
+    def _child_verdict(c):
+        """单子行 K3 裁决：返回 (filter_status, force_replenish)。
+
+        is_discontinued 归一化为 bool —— 与 apply_tags_to_decisions 的调用口径一致
+        （evaluate_status 内部用 `is_discontinued is False` 判 override 资格，
+        直接传 NULL 会误判为不可 override）。
+        """
+        if evaluate_status is not None:
+            return evaluate_status(
+                bool(c.is_discontinued), (c.is_holiday or ""), c.gross_margin,
+                _child_tags(c), _threshold,
+            )
+        # 引擎不可用时的兜底（与存量手写链等价）
+        _rt = _child_tags(c)
+        if c.is_discontinued:
+            return "DISCONTINUED", 0
+        if _rt.get("force_asins"):
+            return "KEEP", 1
+        if (c.is_holiday and str(c.is_holiday).strip()) or _rt.get("holidays"):
+            return "HOLIDAY_EXCLUDED", 0
+        if c.gross_margin is not None and c.gross_margin < _threshold:
+            return "NEG_MARGIN_EXCLUDED", 0
+        return "KEEP", 0
+
+    out = []
+    for c in children:
+        _status, _force = _child_verdict(c)
+        if _status != "KEEP":
+            continue  # K3：仅展示参与补货的子行（与主列表过滤率同口径）
+        out.append({
+            "id": c.id,
+            "asin": c.asin,
+            "sku": c.sku,
+            "fnsku": c.fnsku,
+            "msku": c.msku,
+            "product_name": c.product_name,
+            "account": c.account,
+            "country": c.country,
+            "category": c.category,
+            "brand": c.brand,
+            "fba_stock": c.fba_stock,
+            "fba_available": c.fba_available,
+            "fba_pending_transfer": c.fba_pending_transfer,
+            "fba_in_transfer": c.fba_in_transfer,
+            "fba_inbound_processing": c.fba_inbound_processing,
+            "fba_inbound": c.fba_inbound,
+            "total_stock": (c.fba_stock or 0) + (c.fba_inbound or 0) + (c.local_inventory or 0) - (c.inspection_quantity or 0),
+            "daily_sales": round(c.daily_sales, 2) if c.daily_sales is not None else None,
+            "sales_7d": c.sales_7d,
+            "sales_14d": c.sales_14d,
+            "days_of_supply": c.days_supply_total,
+            "stockout_date": c.stockout_date.isoformat() if c.stockout_date else None,
+            "risk_level": None,
+            "summary_flag": c.summary_flag,
+            "suggest_qty": None,
+            "replenishment_reason": None,
+            "inspection_quantity": c.inspection_quantity or 0,
+            "local_inventory": c.local_inventory or 0,
+            "gross_margin": c.gross_margin,
+            "return_rate_30d": c.return_rate_30d,
+            "return_rate_60d": c.return_rate_60d,
+            "force_replenish": _force,
+            "filter_status": _status,
+            # 行级人工锁定（通配 ∪ 本行 account），与主列表同口径
+            "tag_locked": 1 if (row_is_locked and row_is_locked(_tags, c.asin, c.account)) else 0,
+            # 多值合并与主列表同口径（Q-2 / US-2 AC2；行级：通配 ∪ 本行 account）
+            "is_holiday": _merge_holiday_values(
+                c.is_holiday, _child_tags(c).get("holidays", {}).get(c.asin)),
+        })
+    return out
 
 
 def export_inventory_to_excel(items: list, fields: list = None):
@@ -1654,8 +1964,13 @@ def export_inventory_to_excel(items: list, fields: list = None):
         "local_inventory": "本地仓库存",
         "total_stock": "总库存",
         "gross_margin": "毛利率",
+        "return_rate_30d": "30天退货率",
+        "return_rate_60d": "60天退货率",
         "is_holiday": "节日类型",
         "is_discontinued": "停售",
+        "force_replenish": "强制补货",
+        "tag_locked": "人工锁定",
+        "filter_status": "过滤状态",
         "daily_sales": "日均销量",
         "sales_7d": "7天销量",
         "sales_14d": "14天销量",
@@ -1671,6 +1986,14 @@ def export_inventory_to_excel(items: list, fields: list = None):
 
     # 风险等级中文映射
     risk_map = {"red": "红", "yellow": "黄", "green": "绿"}
+
+    # 过滤状态中文映射（K2 展示口径结论，与页面/决策表同一枚举）
+    filter_status_map = {
+        "KEEP": "参与补货",
+        "DISCONTINUED": "停售",
+        "NEG_MARGIN_EXCLUDED": "负利润排除",
+        "HOLIDAY_EXCLUDED": "节日排除",
+    }
 
     # 确定导出字段
     if fields:
@@ -1707,7 +2030,14 @@ def export_inventory_to_excel(items: list, fields: list = None):
             elif key == "is_discontinued":
                 # 停售标记：True → "是"，False → "否"
                 val = "是" if val else "否"
-            elif key == "gross_margin":
+            elif key == "force_replenish" or key == "tag_locked":
+                # 0/1 → 是/否（与页面标识列同口径）
+                val = "是" if int(val or 0) == 1 else "否"
+            elif key == "filter_status":
+                # 枚举 → 中文（未知值原样输出，不静默丢数据）
+                val = filter_status_map.get(val, val)
+            elif key == "gross_margin" or key.startswith("return_rate_"):
+                # 毛利率 / 退货率：小数 → 百分比字符串，与页面展示口径一致
                 if val is not None and val != "":
                     try:
                         val = f"{float(val) * 100:.2f}%"

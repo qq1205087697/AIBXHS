@@ -6,6 +6,7 @@ import Home from "./pages/Home";
 import ChatBot from "./pages/ChatBot";
 import Dashboard from "./pages/Dashboard";
 import InventoryBot from "./pages/InventoryBot";
+import TagManagement from "./pages/TagManagement";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
@@ -82,6 +83,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <InventoryBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/tags"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <TagManagement />
             </MainLayout>
           </ProtectedRoute>
         }

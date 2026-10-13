@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+
+    # 星拓 MCP Server（标签系统 R2 数据源；密钥资产，不入代码库）
+    STARTOP_MCP_URL: str = "https://openmcp.startop.com/mcp-servers/startop-mcp"
+    STARTOP_MCP_KEY: str = ""         # X-Mcp-Key，星拓后台申请
+    STARTOP_PULL_HOUR: int = 2        # 每日定时拉取时刻（Q-3 裁决：每日定时独立拉取，可配置）
+    STARTOP_PAGE_SIZE: int = 100      # 搜索词报表分页大小
     
     @property
     def DATABASE_URL(self) -> str:

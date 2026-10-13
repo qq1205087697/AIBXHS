@@ -108,7 +108,13 @@ export const inventoryApi = {
     apiClient.put(`/inventory/${id}`, data),
 
   // ========== Restock (补货) API ==========
-  getOverview: () => apiClient.get("/restock/overview"),
+  // 概览与列表同口径：接受与 /restock/search 相同的筛选参数
+  getOverview: (params?: {
+    keyword?: string;
+    holiday_filter?: string;
+    account?: string[];
+    country?: string[];
+  }) => apiClient.get("/restock/overview", { params }),
   calculate: (params?: { snapshot_ids?: string }) =>
     apiClient.post("/restock/calculate", params),
   getCalculateStatus: (taskId: string) =>
@@ -209,6 +215,106 @@ export const localInventoryApi = {
     apiClient.get(`/local-inventory/import-reduction/result/${fileId}`, {
       responseType: "blob",
     }),
+};
+
+// ========== Tags API（标签管理：节日/强制补货/词库/审计/星拓拉取） ==========
+export const tagsApi = {
+  list: (params?: {
+    asin?: string;
+    account?: string;
+    tag_type?: string;
+    keyword?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/tags", { params }),
+  // 行级作用域：account 指定店铺行（汇总行会展开到其共享库存子行）；空串=该 ASIN 全部店铺
+  setForceReplenish: (asin: string, reason: string, sku?: string, account?: string) =>
+    apiClient.post("/tags/force-replenish", {
+      asin,
+      reason,
+      sku: sku || "",
+      account: account || "",
+    }),
+  clearForceReplenish: (asin: string, account?: string) =>
+    apiClient.delete(`/tags/force-replenish/${encodeURIComponent(asin)}`, {
+      params: { account: account || "" },
+    }),
+  setHoliday: (asin: string, holidayValue: string, sku?: string, account?: string) =>
+    apiClient.post("/tags/holiday", {
+      asin,
+      holiday_value: holidayValue,
+      sku: sku || "",
+      account: account || "",
+    }),
+  unlockHoliday: (
+    asin: string,
+    holidayValue: string,
+    clear?: boolean,
+    account?: string,
+  ) =>
+    apiClient.post("/tags/holiday/unlock", {
+      asin,
+      holiday_value: holidayValue,
+      clear: !!clear,
+      account: account || "",
+    }),
+  runAutoTagging: () => apiClient.post("/tags/auto-tagging/run"),
+  previewMatch: (asin?: string, keywords?: string[]) =>
+    apiClient.post("/tags/preview", { asin, keywords }),
+  listLexicon: (params?: {
+    holiday_name?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/tags/lexicon", { params }),
+  addLexicon: (body: {
+    holiday_name: string;
+    keyword: string;
+    match_type?: string;
+    window_start?: string | null;
+    window_end?: string | null;
+  }) => apiClient.post("/tags/lexicon", body),
+  // US-4 AC2：修改词库条目（只传需要改的字段；未传字段保持原值）
+  updateLexicon: (
+    entryId: number,
+    body: {
+      holiday_name?: string;
+      keyword?: string;
+      match_type?: string;
+      site?: string;
+      window_start?: string | null;
+      window_end?: string | null;
+      status?: number;
+      remark?: string;
+    },
+  ) => apiClient.put(`/tags/lexicon/${entryId}`, body),
+  deleteLexicon: (entryId: number) =>
+    apiClient.delete(`/tags/lexicon/${entryId}`),
+  listAudit: (params?: {
+    asin?: string;
+    source?: string;
+    tag_type?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/tags/audit", { params }),
+  getStartopStatus: () => apiClient.get("/tags/startop/status"),
+  pullStartop: (beginDate?: string, endDate?: string) =>
+    apiClient.post("/tags/startop/pull", {
+      begin_date: beginDate,
+      end_date: endDate,
+    }),
+  // F10 兜底通道：上传星拓定时报告导入词数据（幂等：文件哈希去重；仅 admin）
+  importStartopReport: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post("/tags/startop/report-import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  getFilterConfig: () => apiClient.get("/tags/filter-config"),
+  saveFilterConfig: (config: {
+    negative_margin_threshold: number;
+    tag_window_days: number;
+  }) => apiClient.post("/tags/filter-config", config),
 };
 
 // ========== Reviews API ==========

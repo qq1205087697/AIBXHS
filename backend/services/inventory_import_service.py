@@ -4,6 +4,11 @@
 库存导入服务 - 后台异步执行
 """
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from datetime import date
@@ -14,8 +19,17 @@ import pandas as pd
 import numpy as np
 from utils.excel_reader import safe_read_excel
 
-# 导入状态（内存存储）
-_import_status = {
+# ---------------------------------------------------------------------------
+# 导入状态：落盘为 JSON，让「子进程写 / 主进程读」跨进程可见。
+#
+# 导入本身跑在独立子进程（services/import_worker.py）中：子进程退出后由操作系统
+# 无条件回收全部 RSS，从根本上消除「uvicorn worker 进程内导完内存长期不回落」。
+# 内存画像见 scripts/measure_import_memory.py。
+# ---------------------------------------------------------------------------
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_STATUS_FILE = os.path.join(_BACKEND_DIR, ".import_status.json")
+
+_DEFAULT_STATUS = {
     "is_running": False,
     "progress": 0,
     "step": "",
@@ -25,12 +39,118 @@ _import_status = {
     "error": None,
     "started_at": None,
     "finished_at": None,
+    "worker_pid": None,
 }
 
 
+def _read_status_file() -> dict:
+    """读取状态文件，缺失字段用默认值补齐。"""
+    try:
+        with open(_STATUS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("状态文件格式异常")
+    except Exception:
+        data = {}
+    for key, value in _DEFAULT_STATUS.items():
+        data.setdefault(key, value)
+    return data
+
+
+def _write_status_file(status: dict) -> None:
+    """原子写状态文件（tmp + replace，避免读到半个 JSON）。"""
+    try:
+        tmp = f"{_STATUS_FILE}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(status, f, ensure_ascii=False)
+        os.replace(tmp, _STATUS_FILE)
+    except Exception:
+        pass  # 状态落盘失败不得中断导入
+
+
+class _StatusStore(dict):
+    """写时落盘的状态字典：任何变更立即原子写 JSON，供其他进程读取。"""
+
+    def __init__(self, path: str, initial: dict):
+        super().__init__(initial)
+        self._path = path
+
+    def _flush(self):
+        try:
+            tmp = f"{self._path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(dict(self), f, ensure_ascii=False)
+            os.replace(tmp, self._path)
+        except Exception:
+            pass
+
+    def __setitem__(self, key, value):
+        if self.get(key) != value:  # 去重：补货计算的进度回调写入非常频繁
+            super().__setitem__(key, value)
+            self._flush()
+
+    def update(self, *args, **kwargs):
+        if args:
+            super().update(*args)
+        if kwargs:
+            super().update(**kwargs)
+        self._flush()
+
+
+def _pid_alive(pid) -> bool:
+    """判断进程是否存活。
+
+    注意：Windows 下不能用 os.kill(pid, 0) —— CPython 的实现会退化为
+    TerminateProcess，直接把目标进程杀掉。这里改用 OpenProcess 查询。
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+# 子进程内的权威状态（导入时由 _do_import 写入，每次变更自动落盘）
+_import_status = _StatusStore(_STATUS_FILE, _read_status_file())
+
+
 def get_import_status() -> dict:
-    """获取导入状态"""
-    return _import_status.copy()
+    """获取导入状态（跨进程：读状态文件）"""
+    status = _read_status_file()
+    # 子进程被强杀时会残留 is_running=True，这里兜底修正
+    if status.get("is_running") and not _pid_alive(status.get("worker_pid")):
+        status["is_running"] = False
+        status["error"] = status.get("error") or "导入进程已退出（异常终止）"
+        status["finished_at"] = status.get("finished_at") or time.time()
+        _write_status_file(status)
+    return status
 
 
 def _update_status(**kwargs):
@@ -40,7 +160,6 @@ def _update_status(**kwargs):
 
 def _log(msg: str):
     """打印日志 - 强制刷新确保实时显示"""
-    import sys
     elapsed = time.time() - _import_status["started_at"] if _import_status["started_at"] else 0
     log_line = f"[导入 {elapsed:>6.1f}s] {msg}"
     print(log_line, flush=True)
@@ -48,8 +167,33 @@ def _log(msg: str):
     _import_status["step"] = msg
 
 
-def _do_import(file_path: str = None, file_content: bytes = None, filename: str = None, tenant_id: int = 1):
-    """后台导入任务"""
+def _wait_sync_finish(wait_start: float = 30.0, timeout: float = 600.0, interval: float = 2.0) -> None:
+    """等待飞书同步线程结束。
+
+    start_sync_async() 起的是 daemon 线程，子进程一旦退出就会被强杀，
+    因此子进程模式必须显式等待（含一个起步检测窗口，避免同步线程还没起跑就退出）。
+    """
+    from services.feishu_sync_service import get_sync_status
+
+    t0 = time.time()
+    while time.time() - t0 < wait_start:
+        if get_sync_status().get("is_running"):
+            break
+        time.sleep(0.5)
+    else:
+        return  # 起步窗口内未启动，视为无同步任务
+
+    while time.time() - t0 < timeout:
+        if not get_sync_status().get("is_running"):
+            print(f"[导入] FBA同步已结束（{time.time() - t0:.0f}s）", flush=True)
+            return
+        time.sleep(interval)
+    print(f"[导入] 等待 FBA 同步超时（>{timeout:.0f}s），子进程退出", flush=True)
+
+
+def _do_import(file_path: str = None, file_content: bytes = None, filename: str = None,
+               tenant_id: int = 1, wait_for_sync: bool = False):
+    """后台导入任务（在独立子进程中执行，见 services/import_worker.py）"""
     global _import_status
     
     from database.database import SessionLocal, engine
@@ -511,17 +655,8 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         _log(f"replenishment_decisions 计算完成: {calc_result}")
         _import_status["progress"] = 95
 
-        # ========== 步骤9: 触发FBA同步在途 ==========
-        _log("触发FBA同步在途...")
-        try:
-            from services.feishu_sync_service import start_sync_async as start_feishu_sync
-            sync_result = start_feishu_sync()
-            if sync_result.get("started"):
-                _log(f"FBA同步在途已启动: {sync_result.get('message', '')}")
-            else:
-                _log(f"FBA同步在途未启动: {sync_result.get('message', '')}")
-        except Exception as sync_e:
-            _log(f"FBA同步在途触发失败（不影响导入结果）: {sync_e}")
+        # ========== 步骤9（已后移）: FBA同步在途 ==========
+        # 见函数末尾：必须在 db.close() 之后触发，先释放 Session 持有的 ORM 对象。
         _import_status["progress"] = 100
 
         # ========== 完成 ==========
@@ -550,35 +685,113 @@ def _do_import(file_path: str = None, file_content: bytes = None, filename: str 
         import traceback
         traceback.print_exc()
     finally:
-        db.close()
+        try:
+            db.close()  # 先释放 Session 持有的全部 ORM 对象（46790 个）
+        except Exception:
+            pass
+
+    # ========== 步骤9: 触发FBA同步在途 ==========
+    # 必须放在 db.close() 之后：先让 Session 释放 ORM 对象，再去做同步。
+    if not _import_status.get("error"):
+        _log("触发FBA同步在途...")
+        try:
+            from services.feishu_sync_service import start_sync_async as start_feishu_sync
+            sync_result = start_feishu_sync()
+            if sync_result.get("started"):
+                _log(f"FBA同步在途已启动: {sync_result.get('message', '')}")
+            else:
+                _log(f"FBA同步在途未启动: {sync_result.get('message', '')}")
+        except Exception as sync_e:
+            _log(f"FBA同步在途触发失败（不影响导入结果）: {sync_e}")
+        if wait_for_sync:
+            _wait_sync_finish()
+
+
+_start_lock = threading.Lock()
+
+
+def _reap_worker(proc) -> None:
+    """等待子进程结束并回收；子进程异常退出时兜底修正残留状态。"""
+    try:
+        proc.wait()
+    except Exception:
+        return
+    status = _read_status_file()
+    if status.get("is_running"):
+        status["is_running"] = False
+        status["error"] = status.get("error") or f"导入进程异常退出（退出码 {proc.returncode}）"
+        status["finished_at"] = status.get("finished_at") or time.time()
+        _write_status_file(status)
 
 
 def start_import_async(file_path: str = None, file_content: bytes = None, filename: str = None, tenant_id: int = 1) -> dict:
-    """启动异步导入任务"""
-    global _import_status
-    
-    if _import_status["is_running"]:
-        return {"started": False, "message": "导入任务正在运行中", "status": get_import_status()}
-    
-    # 重置状态
-    _import_status = {
-        "is_running": False,
-        "progress": 0,
-        "step": "",
-        "total_rows": 0,
-        "inbound_count": 0,
-        "replen_count": 0,
-        "error": None,
-        "started_at": None,
-        "finished_at": None,
-    }
-    
-    # 启动后台线程
-    thread = threading.Thread(
-        target=_do_import,
-        args=(file_path, file_content, filename, tenant_id),
-        daemon=True
-    )
-    thread.start()
-    
-    return {"started": True, "message": "导入任务已启动"}
+    """启动异步导入任务（独立子进程执行）。
+
+    子进程退出后由操作系统无条件回收全部 RSS —— 这是「导入后内存长期不回落」
+    的结构性解法（allocator 高水位 / ORM 对象 / 编译缓存都随进程一起消失）。
+    """
+    with _start_lock:
+        current = get_import_status()
+        if current.get("is_running"):
+            return {"started": False, "message": "导入任务正在运行中", "status": current}
+
+        # 上传内容先落盘，交给子进程按路径读取（避免跨进程传 10MB+ bytes）
+        tmp_file = None
+        if file_content is not None:
+            fd, tmp_file = tempfile.mkstemp(prefix="restock_import_", suffix=".xlsx")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(file_content)
+            file_path = tmp_file
+
+        if not file_path or not os.path.exists(file_path):
+            if tmp_file and os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
+            return {"started": False, "message": f"文件不存在: {file_path}", "status": current}
+
+        display_name = filename or os.path.basename(file_path)
+
+        # 初始状态落盘（子进程启动后会接管）
+        _write_status_file({**_DEFAULT_STATUS,
+            "is_running": True,
+            "step": "正在启动导入进程...",
+            "started_at": time.time(),
+        })
+
+        cmd = [
+            sys.executable, "-m", "services.import_worker",
+            "--file", file_path,
+            "--tenant", str(tenant_id),
+            "--filename", display_name,
+        ]
+        if tmp_file:
+            cmd += ["--cleanup", tmp_file]
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = _BACKEND_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            proc = subprocess.Popen(cmd, cwd=_BACKEND_DIR, env=env)
+        except Exception as e:
+            if tmp_file and os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
+            _write_status_file({**_DEFAULT_STATUS,
+                "error": f"启动导入进程失败: {e}",
+                "finished_at": time.time(),
+            })
+            return {"started": False, "message": f"启动导入进程失败: {e}"}
+
+        status = _read_status_file()
+        status["worker_pid"] = proc.pid
+        _write_status_file(status)
+
+        # 后台回收子进程（只做 wait，不加载任何数据）
+        threading.Thread(target=_reap_worker, args=(proc,), daemon=True).start()
+
+        return {"started": True, "message": "导入任务已启动", "pid": proc.pid}

@@ -51,7 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, tags
 from config import get_settings
 
 settings = get_settings()
@@ -76,6 +76,7 @@ app.include_router(inventory.router, prefix="/api")
 app.include_router(reviews.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(restock.router, prefix="/api")
+app.include_router(tags.router, prefix="/api")
 app.include_router(chat.router)
 app.include_router(auth.router)
 app.include_router(departments.router)
@@ -209,7 +210,10 @@ _NO_CACHE_EXTS = {".html", ".htm"}
 async def serve_static_middleware(request: Request, call_next):
     path = request.url.path
     
-    if path.startswith("/api/") or path.startswith("/docs") or path.startswith("/redoc"):
+    # /openapi.json 必须放行：它是 Swagger/ReDoc 的数据源。若交给下方静态
+    # 处理逻辑，文件不存在会命中 SPA fallback 返回 index.html（HTML），
+    # Swagger UI 解析失败并报 “does not specify a valid version field”。
+    if path.startswith(("/api/", "/docs", "/redoc", "/openapi.json")):
         return await call_next(request)
     
     file_path = os.path.join(static_dir, path.lstrip("/"))
