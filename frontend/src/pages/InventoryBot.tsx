@@ -4605,24 +4605,34 @@ const InventoryBot: React.FC = () => {
         open={inboundModalVisible}
         onCancel={() => setInboundModalVisible(false)}
         footer={null}
-        width={res.isMobile ? "95vw" : 800}
+        width={res.isMobile ? "95vw" : 860}
+        centered
+        styles={{
+          body: { maxHeight: "68vh", overflowY: "auto", paddingTop: 8 },
+        }}
       >
+        {/* loading/空态给最小高度，避免数据回来后弹窗高度跳变（过场稳定） */}
         <Spin spinning={inboundLoading}>
-          {inboundDetails && inboundDetails.length > 0 ? (
-            <Table
-              columns={inboundColumns}
-              dataSource={inboundDetails}
-              rowKey="shipment_id"
-              pagination={false}
-              size="small"
-              scroll={{ x: res.isMobile ? true : false }}
-            />
-          ) : (
-            <Empty
-              description="暂无在途货件数据"
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-            />
-          )}
+          <div style={{ minHeight: 180 }}>
+            {inboundDetails && inboundDetails.length > 0 ? (
+              <Table
+                columns={inboundColumns}
+                dataSource={inboundDetails}
+                rowKey="shipment_id"
+                pagination={false}
+                size="small"
+                scroll={{
+                  x: res.isMobile ? true : undefined,
+                  y: "calc(68vh - 170px)",
+                }}
+              />
+            ) : (
+              <Empty
+                description="暂无在途货件数据"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            )}
+          </div>
         </Spin>
       </Modal>
 
