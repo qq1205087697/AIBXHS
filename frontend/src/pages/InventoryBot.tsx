@@ -3014,6 +3014,10 @@ const InventoryBot: React.FC = () => {
   // 优化（C1）：进入即比对「条/表」当前 scrollLeft，
   // 差值 < 1px 视为已同步直接返回，打断「条→表→条」的冗余同步回合，
   // 把每次拖拽手势的 repaint 从 2 次压到 1 次，缓解 500 行大表横向卡顿。
+  // 快拖优化（200 行实测）：大步长 scrollLeft → 单帧大面积栅格化 + sticky 重绘
+  // → 掉帧 → 用户拖更多 → 步长更大的正反馈（「越快越卡」）。改为 lerp 平滑：
+  // 每帧向目标收敛 45% 且单帧限步 120px，把大步分摊成多个小步，
+  // 单帧栅格化面积恒定，快拖帧率不再随速度恶化；停手后 ~2-3 帧滑到准位。
   const handleControlScroll = () => {
     const bar = hScrollBarRef.current;
     if (!bar) return;
@@ -3027,9 +3031,18 @@ const InventoryBot: React.FC = () => {
       if (syncingHScroll.current) return;
       const el2 = getHScrollEl();
       if (!el2) return;
+      const target = bar.scrollLeft;
+      const diff = target - el2.scrollLeft;
+      const maxStep = 120;
+      const next =
+        Math.abs(diff) <= maxStep
+          ? target
+          : el2.scrollLeft + Math.sign(diff) * Math.max(maxStep, Math.abs(diff) * 0.45 > maxStep ? maxStep : Math.abs(diff) * 0.45);
       syncingHScroll.current = true;
-      el2.scrollLeft = bar.scrollLeft;
+      el2.scrollLeft = next;
       syncingHScroll.current = false;
+      // 未到位：继续下一帧收敛（拖动中 target 持续更新，自然跟随）
+      if (Math.abs(el2.scrollLeft - target) > 1) handleControlScroll();
     });
   };
 
@@ -4196,19 +4209,21 @@ const InventoryBot: React.FC = () => {
           scrollbar-width: auto;
           overflow-x: hidden !important;
         }
-        .inv-detail-hscroll .ant-table-content,
-        .inv-detail-hscroll .ant-table-header {
-          scrollbar-width: none;
-        }
-        /* 优化（C2）：固定列在横向滚动时由浏览器逐帧更新 sticky 位置。
-           显式提升为合成层，把「主线程重排+重绘」降级为「仅合成」，
-           直接缓解 500 行大表横向拖拽时固定列跟随的卡顿。
-           仅作用于固定列单元格（数量很少），不波及 11500 个普通单元格，
-           避免 will-change 撑爆 GPU 显存。 */
+        /* 合成层策略（200 行 A/B/G 实测取最优）：cell 级 will-change 的稳态
+           avg 12.9ms 为各方案最优（B 移除=18.4 掉帧 6 / F 强制合成层=26+）；
+           其首帧栅格化尖峰（~163ms，每次滚动过程一次）通过下方 lerp 平滑
+           分摊 + 用户加载后首次拖动自然预热消化。 */
         .inv-detail-hscroll .ant-table-cell-fix-left,
         .inv-detail-hscroll .ant-table-cell-fix-right {
           will-change: transform;
         }
+        .inv-detail-hscroll .ant-table-content,
+        .inv-detail-hscroll .ant-table-header {
+          scrollbar-width: none;
+        }
+        /* 合成层策略已改为 body 级 will-change:scroll-position（见上方）：
+           cell 级 will-change 在 200 行/页时产生约 1200 个合成层，
+           GPU 栅格化尖峰实测 163ms/帧（A/B 实验见 probe 记录），已移除。 */
         /* 隐藏 rc-table 在「scroll.x + 冻结列」时渲染的原生底部横向滚动条
            （.ant-table-sticky-scroll，内含 .ant-table-sticky-scroll-bar）。
            横向滑动统一由分页上方的自定义滚动条 .table-h-scroll 承担，
