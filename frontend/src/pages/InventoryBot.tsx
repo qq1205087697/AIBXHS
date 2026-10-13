@@ -1769,38 +1769,7 @@ const InventoryBot: React.FC = () => {
       dataIndex: "image_url",
       key: "image_url",
       width: 70,
-      render: (_: any, record: InventoryItem) => {
-        // 子行（共享库存明细）与父行同产品，同样展示图片（后端 get_summary_children 已返回 image_url）
-        const url = record.image_url;
-        const fallback = (
-          <div
-            style={{
-              width: 40,
-              height: 40,
-              background: "#f0f0f0",
-              borderRadius: 4,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <ImageIcon size={16} color="#ccc" />
-          </div>
-        );
-        return url ? (
-          <Image
-            src={url}
-            width={40}
-            height={40}
-            style={{ objectFit: "cover", borderRadius: 4 }}
-            preview={{ mask: false }}
-            loading="lazy"
-            fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjZjBmMGYwIi8+PC9zdmc+"
-          />
-        ) : (
-          fallback
-        );
-      },
+      render: (_: any, record: InventoryItem) => renderProductImage(record.image_url),
     },
     {
       title: "SKU",
@@ -2792,6 +2761,38 @@ const InventoryBot: React.FC = () => {
     },
   ];
 
+  // 主行 / 子行共用的产品图片渲染（子行列包装会替换主 render，需单独分支调用）
+  const renderProductImage = (url?: string) => {
+    const fallback = (
+      <div
+        style={{
+          width: 40,
+          height: 40,
+          background: "#f0f0f0",
+          borderRadius: 4,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <ImageIcon size={16} color="#ccc" />
+      </div>
+    );
+    return url ? (
+      <Image
+        src={url}
+        width={40}
+        height={40}
+        style={{ objectFit: "cover", borderRadius: 4 }}
+        preview={{ mask: false }}
+        loading="lazy"
+        fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjZjBmMGYwIi8+PC9zdmc+"
+      />
+    ) : (
+      fallback
+    );
+  };
+
   const CHILD_REAL_FIELDS = new Set([
     "asin",
     "sku",
@@ -2887,6 +2888,10 @@ const InventoryBot: React.FC = () => {
             ) : (
               <span style={{ color: "#ccc" }}>-</span>
             );
+          }
+          if (dataKey === "image_url") {
+            // 子行与父行同产品：同样渲染图片（后端 get_summary_children 已返回 image_url）
+            return renderProductImage(val);
           }
           if (dataKey === "force_replenish") {
             return val === 1 ? (
