@@ -4186,18 +4186,14 @@ const InventoryBot: React.FC = () => {
           scrollbar-width: none;
           -ms-overflow-style: none;
         }
-        .inv-page-scroll::-webkit-scrollbar {
-          width: 0;
-          height: 0;
-          display: none;
-        }
-                   作用域：.inv-detail-hscroll 仅加在本页表格的包裹 div 上，
-           避免影响全站其他 antd Table。 */
+        /* Chrome ≥145 已移除 ::-webkit-scrollbar 支持，下方 webkit 规则不再生效；
+           body 横向内容溢出时原生条（15px）直接渲染。改用标准属性藏条：
+           scrollbar-width:none 横纵一起藏，滚动功能保留（滚轮/触控板/沉底条拖拽）。
+           纵条藏掉后 rc-table 的 scrollbarSize 补偿需实测列对齐（探针断言）。 */
         .inv-detail-hscroll .ant-table-body,
         .inv-detail-hscroll .ant-table-content,
         .inv-detail-hscroll .ant-table-header {
-          scrollbar-color: auto;
-          scrollbar-width: auto;
+          scrollbar-width: none;
         }
         /* 优化（C2）：固定列在横向滚动时由浏览器逐帧更新 sticky 位置。
            显式提升为合成层，把「主线程重排+重绘」降级为「仅合成」，
@@ -4239,8 +4235,8 @@ const InventoryBot: React.FC = () => {
            是继承属性，会被本元素继承 → Chrome ≥121 命中标准属性后整条忽略
            下面的 ::-webkit-scrollbar 样式 → 沉底条消失、原生条漏出。 */
         .table-h-scroll {
+          /* 显式 auto 断掉可能的祖先 scrollbar-width 继承 */
           scrollbar-width: auto;
-          -ms-overflow-style: auto;
         }
         .table-h-scroll::-webkit-scrollbar {
           height: 10px;
