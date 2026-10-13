@@ -1770,8 +1770,7 @@ const InventoryBot: React.FC = () => {
       key: "image_url",
       width: 70,
       render: (_: any, record: InventoryItem) => {
-        // 子行（共享库存明细）与父行同产品，不重复显示图片
-        if (record._isChild) return "-";
+        // 子行（共享库存明细）与父行同产品，同样展示图片（后端 get_summary_children 已返回 image_url）
         const url = record.image_url;
         const fallback = (
           <div
