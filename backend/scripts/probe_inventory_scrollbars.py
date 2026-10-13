@@ -44,6 +44,7 @@ JS = r"""
       overflowX: cs.overflowX,
       hScrollbarVisible: el.scrollWidth > el.clientWidth + 1,
       thickness: el.offsetHeight - el.clientHeight,   // 横向条实际占用的厚度
+      vThickness: el.offsetWidth - el.clientWidth,    // 纵向条实际占用的厚度
       display: cs.display,
     };
   }
@@ -133,6 +134,11 @@ JS = r"""
       }
     } catch (e) {}
   }
+  // 沉底条驱动横向同步：只负责设值（scroll 事件异步派发，读取在 Python 侧等待后进行）
+  const th = document.querySelector(".table-h-scroll");
+  const body = document.querySelector(".inv-detail-hscroll .ant-table-body");
+  if (th && body) { th.scrollLeft = 300; }
+  out.hScrollSet = th ? th.scrollLeft : null;
   // 列对齐断言：表头第 N 个 th 与表体第一行第 N 个 td 的左缘差（>2px 即错位）
   const ths = document.querySelectorAll('.inv-detail-hscroll .ant-table-thead th');
   const tds = document.querySelectorAll('.inv-detail-hscroll .ant-table-tbody tr.ant-table-row td');
@@ -155,6 +161,11 @@ with sync_playwright() as pw:
     pg.wait_for_selector(".ant-table-tbody tr.ant-table-row", timeout=30000, state="attached")
     pg.wait_for_timeout(1500)
     data = pg.evaluate(JS)
+    pg.wait_for_timeout(300)   # 等 scroll 事件异步派发、同步监听器执行
+    data["bodyScrollLeftAfter"] = pg.evaluate(
+        "() => document.querySelector('.inv-detail-hscroll .ant-table-body').scrollLeft")
+    data["thScrollLeftAfter"] = pg.evaluate(
+        "() => document.querySelector('.table-h-scroll').scrollLeft")
     browser.close()
 
 import json

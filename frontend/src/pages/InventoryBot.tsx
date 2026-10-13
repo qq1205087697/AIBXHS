@@ -4186,11 +4186,16 @@ const InventoryBot: React.FC = () => {
           scrollbar-width: none;
           -ms-overflow-style: none;
         }
-        /* Chrome ≥145 已移除 ::-webkit-scrollbar 支持，下方 webkit 规则不再生效；
-           body 横向内容溢出时原生条（15px）直接渲染。改用标准属性藏条：
-           scrollbar-width:none 横纵一起藏，滚动功能保留（滚轮/触控板/沉底条拖拽）。
-           纵条藏掉后 rc-table 的 scrollbarSize 补偿需实测列对齐（探针断言）。 */
-        .inv-detail-hscroll .ant-table-body,
+        /* Chrome ≥145 已移除 ::-webkit-scrollbar 支持，webkit 隐藏规则失效。
+           body 需要的形态：纵条保留（条数多时拖动）、横条不渲染（横向滚动
+           由沉底自定义条 .table-h-scroll 以 JS 设 scrollLeft 驱动）。
+           scrollbar-width 只能横纵一起控制，无法单边 → 用 overflow-x:hidden：
+           横向不再渲染滚动条，溢出区域仍可通过 JS 设 scrollLeft（同步不受影响）。
+           !important 用于覆盖 antd 的内联 overflow（inline 无 important）。 */
+        .inv-detail-hscroll .ant-table-body {
+          scrollbar-width: auto;
+          overflow-x: hidden !important;
+        }
         .inv-detail-hscroll .ant-table-content,
         .inv-detail-hscroll .ant-table-header {
           scrollbar-width: none;
