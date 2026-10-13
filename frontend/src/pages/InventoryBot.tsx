@@ -3082,6 +3082,7 @@ const InventoryBot: React.FC = () => {
 
   return (
     <div
+      className="inv-page-scroll"
       style={{
         height: "100%",
         overflowY: "auto",
@@ -4178,7 +4179,19 @@ const InventoryBot: React.FC = () => {
            Chrome ≥121 一旦命中标准滚动条属性，就会整条忽略 ::-webkit-scrollbar
            规则 —— 这正是此前 height:0 屡改无效的原因。
            对策：在本页作用域内把标准属性复位为 auto，回落到 WebKit 伪元素渲染路径。
-           作用域：.inv-detail-hscroll 仅加在本页表格的包裹 div 上，
+/* 页面级纵向滚动条：隐藏 UI 但保留滚动功能。
+           scrollbar-width:none 是标准属性（Chrome 121+/Firefox），命中后
+           浏览器直接不渲染滚动条；::-webkit-scrollbar 兜底旧浏览器。 */
+        .inv-page-scroll {
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .inv-page-scroll::-webkit-scrollbar {
+          width: 0;
+          height: 0;
+          display: none;
+        }
+                   作用域：.inv-detail-hscroll 仅加在本页表格的包裹 div 上，
            避免影响全站其他 antd Table。 */
         .inv-detail-hscroll .ant-table-body,
         .inv-detail-hscroll .ant-table-content,
