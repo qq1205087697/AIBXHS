@@ -682,6 +682,7 @@ async def get_product_page_info_detail(
             "has_aplus": has_aplus_val,
             "has_video": has_video_val,
             "total_score": total_score,
+            "rating_status": item.rating_status or 0,
             "traffic_keywords": item.traffic_keywords,
             "updated_at": item.updated_at.strftime('%Y-%m-%d %H:%M:%S') if item.updated_at else None,
             "gross_margin": gross_margin,
@@ -1186,7 +1187,8 @@ def refresh_inventory(
             if not sku or not store:
                 continue
             # 跳过超出表字段长度的行（如"店铺A、店铺B、店铺C"合并店铺名，其SKU已有单店铺行）
-            if len(sku) > 50 or len(store) > 100:
+            # 跳过合并店铺的共享库存汇总行（store含顿号），只保留单店铺行，否则无法映射店铺别名
+            if len(sku) > 50 or len(store) > 100 or '、' in store:
                 continue
             key = (sku, store)
             if key not in inv_map:

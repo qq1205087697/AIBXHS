@@ -1235,9 +1235,17 @@ const RatingOptimizationBot: React.FC = () => {
                 评分详情
               </Button>
               <Button onClick={handleOpenLog}>操作日志</Button>
-              <Button icon={<Sparkles size={14} />} disabled={aiSuggestLoading} onClick={handleOpenAiSuggest}>
-                {aiSuggestLoading ? 'AI建议生成中...' : '查看AI建议'}
-              </Button>
+              <Tooltip title={selectedRecord?.rating_status === 1 ? undefined : '请先给产品提交评分'}>
+                <span style={{ display: 'inline-flex' }}>
+                  <Button
+                    icon={<Sparkles size={14} />}
+                    disabled={aiSuggestLoading || selectedRecord?.rating_status !== 1}
+                    onClick={handleOpenAiSuggest}
+                  >
+                    {aiSuggestLoading ? 'AI建议生成中...' : '查看AI建议'}
+                  </Button>
+                </span>
+              </Tooltip>
             </Space>
 
             {/* 产品信息详情 */}
