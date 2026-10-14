@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, Button, List, Typography, Space, Divider, Tag, message, Select, Table, DatePicker, Input, Modal, Tooltip, Form, InputNumber } from 'antd';
 import { SearchOutlined, UpOutlined, DownOutlined } from '@ant-design/icons';
 import { AlertTriangle, RefreshCw, CheckCircle, XCircle, Store, Filter } from 'lucide-react';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ScatterChart, Scatter, ZAxis, ReferenceLine, ComposedChart } from 'recharts';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ReferenceLine, ComposedChart, PieChart, Pie, Cell, Sector } from 'recharts';
+import * as XLSX from 'xlsx';
 import dayjs, { Dayjs } from 'dayjs';
 import apiClient from '../api';
 import { useAuth } from '../contexts/AuthContext';
@@ -34,8 +35,11 @@ interface MetricData {
   gmv: number;
   fbaTotalStock: number;
   fbaStockValue: number;
+  fbaStockDate?: string;
   grossProfit: number;
   storageRatio: number;
+  storageFee: number;
+  salesAmount: number;
 }
 
 interface AlertItem {
@@ -61,6 +65,7 @@ interface StoreData {
   ordersTrend: { date: string; orders: number }[];
   adRatioTrend: { date: string; adRatio: number }[];
   alerts: AlertItem[];
+  avgAdRatio30d?: number;
 }
 
 interface MyStore {
@@ -104,6 +109,25 @@ const CHART_COLORS = [
   '#13c2c2', '#eb2f96', '#fa8c16', '#2f54eb', '#10239e'
 ];
 
+// --- 购物车预警记录（product_buybox）
+interface BuyboxRecord {
+  id: number;
+  date: string;
+  sku: string;
+  product_name: string | null;
+  store: string;
+  status: string | null;
+}
+
+// --- 货件预警记录（product_shipment_notice）
+interface ShipmentRecord {
+  id: number;
+  date: string;
+  store: string;
+  shipment_code: string;
+  status: string | null;
+}
+
 interface DataWarningRecord {
   id: number;
   tenant_id: number;
@@ -119,6 +143,7 @@ interface DataWarningRecord {
   fba_total_stock: number;
   storage_ratio: number;
   gross_profit: number;
+  storage_fee?: number;
 }
 
 const fetchDataWarnings = async (
@@ -163,6 +188,47 @@ interface SkuDailySalesRecord {
   total_sales: number;
 }
 
+// --- SKU销量异动检测常量（评分制改造，后续可迁入阈值设置）
+const SKU_ANOMALY_CONSTANTS = {
+  minPrevSales: 3,      // 通道A：前一天销量≥3单
+  absGateBase: 3,       // 通道A：绝对变化量基础门槛（单）
+  absGateAvgRatio: 0.25,// 通道A：绝对变化量随日均放大的比例
+  relGate: 50,          // 通道A：有效环比门槛（%）
+  bBase: 5,             // 通道B（起量事件）：今日≥max(5, 日均×3)
+  bAvgRatio: 3,
+  eventRelP1: 100,      // 事件环比达到翻倍即P1（%）
+  p0Ratio: 1,           // P0：绝对变化≥max(10, 日均×1)
+  p0Base: 10,
+  p1Ratio: 0.3,         // P1：绝对变化≥max(5, 日均×0.3)
+  p1Base: 5,
+  recentEventDays: 3,   // 最近3天有事件→按事件方向分组
+  minTotal: 7,          // 纳入门槛：14天总销量≥7（只保留观察池口径）
+} as const;
+
+type SkuAnomalySeverity = 'P0' | 'P1' | 'P2';
+
+interface SkuAnomalyEvent {
+  startDate: string;
+  endDate: string;
+  days: number;
+  direction: 'up' | 'down';
+  maxAbsChange: number;
+  maxRelChange: number;
+  severity: SkuAnomalySeverity;
+}
+
+interface SkuAnomalyDailyItem {
+  date: string;
+  sales: number | null;      // null = 无记录（dataMissing）
+  prevSales: number | null;
+  changeRate: number | null;
+  absChange: number | null;
+  direction: 'up' | 'down' | 'flat' | null;
+  isAnomaly: boolean;
+  dataMissing: boolean;
+  channel: 'A' | 'B' | null; // A=有效环比，B=起量事件
+}
+
 interface SkuAnomalyRecord {
   sku: string;
   store: string;
@@ -175,7 +241,204 @@ interface SkuAnomalyRecord {
   overallDirection: 'up' | 'down' | 'flat';
   isMonitored: boolean;
   isAnomaly: boolean;
-  daily: { date: string; sales: number; prevSales: number | null; changeRate: number | null; direction: 'up' | 'down' | 'flat' | null; isAnomaly: boolean }[];
+  // --- 评分制字段
+  anomalyScore: number;        // 0-100
+  severity: SkuAnomalySeverity | null;
+  maxAbsChange: number;        // 14天最大单日绝对变化
+  anomalyDayCount: number;     // 有效异动天数
+  recentEventDirection: 'up' | 'down' | null; // 最近3天事件方向（分组用）
+  dataIncomplete: boolean;     // 昨天无记录，趋势回退T-2
+  events: SkuAnomalyEvent[];
+  daily: SkuAnomalyDailyItem[];
+}
+
+// --- SKU异动共享计算函数：真实数据与测试数据共用（评分/事件/池判定）
+const computeSkuAnomalyMetrics = (
+  salesByDate: Map<string, number>,
+  fullDates: string[],
+  store: string,
+  thresholds: Record<string, { latestTrend?: number; overallTrend?: number }>
+) => {
+  const C = SKU_ANOMALY_CONSTANTS;
+  // 无记录日期不补0：仅统计有记录的日期
+  const recordedSales: number[] = fullDates.map(d => (salesByDate.has(d) ? salesByDate.get(d)! : null) as number | null);
+  const validValues = recordedSales.filter((v): v is number => v !== null);
+  const total = validValues.reduce((a, b) => a + b, 0);
+  const avg = total / 14; // 固定14天窗口分母
+  const max = validValues.length ? Math.max(...validValues) : 0;
+  const positives = validValues.filter(v => v > 0);
+  const minPositive = positives.length ? Math.min(...positives) : 0;
+  // 通道A门槛：绝对变化≥max(3, 日均×0.25)
+  const absGateA = Math.max(C.absGateBase, avg * C.absGateAvgRatio);
+  // 通道B门槛：今日≥max(5, 日均×3)
+  const gateB = Math.max(C.bBase, avg * C.bAvgRatio);
+
+  // 逐日判定：
+  // 通道A：前一天≥3 且 |Δ|≥max(3,日均×0.25) 且 |环比|≥50%
+  // 通道B（起量事件）：前一天<3 且 今日≥max(5,日均×3) → 方向固定上升，不参与环比
+  let maxValidRel = 0;   // 最大有效环比（仅通道A）
+  let maxAbsChange = 0;  // 最大绝对变化（通道A+B）
+  let anomalyDayCount = 0;
+  let latestRateAbs = 0; // 最新趋势变化率绝对值（%）
+  const daily: SkuAnomalyDailyItem[] = recordedSales.map((sales, i) => {
+    const date = fullDates[i];
+    // 无记录日期：标记 dataMissing，不参与环比
+    if (sales === null) {
+      return { date, sales: null, prevSales: null, changeRate: null, absChange: null, direction: null, isAnomaly: false, dataMissing: true, channel: null };
+    }
+    const prevItem = i > 0 ? daily[i - 1] : null;
+    const prevSales = prevItem && !prevItem.dataMissing ? prevItem.sales : null;
+    let changeRate: number | null = null;
+    let absChange: number | null = null;
+    let direction: 'up' | 'down' | 'flat' | null = null;
+    let isAnomaly = false;
+    let channel: 'A' | 'B' | null = null;
+    if (prevSales !== null) {
+      absChange = sales - prevSales;
+      if (prevSales > 0) {
+        changeRate = Math.round(((sales - prevSales) / prevSales) * 10000) / 100;
+        direction = changeRate > 0 ? 'up' : changeRate < 0 ? 'down' : 'flat';
+      }
+      if (prevSales >= C.minPrevSales && Math.abs(absChange) >= absGateA && Math.abs(changeRate ?? 0) >= C.relGate) {
+        // 通道A：有效环比
+        isAnomaly = true;
+        channel = 'A';
+        anomalyDayCount++;
+        if (Math.abs(changeRate) > maxValidRel) maxValidRel = Math.abs(changeRate);
+        if (Math.abs(absChange) > maxAbsChange) maxAbsChange = Math.abs(absChange);
+      } else if (prevSales < C.minPrevSales && sales >= gateB) {
+        // 通道B：起量事件（含从0起量），方向固定上升，不参与环比
+        isAnomaly = true;
+        channel = 'B';
+        direction = 'up';
+        changeRate = null;
+        anomalyDayCount++;
+        if (Math.abs(absChange) > maxAbsChange) maxAbsChange = Math.abs(absChange);
+      }
+    }
+    return { date, sales, prevSales, changeRate, absChange, direction, isAnomaly, dataMissing: false, channel };
+  });
+
+  // 连续有效异动日合并为事件，并定级 P0/P1/P2
+  const events: SkuAnomalyEvent[] = [];
+  let cursor = 0;
+  while (cursor < daily.length) {
+    if (!daily[cursor].isAnomaly) { cursor++; continue; }
+    let end = cursor;
+    while (end + 1 < daily.length && daily[end + 1].isAnomaly) end++;
+    let evMaxAbs = 0, evMaxRel = 0, evDir: 'up' | 'down' = 'up';
+    for (let i = cursor; i <= end; i++) {
+      const d = daily[i];
+      const abs = Math.abs(d.absChange || 0);
+      // 通道B不参与环比，事件环比仅统计通道A
+      const rel = d.channel === 'A' ? Math.abs(d.changeRate || 0) : 0;
+      if (abs > evMaxAbs) { evMaxAbs = abs; evDir = (d.absChange || 0) > 0 ? 'up' : 'down'; }
+      if (rel > evMaxRel) evMaxRel = rel;
+    }
+    const evSeverity: SkuAnomalySeverity =
+      evMaxAbs >= Math.max(C.p0Base, avg * C.p0Ratio) ? 'P0'
+        : (evMaxAbs >= Math.max(C.p1Base, avg * C.p1Ratio) || evMaxRel >= C.eventRelP1) ? 'P1'
+          : 'P2';
+    events.push({
+      startDate: daily[cursor].date,
+      endDate: daily[end].date,
+      days: end - cursor + 1,
+      direction: evDir,
+      maxAbsChange: evMaxAbs,
+      maxRelChange: evMaxRel,
+      severity: evSeverity,
+    });
+    cursor = end + 1;
+  }
+
+  // 最新趋势方向：最后有记录日 vs 其前一天（昨天无记录自动回退T-2），阈值走数据库
+  let latestDirection: 'up' | 'down' | 'flat' = 'flat';
+  let dataIncomplete = daily[daily.length - 1].dataMissing;
+  let baseIdx = daily.length - 1;
+  while (baseIdx >= 0 && daily[baseIdx].dataMissing) baseIdx--;
+  const baseItem = baseIdx >= 0 ? daily[baseIdx] : null;
+  const basePrev = baseIdx >= 1 ? daily[baseIdx - 1] : null;
+  if (baseItem && baseItem.sales !== null && basePrev && !basePrev.dataMissing && (basePrev.sales ?? 0) > 0) {
+    const lastChangeRate = ((baseItem.sales ?? 0) - (basePrev.sales ?? 0)) / (basePrev.sales ?? 1);
+    const t = ((thresholds[store]?.latestTrend) ?? 20) / 100;
+    if (lastChangeRate > t) latestDirection = 'up';
+    else if (lastChangeRate < -t) latestDirection = 'down';
+  }
+
+  // 总体趋势方向（后7天均值 vs 前7天均值，仅统计有记录日期，阈值走数据库）
+  let overallDirection: 'up' | 'down' | 'flat' = 'flat';
+  const halfStat = (from: number, to: number) => {
+    let sum = 0, cnt = 0;
+    for (let i = from; i < to; i++) {
+      const v = recordedSales[i];
+      if (v !== null) { sum += v; cnt++; }
+    }
+    return cnt > 0 ? sum / cnt : 0;
+  };
+  const firstHalfAvg = halfStat(0, 7);
+  const secondHalfAvg = halfStat(7, 14);
+  const tOverall = ((thresholds[store]?.overallTrend) ?? 15) / 100;
+  if (firstHalfAvg > 0) {
+    const overallChangeRate = (secondHalfAvg - firstHalfAvg) / firstHalfAvg;
+    if (overallChangeRate > tOverall) overallDirection = 'up';
+    else if (overallChangeRate < -tOverall) overallDirection = 'down';
+  } else if (secondHalfAvg > 0) {
+    // 前7天无销量、后7天开卖 → 从零到有，算上升
+    overallDirection = 'up';
+  }
+
+  // 评分（0-100）：相对波动40 + 绝对冲击30 + 趋势强度20 + 连续性10
+  const relScore = maxValidRel >= C.relGate
+    ? 10 + (Math.min(maxValidRel, 200) - C.relGate) / (200 - C.relGate) * 30 : 0;
+  const absScore = avg > 0 ? Math.min(maxAbsChange / avg / 2, 1) * 30 : 0;
+  let overallRateAbs = 0;
+  if (firstHalfAvg > 0) overallRateAbs = Math.abs((secondHalfAvg - firstHalfAvg) / firstHalfAvg) * 100;
+  if (baseItem && baseItem.sales !== null && basePrev && !basePrev.dataMissing && (basePrev.sales ?? 0) > 0) {
+    latestRateAbs = Math.abs(((baseItem.sales ?? 0) - (basePrev.sales ?? 0)) / (basePrev.sales ?? 1)) * 100;
+  }
+  const trendRaw = Math.max(
+    latestRateAbs / ((thresholds[store]?.latestTrend) ?? 20),
+    overallRateAbs / ((thresholds[store]?.overallTrend) ?? 15)
+  );
+  const trendScore = severityAwareTrend(events.length > 0, Number.isFinite(trendRaw) ? trendRaw : 0);
+  const streakScore = Math.min(anomalyDayCount / 7, 1) * 10;
+  const anomalyScore = Math.min(100, Math.round(relScore + absScore + trendScore + streakScore));
+
+  const isMonitored = total >= C.minTotal;
+  // 最近3天（窗口末3天）有事件 → 按最近事件方向分组；否则按总体趋势
+  const recentSince = fullDates[fullDates.length - C.recentEventDays] || '';
+  const recentEvent = events.filter(e => e.endDate >= recentSince).sort((a, b) => b.endDate.localeCompare(a.endDate))[0];
+  const recentEventDirection: 'up' | 'down' | null = recentEvent ? recentEvent.direction : null;
+  // SKU严重度 = 所有事件中最高级
+  const severityOrder: Record<SkuAnomalySeverity, number> = { P0: 3, P1: 2, P2: 1 };
+  const severity: SkuAnomalySeverity | null = events.length > 0
+    ? events.reduce((best, e) => (severityOrder[e.severity] > severityOrder[best] ? e.severity : best), events[0].severity)
+    : null;
+
+  return {
+    latestSales: baseItem ? (baseItem.sales ?? 0) : 0,
+    avgSales: Math.round(avg * 100) / 100,
+    maxSales: max,
+    minSales: minPositive,
+    fluctuation: Math.round(maxValidRel * 100) / 100,
+    latestDirection,
+    overallDirection,
+    isMonitored,
+    isAnomaly: severity !== null,
+    anomalyScore,
+    severity,
+    maxAbsChange,
+    anomalyDayCount,
+    recentEventDirection,
+    dataIncomplete,
+    events,
+    daily,
+  };
+};
+
+// 趋势强度评分：仅当存在异动事件（severity != null）时计入
+function severityAwareTrend(hasEvents: boolean, raw: number) {
+  return hasEvents ? Math.min(raw, 1) * 20 : 0;
 }
 
 const fetchTopSkus = async (
@@ -301,6 +564,12 @@ const DataAlertBot: React.FC = () => {
   const [storesData, setStoresData] = useState<Record<string, StoreData>>({});
   // 缓存原始 data_warnings 记录（广告图表用，避免重复请求）
   const [adWarnings, setAdWarnings] = useState<DataWarningRecord[]>([]);
+  // --- 购物车预警（product_buybox 未处理数据）
+  const [buyboxRecords, setBuyboxRecords] = useState<BuyboxRecord[]>([]);
+  const [buyboxLoading, setBuyboxLoading] = useState(false);
+  // --- 货件预警（product_shipment_notice 未处理数据）
+  const [shipmentRecords, setShipmentRecords] = useState<ShipmentRecord[]>([]);
+  const [shipmentLoading, setShipmentLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(dayjs().format('YYYY-MM-DD HH:mm:ss'));
   const [myStores, setMyStores] = useState<MyStore[]>([]);
   const [regions, setRegions] = useState<string[]>([]);
@@ -315,19 +584,67 @@ const DataAlertBot: React.FC = () => {
   const [productAgingLatestDate, setProductAgingLatestDate] = useState<string | null>(null);
   const [productAgingDrillBucket, setProductAgingDrillBucket] = useState<string | null>(null);
   const [productAgingExpanded, setProductAgingExpanded] = useState<boolean>(false);
+  const [adRatioExpanded, setAdRatioExpanded] = useState<boolean>(false);
+  const [buyboxExpanded, setBuyboxExpanded] = useState<boolean>(false);
+  const [shipmentExpanded, setShipmentExpanded] = useState<boolean>(false);
   
   // --- 日期查询状态
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(
     [dayjs().subtract(1, 'day'), dayjs().subtract(1, 'day')]
   );
+
+  // --- KPI卡片日期范围（默认昨天，可修改后KPI跟随变化）
+  const [kpiDateRange, setKpiDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(
+    [dayjs().subtract(1, 'day'), dayjs().subtract(1, 'day')]
+  );
+  // --- KPI快捷日期按钮：昨日/近7天/近30天/上月/自定义（参考首页消息搜索面板）
+  const [kpiQuickKey, setKpiQuickKey] = useState<'yesterday' | '7d' | '30d' | 'lastMonth' | 'custom'>('yesterday');
+  const handleKpiQuick = (key: 'yesterday' | '7d' | '30d' | 'lastMonth' | 'custom') => {
+    setKpiQuickKey(key);
+    if (key === 'custom') return;
+    const y = dayjs().subtract(1, 'day');
+    if (key === 'yesterday') {
+      setKpiDateRange([y, y]);
+    } else if (key === '7d') {
+      setKpiDateRange([y.subtract(6, 'day'), y]);
+    } else if (key === '30d') {
+      setKpiDateRange([y.subtract(29, 'day'), y]);
+    } else {
+      const lm = dayjs().subtract(1, 'month');
+      setKpiDateRange([lm.startOf('month'), lm.endOf('month')]);
+    }
+  };
   const [dateQueryResults, setDateQueryResults] = useState<DateQueryRecord[]>([]);
+  // --- 店铺日期查询快捷按钮：昨日/近7天/近30天/上月/自定义（与KPI日期一致）
+  const [dateQueryQuickKey, setDateQueryQuickKey] = useState<'yesterday' | '7d' | '30d' | 'lastMonth' | 'custom'>('yesterday');
+  const handleDateQueryQuick = (key: 'yesterday' | '7d' | '30d' | 'lastMonth' | 'custom') => {
+    setDateQueryQuickKey(key);
+    if (key === 'custom') return;
+    const y = dayjs().subtract(1, 'day');
+    if (key === 'yesterday') {
+      setDateRange([y, y]);
+    } else if (key === '7d') {
+      setDateRange([y.subtract(6, 'day'), y]);
+    } else if (key === '30d') {
+      setDateRange([y.subtract(29, 'day'), y]);
+    } else {
+      const lm = dayjs().subtract(1, 'month');
+      setDateRange([lm.startOf('month'), lm.endOf('month')]);
+    }
+  };
+  // --- 订单量单日对比数据：KPI选中单日时，显示月环比（上月同日）与周同比（上周同日）
+  const [ordersCompare, setOrdersCompare] = useState<{
+    curOrders: number;
+    monthDate: string; monthOrders: number;
+    weekDate: string; weekOrders: number;
+  } | null>(null);
   const [dateQueryLoading, setDateQueryLoading] = useState(false);
   const [dateQueryPageSize, setDateQueryPageSize] = useState<number>(10);
   const [dateQueryCurrentPage, setDateQueryCurrentPage] = useState<number>(1);
   const [dateQueryExpanded, setDateQueryExpanded] = useState<boolean>(false);
   
   // --- 对比模式状态
-  const [compareMode, setCompareMode] = useState<'store' | 'date'>('date');
+  const [compareMode, setCompareMode] = useState<'store' | 'date'>('store');
 
   // --- 基数对比状态（用于GMV和广告占比的趋势判断）
   const [gmvBase, setGmvBase] = useState<string>('');
@@ -336,6 +653,51 @@ const DataAlertBot: React.FC = () => {
 
   // --- KPI悬停状态（null表示没有悬停）
   const [hoveredKpi, setHoveredKpi] = useState<string | null>(null);
+  // KPI卡片点击固定：点击卡片固定详情框，点击其他位置取消固定
+  const [pinnedKpi, setPinnedKpi] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!pinnedKpi) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-kpi-card]')) setPinnedKpi(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [pinnedKpi]);
+
+  // --- 趋势图日期饼图（订单量/广告占比）：悬停日期显示当天各店铺饼图预览，点击打开独立弹窗
+  const [trendPieHover, setTrendPieHover] = useState<{ chart: 'orders' | 'adRatio'; date: string; left: number; top: number } | null>(null);
+  const [trendPieModal, setTrendPieModal] = useState<{ chart: 'orders' | 'adRatio'; date: string } | null>(null);
+  const ordersChartWrapRef = useRef<HTMLDivElement | null>(null);
+  const adRatioChartWrapRef = useRef<HTMLDivElement | null>(null);
+  // --- 饼图扇区悬停放大：记录当前悬停的扇区索引
+  const [pieActiveIndex, setPieActiveIndex] = useState<number>(-1);
+  // --- 当前生效的饼图悬停弹窗
+  const trendPieActive = trendPieHover;
+  // --- 弹窗内滚轮直接滚动下方店铺列表
+  const trendPiePopupRef = useRef<HTMLDivElement | null>(null);
+  const trendPieListRef = useRef<HTMLDivElement | null>(null);
+  const hasTrendPiePopup = !!trendPieActive;
+
+  // --- 悬停日期/图表切换时重置扇区悬停状态
+  useEffect(() => {
+    setPieActiveIndex(-1);
+  }, [trendPieActive?.chart, trendPieActive?.date]);
+
+  // --- 弹窗内任意位置滚动鼠标时，直接滚动下方店铺列表（阻止页面滚动）
+  useEffect(() => {
+    const popup = trendPiePopupRef.current;
+    if (!popup) return;
+    const onWheel = (e: WheelEvent) => {
+      const list = trendPieListRef.current;
+      if (!list || list.scrollHeight <= list.clientHeight) return;
+      e.preventDefault();
+      list.scrollTop += e.deltaY;
+    };
+    popup.addEventListener('wheel', onWheel, { passive: false });
+    return () => popup.removeEventListener('wheel', onWheel);
+  }, [hasTrendPiePopup, trendPieActive?.chart]);
 
   // --- "只显示"店铺筛选状态（空数组表示显示全部）
   const [selectedDisplayStoreIds, setSelectedDisplayStoreIds] = useState<string[]>([]);
@@ -364,6 +726,19 @@ const DataAlertBot: React.FC = () => {
     }));
   }, [myStores]);
 
+  // --- 实际用于显示的店铺ID列表（考虑"只显示"筛选）
+  const displayStoreIds = useMemo(() => {
+    if (selectedDisplayStoreIds.length > 0) {
+      return selectedDisplayStoreIds;
+    }
+    return selectedStoreIds;
+  }, [selectedStoreIds, selectedDisplayStoreIds]);
+
+  // --- 实际用于显示的店铺列表（考虑"只显示"筛选）
+  const displayStores = useMemo(() => {
+    return STORES.filter(s => displayStoreIds.includes(s.id));
+  }, [displayStoreIds, STORES]);
+
   // --- 阈值设置相关状态
   const [thresholds, setThresholds] = useState<Record<string, { adRatio: number; storageRatio: number; acos: number; overallTrend: number; latestTrend: number }>>({});
   const [showThresholdModal, setShowThresholdModal] = useState(false);
@@ -385,7 +760,9 @@ const DataAlertBot: React.FC = () => {
 
   // --- 广告占比周监控：KPI（从真实 data_warnings 聚合，多店铺取最低 adRatio 阈值）
   const adRatioKpis = useMemo(() => {
-    const selectedNames = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+    // 跟随"店铺筛选"+"只显示"（displayStoreIds）；未选择时默认全部
+    const srcIds = displayStoreIds.length > 0 ? displayStoreIds : STORES.map(s => s.id);
+    const selectedNames = STORES.filter(s => srcIds.includes(s.id)).map(s => s.name);
     const TH = selectedNames.length > 0
       ? Math.min(...selectedNames.map(n => thresholds[n]?.adRatio ?? 15))
       : 15;
@@ -420,12 +797,14 @@ const DataAlertBot: React.FC = () => {
       weekChange: pR > 0 ? (cR - pR) / pR * 100 : null,
       TH,
     };
-  }, [adWarnings, selectedStoreIds, STORES, thresholds]);
+  }, [adWarnings, displayStoreIds, STORES, thresholds]);
 
   // --- 广告占比周监控：图表数据（复用上面的 TH）
   const adRatioDailyChartData = useMemo(() => {
     const TH = adRatioKpis.TH;
-    const selectedNames = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+    // 跟随"店铺筛选"+"只显示"（displayStoreIds）；未选择时默认全部
+    const srcIds = displayStoreIds.length > 0 ? displayStoreIds : STORES.map(s => s.id);
+    const selectedNames = STORES.filter(s => srcIds.includes(s.id)).map(s => s.name);
     const yesterday = dayjs().subtract(1, 'day');
     const daily: any[] = [];
     for (let i = 13; i >= 0; i--) {
@@ -451,7 +830,7 @@ const DataAlertBot: React.FC = () => {
       });
     }
     return { daily, TH };
-  }, [adWarnings, selectedStoreIds, STORES, thresholds]);
+  }, [adWarnings, displayStoreIds, STORES, thresholds, adRatioKpis.TH]);
 
   // --- 广告占比周汇总对比（本周 / 上周 / 上上周）
   const adRatioWeeklySummary = useMemo(() => {
@@ -495,8 +874,8 @@ const DataAlertBot: React.FC = () => {
       return {
         key: w.label, week: w.label, range: w.range,
         ratio: parseFloat(ratio.toFixed(2)), ad: Math.round(w.ad), sales: Math.round(w.sales),
-        adChg: adChg == null ? null : parseFloat(adChg.toFixed(1)),
-        salesChg: salesChg == null ? null : parseFloat(salesChg.toFixed(1)),
+        adChg: adChg == null ? null : parseFloat(adChg.toFixed(2)),
+        salesChg: salesChg == null ? null : parseFloat(salesChg.toFixed(2)),
         overDays: w.overDays, attribution, attrLevel, _ratioRaw: ratio,
       };
     });
@@ -520,17 +899,297 @@ const DataAlertBot: React.FC = () => {
     return thresholds[storeName] || null;
   };
 
-  // SKU异动检测结果（按总体趋势分三组）
+  // --- 购物车预警：加载 product_buybox 未处理数据（按筛选店铺）
+  const loadBuyboxRecords = useCallback(async () => {
+    if (isTestMode) {
+      // 测试模式：购物车预警使用固定测试数据（日期相对今天生成，保持新鲜）
+      const names = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+      const d = (n: number) => dayjs().subtract(n, 'day').format('YYYY-MM-DD');
+      const all: BuyboxRecord[] = [
+        { id: 9101, date: d(1), sku: 'TEST-CART-001', product_name: '无线蓝牙耳机 入耳式（测试数据）', store: 'A加', status: null },
+        { id: 9102, date: d(1), sku: 'TEST-CART-002', product_name: '不锈钢保温杯 500ml（测试数据）', store: 'A加', status: null },
+        { id: 9103, date: d(2), sku: 'TEST-CART-003', product_name: '宠物自动喂食器 定时定量（测试数据）', store: 'A加', status: null },
+        { id: 9104, date: d(1), sku: 'TEST-CART-004', product_name: '车载手机支架 重力感应（测试数据）', store: 'B美', status: null },
+        { id: 9105, date: d(2), sku: 'TEST-CART-005', product_name: '瑜伽垫加厚防滑 双面纹（测试数据）', store: 'B美', status: null },
+        { id: 9106, date: d(1), sku: 'TEST-CART-006', product_name: '厨房置物架 落地多层（测试数据）', store: 'A欧', status: null },
+        { id: 9107, date: d(3), sku: 'TEST-CART-007', product_name: 'LED化妆镜 带灯可调光（测试数据）', store: 'B日', status: null },
+      ];
+      setBuyboxRecords(names.length > 0 ? all.filter(r => names.includes(r.store)) : all);
+      return;
+    }
+    try {
+      setBuyboxLoading(true);
+      const names = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+      const params: Record<string, any> = {};
+      if (names.length > 0) params.stores = names.join(',');
+      const res = await apiClient.get('/product-buybox', { params });
+      setBuyboxRecords(res.data?.data || []);
+    } catch (err) {
+      console.error('加载购物车预警失败', err);
+      setBuyboxRecords([]);
+    } finally {
+      setBuyboxLoading(false);
+    }
+  }, [selectedStoreIds, STORES]);
+
+  useEffect(() => {
+    loadBuyboxRecords();
+  }, [loadBuyboxRecords]);
+
+  // --- 购物车预警：有待处理数据自动展开，无数据自动收起
+  useEffect(() => {
+    setBuyboxExpanded(buyboxRecords.length > 0);
+  }, [buyboxRecords]);
+
+  // --- 购物车预警：标记单条为已处理
+  const handleBuyboxProcess = useCallback(async (id: number) => {
+    if (isTestMode) {
+      // 测试模式：仅本地移除，不调用真实接口
+      setBuyboxRecords(prev => prev.filter(r => r.id !== id));
+      message.success('已标记为已处理');
+      return;
+    }
+    try {
+      await apiClient.post(`/product-buybox/${id}/process`);
+      message.success('已标记为已处理');
+      loadBuyboxRecords();
+    } catch (err) {
+      console.error('标记已处理失败', err);
+      message.error('操作失败，请重试');
+    }
+  }, [loadBuyboxRecords]);
+
+  // --- 购物车预警：按店铺分组展示（组头行 + 组内数据行）
+  const buyboxGroups = useMemo(() => {
+    const sorted = [...buyboxRecords].sort((a, b) =>
+      a.store.localeCompare(b.store, 'zh') || b.date.localeCompare(a.date)
+    );
+    const map = new Map<string, BuyboxRecord[]>();
+    sorted.forEach(r => {
+      if (!map.has(r.store)) map.set(r.store, []);
+      map.get(r.store)!.push(r);
+    });
+    return Array.from(map.entries());
+  }, [buyboxRecords]);
+
+  type BuyboxRow = BuyboxRecord & { isGroup?: boolean; count?: number; groupIds?: number[] };
+  const buyboxTableRows = useMemo<BuyboxRow[]>(() => {
+    const rows: BuyboxRow[] = [];
+    buyboxGroups.forEach(([store, recs]) => {
+      rows.push({ ...recs[0], id: -rows.length - 1, isGroup: true, store, count: recs.length, groupIds: recs.map(r => r.id) });
+      recs.forEach(r => rows.push({ ...r, isGroup: false }));
+    });
+    return rows;
+  }, [buyboxGroups]);
+
+  // --- 购物车预警：一键处理某店铺全部未处理记录
+  const handleBuyboxProcessAll = useCallback(async (storeName: string, ids: number[]) => {
+    if (isTestMode) {
+      setBuyboxRecords(prev => prev.filter(r => !ids.includes(r.id)));
+      message.success(`已处理 ${storeName} 的 ${ids.length} 条记录`);
+      return;
+    }
+    try {
+      await apiClient.post('/product-buybox/process-batch', { ids });
+      message.success(`已处理 ${storeName} 的 ${ids.length} 条记录`);
+      loadBuyboxRecords();
+    } catch (err) {
+      console.error('一键处理失败', err);
+      message.error('操作失败，请重试');
+    }
+  }, [loadBuyboxRecords]);
+
+  // --- 购物车预警：查看已处理记录
+  const [processedModalVisible, setProcessedModalVisible] = useState(false);
+  const [processedRecords, setProcessedRecords] = useState<BuyboxRecord[]>([]);
+  const [processedLoading, setProcessedLoading] = useState(false);
+
+  const openProcessedModal = useCallback(async () => {
+    setProcessedModalVisible(true);
+    if (isTestMode) {
+      // 测试模式：无已处理记录，直接展示空状态
+      setProcessedRecords([]);
+      return;
+    }
+    setProcessedLoading(true);
+    try {
+      const res = await apiClient.get('/product-buybox', { params: { processed: true } });
+      setProcessedRecords(res.data?.data || []);
+    } catch (err) {
+      console.error('加载已处理记录失败', err);
+      setProcessedRecords([]);
+    } finally {
+      setProcessedLoading(false);
+    }
+  }, []);
+
+  // --- 货件预警（product_shipment_notice，逻辑与购物车预警一致）
+  const loadShipmentRecords = useCallback(async () => {
+    if (isTestMode) {
+      // 测试模式：货件预警使用固定测试数据
+      const names = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+      const d = (n: number) => dayjs().subtract(n, 'day').format('YYYY-MM-DD');
+      const all: ShipmentRecord[] = [
+        { id: 9201, date: d(1), store: 'A加', shipment_code: 'FBA15TEST01U001', status: null },
+        { id: 9202, date: d(1), store: 'A加', shipment_code: 'FBA15TEST01U002', status: null },
+        { id: 9203, date: d(2), store: 'A加', shipment_code: 'FBA15TEST01U003', status: null },
+        { id: 9204, date: d(1), store: 'B美', shipment_code: 'FBA15TEST02U001', status: null },
+        { id: 9205, date: d(1), store: 'A欧', shipment_code: 'FBA15TEST03U001', status: null },
+        { id: 9206, date: d(2), store: 'A欧', shipment_code: 'FBA15TEST03U002', status: null },
+        { id: 9207, date: d(3), store: 'B日', shipment_code: 'FBA15TEST04U001', status: null },
+      ];
+      setShipmentRecords(names.length > 0 ? all.filter(r => names.includes(r.store)) : all);
+      return;
+    }
+    try {
+      setShipmentLoading(true);
+      const names = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+      const params: Record<string, any> = {};
+      if (names.length > 0) params.stores = names.join(',');
+      const res = await apiClient.get('/product-shipment-notice', { params });
+      setShipmentRecords(res.data?.data || []);
+    } catch (err) {
+      console.error('加载货件预警失败', err);
+      setShipmentRecords([]);
+    } finally {
+      setShipmentLoading(false);
+    }
+  }, [selectedStoreIds, STORES]);
+
+  useEffect(() => {
+    loadShipmentRecords();
+  }, [loadShipmentRecords]);
+
+  // --- 货件预警：有待处理数据自动展开，无数据自动收起
+  useEffect(() => {
+    setShipmentExpanded(shipmentRecords.length > 0);
+  }, [shipmentRecords]);
+
+  // --- 货件预警：按店铺分组 + 店铺内按日期分组（组头行 + 日期头行 + 数据行）
+  const shipmentGroups = useMemo(() => {
+    const sorted = [...shipmentRecords].sort((a, b) =>
+      a.store.localeCompare(b.store, 'zh') || b.date.localeCompare(a.date)
+    );
+    const map = new Map<string, ShipmentRecord[]>();
+    sorted.forEach(r => {
+      if (!map.has(r.store)) map.set(r.store, []);
+      map.get(r.store)!.push(r);
+    });
+    return Array.from(map.entries());
+  }, [shipmentRecords]);
+
+  type ShipmentRow = ShipmentRecord & { isGroup?: boolean; isDateGroup?: boolean; count?: number; groupIds?: number[]; dateCount?: number; dateIds?: number[] };
+  const shipmentTableRows = useMemo<ShipmentRow[]>(() => {
+    const rows: ShipmentRow[] = [];
+    let seq = 0;
+    shipmentGroups.forEach(([store, recs]) => {
+      seq += 1;
+      rows.push({ ...recs[0], id: -seq * 1000 - 1, isGroup: true, store, count: recs.length, groupIds: recs.map(r => r.id) });
+      const byDate = new Map<string, ShipmentRecord[]>();
+      recs.forEach(r => {
+        if (!byDate.has(r.date)) byDate.set(r.date, []);
+        byDate.get(r.date)!.push(r);
+      });
+      Array.from(byDate.entries()).forEach(([date, drecs]) => {
+        seq += 1;
+        rows.push({ ...drecs[0], id: -seq * 1000 - 2, isDateGroup: true, store, date, dateCount: drecs.length, dateIds: drecs.map(r => r.id) });
+        drecs.forEach(r => rows.push({ ...r }));
+      });
+    });
+    return rows;
+  }, [shipmentGroups]);
+
+  // --- 货件预警：一键确认某店铺全部未确认记录（数据库状态写为已确认）
+  const handleShipmentProcessAll = useCallback(async (storeName: string, ids: number[]) => {
+    if (isTestMode) {
+      setShipmentRecords(prev => prev.filter(r => !ids.includes(r.id)));
+      message.success(`已确认 ${storeName} 的 ${ids.length} 条记录`);
+      return;
+    }
+    try {
+      await apiClient.post('/product-shipment-notice/process-batch', { ids });
+      message.success(`已确认 ${storeName} 的 ${ids.length} 条记录`);
+      loadShipmentRecords();
+    } catch (err) {
+      console.error('一键确认失败', err);
+      message.error('操作失败，请重试');
+    }
+  }, [loadShipmentRecords]);
+
+  // --- 货件预警：确认某店铺某日期的记录
+  const handleShipmentConfirmDate = useCallback(async (storeName: string, date: string, ids: number[]) => {
+    if (isTestMode) {
+      setShipmentRecords(prev => prev.filter(r => !ids.includes(r.id)));
+      message.success(`已确认 ${storeName} ${date} 的 ${ids.length} 条记录`);
+      return;
+    }
+    try {
+      await apiClient.post('/product-shipment-notice/process-batch', { ids });
+      message.success(`已确认 ${storeName} ${date} 的 ${ids.length} 条记录`);
+      loadShipmentRecords();
+    } catch (err) {
+      console.error('确认失败', err);
+      message.error('操作失败，请重试');
+    }
+  }, [loadShipmentRecords]);
+
+  // --- 货件预警：查看已确认记录
+  const [shipmentProcessedModalVisible, setShipmentProcessedModalVisible] = useState(false);
+  const [shipmentProcessedRecords, setShipmentProcessedRecords] = useState<ShipmentRecord[]>([]);
+  const [shipmentProcessedLoading, setShipmentProcessedLoading] = useState(false);
+
+  const openShipmentProcessedModal = useCallback(async () => {
+    setShipmentProcessedModalVisible(true);
+    if (isTestMode) {
+      // 测试模式：无已确认记录，直接展示空状态
+      setShipmentProcessedRecords([]);
+      return;
+    }
+    setShipmentProcessedLoading(true);
+    try {
+      const res = await apiClient.get('/product-shipment-notice', { params: { processed: true } });
+      setShipmentProcessedRecords(res.data?.data || []);
+    } catch (err) {
+      console.error('加载已确认记录失败', err);
+      setShipmentProcessedRecords([]);
+    } finally {
+      setShipmentProcessedLoading(false);
+    }
+  }, []);
+
+
+  // SKU异动检测结果：最近3天有事件→按事件方向分组，否则按总体趋势方向分组（只保留观察池口径）
   const skuAnomalyGroups = useMemo(() => {
-    const selectedStoreNames = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
+    const selectedStoreNames = STORES.filter(s => displayStoreIds.includes(s.id)).map(s => s.name);
     const filtered = skuAnomalyTestData.filter(item => item.isMonitored && (selectedStoreNames.length === 0 || selectedStoreNames.includes(item.store)));
+    const severityOrder: Record<string, number> = { P0: 3, P1: 2, P2: 1 };
+    const sortFn = (a: typeof filtered[0], b: typeof filtered[0]) => {
+      const sa = a.severity ? severityOrder[a.severity] : 0;
+      const sb = b.severity ? severityOrder[b.severity] : 0;
+      if (sa !== sb) return sb - sa;
+      return b.anomalyScore - a.anomalyScore;
+    };
     const groups: Record<'up' | 'down' | 'flat', typeof filtered> = { up: [], down: [], flat: [] };
-    filtered.forEach(item => groups[item.overallDirection].push(item));
-    // 每组内按波动降序
+    filtered.forEach(item => {
+      const dir = item.recentEventDirection ?? item.overallDirection;
+      groups[dir].push(item);
+    });
     (Object.keys(groups) as Array<'up' | 'down' | 'flat'>).forEach(dir => {
-      groups[dir].sort((a, b) => b.fluctuation - a.fluctuation);
+      groups[dir].sort(sortFn);
     });
     return groups;
+  }, [skuAnomalyTestData, selectedStoreIds, STORES]);
+
+  // P0/P1/P2 统计（标题徽章用）
+  const skuAnomalySeverityStats = useMemo(() => {
+    const selectedStoreNames = STORES.filter(s => displayStoreIds.includes(s.id)).map(s => s.name);
+    const stats = { P0: 0, P1: 0, P2: 0 };
+    skuAnomalyTestData.forEach(item => {
+      if (item.isMonitored && item.severity && (selectedStoreNames.length === 0 || selectedStoreNames.includes(item.store))) {
+        stats[item.severity]++;
+      }
+    });
+    return stats;
   }, [skuAnomalyTestData, selectedStoreIds, STORES]);
 
   // --- 商品销量数据（从数据库获取，显示累计销量前10个SKU）
@@ -581,19 +1240,20 @@ const DataAlertBot: React.FC = () => {
   }, [selectedStoreIds, skuSalesData, skuDailySalesData, trendDateMode, dateRange, selectedSkusForTrend]);
 
   // --- 从数据库获取完整的商品销量数据（用于弹窗）
-  const fetchAllSkuSalesData = async () => {
-    if (selectedStoreIds.length === 0) {
+  const fetchAllSkuSalesData = async (customStart?: string, customEnd?: string) => {
+    if (displayStoreIds.length === 0) {
       console.log('fetchAllSkuSalesData: 未选择店铺');
       return [];
     }
 
     try {
-      const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
+      const selectedStores = STORES.filter(s => displayStoreIds.includes(s.id));
       const storeNames = selectedStores.map(s => s.name);
-      // 和 SKU TOP10 卡片保持同口径：近 7 天（强制，不跟随顶部 dateRange）
+      if (storeNames.length === 0) return [];
+      // 默认近 7 天，或按传入的自定义日期范围
       const yesterday = dayjs().subtract(1, 'day');
-      const startDate = yesterday.clone().subtract(6, 'day').format('YYYY-MM-DD');
-      const endDate = yesterday.format('YYYY-MM-DD');
+      const startDate = customStart || yesterday.clone().subtract(6, 'day').format('YYYY-MM-DD');
+      const endDate = customEnd || yesterday.format('YYYY-MM-DD');
 
       const response = await apiClient.get('/product-sales/', {
         params: {
@@ -621,7 +1281,7 @@ const DataAlertBot: React.FC = () => {
           
           aggregated[sku].totalSales += record.sales_count;
           
-          const existingStore = aggregated[sku].stores.find(s => s.storeName === storeName);
+          const existingStore = aggregated[sku].stores.find(s => s.storeName === storeName && s.date === record.date);
           if (existingStore) {
             existingStore.sales += record.sales_count;
           } else {
@@ -646,12 +1306,162 @@ const DataAlertBot: React.FC = () => {
 
   // --- 详情弹窗数据状态
   const [allSkuSalesData, setAllSkuSalesData] = useState<SkuSalesRecord[]>([]);
+  const [skuModalMode, setSkuModalMode] = useState<'recent7' | 'dateRange'>('recent7');
+  const [skuModalDateLabel, setSkuModalDateLabel] = useState('');
+  // --- TOP10卡片模式：近7天 / 筛选日期（点击"按筛选日期查看"后图表跟随切换）
+  const [top10Mode, setTop10Mode] = useState<'recent7' | 'dateRange'>('recent7');
+  const [top10DateData, setTop10DateData] = useState<SkuSalesRecord[]>([]);
+  const [top10DateLabel, setTop10DateLabel] = useState('');
+  // --- 右下角悬浮球：板块导航（悬停展开，点击定位，可拖拽移动）
+  const [sectionNavOpen, setSectionNavOpen] = useState(false);
+  const [ballPos, setBallPos] = useState<{ left: number; top: number } | null>(null);
+  const ballDragRef = useRef<{ startX: number; startY: number; origLeft: number; origTop: number; moved: boolean } | null>(null);
+  const ballMovedRef = useRef(false);
 
-  // --- 打开详情弹窗时从数据库获取数据
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = ballDragRef.current;
+      if (!d) return;
+      const dx = e.clientX - d.startX;
+      const dy = e.clientY - d.startY;
+      if (!d.moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+      d.moved = true;
+      ballMovedRef.current = true;
+      const left = Math.min(Math.max(0, d.origLeft + dx), window.innerWidth - 48);
+      const top = Math.min(Math.max(0, d.origTop + dy), window.innerHeight - 48);
+      setBallPos({ left, top });
+    };
+    const onUp = () => {
+      ballDragRef.current = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  const handleBallMouseDown = (e: React.MouseEvent) => {
+    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+    ballDragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      origLeft: ballPos ? ballPos.left : rect.left,
+      origTop: ballPos ? ballPos.top : rect.top,
+      moved: false,
+    };
+    e.preventDefault();
+  };
+
+  const handleBallClick = () => {
+    if (ballMovedRef.current) {
+      ballMovedRef.current = false;
+      return;
+    }
+    setSectionNavOpen(v => !v);
+  };
+  const SECTION_NAVS = [
+    { id: 'section-kpi', title: '📋 KPI总览' },
+    { id: 'section-alerts', title: '⚠️ 实时预警' },
+    { id: 'section-compare', title: '📊 数据对比' },
+    { id: 'section-top10', title: '🏆 商品销量TOP10' },
+    { id: 'section-sku-trend', title: '📈 SKU销量波动趋势' },
+    { id: 'section-aging', title: '📦 超库龄SKU分布' },
+    { id: 'section-ad-ratio', title: '📊 广告占比周监控' },
+    { id: 'section-buybox', title: '🛒 购物车预警' },
+    { id: 'section-shipment', title: '🚚 货件预警' },
+  ];
+  // --- 导航点击：先展开对应板块的折叠内容，再滚动定位（展开改变页面高度，等一帧后定位更准）
+  const expandSectionByNavId = (id: string) => {
+    if (id === 'section-aging') setProductAgingExpanded(true);
+    if (id === 'section-ad-ratio') setAdRatioExpanded(true);
+    if (id === 'section-buybox') setBuyboxExpanded(true);
+    if (id === 'section-shipment') setShipmentExpanded(true);
+  };
+  const scrollToSection = (id: string) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const handleSectionNavClick = (id: string) => {
+    setSectionNavOpen(false);
+    expandSectionByNavId(id);
+    setTimeout(() => scrollToSection(id), 100);
+  };
+
+  // --- 支持外部链接定位板块：/data-alert?section=section-buybox / section-shipment 等（延迟等待数据渲染，同时展开折叠内容）
+  useEffect(() => {
+    const section = new URLSearchParams(window.location.search).get('section');
+    if (!section) return;
+    expandSectionByNavId(section);
+    const timer = setTimeout(() => scrollToSection(section), 1000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- 打开详情弹窗：按当前TOP10模式获取数据（近7天 / 筛选日期）
   const handleOpenSkuModal = async () => {
-    const data = await fetchAllSkuSalesData();
+    const isDateRange = top10Mode === 'dateRange' && dateRange && dateRange[0] && dateRange[1];
+    const startDate = isDateRange ? dateRange![0].format('YYYY-MM-DD') : undefined;
+    const endDate = isDateRange ? dateRange![1].format('YYYY-MM-DD') : undefined;
+    const data = await fetchAllSkuSalesData(startDate, endDate);
     setAllSkuSalesData(data);
+    setSkuModalMode(isDateRange ? 'dateRange' : 'recent7');
+    if (isDateRange) {
+      setSkuModalDateLabel(`${dateRange![0].format('MM-DD')} ~ ${dateRange![1].format('MM-DD')}`);
+    } else {
+      const yesterday = dayjs().subtract(1, 'day');
+      setSkuModalDateLabel(`近 7 天 (${yesterday.clone().subtract(6, 'day').format('MM-DD')} ~ ${yesterday.format('MM-DD')})`);
+    }
     setShowSkuModal(true);
+  };
+
+  // --- 切换TOP10为近7天模式（图表回退到近7天榜单，不打开弹窗）
+  const handleSwitchTop10Recent7 = () => {
+    setTop10Mode('recent7');
+    setSkuModalMode('recent7');
+    setTop10DateLabel('');
+  };
+
+  // --- 按筛选日期查看（TOP10图表同步切换为筛选日期数据）
+  const handleOpenSkuModalByDate = async () => {
+    if (!dateRange || !dateRange[0] || !dateRange[1]) {
+      message.warning('请先选择日期范围');
+      return;
+    }
+    const startDate = dateRange[0].format('YYYY-MM-DD');
+    const endDate = dateRange[1].format('YYYY-MM-DD');
+
+    // TOP10图表切换为筛选日期范围的数据
+    try {
+      const selectedStores = STORES.filter(s => displayStoreIds.includes(s.id));
+      const storeNames = selectedStores.map(s => s.name);
+      if (storeNames.length > 0) {
+        const topSkus = await fetchTopSkus(storeNames, startDate, endDate, 10);
+        const skuMap = new Map<string, SkuSalesRecord>();
+        topSkus.forEach(record => {
+          if (!skuMap.has(record.sku)) {
+            skuMap.set(record.sku, { sku: record.sku, totalSales: 0, stores: [] });
+          }
+          const skuRecord = skuMap.get(record.sku)!;
+          skuRecord.totalSales += record.total_sales;
+          const existingStore = skuRecord.stores.find(s => s.storeName === record.store);
+          if (existingStore) {
+            existingStore.sales += record.total_sales;
+          } else {
+            skuRecord.stores.push({ storeId: '', storeName: record.store, date: record.date || endDate, sales: record.total_sales });
+          }
+        });
+        setTop10DateData(Array.from(skuMap.values()).sort((a, b) => b.totalSales - a.totalSales));
+      }
+    } catch (error) {
+      console.error('按筛选日期加载TOP10失败:', error);
+      setTop10DateData([]);
+    }
+
+    // 仅切换内联TOP10图表为筛选日期数据，不打开弹窗（弹窗由"查看详情"触发）
+    setTop10Mode('dateRange');
+    setTop10DateLabel(`${dateRange[0].format('MM-DD')} ~ ${dateRange[1].format('MM-DD')}`);
   };
 
   // --- 计算日期范围内的店铺汇总数据
@@ -694,7 +1504,7 @@ const DataAlertBot: React.FC = () => {
       data.avgGmv = data.totalGmv;
       // 广告占比：加权平均 = (Σ(店铺GMV × 店铺广告占比)) / (Σ店铺GMV)
       data.avgAdRatio = data.gmvForAdRatioSum > 0 
-        ? parseFloat((data.weightedAdRatioSum / data.gmvForAdRatioSum).toFixed(1)) 
+        ? parseFloat((data.weightedAdRatioSum / data.gmvForAdRatioSum).toFixed(2))
         : 0;
     });
     
@@ -734,24 +1544,11 @@ const DataAlertBot: React.FC = () => {
     return STORES.filter(s => s.region === selectedRegion);
   }, [selectedRegion, STORES]);
 
-  // --- 实际用于显示的店铺ID列表（考虑"只显示"筛选）
-  const displayStoreIds = useMemo(() => {
-    if (selectedDisplayStoreIds.length > 0) {
-      return selectedDisplayStoreIds;
-    }
-    return selectedStoreIds;
-  }, [selectedStoreIds, selectedDisplayStoreIds]);
-
-  // --- 实际用于显示的店铺列表（考虑"只显示"筛选）
-  const displayStores = useMemo(() => {
-    return STORES.filter(s => displayStoreIds.includes(s.id));
-  }, [displayStoreIds, STORES]);
-
   // --- 计算聚合的指标
   const aggregateMetrics = useCallback((storeIds: string[], storeData: Record<string, StoreData>): MetricData => {
     if (storeIds.length === 0) {
       return {
-        orders: 0, adRatio: 0, adSpend: 0, sales: 0, adSales: 0, acos: 0, gmv: 0, fbaTotalStock: 0, fbaStockValue: 0, grossProfit: 0, storageRatio: 0 
+        orders: 0, adRatio: 0, adSpend: 0, sales: 0, adSales: 0, acos: 0, gmv: 0, fbaTotalStock: 0, fbaStockValue: 0, grossProfit: 0, storageRatio: 0, storageFee: 0, salesAmount: 0
       };
     }
 
@@ -761,73 +1558,86 @@ const DataAlertBot: React.FC = () => {
     let totalAdSales = 0;
     let totalGmv = 0;
     let totalGrossProfit = 0;
-    
-    // 用于加权平均计算广告占比和仓储占比的累积值
-    let weightedAdRatioSum = 0;
-    let weightedStorageRatioSum = 0;
-    let gmvForAdRatioSum = 0;
+    let totalStorageFee = 0;
+    let totalSalesAmount = 0;
 
-    // FBA总库存和货值：各店铺分开看，不汇总，只取第一个店铺的值
-    const firstStoreData = storeData[storeIds[0]];
-    const fbaTotalStock = firstStoreData?.currentMetrics.fbaTotalStock || 0;
-    const fbaStockValue = firstStoreData?.currentMetrics.fbaStockValue || 0;
+    // FBA总库存和货值：全部筛选店铺求和
+    let fbaTotalStock = 0;
+    let fbaStockValue = 0;
+    // FBA快照日期：取各店铺中最新的快照日期
+    let fbaStockDate = '';
+
+    // 数据为0的店铺（昨日无数据）不参与聚合计算
+    const validStoreIds = storeIds.filter(id => {
+      const sd = storeData[id];
+      return sd && sd.currentMetrics.orders > 0;
+    });
 
     storeIds.forEach((id) => {
       const sd = storeData[id];
       if (sd) {
+        // FBA库存快照：所有选中店铺求和（含无订单店铺，库存快照与订单无关）
+        fbaTotalStock += sd.currentMetrics.fbaTotalStock || 0;
+        fbaStockValue += sd.currentMetrics.fbaStockValue || 0;
+        const d = sd.currentMetrics.fbaStockDate || '';
+        if (d && (!fbaStockDate || d > fbaStockDate)) fbaStockDate = d;
+        if (sd.currentMetrics.orders <= 0) return;
         totalOrders += sd.currentMetrics.orders;
         totalAdSpend += sd.currentMetrics.adSpend;
         totalSales += sd.currentMetrics.sales;
         totalAdSales += sd.currentMetrics.adSales;
         totalGmv += sd.currentMetrics.gmv;
         totalGrossProfit += sd.currentMetrics.grossProfit;
-        
-        // 累积加权平均的分子和分母
-        const storeGmv = sd.currentMetrics.gmv;
-        const storeAdRatio = sd.currentMetrics.adRatio;
-        const storeStorageRatio = sd.currentMetrics.storageRatio;
-        if (storeGmv > 0) {
-          weightedAdRatioSum += storeGmv * storeAdRatio;
-          weightedStorageRatioSum += storeGmv * storeStorageRatio;
-          gmvForAdRatioSum += storeGmv;
-        }
+        totalStorageFee += sd.currentMetrics.storageFee || 0;
+        totalSalesAmount += sd.currentMetrics.salesAmount || 0;
       }
     });
 
-    // 使用加权平均公式计算广告占比
-    // 合计广告占比 = (店铺A的GMV × 店铺A的广告占比 + 店铺B的GMV × 店铺B的广告占比) ÷ (店铺A的GMV + 店铺B的GMV)
-    const aggregateAdRatio = gmvForAdRatioSum > 0 ? (weightedAdRatioSum / gmvForAdRatioSum) : 0;
-    // 使用加权平均公式计算仓储占比
-    const aggregateStorageRatio = gmvForAdRatioSum > 0 ? (weightedStorageRatioSum / gmvForAdRatioSum) : 0;
+    // 广告占比 = 广告费用总和 ÷ 利润报表销售额总和（数据库真实值）
+    const aggregateAdRatio = totalSalesAmount > 0 ? ((totalAdSpend / totalSalesAmount) * 100) : 0;
+    // 仓储占比 = 仓储费用总和 ÷ 利润报表销售额总和（数据库真实值）
+    const aggregateStorageRatio = totalSalesAmount > 0 ? ((totalStorageFee / totalSalesAmount) * 100) : 0;
     // ACOS = 广告花费 / 广告销售额，多店铺时按总花费/总销售额计算
     const aggregateAcos = totalAdSales > 0 ? ((totalAdSpend / totalAdSales) * 100) : 0;
 
     return {
       orders: totalOrders,
-      adRatio: parseFloat(aggregateAdRatio.toFixed(1)),
-      acos: parseFloat(aggregateAcos.toFixed(1)),
+      adRatio: parseFloat(aggregateAdRatio.toFixed(2)),
+      acos: parseFloat(aggregateAcos.toFixed(2)),
       adSpend: totalAdSpend,
       sales: totalSales,
       adSales: totalAdSales,
       gmv: totalGmv,
       fbaTotalStock,
       fbaStockValue,
+      fbaStockDate,
       grossProfit: totalGrossProfit,
-      storageRatio: parseFloat(aggregateStorageRatio.toFixed(1)),
+      storageRatio: parseFloat(aggregateStorageRatio.toFixed(2)),
     };
   }, [STORES]);
+
+  // --- 百分比格式化：保留两位小数但去掉末尾多余的零（14.00→14, 14.10→14.1, 14.14→14.14）
+  const fmtPct = (v: number) => parseFloat(v.toFixed(2)).toString();
 
   // --- KPI指标名称和格式化映射
   const kpiInfo = {
     orders: { name: '订单量', unit: '单', format: (v: number) => v.toLocaleString() },
     gmv: { name: 'GMV', unit: '¥', format: (v: number) => v.toLocaleString() },
-    adRatio: { name: '广告占比', unit: '%', format: (v: number) => v.toFixed(1) },
-    acos: { name: 'ACOS', unit: '%', format: (v: number) => v.toFixed(1) },
+    adRatio: { name: '广告占比', unit: '%', format: (v: number) => fmtPct(v) },
+    acos: { name: 'ACOS', unit: '%', format: (v: number) => fmtPct(v) },
     fbaTotalStock: { name: 'FBA总库存', unit: '件', format: (v: number) => v.toLocaleString() },
     grossProfit: { name: '毛利润', unit: '¥', format: (v: number) => v.toLocaleString() },
-    storageRatio: { name: '仓储占比', unit: '%', format: (v: number) => v.toFixed(1) },
+    storageRatio: { name: '仓储占比', unit: '%', format: (v: number) => fmtPct(v) },
     avgOrderPrice: { name: '平均客单价', unit: '¥', format: (v: number) => v.toLocaleString() },
   };
+
+  // --- KPI日期范围标签（必须在 renderKpiDetail 之前声明，避免 TDZ）
+  const kpiDateLabel = useMemo(() => {
+    if (!kpiDateRange || !kpiDateRange[0] || !kpiDateRange[1]) return '昨日';
+    const start = kpiDateRange[0].format('MM-DD');
+    const end = kpiDateRange[1].format('MM-DD');
+    return start === end ? start : `${start} ~ ${end}`;
+  }, [kpiDateRange]);
 
   // --- 渲染KPI下方详细内容（各店铺该KPI数据）
   const renderKpiDetail = useCallback((kpiType: string) => {
@@ -838,7 +1648,7 @@ const DataAlertBot: React.FC = () => {
     const info = kpiInfo[kpiType as keyof typeof kpiInfo];
     if (!info) return null;
 
-    // ACOS和FBA总库存特殊处理：KPI卡片上只显示单店铺，但悬停时显示所有店铺
+    // ACOS特殊处理：悬停时显示提示
     const isAcos = kpiType === 'acos';
     const isFbaStock = kpiType === 'fbaTotalStock';
     const isMultiStore = selectedStoreIds.length > 1;
@@ -846,7 +1656,13 @@ const DataAlertBot: React.FC = () => {
     // 悬停时显示所有店铺数据（不限制）
     const isAvgOrderPrice = kpiType === 'avgOrderPrice';
     const storeData = selectedStoreIds
-      .filter(id => storesData[id])
+      .filter(id => {
+        const sd = storesData[id];
+        // 数据为0的店铺（昨日无数据）不显示在详情中；ACOS额外过滤掉acos为0的店铺
+        if (!sd || sd.currentMetrics.orders <= 0) return false;
+        if (isAcos && sd.currentMetrics.acos <= 0) return false;
+        return true;
+      })
       .map(id => {
         const store = storesData[id];
         const storeInfo = STORES.find(s => s.id === id);
@@ -858,11 +1674,15 @@ const DataAlertBot: React.FC = () => {
         return {
           key: id,
           storeName: storeInfo?.name || id,
-          value: Math.round(rawValue),
+          value: isAvgOrderPrice ? Math.round(rawValue) : parseFloat(rawValue.toFixed(2)),
           fbaStockValue: metrics.fbaStockValue,
+          gmv: metrics.gmv,
+          orders: metrics.orders,
         };
       })
-      .sort((a, b) => b.value - a.value);
+      .sort((a, b) => {
+        return b.value - a.value;
+      });
 
     return (
       <div style={{ 
@@ -882,32 +1702,35 @@ const DataAlertBot: React.FC = () => {
         boxSizing: 'border-box'
       }}>
         <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '10px', color: '#333' }}>
-          {info.name} - 各店铺昨日数据
+          {info.name} - 各店铺{kpiDateLabel}数据
         </div>
         
-        {(isAcos || isFbaStock) && isMultiStore && (
-          <div style={{ 
-            backgroundColor: '#fffbe6', 
-            border: '1px solid #ffe58f', 
-            borderRadius: '4px', 
-            padding: '8px', 
+        {isAcos && isMultiStore && (
+          <div style={{
+            backgroundColor: '#fffbe6',
+            border: '1px solid #ffe58f',
+            borderRadius: '4px',
+            padding: '8px',
             marginBottom: '10px',
             fontSize: '12px',
             color: '#d48806'
           }}>
-            💡 {isAcos ? 'ACOS' : 'FBA总库存/货值'}数据为各店铺独立数据，不做合计。KPI卡片上仅显示「{STORES.find(s => s.id === selectedStoreIds[0])?.name || selectedStoreIds[0]}」的数据。
+            💡 多店铺时ACOS卡片仅显示第一个选中店铺的数值，以下为各店铺明细。
           </div>
         )}
         
         <div style={{ maxHeight: '250px', overflow: 'auto' }}>
           {storeData.map((item, index) => {
             let displayValue = '';
-            if (isFbaStock) {
+            if (isAvgOrderPrice) {
+              // 平均客单价详情：显示每个店铺的平均客单价
+              displayValue = `¥${item.value.toLocaleString()}`;
+            } else if (isFbaStock) {
               displayValue = `${item.value.toLocaleString()}件 / ¥${item.fbaStockValue?.toLocaleString() || '0'}`;
             } else if (info.unit === '¥') {
               displayValue = `¥${item.value.toLocaleString()}`;
             } else if (info.unit === '%') {
-              displayValue = `${item.value.toFixed(1)}%`;
+              displayValue = `${fmtPct(item.value)}%`;
             } else {
               displayValue = `${item.value.toLocaleString()} ${info.unit}`;
             }
@@ -929,11 +1752,22 @@ const DataAlertBot: React.FC = () => {
         </div>
       </div>
     );
-  }, [selectedStoreIds, storesData, STORES, kpiInfo]);
+  }, [selectedStoreIds, storesData, STORES, kpiInfo, kpiDateLabel]);
 
   const currentMetrics = useMemo(() => {
     return aggregateMetrics(displayStoreIds, storesData);
   }, [displayStoreIds, storesData, aggregateMetrics]);
+
+  // --- ACOS卡片：多店铺时仅显示第一个有数据的店铺的ACOS，点击查看各店铺详情
+  const acosCard = useMemo(() => {
+    // 找第一个有数据（orders > 0 且 acos > 0）的店铺
+    const validId = displayStoreIds.find(id => storesData[id] && storesData[id].currentMetrics.orders > 0 && storesData[id].currentMetrics.acos > 0);
+    const validSd = validId ? storesData[validId] : undefined;
+    return {
+      value: validSd ? validSd.currentMetrics.acos : currentMetrics.acos,
+      storeName: displayStoreIds.length > 1 ? (validSd?.info.name || '') : '',
+    };
+  }, [displayStoreIds, storesData, currentMetrics]);
 
   // --- 准备订单量趋势数据（分店铺）- 只跟随顶部店铺筛选变化
   const ordersTrendData = useMemo(() => {
@@ -967,7 +1801,7 @@ const DataAlertBot: React.FC = () => {
   // --- 准备广告占比趋势数据（分店铺）- 只跟随顶部店铺筛选变化
   const adRatioTrendData = useMemo(() => {
     if (selectedStoreIds.length === 0) return [];
-    
+
     // 获取所有日期
     const allDates = new Set<string>();
     selectedStoreIds.forEach(storeId => {
@@ -976,9 +1810,9 @@ const DataAlertBot: React.FC = () => {
         sd.adRatioTrend.forEach(point => allDates.add(point.date));
       }
     });
-    
+
     const sortedDates = Array.from(allDates).sort((a, b) => dayjs(a, 'MM-DD').valueOf() - dayjs(b, 'MM-DD').valueOf());
-    
+
     // 构建数据结构：日期 + 各店铺数据
     return sortedDates.map(date => {
       const row: any = { date };
@@ -992,6 +1826,161 @@ const DataAlertBot: React.FC = () => {
       return row;
     });
   }, [selectedStoreIds, storesData]);
+
+  // --- 趋势图日期饼图：根据悬停/固定的日期提取当天各店铺数据（颜色与趋势图一致）
+  // --- 通用：按 (chart, date) 计算当天各店铺饼图数据
+  const buildTrendPieData = (chart: 'orders' | 'adRatio', date: string) => {
+    const rows = chart === 'orders' ? ordersTrendData : adRatioTrendData;
+    const row: any = rows.find(r => r.date === date);
+    if (!row) return [];
+    return selectedStoreIds
+      .map((storeId, index) => {
+        const storeName = STORES.find(s => s.id === storeId)?.name || '';
+        return {
+          name: storeName,
+          value: Number(row[storeName] || 0),
+          color: CHART_COLORS[index % CHART_COLORS.length],
+        };
+      })
+      .filter(item => item.value > 0);
+  };
+
+  const trendPieData = useMemo(() => {
+    if (!trendPieActive) return [];
+    return buildTrendPieData(trendPieActive.chart, trendPieActive.date);
+  }, [trendPieActive, ordersTrendData, adRatioTrendData, selectedStoreIds, STORES]);
+
+  const trendPieModalData = useMemo(() => {
+    if (!trendPieModal) return [];
+    return buildTrendPieData(trendPieModal.chart, trendPieModal.date);
+  }, [trendPieModal, ordersTrendData, adRatioTrendData, selectedStoreIds, STORES]);
+
+  // --- 趋势图鼠标事件：悬停更新饼图弹窗位置，点击图表打开独立弹窗
+  const buildTrendPieState = (chart: 'orders' | 'adRatio', state: any, wrapEl: HTMLDivElement | null) => {
+    if (!state || state.activeTooltipIndex == null || state.activeTooltipIndex < 0 || !state.activeLabel) return null;
+    const chartX: number = state.chartX ?? 0;
+    const chartY: number = state.chartY ?? 0;
+    const wrapW = wrapEl?.clientWidth ?? 420;
+    const popupW = 320;
+    let left = chartX + 14;
+    if (left + popupW > wrapW) left = chartX - popupW - 14;
+    left = Math.max(0, Math.min(left, Math.max(0, wrapW - popupW)));
+    const top = Math.max(0, Math.min(chartY - 12, 60));
+    return { chart, date: state.activeLabel as string, left, top };
+  };
+
+  const handleTrendMouseMove = (chart: 'orders' | 'adRatio', wrapRef: React.MutableRefObject<HTMLDivElement | null>) => (state: any) => {
+    setTrendPieHover(buildTrendPieState(chart, state, wrapRef.current));
+  };
+
+  // --- 鼠标从图表移入饼图弹窗时保留弹窗（relatedTarget在弹窗内则不清除悬停）
+  const handleTrendMouseLeave = (_state: any, e: React.MouseEvent) => {
+    const rt = e?.relatedTarget as HTMLElement | null;
+    if (rt && typeof rt.closest === 'function' && rt.closest('[data-trend-pie-popup]')) return;
+    setTrendPieHover(null);
+  };
+
+  const handleTrendChartClick = (chart: 'orders' | 'adRatio') => (state: any) => {
+    if (!state || state.activeTooltipIndex == null || state.activeTooltipIndex < 0 || !state.activeLabel) return;
+    setTrendPieModal({ chart, date: state.activeLabel as string });
+    setTrendPieHover(null);
+  };
+
+  // --- 渲染趋势图日期饼图弹窗
+  const renderTrendPiePopup = (chart: 'orders' | 'adRatio') => {
+    if (!trendPieActive || trendPieActive.chart !== chart) return null;
+    const isOrders = chart === 'orders';
+    const total = trendPieData.reduce((s, i) => s + i.value, 0);
+    return (
+      <div
+        ref={trendPiePopupRef}
+        data-trend-pie-popup
+        onMouseLeave={() => {
+          setTrendPieHover(null);
+        }}
+        onClick={() => {
+          setTrendPieModal({ chart, date: trendPieActive.date });
+          setTrendPieHover(null);
+        }}
+        style={{
+          position: 'absolute',
+          left: trendPieActive.left,
+          top: trendPieActive.top,
+          width: '320px',
+          backgroundColor: '#fff',
+          borderRadius: '8px',
+          border: '1px solid #eee',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+          zIndex: 1100,
+          padding: '12px 14px',
+          cursor: 'pointer',
+          boxSizing: 'border-box',
+        }}
+      >
+        <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '8px', color: '#333' }}>
+          {trendPieActive.date} 各店铺{isOrders ? '订单量' : '广告占比'}
+          <span style={{ fontSize: '12px', color: '#999', fontWeight: 400, marginLeft: '6px' }}>点击查看大图</span>
+        </div>
+        {trendPieData.length === 0 ? (
+          <div style={{ fontSize: '13px', color: '#999', padding: '16px 0', textAlign: 'center' }}>当天暂无数据</div>
+        ) : (
+          <>
+            <PieChart width={292} height={200}>
+              <Pie
+                data={trendPieData}
+                dataKey="value"
+                nameKey="name"
+                cx="50%"
+                cy="50%"
+                innerRadius={48}
+                outerRadius={80}
+                paddingAngle={2}
+                stroke="#fff"
+                activeIndex={pieActiveIndex >= 0 ? pieActiveIndex : undefined}
+                activeShape={(props: any) => <Sector {...props} outerRadius={props.outerRadius + 10} />}
+                onMouseEnter={(_data: any, index: number) => setPieActiveIndex(index)}
+                onMouseLeave={() => setPieActiveIndex(-1)}
+              >
+                {trendPieData.map(item => (
+                  <Cell key={item.name} fill={item.color} />
+                ))}
+              </Pie>
+              <RechartsTooltip
+                formatter={(value: any, name: any) => [isOrders ? `${Number(value).toLocaleString()} 单` : `${fmtPct(Number(value))}%`, name]}
+                wrapperStyle={{ zIndex: 1200 }}
+              />
+            </PieChart>
+            <div ref={trendPieListRef} style={{ maxHeight: '150px', overflow: 'auto', marginTop: '4px' }}>
+              {trendPieData.map((item, idx) => (
+                <div
+                  key={item.name}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '4px 6px',
+                    margin: '0 -6px',
+                    fontSize: '13px',
+                    borderRadius: '4px',
+                    backgroundColor: pieActiveIndex === idx ? '#e6f4ff' : 'transparent',
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ width: '9px', height: '9px', borderRadius: '2px', backgroundColor: item.color, marginRight: '7px', flexShrink: 0 }} />
+                    {item.name}
+                  </span>
+                  <span style={{ fontWeight: 600, color: '#333', marginLeft: '8px', flexShrink: 0 }}>
+                    {isOrders ? item.value.toLocaleString() : `${fmtPct(item.value)}%`}
+                    <span style={{ color: '#999', fontWeight: 400, marginLeft: '5px' }}>{total > 0 ? `${((item.value / total) * 100).toFixed(0)}%` : '0%'}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
 
   // --- 聚合预警（多店铺时按指标最低的店铺判断）
   const aggregateAlerts = useMemo(() => {
@@ -1021,15 +2010,15 @@ const DataAlertBot: React.FC = () => {
         const metrics = sd.currentMetrics;
         const storeName = sd.info.name;
 
-        if (metrics.adRatio > storeThresholds.adRatio) {
+        if ((sd.avgAdRatio30d ?? metrics.adRatio) > storeThresholds.adRatio) {
           alerts.push({
             id: alertId++,
             time: dayjs().format('HH:mm:ss'),
             metricName: '广告占比',
-            currentValue: metrics.adRatio + '%',
+            currentValue: fmtPct(sd.avgAdRatio30d ?? metrics.adRatio) + '%',
             threshold: '>' + storeThresholds.adRatio + '%',
-            suggestion: '广告花费偏高，建议优化投放',
-            severity: metrics.adRatio > storeThresholds.adRatio * 1.1 ? 'red' : 'orange',
+            suggestion: '广告花费偏高（近30天均值），建议优化投放',
+            severity: (sd.avgAdRatio30d ?? metrics.adRatio) > storeThresholds.adRatio * 1.1 ? 'red' : 'orange',
             storeName: storeName,
           });
         }
@@ -1198,6 +2187,47 @@ const DataAlertBot: React.FC = () => {
     }
   }, [displayStoreIds, dateRange, handleDateQuery]);
 
+  // --- 按筛选日期加载SKU趋势每日销量（切换「按筛选日期」模式或日期变化时调用）
+  // 注意：该函数依赖 skuSalesData（随每次商品销量加载而变化），函数身份不稳定，
+  // 禁止直接放入 effect 依赖数组，否则会形成「加载→identity变化→effect重跑→再加载」死循环
+  const loadSkuTrendForDateRange = useCallback(async () => {
+    if (!dateRange || !dateRange[0] || !dateRange[1] || selectedStoreIds.length === 0) return;
+    const startDate = dateRange[0].format('YYYY-MM-DD');
+    const endDate = dateRange[1].format('YYYY-MM-DD');
+    try {
+      const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
+      const storeNames = selectedStores.map(s => s.name);
+      const skus = selectedSkusForTrend.length > 0
+        ? selectedSkusForTrend
+        : skuSalesData.slice(0, 10).map(s => s.sku);
+      if (skus.length === 0) return;
+      const dailySales = await fetchSkuDailySales(storeNames, skus, startDate, endDate);
+      setSkuDailySalesData(dailySales);
+    } catch (error) {
+      console.error('按筛选日期刷新SKU趋势数据失败:', error);
+    }
+  }, [dateRange, selectedStoreIds, selectedSkusForTrend, skuSalesData]);
+
+  // latest-ref 模式：让店铺变化 effect 能调用最新版本而不依赖其不稳定身份
+  const loadSkuTrendRef = useRef(loadSkuTrendForDateRange);
+  loadSkuTrendRef.current = loadSkuTrendForDateRange;
+
+  // --- 日期变化时同步刷新其他受影响数据（无需手动点按钮）：
+  // 1) TOP10处于筛选日期模式 → 自动刷新榜单
+  // 2) SKU趋势处于按筛选日期模式 → 按新日期范围重拉每日销量
+  useEffect(() => {
+    if (!dateRange || !dateRange[0] || !dateRange[1]) return;
+
+    if (top10Mode === 'dateRange') {
+      handleOpenSkuModalByDate();
+    }
+
+    if (trendDateMode === 'dateRange') {
+      loadSkuTrendForDateRange();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRange]);
+
   // --- 从后端API加载数据并更新storesData
   const loadStoreDataFromAPI = useCallback(async () => {
     if (selectedStoreIds.length === 0) return;
@@ -1223,6 +2253,8 @@ const DataAlertBot: React.FC = () => {
         const sales = gmv;
         const adSpend = Math.floor(gmv * adRatio / 100);
         const adSales = acos > 0 ? Math.floor(adSpend * 100 / acos) : 0;
+        const salesAmount = gmv;
+        const storageFee = Math.floor(gmv * storageRatio / 100);
 
         // 订单量趋势（近14天）
         const ordersTrend: { date: string; orders: number }[] = [];
@@ -1251,9 +2283,9 @@ const DataAlertBot: React.FC = () => {
             id: 1,
             time: dayjs().subtract(Math.floor(Math.random() * 60), 'minute').format('HH:mm:ss'),
             metricName: '广告占比',
-            currentValue: adRatio + '%',
+            currentValue: fmtPct(adRatio) + '%',
             threshold: '>' + storeThresholds.adRatio + '%',
-            suggestion: '广告花费偏高，建议优化投放',
+            suggestion: '广告花费偏高（近30天均值），建议优化投放',
             severity: adRatio > storeThresholds.adRatio * 1.1 ? 'red' : 'orange',
           });
         }
@@ -1282,12 +2314,16 @@ const DataAlertBot: React.FC = () => {
             gmv,
             fbaTotalStock,
             fbaStockValue,
+            fbaStockDate: yesterday.format('YYYY-MM-DD'),
             grossProfit,
             storageRatio,
+            storageFee,
+            salesAmount,
           },
           ordersTrend,
           adRatioTrend,
           alerts,
+          avgAdRatio30d: adRatio,
         };
       });
 
@@ -1298,7 +2334,7 @@ const DataAlertBot: React.FC = () => {
       selectedStoreIds.forEach(storeId => {
         const store = STORES.find(s => s.id === storeId);
         if (!store) return;
-        for (let i = 13; i >= 0; i--) {
+        for (let i = 29; i >= 0; i--) {
           const date = yesterday.clone().subtract(i, 'day').format('YYYY-MM-DD');
           const baseAd = Math.floor(Math.random() * 1200) + 300;   // 300~1500
           const baseSales = Math.floor(Math.random() * 6000) + 2000; // 2000~8000
@@ -1318,32 +2354,37 @@ const DataAlertBot: React.FC = () => {
 
       setLastUpdated(dayjs().format('YYYY-MM-DD HH:mm:ss'));
       console.log('tenant_id=6，使用测试KPI数据');
+      setOrdersCompare(null);
       return;
     }
 
     try {
-      // 获取最近14天的数据（从14天前到昨天）
+      // 获取最近30天的数据（从30天前到昨天）；KPI日期范围超出时自动扩展获取范围
       const yesterday = dayjs().subtract(1, 'day');
       const endDate = yesterday.format('YYYY-MM-DD');
-      const startDate = yesterday.clone().subtract(13, 'day').format('YYYY-MM-DD');
-      console.log('数据加载日期范围:', startDate, '~', endDate);
+      const startDate = yesterday.clone().subtract(29, 'day').format('YYYY-MM-DD');
+      const kpiStartD = kpiDateRange?.[0]?.format('YYYY-MM-DD') || null;
+      const kpiEndD = kpiDateRange?.[1]?.format('YYYY-MM-DD') || null;
+      const fetchStart = (kpiStartD && kpiStartD < startDate) ? kpiStartD : startDate;
+      const fetchEnd = (kpiEndD && kpiEndD > endDate) ? kpiEndD : endDate;
+      console.log('数据加载日期范围:', fetchStart, '~', fetchEnd);
 
       // 获取选中店铺的名称
       const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
       const storeNames = selectedStores.map(s => s.name);
 
-      // 查询最近14天的数据
-      const warnings = await fetchDataWarnings(storeNames, startDate, endDate);
+      // 查询数据（默认30天窗口 + KPI范围扩展部分）
+      const warnings = await fetchDataWarnings(storeNames, fetchStart, fetchEnd);
 
       if (warnings.length === 0) {
-        console.warn(`未从数据库获取到${startDate}至${endDate}的数据，按0处理`);
+        console.warn(`未从数据库获取到${fetchStart}至${fetchEnd}的数据，按0处理`);
       }
 
-      // 缓存原始 warnings 供广告占比图表复用
-      setAdWarnings(warnings);
+      // 缓存原始 warnings 供广告占比图表复用（仅默认30天窗口，保持图表口径不变）
+      setAdWarnings(warnings.filter(w => w.date >= startDate && w.date <= endDate));
 
       const newStoresData: Record<string, StoreData> = {};
-
+      let kpiTotalOrders = 0;
       // 按店铺分组数据
       const groupedByStore: Record<string, DataWarningRecord[]> = {};
       warnings.forEach(warning => {
@@ -1359,21 +2400,40 @@ const DataAlertBot: React.FC = () => {
         // 按日期排序
         storeWarnings.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-        // 当前指标（取指定日期的数据，没数据就是0）
-        const yesterdayWarning = storeWarnings.find(w => w.date === endDate);
+        // 当前指标：按KPI日期范围聚合（求和）
+        const kpiStart = kpiDateRange?.[0]?.format('YYYY-MM-DD') || endDate;
+        const kpiEnd = kpiDateRange?.[1]?.format('YYYY-MM-DD') || endDate;
+        const kpiRangeWarnings = storeWarnings.filter(w => w.date >= kpiStart && w.date <= kpiEnd);
 
-        let orders = 0, sales = 0, adSpend = 0, adSales = 0, adRatio = 0, acos = 0, gmv = 0, fbaTotalStock = 0, grossProfit = 0, storageRatio = 0;
+        let orders = 0, sales = 0, adSpend = 0, adSales = 0, adRatio = 0, acos = 0, gmv = 0, fbaTotalStock = 0, fbaStockDate = '', grossProfit = 0, storageRatio = 0, storageFee = 0, salesAmount = 0;
 
-        if (yesterdayWarning) {
-          orders = yesterdayWarning.order_count;
-          adRatio = parseFloat((yesterdayWarning.ad_ratio * 100).toFixed(2));
-          acos = parseFloat((yesterdayWarning.acos * 100).toFixed(2));
-          fbaTotalStock = yesterdayWarning.fba_total_stock || 0;
-          gmv = yesterdayWarning.gmv;
-          grossProfit = yesterdayWarning.gross_profit || 0;
-          storageRatio = parseFloat((yesterdayWarning.storage_ratio * 100).toFixed(2));
+        // FBA库存/货值：始终取前一天（最新可用记录）的快照值，不跟随KPI日期范围
+        for (let i = storeWarnings.length - 1; i >= 0; i--) {
+          const w = storeWarnings[i];
+          if (w.fba_total_stock) {
+            fbaTotalStock = w.fba_total_stock;
+            fbaStockDate = w.date;
+            break;
+          }
+        }
+
+        if (kpiRangeWarnings.length > 0) {
+          kpiRangeWarnings.forEach(w => {
+            orders += w.order_count || 0;
+            gmv += w.gmv || 0;
+            grossProfit += w.gross_profit || 0;
+            adSpend += w.ad_spend || 0;
+            storageFee += w.storage_fee || 0;
+            salesAmount += w.sales_amount || 0;
+          });
           sales = gmv;
-          adSpend = adRatio * sales / 100;
+          // 广告占比 = 广告费用总和 / 利润报表销售额总和
+          adRatio = salesAmount > 0 ? parseFloat((adSpend / salesAmount * 100).toFixed(2)) : 0;
+          // 仓储占比 = 仓储费用总和 / 利润报表销售额总和
+          storageRatio = salesAmount > 0 ? parseFloat((storageFee / salesAmount * 100).toFixed(2)) : 0;
+          // ACOS：取最后一天的值（单店，不聚合）
+          const lastDayWarning = kpiRangeWarnings[kpiRangeWarnings.length - 1];
+          acos = lastDayWarning.acos ? parseFloat((lastDayWarning.acos * 100).toFixed(2)) : 0;
           adSales = acos > 0 ? (adSpend / acos) * 100 : 0;
         }
 
@@ -1405,27 +2465,22 @@ const DataAlertBot: React.FC = () => {
         const alerts: AlertItem[] = [];
         let alertId = 0;
 
-        if (orders < 80) {
-          alerts.push({
-            id: alertId++,
-            time: dayjs().subtract(Math.floor(Math.random() * 60), 'minute').format('HH:mm:ss'),
-            metricName: '订单量',
-            currentValue: orders.toString(),
-            threshold: '<80',
-            suggestion: '建议检查今日流量是否异常',
-            severity: orders < 80 * 0.8 ? 'red' : 'orange',
-          });
-        }
+        // 计算近30天平均广告占比（Σ广告费用 / Σ销售额，仅默认30天窗口，不随KPI扩展范围变化）
+        const windowWarnings = storeWarnings.filter(w => w.date >= startDate && w.date <= endDate);
+        const totalAdSpend30d = windowWarnings.reduce((sum, w) => sum + (w.ad_spend || 0), 0);
+        const totalSalesAmount30d = windowWarnings.reduce((sum, w) => sum + (w.sales_amount || 0), 0);
+        const avgAdRatio30d = totalSalesAmount30d > 0 ? parseFloat((totalAdSpend30d / totalSalesAmount30d * 100).toFixed(2)) : 0;
+
         const storeThresholds = getThresholdsForStore(store.id);
-        if (adRatio > storeThresholds.adRatio) {
+        if (avgAdRatio30d > storeThresholds.adRatio) {
           alerts.push({
             id: alertId++,
             time: dayjs().subtract(Math.floor(Math.random() * 60), 'minute').format('HH:mm:ss'),
             metricName: '广告占比',
-            currentValue: adRatio + '%',
+            currentValue: avgAdRatio30d + '%',
             threshold: '>' + storeThresholds.adRatio + '%',
-            suggestion: '广告花费偏高，建议优化投放',
-            severity: adRatio > storeThresholds.adRatio * 1.1 ? 'red' : 'orange',
+            suggestion: '广告花费偏高（近30天均值），建议优化投放',
+            severity: avgAdRatio30d > storeThresholds.adRatio * 1.1 ? 'red' : 'orange',
           });
         }
         if (acos > storeThresholds.acos) {
@@ -1451,6 +2506,8 @@ const DataAlertBot: React.FC = () => {
           });
         }
 
+        kpiTotalOrders += orders;
+
         newStoresData[store.id] = {
           info: store,
           currentMetrics: {
@@ -1463,14 +2520,43 @@ const DataAlertBot: React.FC = () => {
             gmv,
             fbaTotalStock,
             fbaStockValue: fbaTotalStock * 17,
+            fbaStockDate,
             grossProfit,
             storageRatio,
+            storageFee,
+            salesAmount,
           },
           ordersTrend,
           adRatioTrend,
           alerts,
+          avgAdRatio30d,
         };
       });
+
+      // --- 订单量单日对比：KPI选中单日时，取上月同日（月环比）与上周同日（周同比）的订单数据
+      if (kpiDateRange?.[0] && kpiDateRange?.[1] && kpiDateRange[0].isSame(kpiDateRange[1], 'day')) {
+        const monthDate = kpiDateRange[0].subtract(1, 'month').format('YYYY-MM-DD');
+        const weekDate = kpiDateRange[0].subtract(7, 'day').format('YYYY-MM-DD');
+        try {
+          const [mRes, wRes] = await Promise.all([
+            fetchDataWarnings(storeNames, monthDate, monthDate),
+            fetchDataWarnings(storeNames, weekDate, weekDate),
+          ]);
+          const sumOrders = (rows: DataWarningRecord[]) => rows.reduce((s, w) => s + (w.order_count || 0), 0);
+          setOrdersCompare({
+            curOrders: kpiTotalOrders,
+            monthDate,
+            monthOrders: sumOrders(mRes),
+            weekDate,
+            weekOrders: sumOrders(wRes),
+          });
+        } catch (e) {
+          console.error('获取订单量对比数据失败:', e);
+          setOrdersCompare(null);
+        }
+      } else {
+        setOrdersCompare(null);
+      }
 
       setStoresData(newStoresData);
       setLastUpdated(dayjs().format('YYYY-MM-DD HH:mm:ss'));
@@ -1478,6 +2564,7 @@ const DataAlertBot: React.FC = () => {
     } catch (error) {
       console.error('从数据库加载数据失败:', error);
       message.error('从数据库加载数据失败，按0处理');
+      setOrdersCompare(null);
       // 失败时按0处理，不使用模拟数据
       const newStoresData: Record<string, StoreData> = {};
       selectedStoreIds.forEach(storeId => {
@@ -1495,8 +2582,11 @@ const DataAlertBot: React.FC = () => {
               gmv: 0,
               fbaTotalStock: 0,
               fbaStockValue: 0,
+              fbaStockDate: yesterday.format('YYYY-MM-DD'),
               grossProfit: 0,
               storageRatio: 0,
+              storageFee: 0,
+              salesAmount: 0,
             },
             ordersTrend: [],
             adRatioTrend: [],
@@ -1507,11 +2597,11 @@ const DataAlertBot: React.FC = () => {
       setStoresData(newStoresData);
       setLastUpdated(dayjs().format('YYYY-MM-DD HH:mm:ss'));
     }
-  }, [selectedStoreIds, STORES, isTestMode]);
+  }, [selectedStoreIds, STORES, isTestMode, kpiDateRange]);
 
   // --- 从后端API加载商品销量数据
   const loadProductSalesData = useCallback(async () => {
-    if (selectedStoreIds.length === 0) {
+    if (displayStoreIds.length === 0) {
       setProductSalesData([]);
       setSkuDailySalesData([]);
       return;
@@ -1568,14 +2658,22 @@ const DataAlertBot: React.FC = () => {
           });
         });
       }
-      setSkuDailySalesData(dailySalesTestData);
+      setSkuDailySalesData(prev => {
+        if (trendDateMode === 'dateRange') return prev; // 按筛选日期模式：不覆盖趋势每日销量
+        return dailySalesTestData;
+      });
       console.log('tenant_id=6，使用测试商品销量数据');
       return;
     }
 
     try {
-      const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
+      const selectedStores = STORES.filter(s => displayStoreIds.includes(s.id));
       const storeNames = selectedStores.map(s => s.name);
+      if (storeNames.length === 0) {
+        setProductSalesData([]);
+        setSkuDailySalesData([]);
+        return;
+      }
       
       // SKU波动模块：**强制用近7天**（默认 dateRange=[昨天,昨天] 只有一天，
       // 不能拿来算 top10，否则每天的销量榜单一天一变、无法比较）
@@ -1616,17 +2714,23 @@ const DataAlertBot: React.FC = () => {
 
       const result = Array.from(skuMap.values()).sort((a, b) => b.totalSales - a.totalSales);
       setProductSalesData(result);
-      setSkuDailySalesData(dailySales);
+      setSkuDailySalesData(prev => {
+        if (trendDateMode === 'dateRange') return prev; // 按筛选日期模式：不覆盖趋势每日销量
+        return dailySales;
+      });
     } catch (error) {
       console.error('加载商品销量数据失败:', error);
       setProductSalesData([]);
-      setSkuDailySalesData([]);
+      setSkuDailySalesData(prev => {
+        if (trendDateMode === 'dateRange') return prev; // 按筛选日期模式：不覆盖趋势每日销量
+        return [];
+      });
     }
-  }, [selectedStoreIds, dateRange, STORES, isTestMode]);
+  }, [displayStoreIds, STORES, isTestMode, trendDateMode]);
 
   // --- 加载SKU异动检测数据（取近14天全部SKU，基准为最后一天有销量的SKU）
   const loadSkuAnomalyData = useCallback(async () => {
-    if (selectedStoreIds.length === 0) {
+    if (displayStoreIds.length === 0) {
       setSkuAnomalyRealData([]);
       return;
     }
@@ -1644,64 +2748,13 @@ const DataAlertBot: React.FC = () => {
       ];
       const yesterday = dayjs().subtract(1, 'day');
       const result = testSkus.map(item => {
-        const avg = item.daily.reduce((a, b) => a + b, 0) / item.daily.length;
-        const max = Math.max(...item.daily);
-        const min = Math.min(...item.daily.filter(v => v > 0));
-        let maxDayOverDay = 0;
-
-        // 构建完整 14 天明细（i=0 对应 14 天前，i=13 对应昨天）
-        const daily = item.daily.map((sales, i) => {
-          const date = yesterday.clone().subtract(13 - i, 'day').format('YYYY-MM-DD');
-          const prevSales = i > 0 ? item.daily[i - 1] : null;
-          let changeRate: number | null = null;
-          let direction: 'up' | 'down' | 'flat' | null = null;
-          let isAnomaly = false;
-          if (prevSales !== null && prevSales > 0) {
-            changeRate = Math.round(((sales - prevSales) / prevSales) * 10000) / 100;
-            direction = changeRate > 0 ? 'up' : changeRate < 0 ? 'down' : 'flat';
-            const absRate = Math.abs(changeRate);
-            if (absRate > maxDayOverDay) maxDayOverDay = absRate;
-            if (absRate >= 50) isAnomaly = true;
-          }
-          return { date, sales, prevSales, changeRate, direction, isAnomaly };
-        });
-
-        // 计算最新趋势方向（最后一天相对前一天）
-        let latestDirection: 'up' | 'down' | 'flat' = 'flat';
-        const lastIdx = item.daily.length - 1;
-        if (lastIdx >= 1 && item.daily[lastIdx - 1] > 0) {
-          const lastChangeRate = (item.daily[lastIdx] - item.daily[lastIdx - 1]) / item.daily[lastIdx - 1];
-          const t = ((thresholds[item.store]?.latestTrend) ?? 20) / 100;
-          if (lastChangeRate > t) latestDirection = 'up';
-          else if (lastChangeRate < -t) latestDirection = 'down';
-        }
-        // 计算总体趋势方向（后7天均值 vs 前7天均值）
-        let overallDirection: 'up' | 'down' | 'flat' = 'flat';
-        if (item.daily.length >= 14) {
-          const firstHalfAvg = item.daily.slice(0, 7).reduce((a, b) => a + b, 0) / 7;
-          const secondHalfAvg = item.daily.slice(7, 14).reduce((a, b) => a + b, 0) / 7;
-          const t = ((thresholds[item.store]?.overallTrend) ?? 15) / 100;
-          if (firstHalfAvg > 0) {
-            const overallChangeRate = (secondHalfAvg - firstHalfAvg) / firstHalfAvg;
-            if (overallChangeRate > t) overallDirection = 'up';
-            else if (overallChangeRate < -t) overallDirection = 'down';
-          } else if (secondHalfAvg > 0) {
-            overallDirection = 'up';
-          }
-        }
+        // 构建 14 天日期序列（i=0 对应 14 天前，i=13 对应昨天），共用共享计算函数
+        const fullDates = item.daily.map((_, i) => yesterday.clone().subtract(13 - i, 'day').format('YYYY-MM-DD'));
+        const salesByDate = new Map<string, number>(fullDates.map((d, i) => [d, item.daily[i]]));
         return {
           sku: item.sku,
           store: item.store,
-          latestSales: item.daily[item.daily.length - 1],
-          avgSales: Math.round(avg * 100) / 100,
-          maxSales: max,
-          minSales: min,
-          fluctuation: Math.round(maxDayOverDay * 100) / 100,
-          latestDirection,
-          overallDirection,
-          isMonitored: avg > 1,
-          isAnomaly: avg > 1 && maxDayOverDay >= 50,
-          daily,
+          ...computeSkuAnomalyMetrics(salesByDate, fullDates, item.store, thresholds),
         };
       });
       setSkuAnomalyRealData(result);
@@ -1709,8 +2762,12 @@ const DataAlertBot: React.FC = () => {
     }
 
     try {
-      const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
+      const selectedStores = STORES.filter(s => displayStoreIds.includes(s.id));
       const storeNames = selectedStores.map(s => s.name);
+      if (storeNames.length === 0) {
+        setSkuAnomalyRealData([]);
+        return;
+      }
 
       // 基准日期固定为前一天
       const baseDate = dayjs().subtract(1, 'day');
@@ -1765,77 +2822,21 @@ const DataAlertBot: React.FC = () => {
         dailyEntry.dailyMap.set(r.date, (dailyEntry.dailyMap.get(r.date) || 0) + r.sales_count);
       });
 
-      // 计算异动指标
+      // 计算异动指标（共享计算函数：评分/事件/分组判定；无记录日期不补0）
       const result: SkuAnomalyRecord[] = [];
       skuStoreMap.forEach((value, key) => {
         const [sku] = key.split('__');
 
-        // 构建完整的 14 天日期序列，缺失日期补 0
+        // 构建完整的 14 天日期序列
         const fullDates: string[] = [];
         for (let i = 0; i < 14; i++) {
           fullDates.push(queryStartDate.clone().add(i, 'day').format('YYYY-MM-DD'));
-        }
-        const dailySalesSeq: number[] = fullDates.map(d => value.dailyMap.get(d) || 0);
-
-        const total = dailySalesSeq.reduce((a, b) => a + b, 0);
-        const avg = total / 14;
-        const max = Math.max(...dailySalesSeq);
-        const minPositive = Math.min(...dailySalesSeq.filter(v => v > 0)) || 0;
-
-        // 构建完整 14 天明细，每行都算环比并标记是否异动
-        let maxDayOverDay = 0;
-        const daily = dailySalesSeq.map((sales, i) => {
-          const prevSales = i > 0 ? dailySalesSeq[i - 1] : null;
-          let changeRate: number | null = null;
-          let direction: 'up' | 'down' | 'flat' | null = null;
-          let isAnomaly = false;
-          if (prevSales !== null && prevSales > 0) {
-            changeRate = Math.round(((sales - prevSales) / prevSales) * 10000) / 100;
-            direction = changeRate > 0 ? 'up' : changeRate < 0 ? 'down' : 'flat';
-            const absRate = Math.abs(changeRate);
-            if (absRate > maxDayOverDay) maxDayOverDay = absRate;
-            if (absRate >= 50) isAnomaly = true;
-          }
-          return { date: fullDates[i], sales, prevSales, changeRate, direction, isAnomaly };
-        });
-
-        // 计算最新趋势方向（最后一天相对前一天的变化）
-        let latestDirection: 'up' | 'down' | 'flat' = 'flat';
-        const lastIdx = dailySalesSeq.length - 1;
-        if (lastIdx >= 1 && dailySalesSeq[lastIdx - 1] > 0) {
-          const lastChangeRate = (dailySalesSeq[lastIdx] - dailySalesSeq[lastIdx - 1]) / dailySalesSeq[lastIdx - 1];
-          const t = ((thresholds[value.store]?.latestTrend) ?? 20) / 100;
-          if (lastChangeRate > t) latestDirection = 'up';
-          else if (lastChangeRate < -t) latestDirection = 'down';
-        }
-
-        // 计算总体趋势方向（后7天均值 vs 前7天均值）
-        let overallDirection: 'up' | 'down' | 'flat' = 'flat';
-        const firstHalfAvg = dailySalesSeq.slice(0, 7).reduce((a, b) => a + b, 0) / 7;
-        const secondHalfAvg = dailySalesSeq.slice(7, 14).reduce((a, b) => a + b, 0) / 7;
-        const t = ((thresholds[value.store]?.overallTrend) ?? 15) / 100;
-        if (firstHalfAvg > 0) {
-          const overallChangeRate = (secondHalfAvg - firstHalfAvg) / firstHalfAvg;
-          if (overallChangeRate > t) overallDirection = 'up';
-          else if (overallChangeRate < -t) overallDirection = 'down';
-        } else if (secondHalfAvg > 0) {
-          // 前7天全零、后7天开卖 → 从零到有，算上升
-          overallDirection = 'up';
         }
 
         result.push({
           sku,
           store: value.store,
-          latestSales: dailySalesSeq[13],
-          avgSales: Math.round(avg * 100) / 100,
-          maxSales: max,
-          minSales: minPositive || 0,
-          fluctuation: Math.round(maxDayOverDay * 100) / 100,
-          latestDirection,
-          overallDirection,
-          isMonitored: avg > 1,
-          isAnomaly: avg > 1 && maxDayOverDay >= 50,
-          daily,
+          ...computeSkuAnomalyMetrics(value.dailyMap, fullDates, value.store, thresholds),
         });
       });
 
@@ -1844,12 +2845,13 @@ const DataAlertBot: React.FC = () => {
       console.error('加载SKU异动数据失败:', error);
       setSkuAnomalyRealData([]);
     }
-  }, [selectedStoreIds, STORES, isTestMode, thresholds]);
+  }, [displayStoreIds, STORES, isTestMode, thresholds]);
 
   // --- 加载 SKU 超库龄数据
   const loadProductAgingData = useCallback(async () => {
     try {
-      const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
+      // 与店铺日期查询一致：跟随"店铺筛选"+"只显示"（displayStoreIds）；未选择时默认全部
+      const selectedStores = STORES.filter(s => displayStoreIds.includes(s.id));
       const storeNames = selectedStores.map(s => s.name);
 
       if (isTestMode) {
@@ -1857,15 +2859,15 @@ const DataAlertBot: React.FC = () => {
         setProductAgingLatestDate(dayjs().subtract(2, 'day').format('YYYY-MM-DD'));
         setProductAgingData([
           { store: 'A加', sku: 'TEST-001', aging_181_270: 12, aging_271_365: 0, aging_366_455: 0, aging_456_plus: 0 },
-          { store: 'A加', sku: 'TEST-002', aging_181_270: 0, aging_271_365: 8, aging_366_455: 0, aging_456_plus: 0 },
-          { store: 'B美', sku: 'TEST-003', aging_181_270: 0, aging_271_365: 0, aging_366_455: 20, aging_456_plus: 5 },
+          { store: 'A加', sku: 'TEST-002', aging_271_365: 8, aging_181_270: 0, aging_366_455: 0, aging_456_plus: 0 },
+          { store: 'B美', sku: 'TEST-003', aging_366_455: 20, aging_456_plus: 5, aging_181_270: 0, aging_271_365: 0 },
           { store: 'B美', sku: 'TEST-004', aging_181_270: 15, aging_271_365: 0, aging_366_455: 0, aging_456_plus: 0 },
-        ].filter(r => storeNames.includes(r.store)));
+        ].filter(r => storeNames.length === 0 || storeNames.includes(r.store)));
         return;
       }
 
       const response = await apiClient.get('/product-aging/', {
-        params: { stores: storeNames.join(',') },
+        params: storeNames.length > 0 ? { stores: storeNames.join(',') } : {},
       });
 
       if (!response.data.success) {
@@ -1881,7 +2883,7 @@ const DataAlertBot: React.FC = () => {
       setProductAgingData([]);
       setProductAgingLatestDate(null);
     }
-  }, [selectedStoreIds, STORES, isTestMode]);
+  }, [displayStoreIds, STORES, isTestMode]);
 
   // --- 初始化：获取数据
   useEffect(() => {
@@ -1955,19 +2957,15 @@ const DataAlertBot: React.FC = () => {
       loadStoreDataFromAPI();
       loadProductSalesData();
       loadSkuAnomalyData();
-      loadProductAgingData();
-    } else {
-      setProductAgingData([]);
-      setProductAgingLatestDate(null);
     }
+    // SKU趋势处于按筛选日期模式时，店铺变化后按新店铺重拉每日销量（经ref调用，避免死循环）
+    if (trendDateMode === 'dateRange') {
+      loadSkuTrendRef.current?.();
+    }
+    // 超库龄：未选择店铺时也加载（默认全部）
+    loadProductAgingData();
     setProductAgingDrillBucket(null);
-  }, [selectedStoreIds, loadStoreDataFromAPI, loadProductSalesData, loadSkuAnomalyData]);
-
-  useEffect(() => {
-    if (selectedStoreIds.length > 0) {
-      loadProductSalesData();
-    }
-  }, [dateRange, selectedStoreIds, loadProductSalesData]);
+  }, [displayStoreIds, loadStoreDataFromAPI, loadProductSalesData, loadSkuAnomalyData, loadProductAgingData, trendDateMode]);
 
 
 
@@ -2103,6 +3101,36 @@ const DataAlertBot: React.FC = () => {
               ))}
             </Select>
 
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontWeight: 500 }}>KPI日期:</span>
+              {([['yesterday', '昨日'], ['7d', '近7天'], ['30d', '近30天'], ['lastMonth', '上月'], ['custom', '自定义']] as const).map(([key, label]) => (
+                <span
+                  key={key}
+                  onClick={() => handleKpiQuick(key)}
+                  title={key === 'custom' ? '在右侧选择日期范围' : `查看${label}数据`}
+                  style={{
+                    fontSize: 12,
+                    padding: '3px 10px',
+                    borderRadius: 12,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    transition: 'all 0.2s',
+                    background: kpiQuickKey === key ? '#1890ff' : '#f5f5f5',
+                    color: kpiQuickKey === key ? '#ffffff' : '#666'
+                  }}
+                >
+                  {label}
+                </span>
+              ))}
+              <DatePicker.RangePicker
+                value={kpiDateRange}
+                onChange={(dates) => { setKpiQuickKey('custom'); setKpiDateRange(dates as [Dayjs | null, Dayjs | null] | null); }}
+                style={{ width: 280 }}
+                allowClear
+                disabledDate={(current) => current && current > dayjs().endOf('day')}
+              />
+            </div>
+
             <Button type="primary" icon={<RefreshCw />} onClick={loadStoreDataFromAPI}>
               刷新数据
             </Button>
@@ -2115,15 +3143,17 @@ const DataAlertBot: React.FC = () => {
       </Card>
 
       {/* --- 顶部 KPI 指标卡区 */}
-      <div style={{ 
-        display: 'flex', 
-        flexWrap: 'nowrap', 
-        gap: '12px', 
-        marginBottom: '16px' 
+      <div id="section-kpi" style={{
+        display: 'flex',
+        flexWrap: 'nowrap',
+        gap: '12px',
+        marginBottom: '16px'
       }}>
         {/* 订单量 */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="orders"
+          onClick={() => setPinnedKpi(prev => prev === 'orders' ? null : 'orders')}
           onMouseEnter={() => setHoveredKpi('orders')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2144,16 +3174,46 @@ const DataAlertBot: React.FC = () => {
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
                   {currentMetrics.orders}
                 </div>
-                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>单/昨日</Text>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>单/{kpiDateLabel}</Text>
+                {ordersCompare && (() => {
+                  const pctChange = (prev: number) => prev > 0 ? parseFloat(((ordersCompare.curOrders - prev) / prev * 100).toFixed(1)) : null;
+                  const renderCompare = (label: string, dateStr: string, prev: number) => {
+                    const p = pctChange(prev);
+                    const dateLabel = dateStr.slice(5).replace('-', '/');
+                    return (
+                      <div key={label} style={{ fontSize: '11px', lineHeight: 1.6, marginTop: '2px', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                        <span style={{ color: '#8c8c8c' }}>{label}</span>
+                        {p === null ? (
+                          <span style={{ color: '#8c8c8c' }}>{dateLabel}：{prev.toLocaleString()}单</span>
+                        ) : (
+                          <>
+                            <span style={{ color: p > 0 ? '#52c41a' : p < 0 ? '#ff4d4f' : '#8c8c8c', fontWeight: 600 }}>
+                              {p > 0 ? '↑' : p < 0 ? '↓' : '－'}{Math.abs(p)}%
+                            </span>
+                            <span style={{ color: '#8c8c8c' }}>({dateLabel}：{prev.toLocaleString()}单)</span>
+                          </>
+                        )}
+                      </div>
+                    );
+                  };
+                  return (
+                    <div>
+                      {renderCompare('月环比', ordersCompare.monthDate, ordersCompare.monthOrders)}
+                      {renderCompare('周同比', ordersCompare.weekDate, ordersCompare.weekOrders)}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'orders' && renderKpiDetail('orders')}
+          {(hoveredKpi === 'orders' || pinnedKpi === 'orders') && renderKpiDetail('orders')}
         </div>
 
         {/* GMV */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="gmv"
+          onClick={() => setPinnedKpi(prev => prev === 'gmv' ? null : 'gmv')}
           onMouseEnter={() => setHoveredKpi('gmv')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2174,16 +3234,18 @@ const DataAlertBot: React.FC = () => {
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
                   ¥{currentMetrics.gmv.toLocaleString()}
                 </div>
-                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>昨日交易总额</Text>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>{kpiDateLabel}交易总额</Text>
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'gmv' && renderKpiDetail('gmv')}
+          {(hoveredKpi === 'gmv' || pinnedKpi === 'gmv') && renderKpiDetail('gmv')}
         </div>
 
         {/* 平均客单价 */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="avgOrderPrice"
+          onClick={() => setPinnedKpi(prev => prev === 'avgOrderPrice' ? null : 'avgOrderPrice')}
           onMouseEnter={() => setHoveredKpi('avgOrderPrice')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2204,16 +3266,18 @@ const DataAlertBot: React.FC = () => {
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
                   ¥{(currentMetrics.orders > 0 ? Math.round(currentMetrics.gmv / currentMetrics.orders) : 0).toLocaleString()}
                 </div>
-                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>GMV ÷ 订单量 · 昨日</Text>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>GMV ÷ 订单量 · {kpiDateLabel}</Text>
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'avgOrderPrice' && renderKpiDetail('avgOrderPrice')}
+          {(hoveredKpi === 'avgOrderPrice' || pinnedKpi === 'avgOrderPrice') && renderKpiDetail('avgOrderPrice')}
         </div>
 
         {/* 毛利润 */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="grossProfit"
+          onClick={() => setPinnedKpi(prev => prev === 'grossProfit' ? null : 'grossProfit')}
           onMouseEnter={() => setHoveredKpi('grossProfit')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2234,16 +3298,18 @@ const DataAlertBot: React.FC = () => {
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
                   ¥{currentMetrics.grossProfit.toLocaleString()}
                 </div>
-                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>昨日毛利润</Text>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>{kpiDateLabel}毛利润</Text>
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'grossProfit' && renderKpiDetail('grossProfit')}
+          {(hoveredKpi === 'grossProfit' || pinnedKpi === 'grossProfit') && renderKpiDetail('grossProfit')}
         </div>
 
         {/* 广告占比 */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="adRatio"
+          onClick={() => setPinnedKpi(prev => prev === 'adRatio' ? null : 'adRatio')}
           onMouseEnter={() => setHoveredKpi('adRatio')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2274,12 +3340,14 @@ const DataAlertBot: React.FC = () => {
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'adRatio' && renderKpiDetail('adRatio')}
+          {(hoveredKpi === 'adRatio' || pinnedKpi === 'adRatio') && renderKpiDetail('adRatio')}
         </div>
 
         {/* 仓储占比 */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="storageRatio"
+          onClick={() => setPinnedKpi(prev => prev === 'storageRatio' ? null : 'storageRatio')}
           onMouseEnter={() => setHoveredKpi('storageRatio')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2310,12 +3378,14 @@ const DataAlertBot: React.FC = () => {
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'storageRatio' && renderKpiDetail('storageRatio')}
+          {(hoveredKpi === 'storageRatio' || pinnedKpi === 'storageRatio') && renderKpiDetail('storageRatio')}
         </div>
 
         {/* ACOS */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="acos"
+          onClick={() => setPinnedKpi(prev => prev === 'acos' ? null : 'acos')}
           onMouseEnter={() => setHoveredKpi('acos')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2324,7 +3394,7 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              ...getCardStyle(getMetricStatus('acos', currentMetrics.acos)), 
+              ...getCardStyle(getMetricStatus('acos', acosCard.value)), 
               minHeight: 'auto', 
               height: 'auto'
             }} 
@@ -2333,25 +3403,27 @@ const DataAlertBot: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', minHeight: '60px' }}>
               <div>
                 <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>ACOS</Text>
-                <div style={{ fontSize: '24px', fontWeight: 600, color: getMetricStatus('acos', currentMetrics.acos) === 'danger' ? '#ff4d4f' : '#333', lineHeight: 1.2 }}>
-                  {currentMetrics.acos}%
+                <div style={{ fontSize: '24px', fontWeight: 600, color: getMetricStatus('acos', acosCard.value) === 'danger' ? '#ff4d4f' : '#333', lineHeight: 1.2 }}>
+                  {acosCard.value}%
                 </div>
-                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>广告效率</Text>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>{acosCard.storeName ? `${acosCard.storeName} · 广告效率` : '广告效率'}</Text>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
-                {getStatusIcon(getMetricStatus('acos', currentMetrics.acos))}
-                <Tag color={getMetricStatus('acos', currentMetrics.acos) === 'normal' ? 'success' : getMetricStatus('acos', currentMetrics.acos) === 'warning' ? 'warning' : 'error'} style={{ fontSize: '11px', padding: '0 6px', lineHeight: 1.6, height: 'auto' }}>
+                {getStatusIcon(getMetricStatus('acos', acosCard.value))}
+                <Tag color={getMetricStatus('acos', acosCard.value) === 'normal' ? 'success' : getMetricStatus('acos', acosCard.value) === 'warning' ? 'warning' : 'error'} style={{ fontSize: '11px', padding: '0 6px', lineHeight: 1.6, height: 'auto' }}>
                   阈值: &gt;{getAggregateThresholds.acos}%
                 </Tag>
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'acos' && renderKpiDetail('acos')}
+          {(hoveredKpi === 'acos' || pinnedKpi === 'acos') && renderKpiDetail('acos')}
         </div>
 
         {/* FBA总库存 */}
         <div 
           style={{ flex: 1, position: 'relative' }}
+          data-kpi-card="fbaTotalStock"
+          onClick={() => setPinnedKpi(prev => prev === 'fbaTotalStock' ? null : 'fbaTotalStock')}
           onMouseEnter={() => setHoveredKpi('fbaTotalStock')}
           onMouseLeave={() => setHoveredKpi(null)}
         >
@@ -2368,15 +3440,24 @@ const DataAlertBot: React.FC = () => {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', minHeight: '60px' }}>
               <div>
-                <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>FBA总库存/货值</Text>
+                <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>
+                  FBA总库存/货值
+                  {kpiDateLabel.includes('~') && currentMetrics.fbaStockDate && (
+                    <Tag color="blue" style={{ marginLeft: 6, fontSize: '11px', lineHeight: 1.6, padding: '0 6px' }}>
+                      {currentMetrics.fbaStockDate.slice(5)} 数据
+                    </Tag>
+                  )}
+                </Text>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
                   {currentMetrics.fbaTotalStock} / ¥{currentMetrics.fbaStockValue.toLocaleString()}
                 </div>
-                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>FBA仓库总库存</Text>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>
+                  {kpiDateLabel.includes('~') ? '库存为快照值，不随日期范围累计' : 'FBA仓库总库存'}
+                </Text>
               </div>
             </div>
           </Card>
-          {hoveredKpi === 'fbaTotalStock' && renderKpiDetail('fbaTotalStock')}
+          {(hoveredKpi === 'fbaTotalStock' || pinnedKpi === 'fbaTotalStock') && renderKpiDetail('fbaTotalStock')}
         </div>
       </div>
 
@@ -2387,21 +3468,25 @@ const DataAlertBot: React.FC = () => {
           <Card title="📈 趋势分析" bordered={false} style={{ height: '100%', overflow: 'visible', position: 'relative' }}>
             <div style={{ marginBottom: '24px', overflow: 'visible', position: 'relative' }}>
               <Title level={5} style={{ marginBottom: '16px' }}>订单量趋势 (最近14天)</Title>
-              <div style={{ overflow: 'visible', position: 'relative' }}>
+              <div style={{ overflow: 'visible', position: 'relative' }} ref={ordersChartWrapRef}>
                 <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={ordersTrendData}>
+                  <BarChart
+                    data={ordersTrendData}
+                    onMouseMove={handleTrendMouseMove('orders', ordersChartWrapRef)}
+                    onMouseLeave={handleTrendMouseLeave}
+                    onClick={handleTrendChartClick('orders')}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="date" />
                     <YAxis />
-                    <RechartsTooltip wrapperStyle={{ zIndex: 1000 }} />
                     <Legend />
                     {selectedStoreIds.map((storeId, index) => {
                       const storeName = STORES.find(s => s.id === storeId)?.name || '';
                       return (
-                        <Bar 
+                        <Bar
                           key={storeId}
-                          dataKey={storeName} 
-                          fill={CHART_COLORS[index % CHART_COLORS.length]} 
+                          dataKey={storeName}
+                          fill={CHART_COLORS[index % CHART_COLORS.length]}
                           name={storeName}
                           barSize={20}
                         />
@@ -2409,36 +3494,42 @@ const DataAlertBot: React.FC = () => {
                     })}
                   </BarChart>
                 </ResponsiveContainer>
+                {renderTrendPiePopup('orders')}
               </div>
             </div>
             <Divider />
             <div style={{ overflow: 'visible', position: 'relative' }}>
               <Title level={5} style={{ marginBottom: '16px' }}>广告占比趋势 (最近7天)</Title>
-              <div style={{ overflow: 'visible', position: 'relative' }}>
+              <div style={{ overflow: 'visible', position: 'relative' }} ref={adRatioChartWrapRef}>
                 <ResponsiveContainer width="100%" height={200}>
-                  <LineChart data={adRatioTrendData}>
+                  <LineChart
+                    data={adRatioTrendData}
+                    onMouseMove={handleTrendMouseMove('adRatio', adRatioChartWrapRef)}
+                    onMouseLeave={handleTrendMouseLeave}
+                    onClick={handleTrendChartClick('adRatio')}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="date" />
                     <YAxis />
-                    <RechartsTooltip wrapperStyle={{ zIndex: 1000 }} formatter={(value, name) => [`${value}%`, name]} />
                     <Legend />
                     {selectedStoreIds.map((storeId, index) => {
                       const storeName = STORES.find(s => s.id === storeId)?.name || '';
                       return (
-                        <Line 
+                        <Line
                           key={storeId}
-                          type="monotone" 
-                          dataKey={storeName} 
-                          stroke={CHART_COLORS[index % CHART_COLORS.length]} 
-                          strokeWidth={2} 
-                          dot={{ r: 4 }} 
-                          activeDot={{ r: 6 }} 
+                          type="monotone"
+                          dataKey={storeName}
+                          stroke={CHART_COLORS[index % CHART_COLORS.length]}
+                          strokeWidth={2}
+                          dot={{ r: 4 }}
+                          activeDot={{ r: 6 }}
                           name={storeName}
                         />
                       );
                     })}
                   </LineChart>
                 </ResponsiveContainer>
+                {renderTrendPiePopup('adRatio')}
               </div>
             </div>
           </Card>
@@ -2446,7 +3537,8 @@ const DataAlertBot: React.FC = () => {
 
         {/* 右侧：实时预警消息列表 */}
         <div style={{ flex: 1 }}>
-          <Card 
+          <Card
+            id="section-alerts"
             title={
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
                 <span>⚠️ 实时预警</span>
@@ -2525,10 +3617,29 @@ const DataAlertBot: React.FC = () => {
           <Space wrap size="middle">
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ fontWeight: 500 }}>日期范围: </span>
-              <DatePicker.RangePicker 
-                value={dateRange} 
-                onChange={setDateRange} 
-                style={{ width: 300 }} 
+              {([['yesterday', '昨日'], ['7d', '近7天'], ['30d', '近30天'], ['lastMonth', '上月'], ['custom', '自定义']] as const).map(([key, label]) => (
+                <span
+                  key={key}
+                  onClick={() => handleDateQueryQuick(key)}
+                  title={key === 'custom' ? '在右侧选择日期范围' : `查看${label}数据`}
+                  style={{
+                    fontSize: 12,
+                    padding: '3px 10px',
+                    borderRadius: 12,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    transition: 'all 0.2s',
+                    background: dateQueryQuickKey === key ? '#1890ff' : '#f5f5f5',
+                    color: dateQueryQuickKey === key ? '#ffffff' : '#666'
+                  }}
+                >
+                  {label}
+                </span>
+              ))}
+              <DatePicker.RangePicker
+                value={dateRange}
+                onChange={(dates) => { setDateQueryQuickKey('custom'); setDateRange(dates as [Dayjs | null, Dayjs | null] | null); }}
+                style={{ width: 300 }}
                 allowClear
                 disabledDate={(current) => {
                   if (!dateRange || !dateRange[0]) {
@@ -2620,7 +3731,8 @@ const DataAlertBot: React.FC = () => {
       {/* --- 第一行：数据对比和TOP10并排显示 */}
       <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginBottom: '16px' }}>
         {/* --- 对比表格 */}
-        <Card 
+        <Card
+          id="section-compare"
           title={
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', gap: '16px', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -2665,8 +3777,12 @@ const DataAlertBot: React.FC = () => {
           <Table
             columns={[
               { title: '店铺', dataIndex: 'name', key: 'name', width: 150 },
-              { title: '订单量', dataIndex: 'orders', key: 'orders', width: 120 },
+              { title: '订单量', dataIndex: 'orders', key: 'orders', width: 120,
+                sorter: (a: any, b: any) => a.orders - b.orders,
+              },
               { title: 'GMV', dataIndex: 'gmv', key: 'gmv', width: 150,
+                defaultSortOrder: 'descend' as const,
+                sorter: (a: any, b: any) => a.gmv - b.gmv,
                 render: (val: number) => {
                   const parsedGmvBase = gmvBase && gmvBase.trim() !== '' ? parseFloat(gmvBase) : null;
                   const enableGmvTrend = parsedGmvBase !== null && !isNaN(parsedGmvBase);
@@ -2706,25 +3822,16 @@ const DataAlertBot: React.FC = () => {
               },
             ]}
             dataSource={
-              dateQueryResults.length > displayStoreIds.length 
-                ? displayStores.map(store => {
-                    const aggregated = storeAggregatedData[store.id];
-                    return {
-                      ...store,
-                      orders: aggregated ? aggregated.avgOrders : 0,
-                      gmv: aggregated ? aggregated.avgGmv : 0,
-                      adRatio: aggregated ? aggregated.avgAdRatio : 0,
-                    };
-                  })
-                : displayStores.map(store => {
-                    const data = storesData[store.id];
-                    return {
-                      ...store,
-                      orders: data?.currentMetrics.orders || 0,
-                      gmv: data?.currentMetrics.gmv || 0,
-                      adRatio: data?.currentMetrics.adRatio || 0,
-                    };
-                  })
+              // 始终按顶部日期筛选范围汇总（dateRange变化自动重查），订单/GMV求和、广告占比加权平均
+              displayStores.map(store => {
+                const aggregated = storeAggregatedData[store.id];
+                return {
+                  ...store,
+                  orders: aggregated ? aggregated.avgOrders : 0,
+                  gmv: aggregated ? aggregated.avgGmv : 0,
+                  adRatio: aggregated ? aggregated.avgAdRatio : 0,
+                };
+              })
             }
             rowKey="id"
             pagination={{ pageSize: 10, showSizeChanger: false }}
@@ -2733,9 +3840,15 @@ const DataAlertBot: React.FC = () => {
           <Table
             columns={[
               { title: '店铺', dataIndex: 'storeName', key: 'storeName', width: 120 },
-              { title: '日期', dataIndex: 'date', key: 'date', width: 120 },
-              { title: '订单量', dataIndex: 'orders', key: 'orders', width: 120 },
+              { title: '日期', dataIndex: 'date', key: 'date', width: 120,
+                defaultSortOrder: 'ascend' as const,
+                sorter: (a: any, b: any) => a.date.localeCompare(b.date) || a.storeName.localeCompare(b.storeName),
+              },
+              { title: '订单量', dataIndex: 'orders', key: 'orders', width: 120,
+                sorter: (a: any, b: any) => a.orders - b.orders,
+              },
               { title: 'GMV', dataIndex: 'gmv', key: 'gmv', width: 150,
+                sorter: (a: any, b: any) => a.gmv - b.gmv,
                 render: (val: number) => {
                   const parsedGmvBase = gmvBase && gmvBase.trim() !== '' ? parseFloat(gmvBase) : null;
                   const enableGmvTrend = parsedGmvBase !== null && !isNaN(parsedGmvBase);
@@ -2773,13 +3886,16 @@ const DataAlertBot: React.FC = () => {
                   return <span style={{ color }}>{val}% {trend}</span>;
                 }
               },
-              { title: '毛利润', dataIndex: 'grossProfit', key: 'grossProfit', width: 150, render: (val: number) => `¥${val.toLocaleString()}` },
+              { title: '毛利润', dataIndex: 'grossProfit', key: 'grossProfit', width: 150,
+                sorter: (a: any, b: any) => a.grossProfit - b.grossProfit,
+                render: (val: number) => `¥${val.toLocaleString()}`,
+              },
               { title: '仓储占比', dataIndex: 'storageRatio', key: 'storageRatio', width: 120,
                 render: (val: number) => {
                   const parsedStorageRatioBase = storageRatioBase && storageRatioBase.trim() !== '' ? parseFloat(storageRatioBase) : null;
                   const enableStorageRatioTrend = parsedStorageRatioBase !== null && !isNaN(parsedStorageRatioBase);
                   if (!enableStorageRatioTrend) {
-                    return <span>{val.toFixed(2)}%</span>;
+                    return <span>{fmtPct(val)}%</span>;
                   }
                   let trend = '';
                   let color = 'inherit';
@@ -2790,7 +3906,7 @@ const DataAlertBot: React.FC = () => {
                     trend = '↓';
                     color = '#52c41a';
                   }
-                  return <span style={{ color }}>{val.toFixed(2)}% {trend}</span>;
+                  return <span style={{ color }}>{fmtPct(val)}% {trend}</span>;
                 }
               },
             ]}
@@ -2808,16 +3924,36 @@ const DataAlertBot: React.FC = () => {
 
         {/* --- 商品销量TOP10 */}
         <Card
+          id="section-top10"
           title={
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
               <span>🏆 商品销量TOP10</span>
-              <Button 
-                type="primary" 
-                size="small"
-                onClick={handleOpenSkuModal}
-              >
-                查看详情
-              </Button>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {top10Mode === 'dateRange' && (
+                  <Tag color="purple" style={{ margin: 0 }}>{top10DateLabel}</Tag>
+                )}
+                <Button
+                  size="small"
+                  type={top10Mode === 'recent7' ? 'primary' : 'default'}
+                  onClick={handleSwitchTop10Recent7}
+                >
+                  近7天
+                </Button>
+                <Button
+                  size="small"
+                  type={top10Mode === 'dateRange' ? 'primary' : 'default'}
+                  onClick={handleOpenSkuModalByDate}
+                >
+                  按筛选日期查看
+                </Button>
+                <Button
+                  type="primary"
+                  size="small"
+                  onClick={handleOpenSkuModal}
+                >
+                  查看详情
+                </Button>
+              </div>
             </div>
           }
           bordered={false}
@@ -2825,9 +3961,9 @@ const DataAlertBot: React.FC = () => {
         >
           <div style={{ flex: 1, overflow: 'auto' }}>
             <div style={{ padding: '4px 0' }}>
-              {skuSalesData.map((record, index) => {
+              {(top10Mode === 'dateRange' ? top10DateData : skuSalesData).map((record, index) => {
                 const rank = index + 1;
-                const maxSales = skuSalesData[0]?.totalSales || 1;
+                const maxSales = (top10Mode === 'dateRange' ? top10DateData : skuSalesData)[0]?.totalSales || 1;
                 const percentage = (record.totalSales / maxSales) * 100;
                 
                 const getRankStyle = () => {
@@ -2944,6 +4080,7 @@ const DataAlertBot: React.FC = () => {
 
       {/* --- 第二行：SKU销量波动趋势（独立板块） */}
       <Card
+        id="section-sku-trend"
         title={
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
             <span>📈 SKU销量波动趋势</span>
@@ -3001,10 +4138,13 @@ const DataAlertBot: React.FC = () => {
               >
                 近七天top10商品波动
               </Button>
-              <Button 
-                size="small" 
+              <Button
+                size="small"
                 type={trendDateMode === 'dateRange' ? 'primary' : 'default'}
-                onClick={() => setTrendDateMode('dateRange')}
+                onClick={() => {
+                  setTrendDateMode('dateRange');
+                  loadSkuTrendForDateRange();
+                }}
               >
                 按筛选日期
               </Button>
@@ -3059,7 +4199,12 @@ const DataAlertBot: React.FC = () => {
       <Card
         title={
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-            <span>🔔 SKU销量异动检测</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              🔔 SKU销量异动检测
+              <Tag color="red" style={{ marginLeft: 4 }}>P0 ×{skuAnomalySeverityStats.P0}</Tag>
+              <Tag color="orange">P1 ×{skuAnomalySeverityStats.P1}</Tag>
+              <Tag color="blue">P2 ×{skuAnomalySeverityStats.P2}</Tag>
+            </span>
             <Button type="link" size="small" onClick={() => setShowSkuAnomalyThresholdModal(true)}>
               阈值设置
             </Button>
@@ -3082,58 +4227,135 @@ const DataAlertBot: React.FC = () => {
             { dir: 'flat', label: '持平', arrow: '→', color: '#595959', bgColor: '#f5f5f5', borderColor: '#d9d9d9' },
           ];
 
+          // 严重度标签样式
+          const severityTag = (sev: string | null) => {
+            if (!sev) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+            const color = sev === 'P0' ? 'red' : sev === 'P1' ? 'orange' : 'blue';
+            return <Tag color={color} style={{ marginRight: 0 }}>{sev}</Tag>;
+          };
+          // 最近事件摘要
+          const latestEventText = (record: any) => {
+            if (!record.events || record.events.length === 0) return <Text type="secondary" style={{ fontSize: 12 }}>无</Text>;
+            const ev = record.events[0];
+            const s = ev.startDate.slice(5).replace('-', '/');
+            const e = ev.endDate.slice(5).replace('-', '/');
+            const range = ev.days > 1 ? `${s}~${e}` : s;
+            const arrow = ev.direction === 'up' ? '↑' : '↓';
+            const color = ev.severity === 'P0' ? '#ff4d4f' : ev.severity === 'P1' ? '#fa8c16' : '#1890ff';
+            return (
+              <span style={{ fontSize: 12, color, whiteSpace: 'nowrap' }}>
+                {range} {arrow}{ev.maxAbsChange}件
+              </span>
+            );
+          };
+
           const commonColumns = [
             {
               title: 'SKU',
               dataIndex: 'sku',
               key: 'sku',
-              width: 160,
+              width: 150,
               render: (text: string, record: any) => (
-                <span style={{ fontWeight: record.isAnomaly ? 'bold' : 'normal' }}>{text}</span>
+                <span style={{ fontWeight: record.severity ? 'bold' : 'normal' }}>{text}</span>
               ),
             },
-            { title: '店铺', dataIndex: 'store', key: 'store', width: 80 },
-            { title: '最新销量', dataIndex: 'latestSales', key: 'latestSales', width: 90 },
-            { title: '最高销量', dataIndex: 'maxSales', key: 'maxSales', width: 90 },
-            { title: '最低销量', dataIndex: 'minSales', key: 'minSales', width: 90 },
+            { title: '店铺', dataIndex: 'store', key: 'store', width: 70 },
+            {
+              title: '严重度',
+              dataIndex: 'severity',
+              key: 'severity',
+              width: 70,
+              render: (val: string | null) => severityTag(val),
+            },
+            {
+              title: '异动评分',
+              dataIndex: 'anomalyScore',
+              key: 'anomalyScore',
+              width: 90,
+              sorter: (a: any, b: any) => a.anomalyScore - b.anomalyScore,
+              defaultSortOrder: 'descend' as const,
+              render: (val: number) => {
+                const color = val >= 60 ? '#ff4d4f' : val >= 30 ? '#fa8c16' : val > 0 ? '#1890ff' : '#999';
+                return <span style={{ color, fontWeight: 'bold' }}>{val}</span>;
+              },
+            },
+            {
+              title: '最近事件',
+              key: 'latestEvent',
+              width: 150,
+              render: (_: any, record: any) => latestEventText(record),
+            },
+            { title: '最新销量', dataIndex: 'latestSales', key: 'latestSales', width: 80 },
             {
               title: '日均销量',
               dataIndex: 'avgSales',
               key: 'avgSales',
-              width: 90,
-              render: (val: number) => val.toFixed(2),
+              width: 80,
+              render: (val: number) => fmtPct(val),
             },
             {
               title: '近期趋势',
               key: 'recent',
-              width: 90,
+              width: 80,
               render: (_: any, record: any) => {
                 const d = record.latestDirection;
                 const color = d === 'up' ? '#ff4d4f' : d === 'down' ? '#1890ff' : '#999';
                 const arrow = d === 'up' ? '↑' : d === 'down' ? '↓' : '→';
-                return <span style={{ color, fontWeight: 'bold', fontSize: 15 }}>{arrow}</span>;
+                return (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                    <span style={{ color, fontWeight: 'bold', fontSize: 15 }}>{arrow}</span>
+                    {record.dataIncomplete && (
+                      <Tooltip title="昨日数据未完整，近期趋势按T-2计算">
+                        <span style={{ fontSize: 12, color: '#faad14' }}>⚠</span>
+                      </Tooltip>
+                    )}
+                  </span>
+                );
               },
             },
             {
               title: '最大波动',
               dataIndex: 'fluctuation',
               key: 'fluctuation',
-              width: 100,
+              width: 90,
               render: (val: number, record: any) => {
-                const color = record.isAnomaly ? '#ff4d4f' : '#52c41a';
-                const d = record.latestDirection;
-                const arrow = d === 'up' ? '↑' : d === 'down' ? '↓' : '→';
-                return (
-                  <span style={{ color, fontWeight: 'bold' }}>
-                    {arrow} {val.toFixed(1)}%
-                  </span>
-                );
+                const color = record.severity ? '#ff4d4f' : '#999';
+                return <span style={{ color }}>{fmtPct(val)}%</span>;
               },
             },
           ];
 
+          // 事件时间线（展开行顶部）
+          const renderEvents = (record: any) => {
+            if (!record.events || record.events.length === 0) return null;
+            return (
+              <div style={{ marginBottom: 12 }}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>异动事件（连续异动日合并）：</Text>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {record.events.map((ev: any, idx: number) => {
+                    const color = ev.severity === 'P0' ? '#ff4d4f' : ev.severity === 'P1' ? '#fa8c16' : '#1890ff';
+                    const s = ev.startDate.slice(5).replace('-', '/');
+                    const e = ev.endDate.slice(5).replace('-', '/');
+                    const range = ev.days > 1 ? `${s} ~ ${e}` : s;
+                    const arrow = ev.direction === 'up' ? '↑ 上涨' : '↓ 下跌';
+                    return (
+                      <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                        <Tag color={ev.severity === 'P0' ? 'red' : ev.severity === 'P1' ? 'orange' : 'blue'} style={{ marginRight: 0 }}>{ev.severity}</Tag>
+                        <span style={{ color: '#333' }}>{range}</span>
+                        <span style={{ color: ev.direction === 'up' ? '#ff4d4f' : '#1890ff' }}>{arrow}</span>
+                        <span>最大变化 <Text strong>{ev.maxAbsChange}件</Text>（{ev.maxRelChange}%）</span>
+                        <Text type="secondary">持续{ev.days}天</Text>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          };
+
           const renderExpanded = (record: any) => (
             <div>
+              {renderEvents(record)}
               <div style={{ marginBottom: 12, display: 'flex', gap: 24, flexWrap: 'wrap' }}>
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>最新(前日)销量：</Text>
@@ -3141,7 +4363,7 @@ const DataAlertBot: React.FC = () => {
                 </div>
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>14天日均：</Text>
-                  <Text strong>{record.avgSales.toFixed(2)}</Text>
+                  <Text strong>{fmtPct(record.avgSales)}</Text>
                 </div>
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>最高销量：</Text>
@@ -3182,13 +4404,22 @@ const DataAlertBot: React.FC = () => {
                       key: 'date',
                       width: 120,
                       render: (val: string, row: any) => (
-                        <span style={{ fontWeight: row.isAnomaly ? 'bold' : 'normal' }}>
+                        <span style={{ fontWeight: row.isAnomaly ? 'bold' : 'normal', color: row.dataMissing ? '#bbb' : undefined }}>
                           {val}
                           {row.isAnomaly && <Tag color="red" style={{ marginLeft: 4 }}>异动</Tag>}
+                          {row.channel === 'B' && <Tag color="orange" style={{ marginLeft: 4 }}>起量</Tag>}
                         </span>
                       ),
                     },
-                    { title: '销量', dataIndex: 'sales', key: 'sales', width: 80 },
+                    {
+                      title: '销量',
+                      dataIndex: 'sales',
+                      key: 'sales',
+                      width: 80,
+                      render: (val: number | null, row: any) => row.dataMissing
+                        ? <Text type="secondary" style={{ fontStyle: 'italic' }}>无记录</Text>
+                        : val,
+                    },
                     {
                       title: '前日销量',
                       dataIndex: 'prevSales',
@@ -3200,8 +4431,9 @@ const DataAlertBot: React.FC = () => {
                       title: '日环比变化',
                       dataIndex: 'changeRate',
                       key: 'changeRate',
-                      width: 120,
+                      width: 110,
                       render: (val: number | null, row: any) => {
+                        if (row.channel === 'B') return <Text type="secondary" style={{ fontStyle: 'italic' }}>起量(不计环比)</Text>;
                         if (val === null) return <Text type="secondary">—</Text>;
                         const isUp = row.direction === 'up';
                         const isDown = row.direction === 'down';
@@ -3210,6 +4442,17 @@ const DataAlertBot: React.FC = () => {
                             {isUp ? '↑' : isDown ? '↓' : '→'} {Math.abs(val)}%
                           </Text>
                         );
+                      },
+                    },
+                    {
+                      title: '绝对变化',
+                      dataIndex: 'absChange',
+                      key: 'absChange',
+                      width: 90,
+                      render: (val: number | null, row: any) => {
+                        if (val === null || val === 0) return <Text type="secondary">—</Text>;
+                        const color = row.isAnomaly ? '#ff4d4f' : '#666';
+                        return <Text style={{ color, fontWeight: row.isAnomaly ? 'bold' : 'normal' }}>{val > 0 ? '+' : ''}{val}</Text>;
                       },
                     },
                   ]}
@@ -3258,7 +4501,7 @@ const DataAlertBot: React.FC = () => {
                         size="small"
                         bordered
                         style={{ borderTop: 'none' }}
-                        rowClassName={(record: any) => record.isAnomaly ? 'anomaly-row' : ''}
+                        rowClassName={(record: any) => record.severity ? 'anomaly-row' : ''}
                         expandable={{ expandedRowRender: renderExpanded }}
                         columns={commonColumns}
                       />
@@ -3281,11 +4524,12 @@ const DataAlertBot: React.FC = () => {
 
       {/* --- 超库龄SKU分布板块 */}
       <Card
+        id="section-aging"
         title={
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
             <span>📦 超库龄SKU分布</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              {productAgingLatestDate && productAgingExpanded && (
+              {productAgingLatestDate && (
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   最新更新时间：{productAgingLatestDate}
                 </Text>
@@ -3305,10 +4549,6 @@ const DataAlertBot: React.FC = () => {
         style={{ marginTop: 16 }}
       >
         {productAgingExpanded && (() => {
-          if (selectedStoreIds.length === 0) {
-            return <div style={{ textAlign: 'center', padding: '40px 0', color: '#999' }}>请先在上方筛选店铺</div>;
-          }
-
           const bucketLabels = [
             { key: 'aging_181_270', label: '181-270天', color: '#faad14' },
             { key: 'aging_271_365', label: '271-365天', color: '#fa8c16' },
@@ -3512,8 +4752,26 @@ const DataAlertBot: React.FC = () => {
 
                       {/* 右侧：完整明细表 */}
                       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
-                          全部 {drillData.length} 个 SKU 明细
+                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span>全部 {drillData.length} 个 SKU 明细</span>
+                          <Button
+                            size="small"
+                            onClick={() => {
+                              if (drillData.length === 0) return;
+                              const ws = XLSX.utils.json_to_sheet(drillData.map(d => ({
+                                '店铺': d.store,
+                                'SKU': d.sku,
+                                '数量': d.qty,
+                              })));
+                              ws['!cols'] = [{ wch: 12 }, { wch: 24 }, { wch: 10 }];
+                              const wb = XLSX.utils.book_new();
+                              XLSX.utils.book_append_sheet(wb, ws, '超库龄SKU明细');
+                              XLSX.writeFile(wb, `超库龄SKU明细_${productAgingDrillBucket}_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`);
+                              message.success('已生成Excel并开始下载');
+                            }}
+                          >
+                            下载Excel
+                          </Button>
                         </div>
                         <Table
                           dataSource={drillData.map((d, i) => ({ ...d, key: d.sku + d.store, rank: i + 1 }))}
@@ -3540,21 +4798,32 @@ const DataAlertBot: React.FC = () => {
       </Card>
 
       {/* --- 广告占比周监控 */}
-      <Card bordered={false} style={{ marginTop: 16 }}
+      <Card id="section-ad-ratio" bordered={false} style={{ marginTop: 16 }}
         title={
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontWeight: 600 }}>📊 广告占比周监控</span>
-            <Tag color={adRatioKpis.sumRatio > adRatioKpis.TH ? 'red' : 'green'} style={{ marginLeft: 4 }}>
-              阈值 {adRatioKpis.TH}% · 近14天
-            </Tag>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>📊 广告占比周监控</span>
+              <Tag color={adRatioKpis.sumRatio > adRatioKpis.TH ? 'red' : 'green'} style={{ marginLeft: 4 }}>
+                阈值 {adRatioKpis.TH}% · 近14天
+              </Tag>
+            </div>
+            <Button
+              type="link"
+              size="small"
+              icon={adRatioExpanded ? <UpOutlined /> : <DownOutlined />}
+              onClick={() => setAdRatioExpanded(v => !v)}
+            >
+              {adRatioExpanded ? '收起' : '展开'}
+            </Button>
           </div>
         }
       >
+        {adRatioExpanded && (<>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
           <div style={{ background: '#fafbfd', border: '1px solid #f0f2f8', borderRadius: 10, padding: '14px 16px' }}>
             <div style={{ fontSize: 12, color: '#888', marginBottom: 6 }}>汇总占比</div>
             <div style={{ fontSize: 22, fontWeight: 700, color: adRatioKpis.sumRatio > adRatioKpis.TH ? '#f5222d' : '#52c41a' }}>
-              {adRatioKpis.sumRatio.toFixed(2)}%
+              {fmtPct(adRatioKpis.sumRatio)}%
             </div>
             <div style={{ fontSize: 11, color: '#aaa', marginTop: 2 }}>近14天花费 ÷ 销售额</div>
           </div>
@@ -3571,7 +4840,7 @@ const DataAlertBot: React.FC = () => {
           <div style={{ background: '#fafbfd', border: '1px solid #f0f2f8', borderRadius: 10, padding: '14px 16px' }}>
             <div style={{ fontSize: 12, color: '#888', marginBottom: 6 }}>较上周变化</div>
             <div style={{ fontSize: 22, fontWeight: 700, color: adRatioKpis.weekChange == null ? '#999' : adRatioKpis.weekChange >= 0 ? '#f5222d' : '#52c41a' }}>
-              {adRatioKpis.weekChange == null ? '--' : `${adRatioKpis.weekChange >= 0 ? '+' : ''}${adRatioKpis.weekChange.toFixed(1)}%`}
+              {adRatioKpis.weekChange == null ? '--' : `${adRatioKpis.weekChange >= 0 ? '+' : ''}${fmtPct(adRatioKpis.weekChange)}%`}
             </div>
             <div style={{ fontSize: 11, color: '#aaa', marginTop: 2 }}>汇总占比环比</div>
           </div>
@@ -3585,8 +4854,8 @@ const DataAlertBot: React.FC = () => {
         </div>
 
         {/* 图表区域（同 Card 内，不单独断卡） */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16, overflow: 'visible' }}>
-          {/* 左侧：每日趋势图（柱状图 + 折线图组合） */}
+        <div style={{ marginTop: 16, overflow: 'visible' }}>
+          {/* 每日趋势图（柱状图 + 折线图组合） */}
           <div style={{ border: '1px solid #f0f2f8', borderRadius: 10, padding: 12, overflow: 'visible', position: 'relative' }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#333', marginBottom: 8 }}>
               📈 每日广告花费 & 占比趋势
@@ -3636,47 +4905,6 @@ const DataAlertBot: React.FC = () => {
                 {/* 红色虚线：15% 阈值线 */}
                 <ReferenceLine yAxisId="right" y={adRatioDailyChartData.TH} stroke="#f5222d" strokeDasharray="5 5" strokeWidth={1.5} label={{ value: `${adRatioDailyChartData.TH}%阈值`, fill: '#f5222d', fontSize: 11, position: 'right' }} />
               </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* 右侧：花费-销售散点图 */}
-          <div style={{ border: '1px solid #f0f2f8', borderRadius: 10, padding: 12, overflow: 'visible', position: 'relative' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#333', marginBottom: 8 }}>
-              🎯 花费-销售散点分布
-              <span style={{ fontSize: 11, color: '#888', fontWeight: 400, marginLeft: 6 }}>
-                （蓝：占比≤{adRatioDailyChartData.TH}% · 红：超标）
-              </span>
-            </div>
-            <ResponsiveContainer width="100%" height={260}>
-              <ScatterChart margin={{ top: 10, right: 10, left: 10, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis type="number" dataKey="ad" name="广告花费" tick={{ fontSize: 11, fill: '#1890ff' }} tickFormatter={v => `¥${(v / 1000).toFixed(0)}k`} label={{ value: '广告花费', position: 'insideBottom', offset: -2, fontSize: 11, fill: '#999' }} />
-                <YAxis type="number" dataKey="sales" name="销售额" tick={{ fontSize: 11, fill: '#52c41a' }} tickFormatter={v => `¥${(v / 1000).toFixed(0)}k`} label={{ value: '销售额', angle: -90, position: 'insideLeft', fontSize: 11, fill: '#999' }} />
-                <RechartsTooltip
-                  wrapperStyle={{ zIndex: 1000 }}
-                  cursor={{ strokeDasharray: '3 3' }}
-                  content={({ active, payload }) => {
-                    if (!active || !payload || payload.length === 0) return null;
-                    const p = payload[0].payload;
-                    return (
-                      <div style={{ background: '#fff', border: '1px solid #e8e8e8', borderRadius: 6, padding: '8px 12px', fontSize: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.15)' }}>
-                        <div style={{ fontWeight: 600, marginBottom: 4 }}>{p.adDate}</div>
-                        <div style={{ color: '#1890ff' }}>💵 广告花费：¥{p.ad.toLocaleString()}</div>
-                        <div style={{ color: '#52c41a' }}>📦 销售额：¥{p.sales.toLocaleString()}</div>
-                        <div style={{ color: p.over ? '#f5222d' : '#333', fontWeight: 600 }}>
-                          广告占比：{p.ratio}% {p.over ? '⚠️ 超标' : '✅'}
-                        </div>
-                      </div>
-                    );
-                  }}
-                />
-                {/* 蓝点：占比 ≤ 阈值 */}
-                <Scatter name="正常" data={adRatioDailyChartData.daily.filter(d => !d.over)} fill="#1890ff" fillOpacity={0.7} />
-                {/* 红点：占比 > 阈值 */}
-                <Scatter name="超标" data={adRatioDailyChartData.daily.filter(d => d.over)} fill="#f5222d" fillOpacity={0.8} />
-                {/* 灰色虚线：平均转化效率线（y = ratio_avg * x） */}
-                <ReferenceLine segment={[{ x: 0, y: 0 }, { x: Math.max(...adRatioDailyChartData.daily.map(d => d.ad)) * 1.1, y: Math.max(...adRatioDailyChartData.daily.map(d => d.sales)) * 1.1 }]} stroke="#bbb" strokeDasharray="4 4" strokeWidth={1} label={{ value: '效率线', fill: '#bbb', fontSize: 10, position: 'right' }} />
-              </ScatterChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -3742,7 +4970,7 @@ const DataAlertBot: React.FC = () => {
                 align: 'center',
                 render: (v: number) => (
                   <span style={{ fontWeight: 700, fontSize: 14, color: v > 15 ? '#f5222d' : '#1890ff' }}>
-                    {v.toFixed(2)}%
+                    {fmtPct(v)}%
                   </span>
                 ),
               },
@@ -3853,7 +5081,244 @@ const DataAlertBot: React.FC = () => {
             .ant-table-tbody > tr:hover > td { background: #f5faff !important; }
           `}</style>
         </div>
+        </>)}
       </Card>
+
+      {/* --- 购物车预警（product_buybox 未处理数据，按店铺分组：组头行带一键处理） */}
+      <Card id="section-buybox" bordered={false} style={{ marginTop: 16 }}
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontWeight: 600 }}>🛒 购物车预警</span>
+            <Tag color={buyboxRecords.length > 0 ? 'orange' : 'green'} style={{ marginLeft: 4 }}>
+              {buyboxRecords.length > 0 ? `未处理 ${buyboxRecords.length} 条` : '暂无预警'}
+            </Tag>
+          </div>
+        }
+        extra={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Button
+              type="link"
+              size="small"
+              icon={buyboxExpanded ? <UpOutlined /> : <DownOutlined />}
+              onClick={() => setBuyboxExpanded(v => !v)}
+            >
+              {buyboxExpanded ? '收起' : '展开'}
+            </Button>
+            <Button size="small" onClick={openProcessedModal}>查看已处理</Button>
+            <Button size="small" onClick={loadBuyboxRecords} loading={buyboxLoading}>刷新</Button>
+          </div>
+        }
+      >
+        {buyboxExpanded && (
+        <Table<BuyboxRow>
+          rowKey="id"
+          size="small"
+          tableLayout="fixed"
+          className="buybox-table"
+          loading={buyboxLoading}
+          dataSource={buyboxTableRows}
+          pagination={buyboxTableRows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
+          locale={{ emptyText: '当前筛选店铺下没有未处理的购物车预警' }}
+          onRow={(record) => record.isGroup ? { style: { background: '#fafafa' } } : {}}
+          columns={[
+            {
+              title: '日期', key: 'main', width: 160,
+              onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 3 : 1 }),
+              render: (_, record: BuyboxRow) => {
+                if (record.isGroup) {
+                  return (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>
+                        <Text strong style={{ fontSize: 13 }}>🏪 {record.store}</Text>
+                        <Tag color="orange" style={{ marginLeft: 8 }}>未处理 {record.count} 条</Tag>
+                      </span>
+                      <Button
+                        type="primary"
+                        size="small"
+                        style={{ background: '#389e0d', borderColor: '#389e0d' }}
+                        onClick={() => handleBuyboxProcessAll(record.store, record.groupIds || [])}
+                      >
+                        一键处理
+                      </Button>
+                    </div>
+                  );
+                }
+                return record.date;
+              },
+            },
+            {
+              title: 'SKU', dataIndex: 'sku', key: 'sku', width: 180, ellipsis: true,
+              onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
+            },
+            {
+              title: '品名', dataIndex: 'product_name', key: 'product_name', ellipsis: false,
+              onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
+              render: (_, record: BuyboxRow) => {
+                if (record.isGroup) return null;
+                return (
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingRight: 110 }}>
+                      {record.product_name || '--'}
+                    </span>
+                    <Button
+                      className="row-process-btn"
+                      type="primary"
+                      size="small"
+                      style={{
+                        position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                        background: '#52c41a', borderColor: '#52c41a',
+                      }}
+                      onClick={() => handleBuyboxProcess(record.id)}
+                    >
+                      已处理
+                    </Button>
+                  </div>
+                );
+              },
+            },
+          ]}
+        />
+        )}
+      </Card>
+
+      {/* --- 购物车预警：已处理记录弹窗 */}
+      <Modal
+        title={`已处理记录（${processedRecords.length} 条）`}
+        visible={processedModalVisible}
+        onCancel={() => setProcessedModalVisible(false)}
+        footer={null}
+        width={640}
+      >
+        <Table<BuyboxRecord>
+          rowKey="id"
+          size="small"
+          loading={processedLoading}
+          dataSource={processedRecords}
+          pagination={processedRecords.length > 10 ? { pageSize: 10, showSizeChanger: false } : false}
+          locale={{ emptyText: '暂无已处理记录' }}
+          columns={[
+            { title: '日期', dataIndex: 'date', key: 'date', width: 95 },
+            { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 120, ellipsis: true },
+            { title: '品名', dataIndex: 'product_name', key: 'product_name', ellipsis: true, render: (v: string | null) => v || '--' },
+            { title: '店铺', dataIndex: 'store', key: 'store', width: 90 },
+          ]}
+        />
+      </Modal>
+
+      {/* --- 货件预警（product_shipment_notice 未处理数据，按店铺分组：组头行带一键处理） */}
+      <Card id="section-shipment" bordered={false} style={{ marginTop: 16 }}
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontWeight: 600 }}>🚚 货件预警</span>
+            <Tag color={shipmentRecords.length > 0 ? 'orange' : 'green'} style={{ marginLeft: 4 }}>
+              {shipmentRecords.length > 0 ? `未处理 ${shipmentRecords.length} 条` : '暂无预警'}
+            </Tag>
+          </div>
+        }
+        extra={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Button
+              type="link"
+              size="small"
+              icon={shipmentExpanded ? <UpOutlined /> : <DownOutlined />}
+              onClick={() => setShipmentExpanded(v => !v)}
+            >
+              {shipmentExpanded ? '收起' : '展开'}
+            </Button>
+            <Button size="small" onClick={openShipmentProcessedModal}>查看已确认</Button>
+            <Button size="small" onClick={loadShipmentRecords} loading={shipmentLoading}>刷新</Button>
+          </div>
+        }
+      >
+        {shipmentExpanded && (
+        <Table<ShipmentRow>
+          rowKey="id"
+          size="small"
+          tableLayout="fixed"
+          className="buybox-table"
+          loading={shipmentLoading}
+          dataSource={shipmentTableRows}
+          pagination={shipmentTableRows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
+          locale={{ emptyText: '当前筛选店铺下没有未处理的货件预警' }}
+          onRow={(record) => (record.isGroup || record.isDateGroup) ? { style: { background: record.isGroup ? '#fafafa' : '#fcfcfc' } } : {}}
+          columns={[
+            {
+              title: '日期', key: 'main', width: 160,
+              onCell: (record: ShipmentRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 3 : 1 }),
+              render: (_, record: ShipmentRow) => {
+                if (record.isGroup) {
+                  return (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>
+                        <Text strong style={{ fontSize: 13 }}>🏪 {record.store}</Text>
+                        <Tag color="orange" style={{ marginLeft: 8 }}>未处理 {record.count} 条</Tag>
+                      </span>
+                      <Button
+                        type="primary"
+                        size="small"
+                        style={{ background: '#389e0d', borderColor: '#389e0d' }}
+                        onClick={() => handleShipmentProcessAll(record.store, record.groupIds || [])}
+                      >
+                        一键确认
+                      </Button>
+                    </div>
+                  );
+                }
+                if (record.isDateGroup) {
+                  return (
+                    <span>
+                      <Text type="secondary" style={{ fontSize: 12 }}>📅 {record.date}</Text>
+                      <Tag style={{ marginLeft: 8 }}>{record.dateCount} 条</Tag>
+                      <Button
+                        type="primary"
+                        size="small"
+                        style={{ marginLeft: 8, background: '#52c41a', borderColor: '#52c41a' }}
+                        onClick={() => handleShipmentConfirmDate(record.store, record.date, record.dateIds || [])}
+                      >
+                        已确认
+                      </Button>
+                    </span>
+                  );
+                }
+                return record.date;
+              },
+            },
+            {
+              title: '店铺', dataIndex: 'store', key: 'store', width: 120,
+              onCell: (record: ShipmentRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 0 : 1 }),
+            },
+            {
+              title: '货件编码', dataIndex: 'shipment_code', key: 'shipment_code', ellipsis: true,
+              onCell: (record: ShipmentRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 0 : 1 }),
+              render: (v: string | null) => v || '--',
+            },
+          ]}
+        />
+        )}
+      </Card>
+
+      {/* --- 货件预警：已确认记录弹窗 */}
+      <Modal
+        title={`已确认记录（${shipmentProcessedRecords.length} 条）`}
+        visible={shipmentProcessedModalVisible}
+        onCancel={() => setShipmentProcessedModalVisible(false)}
+        footer={null}
+        width={640}
+      >
+        <Table<ShipmentRecord>
+          rowKey="id"
+          size="small"
+          loading={shipmentProcessedLoading}
+          dataSource={shipmentProcessedRecords}
+          pagination={shipmentProcessedRecords.length > 10 ? { pageSize: 10, showSizeChanger: false } : false}
+          locale={{ emptyText: '暂无已处理记录' }}
+          columns={[
+            { title: '日期', dataIndex: 'date', key: 'date', width: 95 },
+            { title: '货件编码', dataIndex: 'shipment_code', key: 'shipment_code', width: 180, ellipsis: true },
+            { title: '店铺', dataIndex: 'store', key: 'store', width: 90 },
+          ]}
+        />
+      </Modal>
 
       {/* --- 阈值设置弹窗 */}
       <Modal
@@ -4305,9 +5770,91 @@ const DataAlertBot: React.FC = () => {
         </div>
       </Modal>
 
+      {/* --- 悬浮球：悬停展开导航（可拖拽移动，菜单面板绝对定位，不挤压球的位置） */}
+      {(() => {
+        // 球在下半屏（或未拖动时的默认右下角）菜单向上弹出；上半屏向下弹出；左半屏左对齐、右半屏右对齐
+        const menuAbove = ballPos ? ballPos.top >= window.innerHeight / 2 : true;
+        const alignLeft = ballPos ? ballPos.left < window.innerWidth / 2 : false;
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              right: ballPos ? 'auto' : 24,
+              bottom: ballPos ? 'auto' : 32,
+              left: ballPos ? ballPos.left : 'auto',
+              top: ballPos ? ballPos.top : 'auto',
+              zIndex: 1050,
+              width: 48,
+              height: 48,
+            }}
+            onMouseEnter={() => setSectionNavOpen(true)}
+            onMouseLeave={() => setSectionNavOpen(false)}
+          >
+            {sectionNavOpen && (
+              <div style={{
+                position: 'absolute',
+                ...(menuAbove
+                  ? { bottom: '100%', paddingBottom: 10 }
+                  : { top: '100%', paddingTop: 10 }),
+                ...(alignLeft ? { left: 0 } : { right: 0 }),
+              }}>
+                <div style={{
+                  background: '#fff',
+                  border: '1px solid #e8e8e8',
+                  borderRadius: 10,
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                  padding: '8px 0',
+                  minWidth: 180,
+                }}>
+                  {SECTION_NAVS.map(nav => (
+                    <div
+                      key={nav.id}
+                      onClick={() => handleSectionNavClick(nav.id)}
+                      style={{
+                        padding: '7px 16px',
+                        fontSize: 13,
+                        color: '#333',
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                        transition: 'background 0.15s',
+                      }}
+                      onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = '#f5f5f5'; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+                    >
+                      {nav.title}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div style={{
+              width: 48,
+              height: 48,
+              borderRadius: '50%',
+              background: 'linear-gradient(135deg, #7e57c2, #5e35b1)',
+              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'grab',
+              boxShadow: '0 4px 12px rgba(94,53,177,0.4)',
+              userSelect: 'none',
+              transition: 'box-shadow 0.15s',
+            }}
+              onMouseDown={handleBallMouseDown}
+              onClick={handleBallClick}
+            >
+              {sectionNavOpen ? '收起' : '导航'}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* --- 商品销量详情弹窗 */}
       <Modal
-        title="📦 商品销量详情"
+        title={<span>📦 商品销量详情 {skuModalDateLabel && <Tag color="blue" style={{ marginLeft: 8 }}>{skuModalDateLabel}</Tag>}</span>}
         visible={showSkuModal}
         onCancel={() => {
           setShowSkuModal(false);
@@ -4316,7 +5863,7 @@ const DataAlertBot: React.FC = () => {
         footer={null}
         width={800}
       >
-        <div style={{ marginBottom: '16px' }}>
+        <div style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Input
             placeholder="搜索SKU"
             prefix={<SearchOutlined />}
@@ -4324,6 +5871,9 @@ const DataAlertBot: React.FC = () => {
             onChange={(e) => setSkuSearchValue(e.target.value)}
             style={{ width: 250 }}
           />
+          <span style={{ fontSize: 12, color: '#888' }}>
+            统计范围：近 7 天（{dayjs().subtract(1, 'day').subtract(6, 'day').format('YYYY-MM-DD')} ~ {dayjs().subtract(1, 'day').format('YYYY-MM-DD')}）
+          </span>
         </div>
         <Table
           columns={[
@@ -4353,8 +5903,10 @@ const DataAlertBot: React.FC = () => {
                   { title: '日期', dataIndex: 'date', key: 'date', width: 120 },
                   { title: '销量', dataIndex: 'sales', key: 'sales', width: 100 },
                 ]}
-                dataSource={record.stores}
-                rowKey={(store: any) => `${store.storeId}-${store.date}`}
+                dataSource={[...record.stores].sort((a: any, b: any) =>
+                  a.storeName.localeCompare(b.storeName) || (a.date < b.date ? -1 : 1)
+                )}
+                rowKey={(store: any) => `${store.storeName}-${store.date}`}
                 pagination={false}
                 size="small"
                 style={{ margin: '16px 0 0 48px' }}
@@ -4363,6 +5915,92 @@ const DataAlertBot: React.FC = () => {
             rowExpandable: () => true,
           }}
         />
+      </Modal>
+
+      {/* 趋势图日期饼图独立弹窗 */}
+      <Modal
+        open={!!trendPieModal}
+        onCancel={() => setTrendPieModal(null)}
+        footer={null}
+        width={600}
+        centered
+        title={trendPieModal ? (
+          <span>{trendPieModal.date} 各店铺{trendPieModal.chart === 'orders' ? '订单量' : '广告占比'}</span>
+        ) : null}
+      >
+        {trendPieModal && (
+          <>
+            {trendPieModalData.length === 0 ? (
+              <div style={{ fontSize: '14px', color: '#999', padding: '32px 0', textAlign: 'center' }}>当天暂无数据</div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
+                  <PieChart width={420} height={300}>
+                    <Pie
+                      data={trendPieModalData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={110}
+                      paddingAngle={2}
+                      stroke="#fff"
+                      label={(entry: any) => entry.name}
+                    >
+                      {trendPieModalData.map(item => (
+                        <Cell key={item.name} fill={item.color} />
+                      ))}
+                    </Pie>
+                    <RechartsTooltip
+                      formatter={(value: any, name: any) => [
+                        trendPieModal.chart === 'orders' ? `${Number(value).toLocaleString()} 单` : `${fmtPct(Number(value))}%`,
+                        name,
+                      ]}
+                      wrapperStyle={{ zIndex: 1200 }}
+                    />
+                  </PieChart>
+                </div>
+                <Table
+                  size="small"
+                  pagination={false}
+                  dataSource={trendPieModalData.map((item, idx) => ({ key: idx, ...item }))}
+                  columns={[
+                    {
+                      title: '店铺',
+                      dataIndex: 'name',
+                      render: (_: any, record: any) => (
+                        <span style={{ display: 'flex', alignItems: 'center' }}>
+                          <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: record.color, marginRight: 8, flexShrink: 0 }} />
+                          {record.name}
+                        </span>
+                      ),
+                    },
+                    {
+                      title: trendPieModal.chart === 'orders' ? '订单量' : '广告占比',
+                      dataIndex: 'value',
+                      align: 'right' as const,
+                      render: (value: number) => (
+                        <span style={{ fontWeight: 600 }}>
+                          {trendPieModal.chart === 'orders' ? value.toLocaleString() : `${fmtPct(value)}%`}
+                        </span>
+                      ),
+                    },
+                    {
+                      title: '占比',
+                      align: 'right' as const,
+                      defaultSortOrder: 'descend' as const,
+                      sorter: (a: any, b: any) => a.value - b.value,
+                      render: (_: any, record: any) => {
+                        const total = trendPieModalData.reduce((s, i) => s + i.value, 0);
+                        return <span style={{ color: '#999' }}>{total > 0 ? `${((record.value / total) * 100).toFixed(0)}%` : '0%'}</span>;
+                      },
+                    },
+                  ]}
+                />
+              </>
+            )}
+          </>
+        )}
       </Modal>
 
     </div>

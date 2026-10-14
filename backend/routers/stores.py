@@ -17,7 +17,7 @@ class StoreCreate(BaseModel):
     platform: str = "amazon"
     site: Optional[str] = None
     shop_abbr: str
-    department_id: Optional[int] = None
+    group_id: Optional[int] = None
 
 
 class StoreUpdate(BaseModel):
@@ -27,7 +27,6 @@ class StoreUpdate(BaseModel):
     site: Optional[str] = None
     inventory_name: Optional[str] = None
     shop_abbr: Optional[str] = None
-    department_id: Optional[int] = None
     group_id: Optional[int] = None
     status: Optional[str] = None
 
@@ -291,8 +290,8 @@ async def create_store(
 ):
     try:
         insert_sql = text("""
-            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, inventory_name, shop_abbr, department_id)
-            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :inventory_name, :shop_abbr, :department_id)
+            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, inventory_name, shop_abbr, group_id)
+            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :inventory_name, :shop_abbr, :group_id)
         """)
         result = db.execute(insert_sql, {
             "tenant_id": current_user.tenant_id,
@@ -302,7 +301,7 @@ async def create_store(
             "site": store_data.site,
             "inventory_name": store_data.inventory_name,
             "shop_abbr": store_data.shop_abbr,
-            "department_id": store_data.department_id,
+            "group_id": store_data.group_id,
         })
         db.commit()
         return {
@@ -348,10 +347,8 @@ async def update_store(
         if store_data.shop_abbr is not None:
             updates.append("shop_abbr = :shop_abbr")
             params["shop_abbr"] = store_data.shop_abbr
-        if store_data.department_id is not None:
-            updates.append("department_id = :department_id")
-            params["department_id"] = store_data.department_id
-        if hasattr(store_data, 'group_id'):
+        # 仅在显式传入分组时更新（清空分组请使用 /batch-update-group 接口传 null）
+        if store_data.group_id is not None:
             updates.append("group_id = :group_id")
             params["group_id"] = store_data.group_id
         if store_data.status is not None:
@@ -389,49 +386,59 @@ async def delete_store(
         raise HTTPException(status_code=500, detail=f"删除店铺失败: {str(e)}")
 
 
-class BatchUpdateDepartmentRequest(BaseModel):
+class BatchUpdateGroupRequest(BaseModel):
     store_ids: List[int]
-    department_id: Optional[int] = None
+    group_id: Optional[int] = None
 
 
-@router.post("/batch-update-department")
-async def batch_update_department(
-    request: BatchUpdateDepartmentRequest,
+@router.post("/batch-update-group")
+async def batch_update_group(
+    request: BatchUpdateGroupRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin_user)
 ):
+    """批量分配店铺分组（group_id 传 null 表示取消分组）"""
     try:
         if not request.store_ids:
             raise HTTPException(status_code=400, detail="请选择要更新的店铺")
-        
+
         # 验证所有店铺都属于当前租户
         placeholders = ",".join([f":id_{i}" for i in range(len(request.store_ids))])
         params = {f"id_{i}": store_id for i, store_id in enumerate(request.store_ids)}
         params["tenant_id"] = current_user.tenant_id
-        
+
         check_query = text(f"""
-            SELECT COUNT(*) FROM stores 
+            SELECT COUNT(*) FROM stores
             WHERE id IN ({placeholders}) AND tenant_id = :tenant_id
         """)
         count_result = db.execute(check_query, params)
         count = count_result.fetchone()[0]
-        
+
         if count != len(request.store_ids):
             raise HTTPException(status_code=400, detail="部分店铺不存在或无权限")
-        
+
+        # 验证分组存在且属于当前租户
+        if request.group_id is not None:
+            group_check = db.execute(
+                text("SELECT id FROM store_groups WHERE id = :gid AND tenant_id = :tid AND deleted_at IS NULL"),
+                {"gid": request.group_id, "tid": current_user.tenant_id}
+            ).fetchone()
+            if not group_check:
+                raise HTTPException(status_code=400, detail="店铺分组不存在")
+
         # 批量更新
         update_params = params.copy()
-        update_params["department_id"] = request.department_id
-        
+        update_params["group_id"] = request.group_id
+
         update_query = text(f"""
-            UPDATE stores 
-            SET department_id = :department_id, updated_at = NOW()
+            UPDATE stores
+            SET group_id = :group_id, updated_at = NOW()
             WHERE id IN ({placeholders}) AND tenant_id = :tenant_id
         """)
         db.execute(update_query, update_params)
         db.commit()
-        
-        return {"success": True, "message": f"成功更新 {count} 个店铺的部门"}
+
+        return {"success": True, "message": f"成功更新 {count} 个店铺的分组"}
     except HTTPException:
         raise
     except Exception as e:

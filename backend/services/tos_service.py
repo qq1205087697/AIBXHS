@@ -42,6 +42,8 @@ def _get_tos_client():
         settings.TOS_SECRET_KEY,
         settings.TOS_ENDPOINT,
         settings.TOS_REGION,
+        dns_cache_time=0,  # 关闭 SDK 的全局 DNS 缓存 hook：默认会替换 urllib3 的 create_connection，
+                           # 导致进程内所有 requests 连接（如 H3 轮询）每 15 秒打一行 tos INFO 日志
     )
     logger.info("TOS 客户端已初始化: bucket=%s, endpoint=%s",
                 settings.TOS_BUCKET, settings.TOS_ENDPOINT)
@@ -175,6 +177,56 @@ def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
     }
     content_type = ct_map.get(ext, "video/mp4")
     return upload_file(file_bytes, file_name, content_type=content_type, subdir="videos", custom_name=custom_name)
+
+
+def rename_file(src_url: str, new_name: str) -> str:
+    """服务端复制对象为新名称（保留原对象），返回新公网 URL。
+
+    用于 AI视频/高清处理结果绑定产品时改名为「产品编码_序号」：
+    仅在桶内复制（CopyObject），不下载上传大文件，也不删除源对象
+    （AI视频/高清处理任务历史仍引用源地址）。复制失败抛异常，由调用方决定回退。
+    """
+    from urllib.parse import urlparse, unquote
+
+    settings = get_settings()
+    client = _get_tos_client()
+
+    src_key = unquote(urlparse(src_url).path.lstrip("/"))
+    _, ext = os.path.splitext(src_key)
+    ext = ext.lower() or ".mp4"
+
+    prefix = (settings.TOS_PREFIX or "").strip("/")
+    new_key = f"{prefix}/videos/{new_name}{ext}" if prefix else f"videos/{new_name}{ext}"
+
+    try:
+        import tos
+    except ImportError:
+        raise RuntimeError("未安装 tos SDK，请运行: pip install tos==2.9.2")
+
+    copy_kwargs = {
+        "bucket": settings.TOS_BUCKET,
+        "key": new_key,
+        "src_bucket": settings.TOS_BUCKET,
+        "src_key": src_key,
+    }
+    try:
+        # 新版 SDK 支持 copy 时携带 ACL
+        copy_kwargs["acl"] = tos.ACLType.ACL_Public_Read
+        client.copy_object(**copy_kwargs)
+    except (AttributeError, TypeError):
+        # 旧版 SDK 签名不同，先复制再补 ACL
+        copy_kwargs.pop("acl", None)
+        client.copy_object(**copy_kwargs)
+        try:
+            client.put_object_acl(
+                bucket=settings.TOS_BUCKET, key=new_key, acl=tos.ACLType.ACL_Public_Read
+            )
+        except Exception:
+            pass
+
+    new_url = _build_public_url(new_key)
+    logger.info("TOS 复制改名: %s -> %s", src_key, new_key)
+    return new_url
 
 
 def delete_file(file_url: str) -> bool:

@@ -45,6 +45,21 @@
   gap: 8px;
 }
 
+/* 补货管理：表体在容器内滚动时表头吸顶固定
+   注意1：antd v5 表头 th 默认 position:relative 且 css-in-js 运行时注入，
+   同特异性下会覆盖本文件样式，故 position 必须 !important
+   注意2：antd 的 .ant-table-content 为 overflow:hidden，会困住 sticky
+   （sticky 只相对最近的 overflow 祖先吸附），必须放开为 visible，
+   让垂直/水平滚动统一由外层 .replenish-scroll-container 承担 */
+.replenish-scroll-container .ant-table-content {
+  overflow: visible !important;
+}
+.replenish-scroll-container .ant-table-thead > tr > th {
+  position: sticky !important;
+  top: 0;
+  z-index: 2;
+}
+
 /* 弹窗内表单项网格布局 */
 .responsive-form-grid {
   display: grid;

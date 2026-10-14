@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -7,10 +7,13 @@ from sqlalchemy import text
 from datetime import datetime
 from urllib.parse import quote
 import io
+import json
 import logging
 import pandas as pd
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.worksheet.datavalidation import DataValidation
 
 logger = logging.getLogger(__name__)
 
@@ -81,17 +84,23 @@ def set_required_header_style(worksheet):
         pass
 
 
-def create_replenishment_excel_template() -> io.BytesIO:
-    """创建补货申请Excel模板"""
+def create_replenishment_excel_template(group_names: Optional[list] = None) -> io.BytesIO:
+    """创建补货申请Excel模板
+
+    - 店铺分组：下拉选项（数据来源为系统内全部分组），必填
+    - 产品编码/SKU：选填（与品名至少填一项）
+    - 品名：选填（与产品编码/SKU至少填一项）
+    """
     data = {
-        "店铺分组": ["", "华东组", "华南组"],
-        "产品编码/SKU": ["", "1001", "SKU-001"],
+        "店铺分组": ["", "A美", "B欧"],
+        "产品编码/SKU": ["", "1001", ""],
+        "品名": ["", "样例产品A", "样例产品B"],
         "补货数量": [0, 50, 100],
-        "备注": ["", "样例备注1", "样例备注2"]
+        "备注": ["", "样例备注1", "SKU为空时按品名匹配"]
     }
     df = pd.DataFrame(data)
 
-    required_cols = ["产品编码/SKU", "补货数量"]
+    required_cols = ["店铺分组", "补货数量"]
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -105,24 +114,58 @@ def create_replenishment_excel_template() -> io.BytesIO:
         set_auto_column_width(worksheet)
         set_required_header_style(worksheet)
 
+        # 店铺分组下拉选项：写入隐藏工作表 + 命名区域（兼容任意数量/长度的分组名）
+        names = [str(n).strip() for n in (group_names or []) if str(n).strip()]
+        if names:
+            wb = writer.book
+            ws_opt = wb.create_sheet("分组选项")
+            for i, name in enumerate(names, 1):
+                ws_opt.cell(row=i, column=1, value=name)
+            ws_opt.sheet_state = 'hidden'
+            ref = f"分组选项!$A$1:$A${len(names)}"
+            defined = DefinedName("StoreGroups", attr_text=ref)
+            try:
+                wb.defined_names["StoreGroups"] = defined
+            except TypeError:
+                wb.defined_names.append(defined)
+            dv = DataValidation(type="list", formula1="StoreGroups", allow_blank=True)
+            dv.error = "请从下拉列表中选择店铺分组"
+            dv.errorTitle = "输入无效"
+            ws = writer.sheets['补货模板']
+            ws.add_data_validation(dv)
+            dv.add("A2:A1000")
+
     output.seek(0)
     return output
 
 
-def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) -> List[dict]:
-    """解析补货申请Excel，匹配产品返回预览数据。按店铺分组聚合，每组返回一个对象。"""
+def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int, name_overrides: Optional[dict] = None) -> dict:
+    """解析补货申请Excel，匹配产品返回预览数据。按店铺分组聚合，每组返回一个对象。
+
+    匹配顺序：产品编码 → 平台SKU → 品名（精确匹配）。
+    name_overrides: {行号: 品名} 覆盖（缺失信息弹窗中用户编辑并创建产品后，Excel中仍是旧品名，重新解析时用编辑后的品名匹配）。
+    返回: {groups, errors, pending_platform_skus, new_products}
+    - pending_platform_skus: 品名匹配成功但SKU缺平台商品的行（可直接导入，弹窗引导补建平台信息）
+    - new_products: 全新品待创建行（品名可空，弹窗中补填后创建）
+    """
     df = pd.read_excel(io.BytesIO(file_bytes))
     df.columns = df.columns.str.strip()
 
     col_mapping = {
         "店铺分组": "store_group",
         "店铺分组（选填）": "store_group",
+        "*店铺分组": "store_group",
         "产品编码/SKU": "sku",
         "产品编码/SKU（必填）": "sku",
         "*产品编码/SKU": "sku",
         "产品编码": "sku",
         "*产品编码": "sku",
         "SKU": "sku",
+        "品名": "product_name",
+        "产品名称": "product_name",
+        "品名（选填）": "product_name",
+        "产品名称（选填）": "product_name",
+        "*品名": "product_name",
         "补货数量": "quantity",
         "补货数量（必填）": "quantity",
         "*补货数量": "quantity",
@@ -147,16 +190,49 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
     product_code_map = {}
     for p in all_products:
         code = str(p[1]).strip().lower()
-        product_code_map[code] = (p[0], p[2], p[3])
+        product_code_map[code] = (p[0], p[1], p[2], p[3])
+
+    # 品名 -> 产品列表映射（同名产品可能有多个，需报错提示）
+    product_name_map = {}
+    for p in all_products:
+        pname = str(p[2]).strip().lower() if p[2] else ""
+        if pname:
+            product_name_map.setdefault(pname, []).append(p)
 
     # 平台SKU -> product_id 映射
     platform_skus = db.execute(text("""
-        SELECT pp.sku, pp.product_id
+        SELECT pp.sku, pp.product_id, pp.store_id
         FROM platform_products pp
         JOIN products p ON p.id = pp.product_id
         WHERE p.tenant_id = :tid AND pp.deleted_at IS NULL AND p.deleted_at IS NULL
     """), {"tid": tenant_id}).fetchall()
     platform_sku_map = {str(s[0]).strip().lower(): s[1] for s in platform_skus if s[0]}
+    # 每个产品已有的平台SKU集合（用于检查平台信息完整性：编码命中但缺平台记录时提示补建）
+    product_platform_skus = {}
+    for s in platform_skus:
+        if s[0]:
+            product_platform_skus.setdefault(s[1], set()).add(str(s[0]).strip().lower())
+    # 产品 -> 已覆盖平台商品的店铺集合（store_id 为 JSON 数组，如 '[55]'）
+    product_platform_store_map = {}
+    for s in platform_skus:
+        try:
+            sids = json.loads(s[2]) if s[2] else []
+        except (json.JSONDecodeError, TypeError):
+            sids = []
+        store_set = product_platform_store_map.setdefault(s[1], set())
+        for sid in sids:
+            try:
+                store_set.add(int(sid))
+            except (ValueError, TypeError):
+                continue
+
+    # 店铺分组 -> 分组下店铺集合
+    group_stores_map = {}
+    for s in db.execute(text("""
+        SELECT group_id, id FROM stores
+        WHERE tenant_id = :tid AND deleted_at IS NULL AND group_id IS NOT NULL
+    """), {"tid": tenant_id}).fetchall():
+        group_stores_map.setdefault(s[0], set()).add(s[1])
 
     # 查询店铺分组列表，用于名称→ID映射
     store_groups = db.execute(text("""
@@ -166,60 +242,196 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
 
     items = []
     row_errors = []
+    pending_platform_skus = []
+    new_products = []
     for idx, row in df.iterrows():
         row_no = idx + 2
         sku = str(row["sku"]).strip() if pd.notna(row["sku"]) else ""
+        if sku == "nan":
+            sku = ""
         quantity = int(row["quantity"]) if pd.notna(row["quantity"]) else 0
+
+        # 品名列（选填）
+        product_name_from_row = ""
+        if "product_name" in df.columns:
+            pn_val = row.get("product_name")
+            product_name_from_row = str(pn_val).strip() if pd.notna(pn_val) else ""
+        if product_name_from_row == "nan":
+            product_name_from_row = ""
+        # 品名覆盖：缺失信息弹窗中用户编辑品名并创建产品后，Excel中仍是旧品名，重新解析时用编辑后的品名
+        override_name = (name_overrides or {}).get(str(row_no))
+        if override_name and str(override_name).strip():
+            product_name_from_row = str(override_name).strip()
+
+        notes = str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
+
+        # 店铺分组原始值（用于空行判断）
+        sg_raw = ""
+        if "store_group" in df.columns:
+            sg_raw = str(row["store_group"]).strip() if pd.notna(row.get("store_group")) else ""
+            if sg_raw == "nan":
+                sg_raw = ""
+
+        # 纯空行（Excel 尾部带格式的空行）直接跳过，不报错
+        if not sku and not product_name_from_row and quantity <= 0 and not notes and not sg_raw:
+            continue
 
         # 收集该行所有错误，最后一次性抛出，避免用户每次只能看到一条
         errs = []
-        if not sku or sku == "nan":
-            errs.append("产品编码/SKU不能为空")
         if quantity <= 0:
             errs.append("补货数量必须大于0")
+        if not sku and not product_name_from_row:
+            errs.append("产品编码/SKU与品名不能同时为空，至少填写一项")
+        if not sg_raw:
+            errs.append("店铺分组不能为空")
 
-        # 先按产品编码匹配，再按平台SKU匹配
+        # 先按产品编码匹配，再按平台SKU匹配，最后按品名匹配（SKU为空时仍可按品名匹配）
         product_id = None
         product_name = ""
-        val_lower = sku.lower()
+        product_code = ""  # 预览中显示产品真实编码
 
-        if not errs:
-            if val_lower in product_code_map:
-                pid, pname, pprice = product_code_map[val_lower]
+        # 品名匹配成功（缺平台SKU候选）/ 全新品待创建
+        pending_entry = None
+        new_entry = None
+        # 平台信息完整性待检查的产品ID（延后到分组解析后统一判断）
+        platform_check_pid = None
+
+        val_lower = sku.lower()
+        name_key = product_name_from_row.lower()
+        name_hits = product_name_map.get(name_key) if name_key else None
+
+        # 匹配优先级：品名（用户明确指定，唯一命中时优先）> 产品编码 > 平台SKU
+        if name_hits and len(name_hits) == 1:
+            p = name_hits[0]
+            product_id = p[0]
+            product_code = p[1] or ""
+            product_name = p[2] or ""
+            # 冲突校验：SKU/编码已绑定其他产品时，说明行数据自相矛盾，报错让用户修正
+            conflict_desc = ""
+            if sku:
+                if val_lower in product_code_map and product_code_map[val_lower][0] != product_id:
+                    cp = next((x for x in all_products if x[0] == product_code_map[val_lower][0]), None)
+                    conflict_desc = f"产品编码 '{sku}' 已属于产品 [{cp[1] if cp else ''} {cp[2] if cp else ''}]"
+                elif val_lower in platform_sku_map and platform_sku_map[val_lower] != product_id:
+                    cp = next((x for x in all_products if x[0] == platform_sku_map[val_lower]), None)
+                    conflict_desc = f"SKU '{sku}' 已绑定产品 [{cp[1] if cp else ''} {cp[2] if cp else ''}]"
+            if conflict_desc:
+                errs.append(
+                    f"{conflict_desc}，与品名 '{product_name_from_row}' 对应的产品 [{p[1] or ''} {product_name}] 不一致，请检查后修改"
+                )
+            # 平台信息完整性检查：仅当该SKU不在产品的平台SKU集合中时触发；
+            # 填的是产品编码时延后按分组覆盖判断，填的是其他未知SKU时提示补建（SKU为空时不提示）
+            elif sku and val_lower not in product_platform_skus.get(product_id, set()):
+                if val_lower == str(p[1] or "").strip().lower():
+                    platform_check_pid = product_id
+                else:
+                    pending_entry = {
+                        "row_no": row_no,
+                        "product_id": product_id,
+                        "product_code": p[1] or "",
+                        "product_name": product_name,
+                        "sku": sku,
+                        "store_group_id": None,
+                        "store_group_name": "",
+                    }
+
+        if not product_id:
+            if sku and val_lower in product_code_map:
+                pid, pcode, pname, pprice = product_code_map[val_lower]
                 product_id = pid
+                product_code = pcode or ""
                 product_name = pname or ""
-            elif val_lower in platform_sku_map:
+                # 平台信息完整性检查：延后到分组解析后统一判断
+                if val_lower not in product_platform_skus.get(pid, set()):
+                    platform_check_pid = pid
+            elif sku and val_lower in platform_sku_map:
                 pid = platform_sku_map[val_lower]
                 product_id = pid
                 for p in all_products:
                     if p[0] == pid:
+                        product_code = p[1] or ""
                         product_name = p[2] or ""
                         break
-            if not product_id:
-                errs.append(f"产品编码/SKU '{sku}' 不存在")
 
-        notes = str(row.get("notes", "")).strip() if pd.notna(row.get("notes")) else ""
+        if not product_id:
+            # 完全未匹配
+            if name_hits:
+                # 品名命中多个且SKU也无法唯一匹配
+                codes = ", ".join(str(h[1]) for h in name_hits)
+                errs.append(f"品名 '{product_name_from_row}' 匹配到多个产品（编码：{codes}），请改填产品编码")
+            elif not sku:
+                # SKU为空且品名未命中：进入待创建列表（弹窗中补填SKU和品名）
+                new_entry = {
+                    "row_no": row_no,
+                    "sku": "",
+                    "name": product_name_from_row,
+                    "quantity": quantity,
+                    "store_group_id": None,
+                    "store_group_name": "",
+                }
+            else:
+                # SKU非空且完全未命中：全新品待创建
+                new_entry = {
+                    "row_no": row_no,
+                    "sku": sku,
+                    "name": product_name_from_row,
+                    "quantity": quantity,
+                    "store_group_id": None,
+                    "store_group_name": "",
+                }
 
         # 解析店铺分组
         store_group_name = ""
         store_group_id = None
-        if "store_group" in df.columns:
-            sg_val = str(row["store_group"]).strip() if pd.notna(row.get("store_group")) else ""
-            if sg_val and sg_val != "nan":
-                matched = group_name_to_id.get(sg_val.lower())
-                if matched:
-                    store_group_id = matched[0]
-                    store_group_name = matched[1]  # 使用数据库中的准确名称
-                else:
-                    errs.append(f"店铺分组 '{sg_val}' 不存在")
+        if sg_raw:
+            matched = group_name_to_id.get(sg_raw.lower())
+            if matched:
+                store_group_id = matched[0]
+                store_group_name = matched[1]  # 使用数据库中的准确名称
+            else:
+                errs.append(f"店铺分组 '{sg_raw}' 不存在")
 
         if errs:
             row_errors.append(f"第 {row_no} 行: " + "；".join(errs))
             continue
 
+        # 延后的平台信息完整性检查（按产品编码匹配的行）：
+        # 产品在目标分组店铺上已有平台商品时直接导入；未覆盖时提示补建
+        if platform_check_pid:
+            owned_stores = product_platform_store_map.get(platform_check_pid, set())
+            if store_group_id:
+                covered = bool(group_stores_map.get(store_group_id, set()) & owned_stores)
+            else:
+                covered = bool(owned_stores)
+            if not covered:
+                pending_entry = {
+                    "row_no": row_no,
+                    "product_id": platform_check_pid,
+                    "product_code": product_code,
+                    "product_name": product_name,
+                    "sku": sku,
+                    # 填的是产品编码：前端允许编辑实际平台SKU（默认填产品编码）
+                    "sku_is_code": True,
+                    "store_group_id": None,
+                    "store_group_name": "",
+                }
+
+        if pending_entry:
+            pending_entry["store_group_id"] = store_group_id
+            pending_entry["store_group_name"] = store_group_name
+            pending_platform_skus.append(pending_entry)
+            continue  # 缺平台信息的行必须补建平台SKU（重新解析）后才能导入，不进入预览
+
+        if new_entry:
+            new_entry["store_group_id"] = store_group_id
+            new_entry["store_group_name"] = store_group_name
+            new_products.append(new_entry)
+            continue  # 新品未创建，不进入预览
+
         items.append({
             "product_id": product_id,
-            "product_code": sku,
+            "product_code": product_code,
+            "sku": sku,
             "product_name": product_name,
             "quantity": quantity,
             "notes": notes,
@@ -262,7 +474,12 @@ def parse_replenishment_excel(file_bytes: bytes, db: Session, tenant_id: int) ->
             }
         grouped[gkey]["items"].append(item)
 
-    return list(grouped.values())
+    return {
+        "groups": list(grouped.values()),
+        "errors": "\n".join(row_errors) if row_errors else None,
+        "pending_platform_skus": pending_platform_skus,
+        "new_products": new_products,
+    }
 
 
 # ============ Pydantic Schema ============
@@ -510,11 +727,18 @@ async def create_replenishment_order(
 
 @router.get("/template/download")
 async def download_replenishment_template(
+    db: Session = Depends(get_db),
     current_user: User = Depends(PermissionChecker("replenishment:view"))
 ):
-    """下载补货申请Excel模板"""
+    """下载补货申请Excel模板（店铺分组列为下拉选项，选项为系统内全部分组）"""
     try:
-        file_stream = create_replenishment_excel_template()
+        groups = db.execute(text("""
+            SELECT name FROM store_groups
+            WHERE tenant_id = :tid AND deleted_at IS NULL
+            ORDER BY name
+        """), {"tid": current_user.tenant_id}).fetchall()
+        group_names = [g[0] for g in groups if g[0]]
+        file_stream = create_replenishment_excel_template(group_names)
         filename = f"补货申请模板_{datetime.now().strftime('%Y%m%d')}.xlsx"
         encoded_filename = quote(filename)
         return StreamingResponse(
@@ -529,18 +753,36 @@ async def download_replenishment_template(
 @router.post("/upload/preview")
 async def upload_replenishment_preview(
     file: UploadFile = File(...),
+    name_overrides: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(PermissionChecker("replenishment:create"))
 ):
-    """上传补货申请Excel预览"""
+    """上传补货申请Excel预览
+
+    name_overrides: JSON字符串 {"行号": "品名"}，缺失信息弹窗创建产品后重新解析时传入编辑后的品名。
+    """
     try:
         if not file.filename.endswith(('.xlsx', '.xls')):
             raise HTTPException(status_code=400, detail="请上传Excel文件 (.xlsx/.xls)")
 
         file_bytes = await file.read()
-        items = parse_replenishment_excel(file_bytes, db, current_user.tenant_id)
+        overrides = {}
+        if name_overrides:
+            try:
+                raw = json.loads(name_overrides)
+                if isinstance(raw, dict):
+                    overrides = raw
+            except Exception:
+                overrides = {}
+        result = parse_replenishment_excel(file_bytes, db, current_user.tenant_id, name_overrides=overrides)
 
-        return {"success": True, "data": items}
+        return {
+            "success": True,
+            "data": result["groups"],
+            "errors": result["errors"],
+            "pending_platform_skus": result["pending_platform_skus"],
+            "new_products": result["new_products"],
+        }
     except HTTPException:
         raise
     except ValueError as e:

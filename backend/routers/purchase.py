@@ -735,43 +735,54 @@ async def export_purchase_orders(
         # 收集所有采购单号用于文件名
         order_numbers = [order[1] for order in orders]
 
-        # 收集所有明细，按供应商分组
+        # 收集所有明细，按供应商分组（一次性查询所有明细，避免 N+1 查询）
         # supplier_items_map: { supplier_name: [ {order info + item info}, ... ] }
         supplier_items_map = {}
-        no_supplier_items = []
 
-        for order in orders:
-            order_id, order_number, warehouse, notes, created_at, store_group_id, store_group_name = order
-            items = db.execute(text("""
-                SELECT poi.product_id, p.name as product_name, p.product_code, p.main_image,
-                       poi.quantity, poi.unit_price, poi.total_price, poi.supplier, poi.notes,
-                       poi.store_group_id, sg.name as store_group_name
-                FROM purchase_order_items poi
-                LEFT JOIN products p ON p.id = poi.product_id
-                LEFT JOIN store_groups sg ON sg.id = poi.store_group_id AND sg.deleted_at IS NULL
-                WHERE poi.purchase_order_id = :oid AND poi.deleted_at IS NULL
-            """), {"oid": order_id}).fetchall()
+        order_info_map = {
+            row[0]: {
+                "order_number": row[1],
+                "warehouse": row[2] or "",
+                "store_group_name": row[6] or "",
+                "order_date": row[4].strftime("%Y-%m-%d") if row[4] else "",
+            }
+            for row in orders
+        }
 
-            for item in items:
-                item_data = {
-                    "order_number": order_number,
-                    "warehouse": warehouse or "",
-                    "store_group_name": item[10] or store_group_name or "",
-                    "order_date": created_at.strftime("%Y-%m-%d") if created_at else "",
-                    "product_id": item[0],
-                    "product_code": item[2] or "",
-                    "product_name": item[1] or f"产品#{item[0]}",
-                    "main_image": item[3] or "",
-                    "quantity": int(item[4]),
-                    "unit_price": float(item[5]) if item[5] else 0,
-                    "total_price": float(item[6]) if item[6] else 0,
-                    "supplier": item[7] or "",
-                    "notes": item[8] or "",
-                }
-                supplier_name = item[7] or "未指定供应商"
-                if supplier_name not in supplier_items_map:
-                    supplier_items_map[supplier_name] = []
-                supplier_items_map[supplier_name].append(item_data)
+        oid_placeholders = ', '.join(f':oid{i}' for i in range(len(data.ids)))
+        oid_params = {f'oid{i}': v for i, v in enumerate(data.ids)}
+        all_items = db.execute(text(f"""
+            SELECT poi.purchase_order_id, poi.product_id, p.name as product_name, p.product_code, p.main_image,
+                   poi.quantity, poi.unit_price, poi.total_price, poi.supplier, poi.notes,
+                   poi.store_group_id, sg.name as store_group_name, p.product_type
+            FROM purchase_order_items poi
+            LEFT JOIN products p ON p.id = poi.product_id
+            LEFT JOIN store_groups sg ON sg.id = poi.store_group_id AND sg.deleted_at IS NULL
+            WHERE poi.purchase_order_id IN ({oid_placeholders}) AND poi.deleted_at IS NULL
+        """), oid_params).fetchall()
+
+        for item in all_items:
+            info = order_info_map.get(item[0], {})
+            item_data = {
+                "order_number": info.get("order_number", ""),
+                "warehouse": info.get("warehouse", ""),
+                "store_group_name": item[11] or info.get("store_group_name", ""),
+                "order_date": info.get("order_date", ""),
+                "product_id": item[1],
+                "product_code": item[3] or "",
+                "product_name": item[2] or f"产品#{item[1]}",
+                "main_image": item[4] or "",
+                "quantity": int(item[5]),
+                "unit_price": float(item[6]) if item[6] else 0,
+                "total_price": float(item[7]) if item[7] else 0,
+                "supplier": item[8] or "",
+                "notes": item[9] or "",
+                "product_type": item[12] or "",
+            }
+            supplier_name = item[8] or "未指定供应商"
+            if supplier_name not in supplier_items_map:
+                supplier_items_map[supplier_name] = []
+            supplier_items_map[supplier_name].append(item_data)
 
         # 按供应商+产品ID合并相同商品（不同店铺分组聚合到一行）
         for supplier_name, items in supplier_items_map.items():
@@ -801,6 +812,29 @@ async def export_purchase_orders(
                     existing["notes"] = ", ".join(sorted(notes))
             supplier_items_map[supplier_name] = list(merged_map.values())
 
+        # 并行预下载所有产品图片（同一URL只下载一次，避免串行下载拖慢导出）
+        image_urls = {
+            item["main_image"]
+            for items in supplier_items_map.values()
+            for item in items
+            if item.get("main_image")
+        }
+        image_cache = {}
+        if image_urls:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _download_image(url: str):
+                try:
+                    resp = urlopen(url, timeout=8)
+                    return resp.read()
+                except Exception:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=min(16, len(image_urls))) as executor:
+                future_map = {executor.submit(_download_image, url): url for url in image_urls}
+                for future in as_completed(future_map):
+                    image_cache[future_map[future]] = future.result()
+
         # 创建Excel
         wb = openpyxl.Workbook()
         # 删除默认的Sheet
@@ -825,7 +859,7 @@ async def export_purchase_orders(
             ws = wb.create_sheet(title=sheet_name)
 
             # 表头
-            headers = ["采购单号", "店铺分组", "仓库", "订单日期", "产品编码", "产品名称", "产品图", "数量", "单价", "金额", "备注"]
+            headers = ["采购单号", "店铺分组", "仓库", "订单日期", "产品编码", "产品名称", "产品类型", "产品图", "数量", "单价", "金额", "备注"]
             for col, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col, value=header)
                 cell.font = header_font_white
@@ -837,6 +871,8 @@ async def export_purchase_orders(
             total_quantity = 0
             total_amount = 0
             for row_idx, item in enumerate(items, 2):
+                is_finished = item.get("product_type") == "finished"
+                type_label = {"finished": "成品", "accessory": "配件"}.get(item.get("product_type"), "")
                 values = [
                     item["order_number"],
                     item["store_group_name"],
@@ -844,6 +880,7 @@ async def export_purchase_orders(
                     item["order_date"],
                     item["product_code"],
                     item["product_name"],
+                    type_label,
                     "",  # 产品图列，内容由图片填充
                     item["quantity"],
                     item["unit_price"],
@@ -854,12 +891,14 @@ async def export_purchase_orders(
                     cell = ws.cell(row=row_idx, column=col, value=val)
                     cell.border = thin_border
                     cell.alignment = Alignment(vertical='center')
+                    # 成品行整行加粗
+                    if is_finished:
+                        cell.font = Font(bold=True)
 
-                # 插入产品图（从产品管理 main_image 获取），在单元格内居中显示
-                if item.get("main_image"):
+                # 插入产品图（使用预下载缓存，在单元格内居中显示）
+                image_bytes = image_cache.get(item.get("main_image"))
+                if image_bytes:
                     try:
-                        response = urlopen(item["main_image"], timeout=10)
-                        image_bytes = response.read()
                         img = XLImage(BytesIO(image_bytes))
                         # 限制图片高度，保持比例
                         max_height = 80
@@ -874,7 +913,7 @@ async def export_purchase_orders(
 
                         # 计算单元格居中偏移量（EMU）
                         # 近似换算：1 字符宽度 ≈ 7 像素，1 点 ≈ 1.333 像素
-                        col_width_px = ws.column_dimensions['G'].width * 7
+                        col_width_px = ws.column_dimensions['H'].width * 7
                         row_height_px = target_row_height * 1.333
                         offset_x = int((col_width_px - img.width) * 9525 / 2)
                         offset_y = int((row_height_px - img.height) * 9525 / 2)
@@ -882,7 +921,7 @@ async def export_purchase_orders(
                         # 使用 OneCellAnchor 将图片锚定到单元格并居中
                         anchor = OneCellAnchor(
                             _from=AnchorMarker(
-                                col=6, colOff=max(0, offset_x),
+                                col=7, colOff=max(0, offset_x),
                                 row=row_idx - 1, rowOff=max(0, offset_y)
                             ),
                             ext=XDRPositiveSize2D(cx=img.width * 9525, cy=img.height * 9525)
@@ -900,10 +939,10 @@ async def export_purchase_orders(
             summary_row = len(items) + 2
             ws.cell(row=summary_row, column=1, value="合计").font = summary_font
             ws.cell(row=summary_row, column=1).border = thin_border
-            ws.cell(row=summary_row, column=8, value=total_quantity).font = summary_font
-            ws.cell(row=summary_row, column=8).border = thin_border
-            ws.cell(row=summary_row, column=10, value=round(total_amount, 2)).font = summary_font
-            ws.cell(row=summary_row, column=10).border = thin_border
+            ws.cell(row=summary_row, column=9, value=total_quantity).font = summary_font
+            ws.cell(row=summary_row, column=9).border = thin_border
+            ws.cell(row=summary_row, column=11, value=round(total_amount, 2)).font = summary_font
+            ws.cell(row=summary_row, column=11).border = thin_border
 
             # 话术行
             msg_row = summary_row + 2
@@ -932,22 +971,24 @@ async def export_purchase_orders(
             ws.column_dimensions['D'].width = 12
             ws.column_dimensions['E'].width = 14
             ws.column_dimensions['F'].width = 22
-            ws.column_dimensions['G'].width = 14  # 产品图
-            ws.column_dimensions['H'].width = 8
-            ws.column_dimensions['I'].width = 10
-            ws.column_dimensions['J'].width = 12
-            ws.column_dimensions['K'].width = 16
+            ws.column_dimensions['G'].width = 10  # 产品类型
+            ws.column_dimensions['H'].width = 14  # 产品图
+            ws.column_dimensions['I'].width = 8
+            ws.column_dimensions['J'].width = 10
+            ws.column_dimensions['K'].width = 12
+            ws.column_dimensions['L'].width = 16
 
         # 保存到内存
         output = BytesIO()
         wb.save(output)
         output.seek(0)
 
-        # 文件名使用采购单号
+        # 文件名使用 单号+日期 格式
+        date_str = datetime.now().strftime("%Y%m%d")
         if len(order_numbers) == 1:
-            filename = f"采购单导出_{order_numbers[0]}.xlsx"
+            filename = f"采购单_{order_numbers[0]}_{date_str}.xlsx"
         else:
-            filename = f"采购单导出_批量.xlsx"
+            filename = f"采购单_批量_{date_str}.xlsx"
         encoded_filename = quote(filename)
         return StreamingResponse(
             output,
