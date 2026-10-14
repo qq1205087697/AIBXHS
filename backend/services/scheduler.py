@@ -540,7 +540,7 @@ def push_daily_review_notifications_job():
             logger.info("使用包含 importance_level 的查询")
             pending_query = text("""
                 SELECT r.id, r.asin, r.title, r.rating, r.importance_level, r.status,
-                       s.department_id, d.name as dept_name
+                       s.department_id, d.name as dept_name, d.tenant_id
                 FROM reviews r
                 LEFT JOIN stores s ON r.store_id = s.id
                 LEFT JOIN departments d ON s.department_id = d.id
@@ -553,7 +553,7 @@ def push_daily_review_notifications_job():
             logger.info("使用不包含 importance_level 的查询")
             pending_query = text("""
                 SELECT r.id, r.asin, r.title, r.rating, r.status,
-                       s.department_id, d.name as dept_name
+                       s.department_id, d.name as dept_name, d.tenant_id
                 FROM reviews r
                 LEFT JOIN stores s ON r.store_id = s.id
                 LEFT JOIN departments d ON s.department_id = d.id
@@ -587,12 +587,14 @@ def push_daily_review_notifications_job():
             if has_importance_level:
                 dept_id = row[6]
                 dept_name = row[7] or f"部门{dept_id}"
+                tenant_id = row[8]
             else:
                 dept_id = row[5]
                 dept_name = row[6] or f"部门{dept_id}"
-            
+                tenant_id = row[7]
+
             if dept_id not in dept_stats:
-                dept_stats[dept_id] = {"name": dept_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": []}
+                dept_stats[dept_id] = {"name": dept_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": [], "tenant_id": tenant_id}
             dept_stats[dept_id]["total"] += 1
             
             if has_importance_level:
@@ -639,14 +641,13 @@ def push_daily_review_notifications_job():
                     SELECT COUNT(*) FROM notifications
                     WHERE tenant_id = :tenant_id AND user_id = :uid AND title = :title
                       AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-                """), {"tenant_id": tenant_id, "uid": user_id, "title": title}).scalar()
+                """), {"tenant_id": stats["tenant_id"], "uid": user_id, "title": title}).scalar()
                 if exists > 0:
                     logger.info(f"  用户 ID={user_id} 已在5分钟内收到相同通知，跳过")
                     continue
                 logger.info(f"  准备推送给用户 ID={user_id}")
                 notification_rows.append({
-                    "tenant_id": tenant_id,
-                    "tenant_id": tenant_id,
+                    "tenant_id": stats["tenant_id"],
                     "uid": user_id,
                     "title": title,
                     "content": content

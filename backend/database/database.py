@@ -205,6 +205,13 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass
+
+            # 页面优化机器人表品名字段（与库存快照表品名长度一致，每次启动幂等执行）
+            try:
+                conn.execute(text("ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'"))
+                conn.commit()
+            except Exception:
+                pass
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:

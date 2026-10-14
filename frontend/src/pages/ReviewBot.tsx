@@ -53,6 +53,13 @@ const getDepartmentTag = (department?: string) => {
   return <Tooltip title={d.desc}><Tag color={d.color}>{d.label}</Tag></Tooltip>
 }
 
+// AI建议条目兼容两种格式：旧格式为字符串，新格式为 { text, department } 对象
+const getSuggestionText = (suggestion: string | { text?: string; department?: string } | null): string => {
+  if (!suggestion) return ''
+  if (typeof suggestion === 'string') return suggestion
+  return suggestion.text || ''
+}
+
 const ReviewBot: React.FC = () => {
   const { currentTheme } = useTheme()
   const { hasPermission } = useAuth()
@@ -643,7 +650,7 @@ const ReviewBot: React.FC = () => {
                           <div style={{ fontSize: '12px', color: '#666', marginBottom: 4 }}>🤖 AI处理建议：</div>
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                             {item.suggestions.map((suggestion, idx) => (
-                              <Tag key={`suggestion-${idx}`} color="blue" style={{ flexShrink: 0 }}>{suggestion}</Tag>
+                              <Tag key={`suggestion-${idx}`} color="blue" style={{ flexShrink: 0 }}>{getSuggestionText(suggestion)}</Tag>
                             ))}
                           </div>
                         </div>
@@ -858,7 +865,7 @@ const ReviewBot: React.FC = () => {
                   renderItem={(suggestion) => (
                     <List.Item style={{ padding: '4px 0', minHeight: 'auto' }}>
                       <Alert
-                        message={suggestion}
+                        message={getSuggestionText(suggestion)}
                         type="info"
                         showIcon
                       />

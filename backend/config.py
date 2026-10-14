@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     FEISHU_AD_WEBHOOK_URL: str = ""
     # 飞书 webhook - 编辑基础信息提交地址
     FEISHU_EDIT_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 一键优化提交地址
+    FEISHU_OPTIMIZE_WEBHOOK_URL: str = ""
     
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
@@ -80,7 +82,13 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
-    model_config = {"env_file": os.path.join(os.path.dirname(__file__), ".env")}
+    model_config = {
+        "env_file": [
+            os.path.join(os.path.dirname(__file__), ".env"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+        ],
+        "env_file_encoding": "utf-8",
+    }
 
 
 def get_settings() -> Settings:
