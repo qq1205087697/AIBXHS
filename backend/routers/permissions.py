@@ -694,6 +694,8 @@ async def init_default_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        {"name": "刷新库存", "code": "robot:rating:import", "type": "function", "module": "页面优化机器人", "sort_order": 71},
+        {"name": "开广告", "code": "robot:rating:ad", "type": "function", "module": "页面优化机器人", "sort_order": 72},
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
@@ -797,6 +799,8 @@ async def add_missing_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        {"name": "刷新库存", "code": "robot:rating:import", "type": "function", "module": "页面优化机器人", "sort_order": 71},
+        {"name": "开广告", "code": "robot:rating:ad", "type": "function", "module": "页面优化机器人", "sort_order": 72},
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
@@ -934,6 +938,8 @@ async def add_missing_permissions(
         {"code": "robot:review:analyze", "name": "AI分析差评", "module": "差评机器人"},
         {"code": "robot:review:manage", "name": "管理差评状态", "module": "差评机器人"},
         {"code": "robot:rating:view", "name": "查看页面优化", "module": "页面优化机器人"},
+        {"code": "robot:rating:import", "name": "刷新库存", "module": "页面优化机器人"},
+        {"code": "robot:rating:ad", "name": "开广告", "module": "页面优化机器人"},
     ]
     fixed_count = 0
     for fm in fix_map:

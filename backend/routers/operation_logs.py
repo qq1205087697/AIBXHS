@@ -18,6 +18,8 @@ async def get_operation_logs(
     module: Optional[str] = None,
     action: Optional[str] = None,
     user_id: Optional[int] = None,
+    target_id: Optional[int] = None,
+    target_type: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     search: Optional[str] = None,
@@ -37,6 +39,12 @@ async def get_operation_logs(
         if user_id:
             where_conditions.append("ol.user_id = :user_id")
             params["user_id"] = user_id
+        if target_id:
+            where_conditions.append("ol.target_id = :target_id")
+            params["target_id"] = target_id
+        if target_type:
+            where_conditions.append("ol.target_type = :target_type")
+            params["target_type"] = target_type
         if start_date:
             where_conditions.append("ol.created_at >= :start_date")
             params["start_date"] = start_date

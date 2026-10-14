@@ -401,34 +401,45 @@ export const productPageInfoApi = {
     apiClient.put(`/product-page-info/${id}/delete-competitor`, {
       competitor_line: competitorLine,
     }),
+  addCompetitor: (id: number, asin: string, price: string) =>
+    apiClient.post(`/product-page-info/${id}/add-competitor`, {
+      asin,
+      price,
+    }),
   submitRating: (ids: number[]) =>
     apiClient.post("/product-page-info/submit-rating", { ids }),
   deleteRecords: (ids: number[]) =>
     apiClient.post("/product-page-info/delete-records", { ids }),
   getRanking: () => apiClient.get("/product-page-info/ranking"),
-  importExcel: (file: File) => {
-    const formData = new FormData();
-    formData.append("file", file);
-    return apiClient.post("/product-page-info/import-excel", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-  },
-  cancelImport: (importIds: number[]) =>
-    apiClient.post("/product-page-info/cancel-import", {
-      import_ids: importIds,
-    }),
-  submitEdit: (data: {
-    item_id: number;
-    store: string;
-    field_type: string;
-    sku: string;
-    content: string;
-    reset_rating: boolean;
-  }) => apiClient.post("/product-page-info/submit-edit", data),
+  refreshInventory: () => apiClient.post("/product-page-info/refresh-inventory"),
+  submitEdit: (data: { item_id: number; store: string; field_type: string; sku: string; content: string; reset_rating: boolean }) =>
+    apiClient.post("/product-page-info/submit-edit", data),
+  aiWrite: (data: { item_id: number; field_type: string; content: string; suggestion?: string }) =>
+    apiClient.post("/product-page-info/ai-write", data),
+  aiSuggestLog: (itemId: number, suggestions: Record<string, string>) =>
+    apiClient.post(`/product-page-info/${itemId}/ai-suggest-log`, { suggestions }),
   updateRatingStatus: (id: number, ratingStatus: number) =>
-    apiClient.put(`/product-page-info/${id}/rating-status`, {
-      rating_status: ratingStatus,
-    }),
+    apiClient.put(`/product-page-info/${id}/rating-status`, { rating_status: ratingStatus }),
+  updateTrafficKeywords: (id: number, trafficKeywords: string) =>
+    apiClient.put(`/product-page-info/${id}/traffic-keywords`, { traffic_keywords: trafficKeywords }),
+  adSubmit: (data: {
+    ad_type: string[];
+    keyword_asin_source: string;
+    bid_strategy: string;
+    sku: string;
+    site: string;
+    manual_exact_bid: string;
+    manual_broad_bid: string;
+    manual_phrase_bid: string;
+    related_exact_bid: string;
+    related_expanded_bid: string;
+    strongest_related_asin: string;
+    key_keyword: string;
+    limit_word: string;
+    ad_asin: string;
+    ad_keyword: string;
+    item_id?: number;
+  }) => apiClient.post("/product-page-info/ad-submit", data),
 };
 // ========== Stores API ==========
 export const storesApi = {
@@ -969,6 +980,8 @@ export const operationLogsApi = {
     module?: string;
     action?: string;
     user_id?: number;
+    target_id?: number;
+    target_type?: string;
     start_date?: string;
     end_date?: string;
     search?: string;

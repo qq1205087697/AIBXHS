@@ -1,0 +1,162 @@
+{
+  "meta": {
+    "name": "亚马逊Listing埋词优化配置",
+    "version": "1.0",
+    "description": "通过流量词和原Listing内容，分析关键词埋词状态，并生成各位置优化方案"
+  },
+
+  "market_profiles": {
+    "north_america": {
+      "site": "亚马逊北美站",
+      "market": "北美",
+      "language": "en-US",
+      "spelling": "美式英语",
+      "units": ["英寸", "英尺", "磅", "盎司", "华氏度"],
+      "localization_prompt": "使用美式英语拼写（color, center, organizer等）；计量单位用英寸/英尺/磅/盎司/华氏度；场景、节日、人群表达符合美国消费者习惯；避免英式拼写。"
+    },
+    "uk": {
+      "site": "亚马逊英国站",
+      "market": "英国",
+      "language": "en-GB",
+      "spelling": "英式英语",
+      "units": ["厘米", "米", "千克", "摄氏度"],
+      "localization_prompt": "使用英式英语拼写（colour, centre, organiser等）；计量单位用厘米/米/千克/摄氏度；场景、节日、人群表达符合英国消费者习惯；避免美式拼写。"
+    },
+    "europe": {
+      "site": "亚马逊欧洲站",
+      "market": "欧洲",
+      "language": "多语言",
+      "countries": [
+        {
+          "country": "DE",
+          "language": "de-DE",
+          "localization_prompt": "德语；使用当地计量单位；避免英语直译；符合德国搜索习惯和合规要求。"
+        },
+        {
+          "country": "FR",
+          "language": "fr-FR",
+          "localization_prompt": "法语；使用当地计量单位；避免英语直译；符合法国搜索习惯和合规要求。"
+        },
+        {
+          "country": "IT",
+          "language": "it-IT",
+          "localization_prompt": "意大利语；使用当地计量单位；避免英语直译；符合意大利搜索习惯和合规要求。"
+        },
+        {
+          "country": "ES",
+          "language": "es-ES",
+          "localization_prompt": "西班牙语；使用当地计量单位；避免英语直译；符合西班牙搜索习惯和合规要求。"
+        }
+      ],
+      "localization_prompt": "按目标国家输出对应语言；使用当地计量单位；避免英语直译；符合当地搜索习惯和合规要求。建议分国家单独生成，不要用一份英语文案覆盖全欧洲。"
+    }
+  },
+
+  "prompt_templates": {
+    "overall": "你是一名亚马逊Listing埋词优化专家。请严格根据我提供的流量词工作，不要编造搜索量，不要添加我未提供的搜索词（如需补充同义词，请单独标注“建议补充”）。\n目标站点：{{site}}\n目标市场：{{market}}\n语言：{{language}}\n产品信息：{{product_info}}\n原Listing内容：{{original_listing}}\n流量词表：{{traffic_keywords}}\n任务步骤：\n1. 相关性过滤：剔除与产品明显不相关的词，列出剔除词和原因。\n2. 关键词分类：核心大词、精准中词、长尾词、属性词、场景词、痛点词、同义/变体词。\n3. 埋词分析：判断每个关键词是否已存在于原Listing，出现在哪些位置，出现频次。\n4. 分层埋词：标题>五点>描述/A+>Search Terms>QA。标题放核心大词+精准中词；五点放长尾+场景+痛点；描述/A+放属性+次要长尾；Search Terms放未使用的同义/变体/拼写词；QA自然植入长尾。\n5. 输出必须是合法JSON，不要Markdown，不要额外解释。JSON结构参考：keyword_analysis、optimized_listing、placement_mapping、coverage、compliance_check。\n区域本地化要求：{{localization_requirements}}",
+
+    "title": "你是亚马逊{{site}}标题优化专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原标题：{{original_title}}。请只使用我提供的流量词，生成3个标题方案。结构：核心大词+精准中词+关键属性（尺寸/材质/数量）+适用场景/人群。前30-40字符必须含核心大词；≤200字符；自然通顺；不堆砌；同一词根不超过2次；不用促销词/全大写/特殊符号。输出JSON数组，每项包含text、char_count、embedded_keywords、reason。区域本地化要求：{{localization_requirements}}",
+
+    "bullets": "你是亚马逊{{site}}五点描述优化专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原五点：{{original_bullets}}。请生成5条Bullet Points。每条首词用长尾词/场景词；每条围绕一个卖点：功能、材质/品质、适配场景、差异化、售后/信任；每条自然嵌入1-2个流量词；不堆砌；输出JSON数组，每项包含index、text、embedded_keywords、selling_point。区域本地化要求：{{localization_requirements}}",
+
+    "description": "你是亚马逊{{site}}描述/A+文案专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原描述：{{original_description}}。请生成产品描述或A+模块文案，不超过100词。埋入标题和五点未覆盖的次要长尾词、属性词、场景词；自然段落；可包含小标题；不堆砌；输出JSON，包含text和embedded_keywords。区域本地化要求：{{localization_requirements}}",
+
+    "search_terms": "你是亚马逊后台Search Terms优化专家。目标站点：{{site}}，语言：{{language}}。流量词：{{traffic_keywords}}。原Search Terms：{{original_search_terms}}。请从流量词中筛选未在标题、五点、描述中使用的同义/变体/拼写误差/缩写/小众习惯词；去重；空格分隔；≤250字节；不重复；不含品牌名、ASIN、促销词、竞品品牌。输出JSON，包含text、bytes、included_keywords。区域本地化要求：{{localization_requirements}}",
+
+    "qa": "你是亚马逊QA优化专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原QA：{{original_qa}}。请生成5-8组买家问答。问题围绕痛点、场景、使用疑问；答案自然植入长尾词和场景词；不堆砌；输出JSON数组，每项包含question、answer、embedded_keywords。区域本地化要求：{{localization_requirements}}"
+  },
+
+  "input": {
+    "market_profile_key": "north_america",
+    "product_info": {
+      "product_name": "无线蓝牙耳机",
+      "category": "电子产品",
+      "core_features": ["降噪", "防水", "长续航"],
+      "material": "ABS+硅胶",
+      "size": "均码",
+      "target_audience": "运动人群、通勤族",
+      "use_scenarios": ["跑步", "健身", "办公", "旅行"]
+    },
+    "original_listing": {
+      "title": "原标题内容",
+      "bullets": [
+        "原五点1",
+        "原五点2",
+        "原五点3",
+        "原五点4",
+        "原五点5"
+      ],
+      "description": "原产品描述",
+      "a_plus": "原A+内容",
+      "search_terms": "原后台搜索词",
+      "qa": [
+        {
+          "question": "原问题1",
+          "answer": "原答案1"
+        }
+      ]
+    },
+    "traffic_keywords": [
+      {
+        "keyword": "wireless earbuds",
+        "search_volume": 120000,
+        "aba_rank": 3500,
+        "traffic_share": 0.18,
+        "ctr": 0.012,
+        "cvr": 0.06,
+        "competition": 0.85,
+        "relevance": null
+      },
+      {
+        "keyword": "bluetooth headphones for running",
+        "search_volume": 30000,
+        "aba_rank": 80000,
+        "traffic_share": 0.07,
+        "ctr": 0.015,
+        "cvr": 0.08,
+        "competition": 0.55,
+        "relevance": null
+      }
+    ]
+  },
+
+  "analysis_config": {
+    "relevance_filter": {
+      "enabled": true,
+      "min_same_category_ratio": 0.5
+    },
+    "dedupe": {
+      "stem_merge": true,
+      "keep_highest_search_volume": true
+    },
+    "classification": {
+      "by_volume": {
+        "core": { "aba_rank_max": 50000 },
+        "mid": { "aba_rank_min": 50000, "aba_rank_max": 200000 },
+        "long_tail": { "aba_rank_min": 200000 }
+      },
+      "by_semantic": ["attribute", "scenario", "function", "pain_point", "synonym", "variant"],
+      "by_conversion": {
+        "high_conversion": { "ctr_above_avg": true, "cvr_above_avg": true },
+        "traffic_only": { "ctr_above_avg": true, "cvr_below_avg": true }
+      }
+    },
+    "weight_model": {
+      "title": 100,
+      "bullets": 80,
+      "description": 60,
+      "a_plus": 50,
+      "search_terms": 40,
+      "qa": 30
+    },
+    "constraints": {
+      "title_max_chars": 200,
+      "title_front_chars": 40,
+      "search_terms_max_bytes": 250,
+      "same_stem_max_occurrences": 2,
+      "no_promotional_words": true,
+      "no_brand_names_in_search_terms": true,
+      "no_asin_in_search_terms": true
+    }
+  }
+}

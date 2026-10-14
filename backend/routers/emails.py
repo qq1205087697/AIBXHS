@@ -123,8 +123,13 @@ async def get_email_messages(
             params["user_id"] = current_user.id
             where_conditions.append("""
                 e.store_id IN (
-                    SELECT us.store_id FROM user_stores us
-                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                    SELECT s.id FROM stores s
+                    WHERE s.group_id IN (
+                        SELECT DISTINCT s2.group_id FROM stores s2
+                        INNER JOIN user_stores us ON s2.id = us.store_id
+                        WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                          AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                    )
                 )
             """)
 
@@ -236,9 +241,12 @@ async def get_store_names(
             query = text("""
                 SELECT DISTINCT s.name FROM stores s
                 WHERE s.tenant_id = :tenant_id
-                  AND s.id IN (
-                    SELECT us.store_id FROM user_stores us
+                  AND s.deleted_at IS NULL
+                  AND s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
                     WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
                 )
                 ORDER BY s.name
             """)
@@ -265,8 +273,13 @@ async def get_unfollowed_count(
         dep_params = {"tenant_id": current_user.tenant_id}
         if not is_admin_user(current_user, db):
             dep_filter = """ AND e.store_id IN (
-                SELECT us.store_id FROM user_stores us
-                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
             dep_params["user_id"] = current_user.id
 
@@ -414,10 +427,22 @@ async def get_department_todos(
             dep_filter_email = ""
         else:
             dep_filter_review = """ AND r.store_id IN (
-                SELECT us.store_id FROM user_stores us WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
             dep_filter_email = """ AND e.store_id IN (
-                SELECT us.store_id FROM user_stores us WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
 
         params = {"tenant_id": current_user.tenant_id}
@@ -471,8 +496,13 @@ async def get_email_detail(
     try:
         if not is_admin_user(current_user, db):
             access_filter = """ AND e.store_id IN (
-                SELECT us.store_id FROM user_stores us
-                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
         else:
             access_filter = ""
@@ -551,8 +581,13 @@ async def batch_update_follow_up(
 
         if not is_admin_user(current_user, db):
             access_filter = """ AND store_id IN (
-                SELECT us.store_id FROM user_stores us
-                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
         else:
             access_filter = ""
@@ -596,8 +631,13 @@ async def update_follow_up(
     try:
         if not is_admin_user(current_user, db):
             access_filter = """ AND store_id IN (
-                SELECT us.store_id FROM user_stores us
-                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
         else:
             access_filter = ""
@@ -637,12 +677,11 @@ async def send_feishu_webhook(
 ):
     """发送飞书webhook（复用逻辑）"""
     if not is_admin_user(current_user, db):
-        webhook_access_filter = """ AND s.id IN (
-            SELECT s2.id FROM stores s2
-            WHERE s2.department_id IN (
-                SELECT ud.department_id FROM user_departments ud
-                WHERE ud.user_id = :user_id
-            )
+        webhook_access_filter = """ AND s.group_id IN (
+            SELECT DISTINCT s2.group_id FROM stores s2
+            INNER JOIN user_stores us ON s2.id = us.store_id
+            WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+              AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
         )"""
     else:
         webhook_access_filter = ""
@@ -704,12 +743,14 @@ async def update_need_reply(
         
         if not is_admin_user(current_user, db):
             access_filter = """ AND store_id IN (
-                    SELECT s2.id FROM stores s2
-                    WHERE s2.department_id IN (
-                        SELECT ud.department_id FROM user_departments ud
-                        WHERE ud.user_id = :user_id
-                    )
-                )"""
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
+            )"""
         else:
             access_filter = ""
 
@@ -766,13 +807,18 @@ async def re_run_robot(
     try:
         # 获取邮件信息
         if not is_admin_user(current_user, db):
-            access_filter = """ AND e.store_id IN (
-                SELECT us.store_id FROM user_stores us
-                WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+            access_filter = """ AND store_id IN (
+                SELECT s.id FROM stores s
+                WHERE s.group_id IN (
+                    SELECT DISTINCT s2.group_id FROM stores s2
+                    INNER JOIN user_stores us ON s2.id = us.store_id
+                    WHERE us.user_id = :user_id AND us.tenant_id = :tenant_id
+                      AND s2.group_id IS NOT NULL AND s2.deleted_at IS NULL
+                )
             )"""
         else:
             access_filter = ""
-        
+
         query = text(f"""
             SELECT e.need_reply, e.reply_text
             FROM email_messages e
