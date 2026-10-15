@@ -281,13 +281,18 @@ async def list_video_tasks_endpoint(
     page: int = 1,
     page_size: int = 10,
     keyword: str = "",
+    bind_status: str = "all",
     current_user: User = Depends(get_current_user),
 ):
-    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询"""
+    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询；bind_status: all/bound/unbound"""
     return {
         "success": True,
         "data": list_video_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+            current_user.tenant_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            bind_status=bind_status,
         ),
     }
 
@@ -339,15 +344,20 @@ async def list_upscale_tasks_endpoint(
     page: int = 1,
     page_size: int = 20,
     keyword: str = "",
+    bind_status: str = "all",
     current_user: User = Depends(get_current_user),
 ):
-    """超分任务列表（分页 + 标题搜索），用于高清处理页面与进度轮询"""
+    """超分任务列表（分页 + 标题搜索 + 绑定状态筛选），用于高清处理页面与进度轮询"""
     from services.upscale_service import list_upscale_tasks
 
     return {
         "success": True,
         "data": list_upscale_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+            current_user.tenant_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            bind_status=bind_status,
         ),
     }
 

@@ -54,6 +54,7 @@ import {
   Table2,
   Video,
   Film,
+  ClipboardCheck,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -334,6 +335,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               icon: <Film size={18} />,
               label: '高清处理',
             },
+            ...(hasPermission('ai_video:approve')
+              ? [{
+                  key: '/video-binding-review',
+                  icon: <ClipboardCheck size={18} />,
+                  label: '视频绑定审核',
+                }]
+              : []),
           ],
         }] : []),
     {
@@ -529,6 +537,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/product-selection': '选品机器人',
       '/ai-creation': 'AI视频',
       '/upscale-center': '高清处理',
+      '/video-binding-review': '视频绑定审核',
     };
     return pathMap[location.pathname] || "未知页面";
   };

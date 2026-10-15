@@ -238,15 +238,24 @@ def _download_video(finfo: Dict[str, Any]) -> Tuple[bytes, str]:
     return buf.getvalue(), finfo.get("filename") or "output.mp4"
 
 
-def _update_task(task_id: int, **fields) -> None:
-    """独立会话更新任务记录（后台线程中使用）"""
+def _update_task(task_id: int, only_active: bool = False, **fields) -> None:
+    """独立会话更新任务记录（后台线程中使用）
+
+    only_active=True 时仅在任务仍处于「排队中/生成中」才写入，
+    防止双后端同库场景下，本进程的迟到结果覆盖另一进程已写入的「已完成」。
+    """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
 
     db = SessionLocal()
     try:
-        db.query(AIVideoTask).filter(AIVideoTask.id == task_id).update(fields)
+        q = db.query(AIVideoTask).filter(AIVideoTask.id == task_id)
+        if only_active:
+            q = q.filter(AIVideoTask.status.in_(["排队中", "生成中"]))
+        updated = q.update(fields, synchronize_session=False)
         db.commit()
+        if only_active and not updated:
+            logger.info(f"[H3视频] 任务 {task_id} 状态已被其他进程更新，跳过写入 {fields.get('status')}")
     except Exception as e:
         logger.error(f"[H3视频] 更新任务 {task_id} 状态失败: {e}")
         db.rollback()
@@ -280,13 +289,44 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
             last_status = status
 
     try:
+        consecutive_failures = 0  # 连续查询失败：配置缺失/服务不可达等确定性错误，快速失败
+        timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久
         for _ in range(max_polls):
             threading.Event().wait(interval)
             try:
                 history = _api("GET", f"/history/{h3_prompt_id}").json()
-            except Exception as e:
-                logger.warning(f"[H3视频] 任务 {task_id} 查询失败，稍后重试: {e}")
+            except requests.exceptions.Timeout as e:
+                # 超时不算服务故障：ComfyUI 忙时 HTTP 响应可能超过请求超时，任务本身仍在正常运行
+                timeout_failures += 1
+                if timeout_failures % 40 == 1:
+                    logger.warning(
+                        f"[H3视频] 任务 {task_id} 查询超时（连续 {timeout_failures} 次，ComfyUI 可能正忙）: {e}"
+                    )
+                if timeout_failures >= 240:
+                    _update_task(
+                        task_id, only_active=True, status="失败",
+                        error_message="ComfyUI 长时间无响应（连续 1 小时查询超时），请检查 ComfyUI 服务后重新提交",
+                        finished_at=datetime.now(),
+                    )
+                    logger.error(f"[H3视频] 任务 {task_id} 连续查询超时，终止轮询")
+                    return
                 continue
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(
+                    f"[H3视频] 任务 {task_id} 查询失败（连续 {consecutive_failures} 次）: {e}"
+                )
+                if consecutive_failures >= 20:
+                    _update_task(
+                        task_id, only_active=True, status="失败",
+                        error_message="ComfyUI 服务连接失败（连续 5 分钟查询异常），请检查 H3_BASE_URL 等配置后重新提交",
+                        finished_at=datetime.now(),
+                    )
+                    logger.error(f"[H3视频] 任务 {task_id} 连续查询失败，终止轮询")
+                    return
+                continue
+            consecutive_failures = 0
+            timeout_failures = 0
 
             item = history.get(h3_prompt_id)
             if item is None:
@@ -343,7 +383,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
             set_status("生成中")
 
         _update_task(
-            task_id, status="失败",
+            task_id, only_active=True, status="失败",
             error_message=f"生成超时（超过 {settings.H3_MAX_WAIT_MINUTES} 分钟）",
             finished_at=datetime.now(),
         )
@@ -594,16 +634,18 @@ def _serialize(task) -> Dict[str, Any]:
 
 
 def list_video_tasks(
-    tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = ""
+    tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = "", bind_status: str = "all"
 ) -> Dict[str, Any]:
     """租户的视频生成任务列表（按时间倒序，不做账号隔离）。含失败任务及其失败原因。
 
     keyword 模糊匹配产品编码 / 产品品名 / 任务标题。
-    返回 {"items": [...], "total": 总条数}，供前端分页。
+    bind_status: all=全部 / bound=已绑定 / unbound=未绑定（按审核通过的绑定申请判定成片地址）。
+    返回 {"items": [...], "total": 总条数}，供前端分页，items 内含 bound 绑定状态。
     """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
-    from sqlalchemy import or_
+    from models.video_binding_request import VideoBindingRequest
+    from sqlalchemy import or_, text, bindparam
 
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
@@ -623,6 +665,28 @@ def list_video_tasks(
                     AIVideoTask.title.ilike(like),
                 )
             )
+        # 绑定状态筛选：审核通过的绑定申请命中，或产品视频列表已包含该地址（旧直绑数据无申请记录）
+        # products 表无 ORM 模型映射，产品包含判定用 text SQL 相关子查询
+        bind_exists = or_(
+            db.query(VideoBindingRequest.id)
+            .filter(
+                VideoBindingRequest.tenant_id == tenant_id,
+                VideoBindingRequest.status == "approved",
+                VideoBindingRequest.deleted_at.is_(None),
+                VideoBindingRequest.video_url == AIVideoTask.video_url,
+            )
+            .exists(),
+            text(
+                "EXISTS (SELECT 1 FROM products p "
+                "WHERE p.tenant_id = :bs_tid AND p.deleted_at IS NULL "
+                "AND (p.video_url = ai_video_tasks.video_url "
+                "OR p.videos LIKE CONCAT('%', ai_video_tasks.video_url, '%')))"
+            ).bindparams(bs_tid=tenant_id),
+        )
+        if bind_status == "bound":
+            query = query.filter(bind_exists)
+        elif bind_status == "unbound":
+            query = query.filter(~bind_exists)
         total = query.count()
         rows = (
             query.order_by(AIVideoTask.id.desc())
@@ -631,6 +695,48 @@ def list_video_tasks(
             .all()
         )
         items = [_serialize(r) for r in rows]
+        # 附加绑定状态：approved 申请命中，或产品视频列表已包含（旧直绑数据）
+        try:
+            video_urls = [r.video_url for r in rows if r.video_url]
+            bound_urls = set()
+            if video_urls:
+                bound_urls = {
+                    u
+                    for (u,) in db.query(VideoBindingRequest.video_url)
+                    .filter(
+                        VideoBindingRequest.tenant_id == tenant_id,
+                        VideoBindingRequest.status == "approved",
+                        VideoBindingRequest.deleted_at.is_(None),
+                        VideoBindingRequest.video_url.in_(video_urls),
+                    )
+                    .all()
+                }
+                remaining = [u for u in video_urls if u not in bound_urls]
+                if remaining:
+                    like_parts = " OR ".join(
+                        [f"videos LIKE CONCAT('%', :u{i}, '%')" for i in range(len(remaining))]
+                    )
+                    prods = db.execute(
+                        text(
+                            "SELECT video_url, videos FROM products "
+                            "WHERE tenant_id = :tid AND deleted_at IS NULL AND "
+                            "(video_url IN :urls OR " + like_parts + ")"
+                        ).bindparams(bindparam("urls", expanding=True)),
+                        {
+                            "tid": tenant_id,
+                            "urls": remaining,
+                            **{f"u{i}": u for i, u in enumerate(remaining)},
+                        },
+                    ).fetchall()
+                    for pv, pv_ids in prods:
+                        blob = (pv or "") + (pv_ids or "")
+                        for u in remaining:
+                            if u in blob:
+                                bound_urls.add(u)
+            for r, item in zip(rows, items):
+                item["bound"] = bool(r.video_url) and r.video_url in bound_urls
+        except Exception as e:
+            logger.warning(f"生成历史附加绑定状态失败: {e}")
         # 附加已完成的超分结果（按源视频地址匹配，取最新一条），供前端并排对比展示
         try:
             from models.video_upscale_task import VideoUpscaleTask

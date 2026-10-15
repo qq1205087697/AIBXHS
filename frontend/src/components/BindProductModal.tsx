@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Modal, Select, Spin, message } from 'antd'
-import { productsApi, aiCreationApi } from '../api'
+import { productsApi, videoBindingApi } from '../api'
 
 interface ProductOption {
   id: number
@@ -10,12 +10,14 @@ interface ProductOption {
 
 const PAGE_SIZE = 50
 
-/** 绑定视频至产品详情（AI视频页 / 高清处理页共用），选择产品后写入产品 videos 列表 */
+/** 绑定视频至产品详情（AI视频页 / 高清处理页共用），选择产品后提交绑定申请，审核通过才真正写入产品 */
 const BindProductModal: React.FC<{
   open: boolean
   videoUrl: string
+  source?: 'ai_video' | 'upscale'
+  taskTitle?: string
   onClose: () => void
-}> = ({ open, videoUrl, onClose }) => {
+}> = ({ open, videoUrl, source = 'ai_video', taskTitle, onClose }) => {
   const [products, setProducts] = useState<ProductOption[]>([])
   const [productId, setProductId] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -86,11 +88,16 @@ const BindProductModal: React.FC<{
     }
     setSubmitting(true)
     try {
-      await aiCreationApi.bindProductVideo(productId, videoUrl)
-      message.success('视频已绑定至产品详情')
+      await videoBindingApi.submit({
+        product_id: productId,
+        video_url: videoUrl,
+        source,
+        task_title: taskTitle,
+      })
+      message.success('绑定申请已提交，审核通过后生效')
       onClose()
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '绑定失败')
+      message.error(e?.response?.data?.detail || '提交绑定申请失败')
     } finally {
       setSubmitting(false)
     }

@@ -109,15 +109,24 @@ def _download_comfy_file(finfo: Dict[str, Any]) -> Tuple[bytes, str]:
     return buf.getvalue(), finfo.get("filename") or "upscaled.mp4"
 
 
-def _update_task(task_id: int, **fields) -> None:
-    """独立会话更新任务记录（后台线程中使用）"""
+def _update_task(task_id: int, only_active: bool = False, **fields) -> None:
+    """独立会话更新任务记录（后台线程中使用）
+
+    only_active=True 时仅在任务仍处于「排队中/处理中」才写入，
+    防止双后端同库场景下，本进程的迟到结果覆盖另一进程已写入的「已完成」。
+    """
     from database.database import SessionLocal
     from models.video_upscale_task import VideoUpscaleTask
 
     db = SessionLocal()
     try:
-        db.query(VideoUpscaleTask).filter(VideoUpscaleTask.id == task_id).update(fields)
+        q = db.query(VideoUpscaleTask).filter(VideoUpscaleTask.id == task_id)
+        if only_active:
+            q = q.filter(VideoUpscaleTask.status.in_(["排队中", "处理中"]))
+        updated = q.update(fields, synchronize_session=False)
         db.commit()
+        if only_active and not updated:
+            logger.info(f"[超分] 任务 {task_id} 状态已被其他进程更新，跳过写入 {fields.get('status')}")
     except Exception as e:
         logger.error(f"[超分] 更新任务 {task_id} 状态失败: {e}")
         db.rollback()
@@ -166,31 +175,64 @@ def _run_task(task_id: int) -> None:
         try:
             task = db.query(VideoUpscaleTask).filter(VideoUpscaleTask.id == task_id).first()
             source_url = task.source_video_url if task else None
+            existing_prompt_id = task.comfy_prompt_id if task else None
         finally:
             db.close()
         if not source_url:
             raise UpscaleError("找不到源视频地址")
 
-        logger.info(f"[超分] 任务 {task_id} 开始下载源视频: {source_url}")
-        content = _download(source_url)
-        logger.info(f"[超分] 任务 {task_id} 源视频已下载，{len(content) // 1024}KB")
+        if existing_prompt_id:
+            # 服务重启恢复：工作流已提交 ComfyUI，直接接续轮询，不重复上传/入队（与 H3 恢复逻辑一致）
+            prompt_id = existing_prompt_id
+            logger.info(f"[超分] 任务 {task_id} 接续轮询 ComfyUI {prompt_id}")
+        else:
+            logger.info(f"[超分] 任务 {task_id} 开始下载源视频: {source_url}")
+            content = _download(source_url)
+            logger.info(f"[超分] 任务 {task_id} 源视频已下载，{len(content) // 1024}KB")
 
-        # 2. 上传 ComfyUI 并提交工作流
-        video_name = _upload_video(content)
-        workflow = _build_workflow(video_name, _get_scale(task_id))
-        resp = _api("POST", "/prompt", json={"prompt": workflow})
-        prompt_id = resp.json()["prompt_id"]
-        _update_task(task_id, comfy_prompt_id=prompt_id)
-        logger.info(f"[超分] 任务 {task_id} 已提交，ComfyUI ID={prompt_id}")
+            # 2. 上传 ComfyUI 并提交工作流
+            video_name = _upload_video(content)
+            workflow = _build_workflow(video_name, _get_scale(task_id))
+            resp = _api("POST", "/prompt", json={"prompt": workflow})
+            prompt_id = resp.json()["prompt_id"]
+            _update_task(task_id, comfy_prompt_id=prompt_id)
+            logger.info(f"[超分] 任务 {task_id} 已提交，ComfyUI ID={prompt_id}")
 
         # 3. 轮询直到完成
+        consecutive_failures = 0  # 连续查询失败：配置缺失/服务不可达等确定性错误，快速失败
+        timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久
         for _ in range(max_polls):
             threading.Event().wait(interval)
             try:
                 history = _api("GET", f"/history/{prompt_id}").json()
-            except Exception as e:
-                logger.warning(f"[超分] 任务 {task_id} 查询失败，稍后重试: {e}")
+            except requests.exceptions.Timeout as e:
+                # 超时不算服务故障：ComfyUI 忙时 HTTP 响应可能超过请求超时，任务本身仍在正常运行
+                timeout_failures += 1
+                if timeout_failures % 40 == 1:
+                    logger.warning(
+                        f"[超分] 任务 {task_id} 查询超时（连续 {timeout_failures} 次，ComfyUI 可能正忙）: {e}"
+                    )
+                if timeout_failures >= 240:
+                    _update_task(task_id, only_active=True, status="失败",
+                                 error_message="ComfyUI 长时间无响应（连续 1 小时查询超时），请检查 ComfyUI 服务后重新提交",
+                                 finished_at=datetime.now())
+                    logger.error(f"[超分] 任务 {task_id} 连续查询超时，终止轮询")
+                    return
                 continue
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(
+                    f"[超分] 任务 {task_id} 查询失败（连续 {consecutive_failures} 次）: {e}"
+                )
+                if consecutive_failures >= 20:
+                    _update_task(task_id, only_active=True, status="失败",
+                                 error_message="ComfyUI 服务连接失败（连续 5 分钟查询异常），请检查 H3_BASE_URL 等配置后重新提交",
+                                 finished_at=datetime.now())
+                    logger.error(f"[超分] 任务 {task_id} 连续查询失败，终止轮询")
+                    return
+                continue
+            consecutive_failures = 0
+            timeout_failures = 0
 
             item = history.get(prompt_id)
             if item is None:
@@ -235,7 +277,7 @@ def _run_task(task_id: int) -> None:
 
             set_status("处理中")
 
-        _update_task(task_id, status="失败",
+        _update_task(task_id, only_active=True, status="失败",
                      error_message=f"处理超时（超过 {settings.H3_MAX_WAIT_MINUTES} 分钟）",
                      finished_at=datetime.now())
         logger.error(f"[超分] 任务 {task_id} 等待超时")
@@ -345,12 +387,16 @@ def _serialize(task) -> Dict[str, Any]:
 
 
 def list_upscale_tasks(
-    tenant_id: int, page: int = 1, page_size: int = 20, keyword: str = ""
+    tenant_id: int, page: int = 1, page_size: int = 20, keyword: str = "", bind_status: str = "all"
 ) -> Dict[str, Any]:
-    """租户的超分任务列表（按时间倒序），keyword 模糊匹配任务标题"""
+    """租户的超分任务列表（按时间倒序），keyword 模糊匹配任务标题。
+
+    bind_status: all=全部 / bound=已绑定 / unbound=未绑定（按审核通过的绑定申请判定，成片或源视频地址一致均可）。
+    """
     from database.database import SessionLocal
     from models.video_upscale_task import VideoUpscaleTask
-    from sqlalchemy import or_
+    from models.video_binding_request import VideoBindingRequest
+    from sqlalchemy import or_, text, bindparam
 
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
@@ -364,6 +410,33 @@ def list_upscale_tasks(
         if keyword:
             like = f"%{keyword}%"
             query = query.filter(or_(VideoUpscaleTask.title.ilike(like)))
+        # 绑定状态筛选：审核通过的绑定申请命中，或产品视频列表已包含成片/源视频地址（旧直绑数据无申请记录）
+        # products 表无 ORM 模型映射，产品包含判定用 text SQL 相关子查询
+        bind_exists = or_(
+            db.query(VideoBindingRequest.id)
+            .filter(
+                VideoBindingRequest.tenant_id == tenant_id,
+                VideoBindingRequest.status == "approved",
+                VideoBindingRequest.deleted_at.is_(None),
+                or_(
+                    VideoBindingRequest.video_url == VideoUpscaleTask.video_url,
+                    VideoBindingRequest.video_url == VideoUpscaleTask.source_video_url,
+                ),
+            )
+            .exists(),
+            text(
+                "EXISTS (SELECT 1 FROM products p "
+                "WHERE p.tenant_id = :bs_tid AND p.deleted_at IS NULL "
+                "AND (p.video_url = video_upscale_tasks.video_url "
+                "OR p.videos LIKE CONCAT('%', video_upscale_tasks.video_url, '%') "
+                "OR p.video_url = video_upscale_tasks.source_video_url "
+                "OR p.videos LIKE CONCAT('%', video_upscale_tasks.source_video_url, '%')))"
+            ).bindparams(bs_tid=tenant_id),
+        )
+        if bind_status == "bound":
+            query = query.filter(bind_exists)
+        elif bind_status == "unbound":
+            query = query.filter(~bind_exists)
         total = query.count()
         rows = (
             query.order_by(VideoUpscaleTask.id.desc())
@@ -371,7 +444,59 @@ def list_upscale_tasks(
             .limit(page_size)
             .all()
         )
-        return {"items": [_serialize(r) for r in rows], "total": total}
+        items = [_serialize(r) for r in rows]
+        # 附加绑定状态：approved 申请命中，或产品视频列表已包含成片/源视频地址（旧直绑数据）
+        try:
+            check_urls = []
+            for r in rows:
+                if r.video_url:
+                    check_urls.append(r.video_url)
+                if r.source_video_url:
+                    check_urls.append(r.source_video_url)
+            bound_urls = set()
+            if check_urls:
+                bound_urls = {
+                    u
+                    for (u,) in db.query(VideoBindingRequest.video_url)
+                    .filter(
+                        VideoBindingRequest.tenant_id == tenant_id,
+                        VideoBindingRequest.status == "approved",
+                        VideoBindingRequest.deleted_at.is_(None),
+                        VideoBindingRequest.video_url.in_(check_urls),
+                    )
+                    .all()
+                }
+                remaining = [u for u in check_urls if u not in bound_urls]
+                if remaining:
+                    like_parts = " OR ".join(
+                        [f"videos LIKE CONCAT('%', :u{i}, '%')" for i in range(len(remaining))]
+                    )
+                    prods = db.execute(
+                        text(
+                            "SELECT video_url, videos FROM products "
+                            "WHERE tenant_id = :tid AND deleted_at IS NULL AND "
+                            "(video_url IN :urls OR " + like_parts + ")"
+                        ).bindparams(bindparam("urls", expanding=True)),
+                        {
+                            "tid": tenant_id,
+                            "urls": remaining,
+                            **{f"u{i}": u for i, u in enumerate(remaining)},
+                        },
+                    ).fetchall()
+                    for pv, pv_ids in prods:
+                        blob = (pv or "") + (pv_ids or "")
+                        for u in remaining:
+                            if u in blob:
+                                bound_urls.add(u)
+            for r, item in zip(rows, items):
+                item["bound"] = (
+                    bool(r.video_url) and r.video_url in bound_urls
+                ) or (
+                    bool(r.source_video_url) and r.source_video_url in bound_urls
+                )
+        except Exception as e:
+            logger.warning(f"超分列表附加绑定状态失败: {e}")
+        return {"items": items, "total": total}
     finally:
         db.close()
 
@@ -397,7 +522,7 @@ def delete_upscale_task(tenant_id: int, task_id: int) -> None:
 
 
 def resume_pending_tasks() -> None:
-    """服务启动时恢复未完成的超分任务：重新挂上后台线程"""
+    """服务启动时恢复未完成的超分任务：已有 ComfyUI 任务 ID 的接续轮询，未提交成功的标失败（与 H3 恢复逻辑一致）"""
     from database.database import SessionLocal
     from models.video_upscale_task import VideoUpscaleTask
 
@@ -407,14 +532,30 @@ def resume_pending_tasks() -> None:
             db.query(VideoUpscaleTask)
             .filter(
                 VideoUpscaleTask.status.in_(["排队中", "处理中"]),
+                VideoUpscaleTask.comfy_prompt_id.isnot(None),
                 VideoUpscaleTask.deleted_at.is_(None),
             )
             .all()
         )
-        pending = [r.id for r in rows]
+        pending = [(r.id, r.comfy_prompt_id) for r in rows]
+
+        # 未拿到 ComfyUI 任务 ID 的记录已无法追踪，直接标记失败，避免一直停在“排队中”
+        orphan = db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.status.in_(["排队中", "处理中"]),
+            VideoUpscaleTask.comfy_prompt_id.is_(None),
+            VideoUpscaleTask.deleted_at.is_(None),
+        )
+        orphan_count = orphan.update(
+            {"status": "失败", "error_message": "服务重启导致任务中断，请重新提交",
+             "finished_at": datetime.now()},
+            synchronize_session=False,
+        )
+        db.commit()
+        if orphan_count:
+            logger.warning(f"[超分] {orphan_count} 条未提交成功的任务已标记为失败")
     finally:
         db.close()
 
-    for task_id in pending:
-        logger.info(f"[超分] 恢复未完成任务 {task_id}")
+    for task_id, prompt_id in pending:
+        logger.info(f"[超分] 恢复未完成任务 {task_id}（ComfyUI {prompt_id}）")
         _ensure_worker(task_id)

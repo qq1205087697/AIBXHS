@@ -253,6 +253,7 @@ const filterFieldOptions = [
   { label: '平台数', value: 'platform_count' },
   { label: '状态', value: 'status' },
   { label: '配件绑定情况', value: 'accessory_binding' },
+  { label: '视频', value: 'video_binding' },
 ]
 
 // 操作符选项
@@ -282,6 +283,10 @@ const fieldValueOptions: Record<string, { label: string; value: string }[]> = {
     { label: '未绑定', value: 'unbound' },
     { label: '已绑定', value: 'bound' },
     { label: '无配件', value: 'no_accessory' },
+  ],
+  video_binding: [
+    { label: '有视频', value: 'has_video' },
+    { label: '无视频', value: 'no_video' },
   ],
 }
 
@@ -2280,10 +2285,10 @@ const productAttributeLabelMap: Record<string, string> = {
                               value={condition.field}
                               onChange={(v) => {
                                 updateFilterCondition(condition.id, 'field', v)
-                                // 切换到有固定候选值的字段时，重置操作符为"等于"并清空已填的值
+                                // 切换到有固定候选值的字段时，重置操作符为"等于"并清空已填的值；视频字段默认选"有视频"
                                 if (fieldValueOptions[v as string]) {
                                   updateFilterCondition(condition.id, 'operator', 'eq')
-                                  updateFilterCondition(condition.id, 'value', '')
+                                  updateFilterCondition(condition.id, 'value', v === 'video_binding' ? 'has_video' : '')
                                 }
                               }}
                               options={filterFieldOptions}
@@ -2375,6 +2380,16 @@ const productAttributeLabelMap: Record<string, string> = {
                           style={{ padding: 0 }}
                         >
                           添加条件
+                        </Button>
+                        <Button
+                          type="link"
+                          danger
+                          icon={<DeleteOutlined />}
+                          onClick={() => setFilterConditions([])}
+                          disabled={filterConditions.length === 0}
+                          style={{ marginLeft: 'auto', padding: 0 }}
+                        >
+                          清空筛选
                         </Button>
                       </div>
                     </div>
@@ -3722,19 +3737,23 @@ const productAttributeLabelMap: Record<string, string> = {
                         : detailModalProduct.video_url
                           ? [detailModalProduct.video_url]
                           : []
-                      return galleryVideos.length > 0 ? (
+                      return (
                         <Card size="small" title={`产品视频（${galleryVideos.length}）`}>
-                          {galleryVideos.map((v, i) => (
-                            <video
-                              key={i}
-                              src={v}
-                              controls
-                              preload="metadata"
-                              style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto 8px' }}
-                            />
-                          ))}
+                          {galleryVideos.length > 0 ? (
+                            galleryVideos.map((v, i) => (
+                              <video
+                                key={i}
+                                src={v}
+                                controls
+                                preload="metadata"
+                                style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto 8px' }}
+                              />
+                            ))
+                          ) : (
+                            <div style={{ color: '#999', fontSize: 13, textAlign: 'center', padding: '16px 0' }}>暂无视频</div>
+                          )}
                         </Card>
-                      ) : null
+                      )
                     })()}
                   </div>
                 )

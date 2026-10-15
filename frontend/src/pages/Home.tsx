@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Card, Row, Col, Typography, Select, Empty, Modal, Table, Button, Radio, Tag, message, Spin, Space } from 'antd'
-import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList } from 'lucide-react'
+import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList, ClipboardCheck } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
-import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi } from '../api'
+import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi, videoBindingApi } from '../api'
 import { useResponsive } from '../hooks/useResponsive'
 
 const { Title, Text } = Typography
@@ -50,6 +50,7 @@ const Home: React.FC = () => {
   const [confirmedShipmentCount, setConfirmedShipmentCount] = useState(0) // 已确认发货单数
   const [cancelledShipmentCount, setCancelledShipmentCount] = useState(0) // 已取消发货单数
   const [pendingReplenishmentCount, setPendingReplenishmentCount] = useState(0) // 补货单待审批数量
+  const [pendingVideoBindingCount, setPendingVideoBindingCount] = useState(0) // 视频绑定待审核数量
   const [diffModalOpen, setDiffModalOpen] = useState(false)
   const [diffItems, setDiffItems] = useState<any[]>([])
   const [diffLoading, setDiffLoading] = useState(false)
@@ -152,6 +153,7 @@ const Home: React.FC = () => {
       loadPurchaseStats(),
       loadInboundDiffCount(),
       loadPendingShipmentCount(),
+      loadPendingVideoBindingCount(),
     ]).finally(() => {
       setLoading(false)
     })
@@ -179,6 +181,17 @@ const Home: React.FC = () => {
       }
     } catch (e) {
       console.error('加载发货单KPI失败:', e)
+    }
+  }
+
+  const loadPendingVideoBindingCount = async () => {
+    try {
+      const res = await videoBindingApi.getPendingCount()
+      if (res.data.success) {
+        setPendingVideoBindingCount(res.data.pending_count || 0)
+      }
+    } catch (e) {
+      console.error('加载视频绑定待审核数量失败:', e)
     }
   }
 
@@ -316,7 +329,19 @@ const Home: React.FC = () => {
       hasPending: pendingReplenishmentCount > 0,
       priority: 1,
     },
-  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount])
+    {
+      id: 'video_binding',
+      title: '视频机器人',
+      requiredPermission: 'ai_video:approve',
+      icon: <ClipboardCheck size={32} />,
+      color: '#eb2f96',
+      description: 'AI视频/高清处理绑定至产品的待审核申请',
+      path: '/video-binding-review',
+      stats: pendingVideoBindingCount,
+      hasPending: pendingVideoBindingCount > 0,
+      priority: 1,
+    },
+  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount, pendingVideoBindingCount])
 
   const permittedBots = useMemo(() =>
     allBots.filter(bot => hasPermission(bot.requiredPermission)),
@@ -546,6 +571,32 @@ const Home: React.FC = () => {
               )}
               {hasPending && (
                 <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>请及时审批</div>
+              )}
+            </div>
+          </Col>
+        </Row>
+      </div>
+    )
+  }
+
+  const renderVideoBindingStats = () => {
+    const hasPending = pendingVideoBindingCount > 0
+    return (
+      <div style={{ marginTop: 16 }}>
+        <Row gutter={[8, 8]}>
+          <Col span={24}>
+            <div style={{
+              textAlign: 'center',
+              padding: '12px 0',
+              background: hasPending ? '#fff0f6' : '#f6ffed',
+              borderRadius: 8
+            }}>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>绑定至产品待审核</div>
+              <div style={{ fontSize: 28, fontWeight: 'bold', color: hasPending ? '#eb2f96' : '#52c41a' }}>
+                {pendingVideoBindingCount} 条
+              </div>
+              {hasPending && (
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>点击前往审核</div>
               )}
             </div>
           </Col>
@@ -853,6 +904,7 @@ const Home: React.FC = () => {
                 {module.id === 'inbound_diff' && renderInboundDiffStats()}
                 {module.id === 'pending_shipment' && renderPendingShipmentStats()}
                 {module.id === 'pending_replenishment' && renderPendingReplenishmentStats()}
+                {module.id === 'video_binding' && renderVideoBindingStats()}
               </Card>
             </Col>
             ))

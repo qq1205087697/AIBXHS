@@ -31,6 +31,7 @@ import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
+import VideoBindingReview from './pages/VideoBindingReview';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -325,6 +326,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <UpscaleCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/video-binding-review"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <VideoBindingReview />
             </MainLayout>
           </ProtectedRoute>
         }

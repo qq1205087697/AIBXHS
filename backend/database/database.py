@@ -90,6 +90,7 @@ def init_db():
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
         )
         from models.ai_video_task import AIVideoTask
+        from models.video_binding_request import VideoBindingRequest
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)

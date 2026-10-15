@@ -252,6 +252,8 @@ const AICreationCenter: React.FC = () => {
   const [productDraftDirty, setProductDraftDirty] = useState(false)
   const [history, setHistory] = useState<AIVideoTask[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
+  // 失败任务重试中标记（一次只允许一个重试请求，防止重复提交）
+  const [retryingId, setRetryingId] = useState<number | null>(null)
   const [previewTask, setPreviewTask] = useState<AIVideoTask | null>(null)
   // 生成历史缩略图大图预览：记录当前打开的历史项 id 与图片下标（受控，支持"+N"直达后面的图）
   const [historyPreview, setHistoryPreview] = useState<{ id: number; index: number } | null>(null)
@@ -406,12 +408,19 @@ const AICreationCenter: React.FC = () => {
   const [historyPageSize, setHistoryPageSize] = useState(20)
   const [historyTotal, setHistoryTotal] = useState(0)
   const [historyKeyword, setHistoryKeyword] = useState('')
+  // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
+  const [historyBindFilter, setHistoryBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
   const keywordTimerRef = useRef<number | null>(null)
 
-  const loadTasks = async (page = historyPage, size = historyPageSize, kw = historyKeyword) => {
+  const loadTasks = async (
+    page = historyPage,
+    size = historyPageSize,
+    kw = historyKeyword,
+    bind = historyBindFilter,
+  ) => {
     setTasksLoading(true)
     try {
-      const resp = await aiCreationApi.listVideoTasks(page, size, kw)
+      const resp = await aiCreationApi.listVideoTasks(page, size, kw, bind)
       setHistory(resp.data.data.items || [])
       setHistoryTotal(resp.data.data.total || 0)
     } catch {
@@ -431,6 +440,12 @@ const AICreationCenter: React.FC = () => {
     }, 300)
   }
 
+  // 绑定状态页签切换：回到第 1 页重新加载
+  const handleHistoryBindFilterChange = (v: 'all' | 'unbound' | 'bound') => {
+    setHistoryBindFilter(v)
+    loadTasks(1, historyPageSize, historyKeyword, v)
+  }
+
   useEffect(() => {
     loadTasks(1)
     setHistoryPage(1)
@@ -443,7 +458,7 @@ const AICreationCenter: React.FC = () => {
     const timer = window.setInterval(() => loadTasks(historyPage), 15000)
     return () => window.clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [history, historyPage, historyPageSize, historyKeyword])
+  }, [history, historyPage, historyPageSize, historyKeyword, historyBindFilter])
 
   // 下载 URL 图片为 Blob：先浏览器直连，被 CORS 拦截或网络失败时改走后端代理
   const fetchImageBlob = async (url: string): Promise<Blob | null> => {
@@ -672,6 +687,52 @@ const AICreationCenter: React.FC = () => {
         }
       },
     })
+  }
+
+  // ===== 失败任务重试：用历史存储的参考图与原参数重新提交（生成新任务记录，原记录保留）=====
+  const retryTask = async (item: AIVideoTask) => {
+    if (retryingId != null) return
+    if (!item.images.length) {
+      message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
+      return
+    }
+    setRetryingId(item.id)
+    try {
+      const files: File[] = []
+      for (let i = 0; i < item.images.length; i++) {
+        const blob = await fetchImageBlob(item.images[i])
+        if (blob) {
+          files.push(new File([blob], `ref-${i + 1}.jpg`, { type: blob.type || 'image/jpeg' }))
+        }
+      }
+      if (files.length === 0) {
+        message.error('参考图片读取失败，请使用「编辑」重新上传')
+        return
+      }
+      const storedLang = item.voiceover_language || '自动'
+      const resp = await aiCreationApi.generateVideo(files, {
+        prompt: item.prompt,
+        duration: item.duration,
+        resolution: item.resolution,
+        ratio: item.ratio,
+        model: item.model,
+        market: item.market,
+        voiceover_language: storedLang === '自动' ? 'auto' : (storedLang as VoiceoverLanguage),
+        title: item.title,
+        product_code: item.product_code || '',
+        product_name: item.product_name || '',
+      })
+      const task = resp.data.data
+      // 新任务在最前：跳回第 1 页刷新
+      setHistoryPage(1)
+      loadTasks(1)
+      setActiveHistoryId(task.id)
+      message.success('已重新提交生成任务，排队中')
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '重试失败，请稍后再试')
+    } finally {
+      setRetryingId(null)
+    }
   }
 
   // ===== 绑定至产品 / 变高清 =====
@@ -1292,6 +1353,19 @@ const AICreationCenter: React.FC = () => {
       style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}
       styles={{ body: { flex: 1, minHeight: 0, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
     >
+      {/* 绑定状态页签：全部 / 未绑定 / 已绑定 */}
+      <div style={{ marginBottom: 10, flexShrink: 0 }}>
+        <Segmented
+          size="small"
+          value={historyBindFilter}
+          onChange={(v) => handleHistoryBindFilterChange(v as 'all' | 'unbound' | 'bound')}
+          options={[
+            { label: '全部', value: 'all' },
+            { label: '未绑定', value: 'unbound' },
+            { label: '已绑定', value: 'bound' },
+          ]}
+        />
+      </div>
       {history.length === 0 ? (
         tasksLoading ? (
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
@@ -1381,9 +1455,18 @@ const AICreationCenter: React.FC = () => {
                     失败
                   </Tag>
                 ) : item.status === '已完成' && item.cost_seconds != null ? (
-                  <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                    耗时 {formatCost(item.cost_seconds)}
-                  </Text>
+                  <>
+                    {item.bound ? (
+                      <Tag color="success" style={{ flexShrink: 0, marginRight: 0 }}>
+                        已绑定
+                      </Tag>
+                    ) : (
+                      <Tag style={{ flexShrink: 0, marginRight: 0, color: '#999' }}>未绑定</Tag>
+                    )}
+                    <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+                      耗时 {formatCost(item.cost_seconds)}
+                    </Text>
+                  </>
                 ) : null}
                 <div style={{ flex: 1 }} />
                 <Button icon={<EyeOutlined />} onClick={() => setPreviewTask(item)}>
@@ -1396,6 +1479,17 @@ const AICreationCenter: React.FC = () => {
                   trigger={['click']}
                   menu={{
                     items: [
+                      ...(item.status === '失败'
+                        ? [
+                            {
+                              key: 'retry',
+                              label: retryingId === item.id ? '重试中…' : '重试生成',
+                              icon: <ReloadOutlined />,
+                              disabled: retryingId != null,
+                              onClick: () => retryTask(item),
+                            },
+                          ]
+                        : []),
                       ...(item.status === '已完成' && item.video_url
                         ? [
                             {
@@ -1859,10 +1953,12 @@ const AICreationCenter: React.FC = () => {
       {renderPlanModal()}
       {renderProductModal()}
 
-      {/* 绑定至产品：选择产品后把视频写入产品详情（无视频小窗） */}
+      {/* 绑定至产品：选择产品后提交绑定申请，审核通过才写入产品详情（无视频小窗） */}
       <BindProductModal
         open={bindModalOpen}
         videoUrl={bindTask?.video_url || ''}
+        source="ai_video"
+        taskTitle={bindTask?.title}
         onClose={() => setBindModalOpen(false)}
       />
 

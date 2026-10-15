@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Card, Button, Spin, Tag, Typography, Space, Input, Empty, Modal, Pagination, message } from 'antd'
+import { Card, Button, Spin, Tag, Typography, Space, Input, Empty, Modal, Pagination, message, Segmented } from 'antd'
 import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined } from '@ant-design/icons'
 import BindProductModal from '../components/BindProductModal'
 import CompareVideoModal from '../components/CompareVideoModal'
@@ -23,10 +23,13 @@ const UpscaleCenter: React.FC = () => {
   const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT)
   const [total, setTotal] = useState(0)
   const [keyword, setKeyword] = useState('')
+  // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
+  const [bindFilter, setBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
   const keywordTimerRef = useRef<number | null>(null)
   const [previewTask, setPreviewTask] = useState<VideoUpscaleTask | null>(null)
   const [bindOpen, setBindOpen] = useState(false)
   const [bindUrl, setBindUrl] = useState('')
+  const [bindTitle, setBindTitle] = useState('')
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
 
   // 下载源视频/超分结果（入口：对比弹窗「更多」菜单）：走后端代理流式下载（跨域 <a download> 不生效）
@@ -54,10 +57,10 @@ const UpscaleCenter: React.FC = () => {
     }
   }
 
-  const loadTasks = async (p = page, size = pageSize, kw = keyword) => {
+  const loadTasks = async (p = page, size = pageSize, kw = keyword, bind = bindFilter) => {
     setLoading(true)
     try {
-      const resp = await aiCreationApi.listUpscaleTasks(p, size, kw)
+      const resp = await aiCreationApi.listUpscaleTasks(p, size, kw, bind)
       setTasks(resp.data.data.items || [])
       setTotal(resp.data.data.total || 0)
     } catch {
@@ -65,6 +68,12 @@ const UpscaleCenter: React.FC = () => {
     } finally {
       setLoading(false)
     }
+  }
+
+  // 绑定状态页签切换：回到第 1 页重新加载
+  const handleBindFilterChange = (v: 'all' | 'unbound' | 'bound') => {
+    setBindFilter(v)
+    loadTasks(1, pageSize, keyword, v)
   }
 
   useEffect(() => {
@@ -79,7 +88,7 @@ const UpscaleCenter: React.FC = () => {
     const timer = window.setInterval(() => loadTasks(), 15000)
     return () => window.clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasks, page, pageSize, keyword])
+  }, [tasks, page, pageSize, keyword, bindFilter])
 
   const handleKeywordChange = (kw: string) => {
     setKeyword(kw)
@@ -174,6 +183,19 @@ const UpscaleCenter: React.FC = () => {
           ) : null
         }
       >
+        {/* 绑定状态页签：全部 / 未绑定 / 已绑定 */}
+        <div style={{ marginBottom: 12, flexShrink: 0 }}>
+          <Segmented
+            size="small"
+            value={bindFilter}
+            onChange={(v) => handleBindFilterChange(v as 'all' | 'unbound' | 'bound')}
+            options={[
+              { label: '全部', value: 'all' },
+              { label: '未绑定', value: 'unbound' },
+              { label: '已绑定', value: 'bound' },
+            ]}
+          />
+        </div>
         {tasks.length === 0 ? (
           <Empty
             description={loading ? <Spin /> : '暂无超分任务，可在「AI视频」生成历史的「更多」菜单中提交变高清'}
@@ -214,9 +236,18 @@ const UpscaleCenter: React.FC = () => {
                       失败
                     </Tag>
                   ) : item.status === '已完成' && item.cost_seconds != null ? (
-                    <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                      耗时 {formatCost(item.cost_seconds)}
-                    </Text>
+                    <>
+                      {item.bound ? (
+                        <Tag color="success" style={{ flexShrink: 0, marginRight: 0 }}>
+                          已绑定
+                        </Tag>
+                      ) : (
+                        <Tag style={{ flexShrink: 0, marginRight: 0, color: '#999' }}>未绑定</Tag>
+                      )}
+                      <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+                        耗时 {formatCost(item.cost_seconds)}
+                      </Text>
+                    </>
                   ) : null}
                   <div style={{ flex: 1 }} />
                   {item.source_video_url && (
@@ -226,6 +257,7 @@ const UpscaleCenter: React.FC = () => {
                       onClick={() => {
                         // 优先绑定超分结果，无结果时绑定源视频
                         setBindUrl(item.video_url || item.source_video_url)
+                        setBindTitle(item.title || '')
                         setBindOpen(true)
                       }}
                     >
@@ -359,10 +391,12 @@ const UpscaleCenter: React.FC = () => {
         }}
       />
 
-      {/* 绑定至产品（与 AI视频页共用） */}
+      {/* 绑定至产品（与 AI视频页共用）：提交绑定申请，审核通过才写入产品详情 */}
       <BindProductModal
         open={bindOpen}
         videoUrl={bindUrl}
+        source="upscale"
+        taskTitle={bindTitle}
         onClose={() => setBindOpen(false)}
       />
     </div>
