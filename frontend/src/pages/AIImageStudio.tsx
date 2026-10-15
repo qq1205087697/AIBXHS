@@ -469,7 +469,7 @@ const AIImageStudio: React.FC = () => {
         }
       `}
     </style>
-    <div style={{ padding: 16, height: '100%', boxSizing: 'border-box' }}>
+    <div style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
       <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
         {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
         <Col xs={24} lg={9} style={{ height: '100%', flex: '0 0 400px', maxWidth: '100%' }}>
