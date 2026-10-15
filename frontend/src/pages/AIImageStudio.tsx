@@ -19,13 +19,10 @@ import {
   Badge,
   Upload,
   Radio,
-  Modal,
-  ColorPicker,
   Pagination,
   Checkbox,
   Switch,
 } from 'antd'
-import type { Color } from 'antd/es/color-picker'
 import {
   UploadOutlined,
   PictureOutlined,
@@ -34,7 +31,6 @@ import {
   ThunderboltOutlined,
   DownloadOutlined,
   BulbOutlined,
-  SettingOutlined,
   SearchOutlined,
   CopyOutlined,
   MinusOutlined,
@@ -92,9 +88,6 @@ const STATUS_COLORS: Record<string, string> = {
 }
 
 const BRAND_DEFAULTS = {
-  main_color: '',
-  font_style: '智能字体风格',
-  custom_text: '',
   country: 'US 美国',
   language: '英语',
   platform: '亚马逊',
@@ -140,8 +133,6 @@ const AIImageStudio: React.FC = () => {
     scene: 1,
   })
   const [mainAspectRatio, setMainAspectRatio] = useState('1:1')
-  const [mainNoText, setMainNoText] = useState(false)
-  const [brandOpen, setBrandOpen] = useState(false)
   const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -252,7 +243,6 @@ const AIImageStudio: React.FC = () => {
           ...Object.fromEntries(
             Object.entries(brand).filter(([, v]) => v !== ''),
           ),
-          no_text_mode: mainEnabled && mainNoText ? 'true' : '',
         },
       })
       message.success('任务已提交，正在后台生成')
@@ -307,7 +297,6 @@ const AIImageStudio: React.FC = () => {
     if (task.brand_settings) setBrand({ ...BRAND_DEFAULTS, ...task.brand_settings })
     setProductInfo(task.product_info || '')
     setExtraPrompt(task.prompt || '')
-    setBrandOpen(false)
     message.success('参数已回填到左侧表单（参考图需重新上传）')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -326,7 +315,6 @@ const AIImageStudio: React.FC = () => {
     }
   }
 
-  const brandActiveCount = Object.entries(brand).filter(([, v]) => v !== '').length
 
   // ===== 渲染：结果图（大图预览画廊）=====
   const renderResultItem = (item: AIImageResultItem, task: AIImageTask) => {
@@ -491,6 +479,7 @@ const AIImageStudio: React.FC = () => {
                   accept="image/*"
                   maxCount={MAX_IMAGES}
                   fileList={fileList}
+                  showUploadList={false}
                   beforeUpload={() => false}
                   onChange={({ fileList: fl }) => setFileList(fl.slice(-MAX_IMAGES))}
                   style={{ marginTop: 8 }}
@@ -501,6 +490,29 @@ const AIImageStudio: React.FC = () => {
                   <p className="ant-upload-text">点击或拖拽上传商品参考图</p>
                   <p className="ant-upload-hint">JPEG/PNG/WebP，单张 ≤ 10M</p>
                 </Upload.Dragger>
+                {fileList.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                    {fileList.map((f) => (
+                      <div key={f.uid} style={{ position: 'relative', width: 80, height: 80 }}>
+                        <img
+                          alt={f.name}
+                          src={f.thumbUrl || f.url}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
+                        />
+                        <Button
+                          danger
+                          size="small"
+                          shape="circle"
+                          icon={<DeleteOutlined style={{ fontSize: 10 }} />}
+                          style={{ position: 'absolute', top: -8, right: -8, width: 20, height: 20, minWidth: 20 }}
+                          onClick={() =>
+                            setFileList((prev) => prev.filter((x) => x.uid !== f.uid))
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div>
@@ -525,6 +537,48 @@ const AIImageStudio: React.FC = () => {
                   style={{ marginTop: 8 }}
                 />
               </div>
+
+              <Row gutter={12}>
+                <Col span={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>销售国家/地区</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 4 }}
+                    size="small"
+                    value={brand.country}
+                    onChange={(v) => setBrand((b) => ({ ...b, country: v }))}
+                    showSearch
+                    options={[
+                      'US 美国', 'CA 加拿大', 'UK 英国', 'DE 德国', 'FR 法国',
+                      'IT 意大利', 'ES 西班牙', 'JP 日本', 'AU 澳大利亚',
+                    ].map((s) => ({ value: s, label: s }))}
+                  />
+                </Col>
+                <Col span={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>生成图片语言</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 4 }}
+                    size="small"
+                    value={brand.language}
+                    onChange={(v) => setBrand((b) => ({ ...b, language: v }))}
+                    showSearch
+                    options={['英语', '德语', '法语', '意大利语', '西班牙语', '日语'].map(
+                      (s) => ({ value: s, label: s }),
+                    )}
+                  />
+                </Col>
+                <Col span={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>发布平台</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 4 }}
+                    size="small"
+                    value={brand.platform}
+                    onChange={(v) => setBrand((b) => ({ ...b, platform: v }))}
+                    options={['亚马逊', 'eBay', '独立站', 'Temu', 'Shein'].map(
+                      (s) => ({ value: s, label: s }),
+                    )}
+                  />
+                </Col>
+              </Row>
 
               {/* ===== A+图设置（单选） ===== */}
               <Card
@@ -663,22 +717,9 @@ const AIImageStudio: React.FC = () => {
                                   borderRadius: 6,
                                 }}
                               >
-                                <Space
-                                  style={{ width: '100%', justifyContent: 'space-between' }}
-                                >
-                                  <Text style={{ fontSize: 12 }}>无文字模式</Text>
-                                  <Switch
-                                    size="small"
-                                    checked={mainNoText}
-                                    onChange={(v) => setMainNoText(v)}
-                                  />
-                                </Space>
-                                <div>
-                                  <Text
-                                    type="secondary"
-                                    style={{ fontSize: 12 }}
-                                  >💡未选择排版时，将由 AI 自由排版生成（排版模板即将上线）</Text>
-                                </div>
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  💡未选择排版时，将由 AI 自由排版生成（排版模板即将上线）
+                                </Text>
                               </div>
                             )}
                           </div>
@@ -687,45 +728,26 @@ const AIImageStudio: React.FC = () => {
                     </div>
                     <div style={{ marginTop: 10 }}>
                       <Text type="secondary" style={{ fontSize: 12 }}>生成比例</Text>
-                      <div style={{ marginTop: 6 }}>
-                        <Radio.Group
-                          value={mainAspectRatio}
-                          onChange={(e) => setMainAspectRatio(e.target.value)}
-                          optionType="button"
-                          buttonStyle="solid"
-                          size="small"
-                          options={[
-                            { value: '1:1', label: '1:1' },
-                            { value: '3:4', label: '3:4' },
-                            { value: '4:3', label: '4:3' },
-                            { value: '9:16', label: '9:16' },
-                            { value: '16:9', label: '16:9' },
-                          ]}
-                        />
-                      </div>
+                      <Select
+                        style={{ width: '100%', marginTop: 6 }}
+                        value={mainAspectRatio}
+                        onChange={setMainAspectRatio}
+                        size="small"
+                        options={[
+                          { value: '1:1', label: '1:1（方形）' },
+                          { value: '2:3', label: '2:3（竖版照片）' },
+                          { value: '3:2', label: '3:2（横版照片）' },
+                          { value: '3:4', label: '3:4（竖版标准）' },
+                          { value: '4:3', label: '4:3（横版标准）' },
+                          { value: '9:16', label: '9:16（全屏竖版）' },
+                          { value: '16:9', label: '16:9（全屏横版）' },
+                          { value: '21:9', label: '21:9（超宽）' },
+                        ]}
+                      />
                     </div>
                   </div>
                 )}
               </Card>
-
-              {/* ===== 品牌与自定义设置 ===== */}
-              <div>
-                <Button
-                  icon={<SettingOutlined />}
-                  onClick={() => setBrandOpen(true)}
-                  style={{ width: '100%', justifyContent: 'flex-start' }}
-                >
-                  品牌与自定义设置
-                  {brandActiveCount > 0 && (
-                    <Badge count={brandActiveCount} size="small" style={{ marginLeft: 8 }} />
-                  )}
-                </Button>
-                {brandActiveCount > 0 && (
-                  <div style={{ marginTop: 6 }}>
-                    {renderBrandSummary({ brand_settings: brand } as AIImageTask)}
-                  </div>
-                )}
-              </div>
 
               <div>
                 <Text strong>附加要求（可选）</Text>
@@ -932,112 +954,6 @@ const AIImageStudio: React.FC = () => {
         </Col>
       </Row>
 
-      {/* ===== 品牌与自定义设置弹窗 ===== */}
-      <Modal
-        title="品牌与自定义设置"
-        open={brandOpen}
-        onCancel={() => setBrandOpen(false)}
-        footer={[
-          <Button
-            key="clear"
-            onClick={() => {
-              setBrand({ ...BRAND_DEFAULTS })
-              message.success('已恢复默认')
-            }}
-          >
-            恢复默认
-          </Button>,
-          <Button key="ok" type="primary" onClick={() => setBrandOpen(false)}>
-            完成
-          </Button>,
-        ]}
-        width={520}
-      >
-        <Space direction="vertical" style={{ width: '100%' }} size={14}>
-          <div>
-            <Text strong>品牌主色</Text>
-            <div style={{ marginTop: 6 }}>
-              <Space>
-                <ColorPicker
-                  value={brand.main_color || '#ffffff'}
-                  onChange={(c: Color) => setBrand((b) => ({ ...b, main_color: c.toHexString() }))}
-                  showText
-                  disabledAlpha
-                />
-                {!brand.main_color && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>未设置时由 AI 根据商品智能取色</Text>
-                )}
-                {brand.main_color && (
-                  <Button size="small" onClick={() => setBrand((b) => ({ ...b, main_color: '' }))}>
-                    智能主色
-                  </Button>
-                )}
-              </Space>
-            </div>
-          </div>
-
-          <div>
-            <Text strong>字体风格</Text>
-            <Select
-              style={{ width: '100%', marginTop: 6 }}
-              value={brand.font_style}
-              onChange={(v) => setBrand((b) => ({ ...b, font_style: v }))}
-              options={['智能字体风格', '现代无衬线', '经典衬线', '圆润可爱', '硬朗工业'].map(
-                (s) => ({ value: s, label: s }),
-              )}
-            />
-          </div>
-
-          <div>
-            <Text strong>自定义设置</Text>
-            <TextArea
-              rows={3}
-              maxLength={500}
-              showCount
-              value={brand.custom_text}
-              onChange={(e) => setBrand((b) => ({ ...b, custom_text: e.target.value }))}
-              placeholder="可输入想要的视觉氛围、设计风格等想自定义的内容"
-              style={{ marginTop: 6 }}
-            />
-          </div>
-
-          <Row gutter={12}>
-            <Col span={12}>
-              <Text strong>销售国家/地区</Text>
-              <Select
-                style={{ width: '100%', marginTop: 6 }}
-                value={brand.country}
-                onChange={(v) => setBrand((b) => ({ ...b, country: v }))}
-                options={['US 美国', 'CA 加拿大', 'UK 英国', 'DE 德国', 'FR 法国',
-                  'IT 意大利', 'ES 西班牙', 'JP 日本', 'AU 澳大利亚'].map((s) => ({ value: s, label: s }))}
-                showSearch
-              />
-            </Col>
-            <Col span={12}>
-              <Text strong>生成图片语言</Text>
-              <Select
-                style={{ width: '100%', marginTop: 6 }}
-                value={brand.language}
-                onChange={(v) => setBrand((b) => ({ ...b, language: v }))}
-                options={['英语', '德语', '法语', '意大利语', '西班牙语', '日语'].map(
-                  (s) => ({ value: s, label: s }),
-                )}
-                showSearch
-              />
-            </Col>
-          </Row>
-
-          <div>
-            <Text strong>发布平台</Text>
-            <Select
-              style={{ width: '100%', marginTop: 6 }}
-              value={brand.platform}
-              onChange={(v) => setBrand((b) => ({ ...b, platform: v }))}
-              options={['亚马逊', 'eBay', '独立站', 'Temu', 'Shein'].map((s) => ({ value: s, label: s }))}
-            />
-          </div>
-        </Space>
-      </Modal>
     </div>
     </>
   )
