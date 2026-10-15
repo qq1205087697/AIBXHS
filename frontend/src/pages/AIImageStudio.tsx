@@ -455,7 +455,7 @@ const AIImageStudio: React.FC = () => {
     <div style={{ padding: 16, height: '100%', boxSizing: 'border-box' }}>
       <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
         {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
-        <Col xs={24} lg={9} style={{ height: '100%' }}>
+        <Col xs={24} lg={9} style={{ height: '100%', width: 400, maxWidth: '100%', flexShrink: 0 }}>
           <Card
             title={
               <Space>
@@ -729,6 +729,12 @@ const AIImageStudio: React.FC = () => {
                 onClick={handleSubmit}
                 block
                 size="large"
+                style={{
+                  position: 'sticky',
+                  bottom: 0,
+                  zIndex: 2,
+                  boxShadow: '0 -4px 12px rgba(0,0,0,0.08)',
+                }}
               >
                 立即生成（
                 {[
@@ -746,7 +752,7 @@ const AIImageStudio: React.FC = () => {
         </Col>
 
         {/* 右栏：生成记录 */}
-        <Col xs={24} lg={15} style={{ height: '100%' }}>
+        <Col xs={24} lg={15} style={{ height: '100%', flex: 1, minWidth: 0 }}>
           <Card
             style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
             styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
