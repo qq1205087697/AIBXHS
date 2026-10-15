@@ -452,10 +452,10 @@ const AIImageStudio: React.FC = () => {
   }
 
   return (
-    <div style={{ padding: 24 }}>
-      <Row gutter={16}>
-        {/* 左栏：生成表单 */}
-        <Col xs={24} lg={9}>
+    <div style={{ padding: 16, height: '100%', boxSizing: 'border-box' }}>
+      <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
+        {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
+        <Col xs={24} lg={9} style={{ height: '100%' }}>
           <Card
             title={
               <Space>
@@ -463,6 +463,8 @@ const AIImageStudio: React.FC = () => {
                 <span>商品套图生成</span>
               </Space>
             }
+            style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+            styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
           >
             <Space direction="vertical" style={{ width: '100%' }} size={14}>
               <div>
@@ -744,8 +746,10 @@ const AIImageStudio: React.FC = () => {
         </Col>
 
         {/* 右栏：生成记录 */}
-        <Col xs={24} lg={15}>
+        <Col xs={24} lg={15} style={{ height: '100%' }}>
           <Card
+            style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+            styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
             title={
               <Space>
                 <span>生成记录</span>
