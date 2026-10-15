@@ -708,20 +708,6 @@ const AIImageStudio: React.FC = () => {
                                 </Space>
                               )}
                             </div>
-                            {checked && key === selectedMainTypes[0] && (
-                              <div
-                                style={{
-                                  margin: '4px 0 8px',
-                                  padding: '8px 12px',
-                                  background: '#fafafa',
-                                  borderRadius: 6,
-                                }}
-                              >
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                  💡未选择排版时，将由 AI 自由排版生成（排版模板即将上线）
-                                </Text>
-                              </div>
-                            )}
                           </div>
                         )
                       })}
