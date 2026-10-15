@@ -216,9 +216,7 @@ export const reviewsApi = {
   getList: (params?: {
     page?: number;
     page_size?: number;
-    asin_search?: string;
-    product_name_search?: string;
-    sku_search?: string;
+    search?: string;
     sort_by?: string;
     sort_order?: string;
     start_date?: string;
@@ -403,34 +401,45 @@ export const productPageInfoApi = {
     apiClient.put(`/product-page-info/${id}/delete-competitor`, {
       competitor_line: competitorLine,
     }),
+  addCompetitor: (id: number, asin: string, price: string) =>
+    apiClient.post(`/product-page-info/${id}/add-competitor`, {
+      asin,
+      price,
+    }),
   submitRating: (ids: number[]) =>
     apiClient.post("/product-page-info/submit-rating", { ids }),
   deleteRecords: (ids: number[]) =>
     apiClient.post("/product-page-info/delete-records", { ids }),
   getRanking: () => apiClient.get("/product-page-info/ranking"),
-  importExcel: (file: File) => {
-    const formData = new FormData();
-    formData.append("file", file);
-    return apiClient.post("/product-page-info/import-excel", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-  },
-  cancelImport: (importIds: number[]) =>
-    apiClient.post("/product-page-info/cancel-import", {
-      import_ids: importIds,
-    }),
-  submitEdit: (data: {
-    item_id: number;
-    store: string;
-    field_type: string;
-    sku: string;
-    content: string;
-    reset_rating: boolean;
-  }) => apiClient.post("/product-page-info/submit-edit", data),
+  refreshInventory: () => apiClient.post("/product-page-info/refresh-inventory"),
+  submitEdit: (data: { item_id: number; store: string; field_type: string; sku: string; content: string; reset_rating: boolean }) =>
+    apiClient.post("/product-page-info/submit-edit", data),
+  aiWrite: (data: { item_id: number; field_type: string; content: string; suggestion?: string }) =>
+    apiClient.post("/product-page-info/ai-write", data),
+  aiSuggestLog: (itemId: number, suggestions: Record<string, string>) =>
+    apiClient.post(`/product-page-info/${itemId}/ai-suggest-log`, { suggestions }),
   updateRatingStatus: (id: number, ratingStatus: number) =>
-    apiClient.put(`/product-page-info/${id}/rating-status`, {
-      rating_status: ratingStatus,
-    }),
+    apiClient.put(`/product-page-info/${id}/rating-status`, { rating_status: ratingStatus }),
+  updateTrafficKeywords: (id: number, trafficKeywords: string) =>
+    apiClient.put(`/product-page-info/${id}/traffic-keywords`, { traffic_keywords: trafficKeywords }),
+  adSubmit: (data: {
+    ad_type: string[];
+    keyword_asin_source: string;
+    bid_strategy: string;
+    sku: string;
+    site: string;
+    manual_exact_bid: string;
+    manual_broad_bid: string;
+    manual_phrase_bid: string;
+    related_exact_bid: string;
+    related_expanded_bid: string;
+    strongest_related_asin: string;
+    key_keyword: string;
+    limit_word: string;
+    ad_asin: string;
+    ad_keyword: string;
+    item_id?: number;
+  }) => apiClient.post("/product-page-info/ad-submit", data),
 };
 // ========== Stores API ==========
 export const storesApi = {
@@ -971,6 +980,8 @@ export const operationLogsApi = {
     module?: string;
     action?: string;
     user_id?: number;
+    target_id?: number;
+    target_type?: string;
     start_date?: string;
     end_date?: string;
     search?: string;
@@ -1238,14 +1249,20 @@ export const productSelectionApi = {
     return_rate: number;
   }) => apiClient.put("/product-selection/profit-settings", data),
   resetProfitSettings: () => apiClient.post("/product-selection/profit-settings/reset"),
-  approve: (id: number) =>
-    apiClient.post(`/product-selection/${id}/approve`, {}),
+  approve: (id: number, data?: { product_name?: string }) =>
+    apiClient.post(`/product-selection/${id}/approve`, data || {}),
+  batchApprove: (data: { items: { selection_id: number; product_name?: string }[] }) =>
+    apiClient.post(`/product-selection/batch-approve`, data),
   cancelApprovalApplication: (id: number) =>
     apiClient.post(`/product-selection/${id}/cancel-approval-application`, {}),
-  generatePurchaseOrder: (id: number) =>
-    apiClient.post(`/product-selection/${id}/generate-purchase-order`, {}),
-  batchGeneratePurchaseOrders: (ids: number[]) =>
-    apiClient.post("/product-selection/batch-generate-purchase-orders", ids),
+  batchCancelApproval: (ids: number[]) =>
+    apiClient.post(`/product-selection/batch-cancel-approval`, ids),
+  revokeApproval: (id: number) =>
+    apiClient.post(`/product-selection/${id}/revoke-approval`, {}),
+  batchRevokeApproval: (ids: number[]) =>
+    apiClient.post(`/product-selection/batch-revoke-approval`, ids),
+  reject: (data: { ids: number[]; reason?: string }) =>
+    apiClient.post(`/product-selection/reject`, data),
   create: (data: {
     product_title: string;
     url?: string;
@@ -1494,13 +1511,14 @@ export const baseTableApi = {
     page_size?: number;
     issue?: string;
     keyword?: string;
-    product_type?: string;
+    group_id?: number;
     sort_by?: string;
     sort_order?: string;
   }) =>
     apiClient.get("/base-table/summary", {
       params,
     }),
+  getMyGroups: () => apiClient.get("/base-table/my-groups"),
   getProductWarehouses: (productId: number) =>
     apiClient.get(`/base-table/${productId}/warehouses`),
   getProductPurchaseOrders: (productId: number) =>
@@ -1668,6 +1686,398 @@ export const developmentBotApi = {
     notes?: string;
     items: { record_id: string; quantity: number; notes?: string }[];
   }) => apiClient.post("/product-development/projects/replenishment", data),
+};
+
+// ========== AI 创作中心 API ==========
+export interface AmazonProductAnalysisResult {
+  product_name_cn: string;
+  product_name_en: string;
+  product_type: string;
+  product_size?: string;
+  target_audience: string[];
+  selling_points: string[];
+  material: string[];
+  usage_scenarios: string[];
+  usage_methods: string[];
+  product_components: string[];
+  colors: string[];
+  amazon_category: string;
+  keywords: string[];
+  visible_text: string[];
+  confidence: number;
+  uncertain_information: string[];
+}
+
+export interface VideoStoryboardShot {
+  timestamp: string;
+  shot_purpose: string;
+  description?: string;
+  shot_type: string;
+  camera_movement: string;
+  character_action: string;
+  character_expression: string;
+  product_action: string;
+  product_position: string;
+  composition: string;
+  environment: string;
+  voiceover: string;
+  voiceover_cn: string;
+  sound: string;
+}
+
+export interface CreativeStrategy {
+  persona_identity: string;
+  persona_role: string;
+  age: string;
+  relationship_to_product: string;
+  story_background: string;
+  consumption_scene: string;
+  core_pain_point: string;
+  core_selling_point: string;
+  emotion: string;
+  video_style: string;
+  camera_language: string;
+}
+
+export interface VideoConcept {
+  concept_title: string;
+  marketing_goal: string;
+  creative_strategy: CreativeStrategy;
+  story: string;
+  character: string;
+  environment: string;
+  music: string;
+  storyboard: VideoStoryboardShot[];
+}
+
+export interface VideoPrompt {
+  concept_title: string;
+  final_prompt: string;
+}
+
+export type VideoMarket =
+  | 'US' | 'CA' | 'AU' | 'UK'
+  | 'DE' | 'AT' | 'CH'
+  | 'FR' | 'ES' | 'MX' | 'IT'
+  | 'JP' | 'KR' | 'BR'
+  | 'ME' | 'SEA' | 'CN';
+export type VideoDuration = 5 | 10 | 15;
+export type VideoRatio = 'auto' | '9:16' | '16:9' | '1:1' | '4:3' | '3:4' | '21:9';
+export type VideoModel = 'minimax-h3' | 'minimax-h3-lite';
+/** 视频分辨率档位：0.3 / 0.5 为 megapixels 档位，768P 即 0.98 满画幅 */
+export type VideoResolution = '0.3' | '0.5' | '768P';
+
+/** 口播语言：'auto' 表示跟随目标市场自动决定 */
+export type VoiceoverLanguage =
+  | 'auto' | 'English' | 'German' | 'French' | 'Spanish' | 'Italian'
+  | 'Japanese' | 'Korean' | 'Portuguese' | 'Arabic';
+
+/** 视频类型：口播带货（含口播台词）/ 产品展示（纯画面展示，无台词） */
+export type VideoType = '口播带货' | '产品展示';
+
+export interface VoiceoverPlanParams {
+  /** 视频时长（10~30 秒） */
+  duration: VideoDuration;
+  /** 目标市场（中文名，如“美国”） */
+  target_market: string;
+  /** 口播语言 */
+  voiceover_language: VoiceoverLanguage;
+  /** 视频类型（默认口播带货） */
+  video_type?: VideoType;
+  /** 画面比例 */
+  aspect_ratio: VideoRatio;
+  /** 产品名称（可空，模型会从图片识别） */
+  product_name?: string;
+  /** 指定的方案类型（可不填） */
+  specified_types?: string[];
+  /** 风格偏好 */
+  style_preference?: string;
+  /** 换一换时需避免重复的已生成类型 */
+  avoid_types?: string[];
+  /** 用户已确认的产品信息卡文本（编辑后重新生成时使用） */
+  confirmed_card?: string;
+}
+
+export interface VoiceoverPlanResult {
+  product: AmazonProductAnalysisResult;
+  concepts: VideoConcept[];
+  raw_text: string;
+}
+
+/** 视频生成任务（MiniMax H3） */
+export interface AIVideoTask {
+  id: number;
+  title: string;
+  /** 排队中 / 生成中 / 已完成 / 失败 */
+  status: string;
+  /** 生成者用户名 */
+  creator_name: string;
+  prompt: string;
+  /** 二次优化后的 H3 结构化提示词（Ref2VA 六段式英文，实际提交给模型） */
+  h3_prompt?: string;
+  market: VideoMarket;
+  /** 口播语言，「自动」表示跟随目标市场 */
+  voiceover_language: string;
+  /** 视频类型：口播带货/产品展示 */
+  video_type?: string;
+  model: VideoModel;
+  resolution: VideoResolution;
+  duration: VideoDuration;
+  ratio: VideoRatio;
+  /** 本次生成使用的参考图地址 */
+  images: string[];
+  video_url: string | null;
+  /** 从产品管理选图提交时记录的产品编码/品名 */
+  product_code?: string;
+  product_name?: string;
+  /** 已完成的超分结果（后端按源视频地址匹配附加），用于并排对比展示 */
+  upscale_video_url?: string;
+  /** ComfyUI 任务 ID */
+  h3_prompt_id: string;
+  /** 生成总耗时（秒），未完成为 null */
+  cost_seconds: number | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface GenerateVideoParams {
+  prompt: string;
+  duration: VideoDuration;
+  resolution: VideoResolution;
+  ratio: VideoRatio;
+  model: VideoModel;
+  /** 目标市场代码，如 US / DE */
+  market: VideoMarket;
+  /** 口播语言，'auto' 表示跟随目标市场 */
+  voiceover_language: VoiceoverLanguage;
+  /** 视频类型（默认口播带货） */
+  video_type?: VideoType;
+  title: string;
+  /** 从产品管理选图提交时记录的产品编码/品名 */
+  product_code?: string;
+  product_name?: string;
+}
+
+/** 视频超分（Topaz 星光 2.6）任务 */
+export interface VideoUpscaleTask {
+  id: number;
+  title: string;
+  creator_name: string;
+  source_video_url: string;
+  source_width?: number | null;
+  source_height?: number | null;
+  scale?: number | null;
+  status: string;
+  error_message?: string;
+  video_url?: string;
+  created_at: string;
+  cost_seconds?: number | null;
+}
+
+export const aiCreationApi = {
+  /** 新方案：一次生成产品信息卡 + 3 套口播视频提示词方案。
+ * 生成耗时 1~5 分钟以上，走 SSE 流式响应（15 秒心跳）防止网关读超时 504 */
+  generateVoiceoverPlans: (files: File[], params: VoiceoverPlanParams) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("duration", String(params.duration));
+    formData.append("target_market", params.target_market);
+    formData.append(
+      "voiceover_language",
+      params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
+    );
+    formData.append("video_type", params.video_type || "口播带货");
+    formData.append("aspect_ratio", params.aspect_ratio);
+    formData.append("product_name", params.product_name || "");
+    if (params.specified_types?.length) {
+      formData.append("specified_types", params.specified_types.join("、"));
+    }
+    if (params.avoid_types?.length) {
+      formData.append("avoid_types", params.avoid_types.join("、"));
+    }
+    if (params.style_preference) {
+      formData.append("style_preference", params.style_preference);
+    }
+    if (params.confirmed_card) {
+      formData.append("confirmed_card", params.confirmed_card);
+    }
+
+    const readSse = async (resp: Response) => {
+      const reader = resp.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result: { success: boolean; data: VoiceoverPlanResult } | null = null;
+      const handleFrame = (frame: string) => {
+        const dataLine = frame
+          .split("\n")
+          .find((l) => l.startsWith("data:"));
+        if (!dataLine) return; // 心跳帧（: ping）没有 data 行
+        const payload = JSON.parse(dataLine.slice(5).trim());
+        if (payload.detail) {
+          const err: any = new Error(payload.detail);
+          err.response = { data: { detail: payload.detail } };
+          throw err;
+        }
+        result = payload;
+      };
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+        for (const frame of frames) handleFrame(frame);
+      }
+      if (buffer.trim()) handleFrame(buffer);
+      if (!result) throw new Error("方案生成中断，请重试");
+      return result;
+    };
+
+    const token = localStorage.getItem("token");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 960000);
+    return fetch(`${API_BASE}/ai-creation/generate-voiceover-plans`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body: formData,
+      signal: controller.signal,
+    })
+      .then(async (resp) => {
+        clearTimeout(timer);
+        if (!resp.ok || !resp.body) {
+          // 非 200（401/400 等校验错误）：保持与 axios 错误结构兼容
+          let detail = `请求失败（${resp.status}）`;
+          try {
+            const j = await resp.json();
+            detail = j.detail || detail;
+          } catch {
+            /* 忽略解析失败 */
+          }
+          const err: any = new Error(detail);
+          err.response = { status: resp.status, data: { detail } };
+          throw err;
+        }
+        return { data: await readSse(resp) };
+      })
+      .catch((e: any) => {
+        if (e?.name === "AbortError") {
+          const err: any = new Error("AI 生成超时，请稍后重试");
+          err.response = { data: { detail: err.message } };
+          throw err;
+        }
+        throw e;
+      })
+      .finally(() => clearTimeout(timer));
+  },
+  /** 代理取图：图片 URL 浏览器直连被 CORS 拦截时（如 TOS 桶未配置跨域），由后端代取图片字节 */
+  proxyImage: (url: string) =>
+    apiClient.get<Blob>("/ai-creation/proxy-image", {
+      params: { url },
+      responseType: "blob",
+      timeout: 60000,
+    }),
+  /** 立即生成：提交 MiniMax H3 视频生成任务（长时间生成，立即返回任务记录） */
+  generateVideo: (files: File[], params: GenerateVideoParams) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("prompt", params.prompt);
+    formData.append("duration", String(params.duration));
+    formData.append("resolution", params.resolution);
+    formData.append("ratio", params.ratio);
+    formData.append("model", params.model);
+    formData.append("market", params.market);
+    formData.append(
+      "voiceover_language",
+      params.voiceover_language === "auto" ? "自动" : params.voiceover_language,
+    );
+    formData.append("video_type", params.video_type || "口播带货");
+    formData.append("title", params.title);
+    formData.append("product_code", params.product_code || "");
+    formData.append("product_name", params.product_name || "");
+    return apiClient.post<{ success: boolean; data: AIVideoTask }>(
+      "/ai-creation/generate-video",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 300000,
+      },
+    );
+  },
+  /** 视频生成任务列表（分页 + 关键词搜索，含状态与成片地址） */
+  listVideoTasks: (page = 1, pageSize = 20, keyword = "") =>
+    apiClient.get<{ success: boolean; data: { items: AIVideoTask[]; total: number } }>(
+      "/ai-creation/video-tasks",
+      { params: { page, page_size: pageSize, keyword } },
+    ),
+  /** 删除视频生成任务记录 */
+  deleteVideoTask: (taskId: number) =>
+    apiClient.delete<{ success: boolean }>(`/ai-creation/video-tasks/${taskId}`),
+  /** 提交视频超分任务（Topaz 星光 2.6，后台下载/上传/入队/轮询） */
+  createUpscaleTask: (params: {
+    title: string;
+    source_video_url: string;
+    source_width?: number;
+    source_height?: number;
+    scale: number;
+  }) =>
+    apiClient.post<{ success: boolean; data: VideoUpscaleTask }>(
+      "/ai-creation/upscale-tasks",
+      params,
+      { timeout: 300000 },
+    ),
+  /** 超分任务列表（分页 + 标题搜索） */
+  listUpscaleTasks: (page = 1, pageSize = 20, keyword = "") =>
+    apiClient.get<{ success: boolean; data: { items: VideoUpscaleTask[]; total: number } }>(
+      "/ai-creation/upscale-tasks",
+      { params: { page, page_size: pageSize, keyword } },
+    ),
+  /** 删除超分任务 */
+  deleteUpscaleTask: (taskId: number) =>
+    apiClient.delete<{ success: boolean }>(`/ai-creation/upscale-tasks/${taskId}`),
+  /** 下载超分任务视频（target: result=超分结果 / source=源视频），blob 流式下载 */
+  downloadUpscaleVideo: (taskId: number, target: "result" | "source") =>
+    apiClient.get(`/ai-creation/upscale-tasks/${taskId}/download`, {
+      params: { target },
+      responseType: "blob",
+      timeout: 600000,
+    }),
+  /** 绑定视频至产品详情（最多 6 个，超出报「产品已达到视频上限」） */
+  bindProductVideo: (productId: number, videoUrl: string) =>
+    apiClient.post<{ success: boolean; data: { videos: string[] } }>(
+      `/products/${productId}/videos`,
+      { video_url: videoUrl },
+    ),
+  /** 旧方案：仅识别商品信息 */
+  analyzeProduct: (files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult }>(
+      "/ai-creation/analyze-product",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 300000,
+      },
+    );
+  },
+  generateVideoConcepts: (
+    product_profile: AmazonProductAnalysisResult,
+    market: VideoMarket = "US",
+    duration: VideoDuration = 15,
+    previous_concepts?: VideoConcept[],
+    aspect_ratio: VideoRatio = "9:16",
+  ) =>
+    apiClient.post<{ success: boolean; data: VideoConcept[] }>(
+      "/ai-creation/generate-video-concepts",
+      { product_profile, market, duration, previous_concepts, aspect_ratio },
+      { timeout: 300000 },
+    ),
+  generateVideoPrompts: (product_profile: AmazonProductAnalysisResult, concepts: VideoConcept[]) =>
+    apiClient.post<{ success: boolean; data: VideoPrompt[] }>(
+      "/ai-creation/generate-video-prompts",
+      { product_profile, concepts },
+      { timeout: 300000 },
+    ),
 };
 
 export default apiClient;

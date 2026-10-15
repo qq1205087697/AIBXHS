@@ -1,7 +1,8 @@
-import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, useLocation } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import MainLayout from "./components/Layout/MainLayout";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Home from "./pages/Home";
 import ChatBot from "./pages/ChatBot";
 import Dashboard from "./pages/Dashboard";
@@ -10,7 +11,6 @@ import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
 import AdBotPage from "./pages/AdBot";
-import RatingOptimizationBot from "./pages/RatingOptimizationBot";
 import DataAlertBot from "./pages/DataAlertBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
@@ -31,6 +31,8 @@ import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
 import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
 import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
+import AICreationCenter from './pages/AICreationCenter';
+import UpscaleCenter from './pages/UpscaleCenter';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -124,7 +126,8 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <MainLayout>
-              <RatingOptimizationBot />
+              {/* 页面优化机器人由 KeepAliveHost 常驻缓存渲染，切换路由不卸载 */}
+              {null}
             </MainLayout>
           </ProtectedRoute>
         }
@@ -329,15 +332,43 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      <Route
+        path="/ai-creation"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AICreationCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/upscale-center"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <UpscaleCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
     </Routes>
   );
+}
+
+/** 根级错误边界：捕获Content之外的渲染错误（如布局本身），路由变化时自动重置 */
+function RootErrorBoundary({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
+  return <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>;
 }
 
 function App() {
   return (
     <AuthProvider>
       <Router>
-        <AppRoutes />
+        <RootErrorBoundary>
+          <AppRoutes />
+        </RootErrorBoundary>
       </Router>
     </AuthProvider>
   );

@@ -27,6 +27,7 @@ MODULE_LABELS = {
     "product": "产品",
     "replenishment": "补货",
     "shipment": "发货",
+    "page_optimization": "页面优化",
 }
 
 ACTION_LABELS = {

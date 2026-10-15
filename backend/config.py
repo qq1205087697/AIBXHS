@@ -28,12 +28,45 @@ class Settings(BaseSettings):
     FEISHU_INVENTORY_TABLE_ID: str = ""
     FEISHU_REVIEW_BASE_TOKEN: str = ""
     FEISHU_REVIEW_TABLE_ID: str = ""
+    # 飞书 webhook - 开广告提交地址
+    FEISHU_AD_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 编辑基础信息提交地址
+    FEISHU_EDIT_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 一键优化提交地址
+    FEISHU_OPTIMIZE_WEBHOOK_URL: str = ""
     
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
+    # AI 调用参数（可按需在 .env 调整）
+    OPENAI_TEMPERATURE: float = 0.7
+    OPENAI_TIMEOUT: int = 60
     OPENAI_VISION_MODEL: str = ""
     OPENAI_VISION_RESPONSE_FORMAT: str = ""
+
+    # MiniMax H3 本地视频生成（ComfyUI API，需 Basic Auth 账号密码）
+    
+    H3_BASE_URL: str = ""
+    H3_AUTH_USER: str = ""
+    H3_AUTH_PASSWORD: str = ""
+    # 工作流模板默认取工程内文件（跨平台部署可用），需要时用环境变量 H3_WORKFLOW_PATH 覆盖
+    H3_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "h3_workflow_template.json"
+    )
+    H3_POLL_INTERVAL: int = 15          # 轮询任务状态间隔（秒）
+    H3_MAX_WAIT_MINUTES: int = 240      # 单条视频最长等待时间（分钟）
+
+    # 视频超分（Topaz 星光 2.6）工作流模板，与 H3 共用同一台 ComfyUI
+    UPSCALE_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "upscale_workflow_template.json"
+    )
+
+    # H3 提示词二次优化：按官方 h3-prompt-writing 指南把中文方案改写为 Ref2VA 六段式英文提示词
+    H3_PROMPT_OPTIMIZE: bool = True     # 关闭后直接提交原始方案文本
+    H3_PROMPT_MODEL: str = ""           # 优化用文本模型，留空则使用 OPENAI_MODEL
+    H3_PROMPT_GUIDE_DIR: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "prompts"
+    )
 
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
@@ -46,7 +79,7 @@ class Settings(BaseSettings):
     TOS_ENDPOINT: str = ""            # 如: tos-cn-beijing.volces.com
     TOS_REGION: str = ""              # 如: cn-beijing
     TOS_BUCKET: str = ""              # 桶名称
-    TOS_PREFIX: str = "uploads/"      # 对象前缀（目录）
+    TOS_PREFIX: str = "uploads/"     # 对象前缀（目录）
     # 桶访问域名（用于拼接公网访问URL，若为空则使用 https://{bucket}.{endpoint} 形式）
     TOS_CUSTOM_DOMAIN: str = ""
 
@@ -73,7 +106,13 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
-    model_config = {"env_file": os.path.join(os.path.dirname(__file__), ".env")}
+    model_config = {
+        "env_file": [
+            os.path.join(os.path.dirname(__file__), ".env"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+        ],
+        "env_file_encoding": "utf-8",
+    }
 
 
 def get_settings() -> Settings:

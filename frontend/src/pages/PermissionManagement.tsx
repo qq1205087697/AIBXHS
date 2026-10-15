@@ -48,6 +48,7 @@ import {
     StarOutlined,
     TableOutlined,
     ContactsOutlined,
+    VideoCameraOutlined,
 } from "@ant-design/icons";
 import { permissionsApi } from "../api";
 import { useResponsive } from "../hooks/useResponsive";
@@ -401,6 +402,7 @@ const PermissionManagement: React.FC = () => {
         '选品管理': { icon: <StarOutlined />, color: '#eb2f96' },
         '底表管理': { icon: <TableOutlined />, color: '#13c2c2' },
         '供应商管理': { icon: <ContactsOutlined />, color: '#fa8c16' },
+        '媒体创作中心': { icon: <VideoCameraOutlined />, color: '#722ed1' },
     };
 
   // 计算权限总数

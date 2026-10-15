@@ -32,9 +32,12 @@ async def get_store_groups(
     try:
         query = text("""
             SELECT sg.id, sg.name, sg.description, sg.created_at,
-                   COUNT(s.id) as store_count
+                   COUNT(DISTINCT s.id) as store_count,
+                   GROUP_CONCAT(DISTINCT CONCAT(u.id, ':', COALESCE(NULLIF(u.nickname, ''), u.username)) SEPARATOR '|') as member_pairs
             FROM store_groups sg
             LEFT JOIN stores s ON s.group_id = sg.id AND s.deleted_at IS NULL
+            LEFT JOIN user_stores us ON us.store_id = s.id AND us.tenant_id = sg.tenant_id
+            LEFT JOIN users u ON u.id = us.user_id AND u.deleted_at IS NULL
             WHERE sg.tenant_id = :tenant_id AND sg.deleted_at IS NULL
             GROUP BY sg.id, sg.name, sg.description, sg.created_at
             ORDER BY sg.created_at DESC
@@ -42,12 +45,28 @@ async def get_store_groups(
         rows = db.execute(query, {"tenant_id": current_user.tenant_id}).fetchall()
         groups = []
         for row in rows:
+            # 解析 "用户ID:姓名" 对 → 人员列表（分组下所有店铺的人员去重）
+            members = []
+            if row[5]:
+                seen_ids = set()
+                for pair in str(row[5]).split("|"):
+                    if ":" in pair:
+                        uid_str, name = pair.split(":", 1)
+                        try:
+                            uid = int(uid_str)
+                        except ValueError:
+                            continue
+                        if uid not in seen_ids:
+                            seen_ids.add(uid)
+                            members.append({"id": uid, "name": name})
             groups.append({
                 "id": row[0],
                 "name": row[1],
                 "description": row[2],
                 "created_at": row[3].strftime("%Y-%m-%d %H:%M:%S") if row[3] else "",
-                "store_count": row[4],
+                "store_count": int(row[4] or 0),
+                "member_count": len(members),
+                "members": members,
             })
         return {"success": True, "data": groups}
     except Exception as e:

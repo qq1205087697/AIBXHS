@@ -160,6 +160,7 @@ const TosUpload: React.FC<TosUploadProps> = ({
           key={value}
           src={value}
           controls
+          preload="metadata"
           style={{ width: 200, maxHeight: 150, borderRadius: 4, background: '#000' }}
         />
         {!disabled && (
@@ -202,3 +203,115 @@ const TosUpload: React.FC<TosUploadProps> = ({
 }
 
 export default TosUpload
+
+const MAX_VIDEOS = 6
+
+/** 多视频上传（最多 6 个）：值为 URL 数组，预览样式与 TosUpload 视频一致 */
+export const VideosUpload: React.FC<{
+  value?: string[]
+  onChange?: (value: string[] | undefined) => void
+  disabled?: boolean
+  placeholder?: string
+}> = ({ value, onChange, disabled, placeholder }) => {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
+  const videos = value || []
+
+  const handleClick = () => {
+    if (disabled || uploading || videos.length >= MAX_VIDEOS) return
+    inputRef.current?.click()
+  }
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+
+    if (file.size > 200 * 1024 * 1024) {
+      message.error('文件大小不能超过 200MB')
+      return
+    }
+    const fileName = file.name.toLowerCase()
+    const allowed = ['.mp4', '.mov', '.avi', '.wmv', '.flv', '.mkv', '.webm']
+    if (!allowed.some((ext) => fileName.endsWith(ext))) {
+      message.error(`不支持的文件格式，允许：${allowed.join(', ')}`)
+      return
+    }
+    if (videos.length >= MAX_VIDEOS) {
+      message.error(`产品视频最多 ${MAX_VIDEOS} 个`)
+      return
+    }
+
+    setUploading(true)
+    try {
+      const res = await uploadApi.uploadVideo(file)
+      const payload = res?.data
+      const url = payload?.data?.url || payload?.url
+      if (url) {
+        onChange?.([...videos, url])
+        message.success('视频上传成功')
+      } else {
+        console.error('上传响应异常：', payload)
+        message.error('上传失败：未获取到URL')
+      }
+    } catch (err: any) {
+      const errMsg = err?.response?.data?.detail || err?.message || '上传失败'
+      message.error(errMsg)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const handleRemove = (index: number) => {
+    const next = videos.filter((_, i) => i !== index)
+    onChange?.(next.length ? next : undefined)
+  }
+
+  return (
+    <div>
+      {videos.map((v, i) => (
+        <div key={`${v}-${i}`} style={{ marginTop: 8, position: 'relative', display: 'inline-block', marginRight: 8 }}>
+          <video
+            src={v}
+            controls
+            preload="metadata"
+            style={{ width: 200, maxHeight: 150, borderRadius: 4, background: '#000' }}
+          />
+          {!disabled && (
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => handleRemove(i)}
+              style={{ position: 'absolute', top: -8, right: -8, borderRadius: '50%' }}
+            />
+          )}
+        </div>
+      ))}
+      {videos.length < MAX_VIDEOS && (
+        <div style={{ marginTop: 8 }}>
+          <Button
+            icon={uploading ? <LoadingOutlined /> : <VideoCameraOutlined />}
+            loading={uploading}
+            disabled={disabled || uploading}
+            onClick={handleClick}
+          >
+            {uploading
+              ? '上传中...'
+              : placeholder || (videos.length ? '继续添加视频' : '上传产品视频')}
+          </Button>
+          {videos.length > 0 && (
+            <span style={{ marginLeft: 8, fontSize: 12, color: '#999' }}>{videos.length}/{MAX_VIDEOS}</span>
+          )}
+        </div>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".mp4,.mov,.avi,.wmv,.flv,.mkv,.webm"
+        style={{ display: 'none' }}
+        onChange={handleFileChange}
+      />
+    </div>
+  )
+}
