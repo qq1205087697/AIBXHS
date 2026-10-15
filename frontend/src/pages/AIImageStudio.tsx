@@ -17,6 +17,7 @@ import {
   Popconfirm,
   Spin,
   Badge,
+  Upload,
 } from 'antd'
 import {
   UploadOutlined,
