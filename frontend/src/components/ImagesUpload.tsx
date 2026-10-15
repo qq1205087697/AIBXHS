@@ -30,31 +30,18 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
   const activeIndexRef = useRef<number | null>(null)
   const [uploadingIndex, setUploadingIndex] = useState<number | null>(null)
   const [previewImages, setPreviewImages] = useState<string[]>(value || [])
+  const [dragOver, setDragOver] = useState(false)
 
   useEffect(() => {
-    setPreviewImages(value || [])
+    const next = value || []
+    // 内容一致时保持原引用，避免父组件每次渲染传入新数组导致无限更新
+    setPreviewImages((prev) =>
+      prev.length === next.length && prev.every((v, i) => v === next[i]) ? prev : next,
+    )
   }, [value])
 
-  const defaultMaxSize = 10 * 1024 * 1024
-  const accept = '.jpg,.jpeg,.png,.gif,.webp,.bmp'
-  const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
-
-  const validateFile = (file: File): boolean => {
-    if (file.size > defaultMaxSize) {
-      message.error('图片大小不能超过 10MB')
-      return false
-    }
-    const fileName = file.name.toLowerCase()
-    const matched = allowedExt.some((ext) => fileName.endsWith(ext))
-    if (!matched) {
-      message.error(`不支持的图片格式，允许：${allowedExt.join(', ')}`)
-      return false
-    }
-    return true
-  }
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
+  // 统一的文件处理入口（点击选择与拖拽共用）
+  const handleFiles = async (files: FileList | File[] | null | undefined) => {
     if (!files || files.length === 0) return
 
     const fileList = Array.from(files)
@@ -84,10 +71,10 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
       if (!validateFile(file)) continue
 
       try {
-        // 生成自定义文件名：函数形式直接调用，字符串形式追加时间戳和序号避免覆盖
+        // 生成自定义文件名：函数形式直接调用（传入全局位置序号，含替换场景），字符串形式追加时间戳和序号避免覆盖
         let uploadCustomName: string | undefined
         if (typeof customName === 'function') {
-          uploadCustomName = customName(file, i)
+          uploadCustomName = customName(file, targetIndex + i)
         } else if (customName) {
           uploadCustomName = `${customName}_${Date.now()}_${i}`
         }
@@ -123,7 +110,40 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
     }
     setUploadingIndex(null)
     activeIndexRef.current = null
+  }
+
+  const defaultMaxSize = 10 * 1024 * 1024
+  const accept = '.jpg,.jpeg,.png,.gif,.webp,.bmp'
+  const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+
+  const validateFile = (file: File): boolean => {
+    if (file.size > defaultMaxSize) {
+      message.error('图片大小不能超过 10MB')
+      return false
+    }
+    const fileName = file.name.toLowerCase()
+    const matched = allowedExt.some((ext) => fileName.endsWith(ext))
+    if (!matched) {
+      message.error(`不支持的图片格式，允许：${allowedExt.join(', ')}`)
+      return false
+    }
+    return true
+  }
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    await handleFiles(e.target.files)
     e.target.value = ''
+  }
+
+  // 桌面拖拽上传
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    if (disabled) return
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+    const files = Array.from(e.dataTransfer.files || []).filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) return
+    await handleFiles(files)
   }
 
   const handleRemove = (index: number) => {
@@ -154,7 +174,26 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
   }
 
   return (
-    <div>
+    <div
+      onDrop={handleDrop}
+      onDragOver={(e) => {
+        if (disabled) return
+        e.preventDefault()
+        e.stopPropagation()
+        setDragOver(true)
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault()
+        setDragOver(false)
+      }}
+      style={{
+        border: dragOver ? '2px dashed #1677ff' : '2px dashed transparent',
+        borderRadius: 8,
+        padding: dragOver ? 10 : 12,
+        background: dragOver ? '#f0f7ff' : undefined,
+        transition: 'all 0.2s',
+      }}
+    >
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
         {previewImages.map((url, index) => (
           <div

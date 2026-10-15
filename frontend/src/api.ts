@@ -1534,4 +1534,140 @@ export const suppliersApi = {
   delete: (id: number) => apiClient.delete(`/suppliers/${id}`),
 };
 
+// ========== Product Development Bot API ==========
+// 后端表 ad_product_info 字段映射：
+//   title            -> 标题（只填英文）
+//   product_title + keywords（合并） -> 关键词（只填英文）
+//   product_name_zh  -> 产品名提取
+//   reference_images -> 采购图片（逗号分隔URL/文件名）
+//   category/developer/urgency/seasonality/competitors/purchase_price
+//   de_title/de_keywords/development_date 对应表中的同名中文列
+export interface ProductDevelopmentPayload {
+  title?: string;
+  product_title?: string;
+  keywords?: string;
+  product_name_zh?: string;
+  category?: string;
+  developer?: string;
+  urgency?: string;
+  seasonality?: string;
+  competitors?: string;
+  purchase_price?: number;
+  de_title?: string;
+  de_keywords?: string;
+  development_date?: string;
+  reference_images?: string[];
+  warehouse_note?: string;
+  site_owners?: string;
+  related_store?: string;
+  purchase_links?: string[];
+  purchase_info?: string;
+}
+
+export interface DevelopmentProject
+  extends Omit<ProductDevelopmentPayload, "warehouse_note" | "site_owners"> {
+  record_id: string;
+  purchase_images: string[];
+  purchased?: string;
+  purchase_note?: string | null;
+  product_code?: string | null;
+  site_owners?: string | null;
+  warehouse_note?: string | null;
+  six_face_images?: string[];
+  designer_images?: string[];
+  designer_complete_date?: string | null;
+  image_review?: string | null;
+  doc_name?: string | null;
+  doc_link?: string | null;
+}
+
+export interface DevPendingCounts {
+  purchase: number;
+  six_face: number;
+  designer: number;
+  review: number;
+}
+
+export interface DevMyRoles {
+  departments: string[];
+  is_admin: boolean;
+  can_view_all: boolean;
+  can_purchase: boolean;
+  can_warehouse: boolean;
+  can_design: boolean;
+  can_review: boolean;
+  can_replenish: boolean;
+}
+
+export interface ProjectDocElement {
+  type: "text" | "image";
+  content?: string;
+  file_token?: string;
+}
+
+export interface ProjectDocInfo {
+  doc_name?: string | null;
+  doc_link?: string | null;
+  elements?: ProjectDocElement[];
+  content?: string | null;
+  message?: string;
+  /** 被屏蔽的采购链接数量（非采购部用户） */
+  links_hidden?: number;
+}
+
+export const developmentBotApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    search?: string;
+    category?: string;
+    urgency?: string;
+    seasonality?: string;
+    developer?: string;
+    date?: string;
+    status?: string;
+  }) => apiClient.get("/product-development/projects", { params }),
+  getFilters: () => apiClient.get("/product-development/projects/filters"),
+  getDetail: (record_id: string) =>
+    apiClient.get(`/product-development/projects/${record_id}`),
+  create: (data: ProductDevelopmentPayload) =>
+    apiClient.post("/product-development/projects", data),
+  createBatch: (data: ProductDevelopmentPayload[]) =>
+    apiClient.post("/product-development/projects/batch", { projects: data }),
+  update: (record_id: string, data: Partial<ProductDevelopmentPayload>) =>
+    apiClient.put(`/product-development/projects/${record_id}`, data),
+  remove: (record_id: string) =>
+    apiClient.delete(`/product-development/projects/${record_id}`),
+  getDoc: (record_id: string) =>
+    apiClient.get(`/product-development/projects/${record_id}/doc`),
+  getCategories: () => apiClient.get("/product-development/categories"),
+  addCategory: (name: string) =>
+    apiClient.post("/product-development/categories", { name }),
+  downloadImportTemplate: () =>
+    apiClient.get("/product-development/import-template", { responseType: "blob" }),
+  importProjects: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.post("/product-development/import-projects", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  getPendingCounts: () =>
+    apiClient.get("/product-development/pending-counts"),
+  getMyRoles: () => apiClient.get("/product-development/my-roles"),
+  updatePurchase: (record_id: string, data: { purchase_price: number; purchased?: string; purchase_note?: string }) =>
+    apiClient.put(`/product-development/projects/${record_id}/purchase`, data),
+  updateWarehouse: (record_id: string, data: { six_face_images?: string[]; warehouse_note?: string }) =>
+    apiClient.put(`/product-development/projects/${record_id}/warehouse`, data),
+  uploadDesignerImage: (record_id: string, images: string[]) =>
+    apiClient.put(`/product-development/projects/${record_id}/designer-image`, { images }),
+  reviewImage: (record_id: string, approved: boolean) =>
+    apiClient.put(`/product-development/projects/${record_id}/review`, { approved }),
+  createReplenishment: (data: {
+    store_group_id?: number;
+    notes?: string;
+    items: { record_id: string; quantity: number; notes?: string }[];
+  }) => apiClient.post("/product-development/projects/replenishment", data),
+};
+
 export default apiClient;

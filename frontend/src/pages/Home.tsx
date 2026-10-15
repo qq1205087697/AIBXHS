@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Card, Row, Col, Typography, Select, Empty, Modal, Table, Button, Radio, Tag, message, Spin, Space } from 'antd'
-import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList } from 'lucide-react'
+import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList, Rocket } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
-import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi } from '../api'
+import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi, developmentBotApi } from '../api'
 import { useResponsive } from '../hooks/useResponsive'
 
 const { Title, Text } = Typography
@@ -50,6 +50,7 @@ const Home: React.FC = () => {
   const [confirmedShipmentCount, setConfirmedShipmentCount] = useState(0) // 已确认发货单数
   const [cancelledShipmentCount, setCancelledShipmentCount] = useState(0) // 已取消发货单数
   const [pendingReplenishmentCount, setPendingReplenishmentCount] = useState(0) // 补货单待审批数量
+  const [devCounts, setDevCounts] = useState<{ purchase: number; six_face: number; designer: number; review: number }>({ purchase: 0, six_face: 0, designer: 0, review: 0 })
   const [diffModalOpen, setDiffModalOpen] = useState(false)
   const [diffItems, setDiffItems] = useState<any[]>([])
   const [diffLoading, setDiffLoading] = useState(false)
@@ -152,6 +153,7 @@ const Home: React.FC = () => {
       loadPurchaseStats(),
       loadInboundDiffCount(),
       loadPendingShipmentCount(),
+      loadDevCounts(),
     ]).finally(() => {
       setLoading(false)
     })
@@ -179,6 +181,15 @@ const Home: React.FC = () => {
       }
     } catch (e) {
       console.error('加载发货单KPI失败:', e)
+    }
+  }
+
+  const loadDevCounts = async () => {
+    try {
+      const res = await developmentBotApi.getPendingCounts()
+      if (res.data?.success) setDevCounts(res.data.data || { purchase: 0, six_face: 0, designer: 0, review: 0 })
+    } catch (e) {
+      console.error('加载开发机器人待办统计失败:', e)
     }
   }
 
@@ -316,10 +327,31 @@ const Home: React.FC = () => {
       hasPending: pendingReplenishmentCount > 0,
       priority: 1,
     },
-  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount])
+    {
+      id: 'development',
+      title: '开发机器人',
+      requiredPermission: 'development:purchase_kpi',
+      anyPermissions: [
+        'development:purchase_kpi',
+        'development:warehouse_kpi',
+        'development:designer_kpi',
+        'development:review_kpi',
+      ],
+      icon: <Rocket size={32} />,
+      color: '#7c3aed',
+      description: '新品采购/仓库/美工/审核待办汇总',
+      path: '/development',
+      stats: devCounts.purchase + devCounts.six_face + devCounts.designer + devCounts.review,
+      hasPending: devCounts.purchase + devCounts.six_face + devCounts.designer + devCounts.review > 0,
+      priority: 0,
+    },
+  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount, devCounts])
 
   const permittedBots = useMemo(() =>
-    allBots.filter(bot => hasPermission(bot.requiredPermission)),
+    allBots.filter(bot => {
+      const anyPerms = (bot as { anyPermissions?: string[] }).anyPermissions
+      return anyPerms ? anyPerms.some(code => hasPermission(code)) : hasPermission(bot.requiredPermission)
+    }),
     [allBots, hasPermission])
 
   const visibleBots = useMemo(() =>
@@ -549,6 +581,48 @@ const Home: React.FC = () => {
               )}
             </div>
           </Col>
+        </Row>
+      </div>
+    )
+  }
+
+  const renderDevelopmentStats = () => {
+    const items = [
+      { label: '采购填写', count: devCounts.purchase, color: '#fa541c', tab: 'purchase' },
+      { label: '六面图上传', count: devCounts.six_face, color: '#1890ff', tab: 'six_face' },
+      { label: '美工传图', count: devCounts.designer, color: '#eb2f96', tab: 'designer' },
+      { label: '图片审核', count: devCounts.review, color: '#52c41a', tab: 'review' },
+    ]
+    return (
+      <div style={{ marginTop: 16 }}>
+        <Row gutter={[8, 8]}>
+          {items.map(item => (
+            <Col span={6} key={item.label}>
+              <div
+                onClick={(e) => {
+                  e.stopPropagation()
+                  navigate(`/development?tab=${item.tab}`)
+                }}
+                style={{
+                  textAlign: 'center',
+                  padding: '10px 0',
+                  background: item.count > 0 ? `${item.color}15` : '#fafafa',
+                  borderRadius: 8,
+                  border: item.count > 0 ? `1px solid ${item.color}40` : '1px solid #f0f0f0',
+                  cursor: 'pointer',
+                  transition: 'box-shadow 0.2s',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.boxShadow = `0 2px 8px ${item.color}30` }}
+                onMouseLeave={(e) => { e.currentTarget.style.boxShadow = 'none' }}
+                title={`查看${item.label}待办`}
+              >
+                <div style={{ fontSize: 20, fontWeight: 'bold', color: item.count > 0 ? item.color : '#bbb' }}>
+                  {item.count}
+                </div>
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>{item.label}</div>
+              </div>
+            </Col>
+          ))}
         </Row>
       </div>
     )
@@ -853,6 +927,7 @@ const Home: React.FC = () => {
                 {module.id === 'inbound_diff' && renderInboundDiffStats()}
                 {module.id === 'pending_shipment' && renderPendingShipmentStats()}
                 {module.id === 'pending_replenishment' && renderPendingReplenishmentStats()}
+                {module.id === 'development' && renderDevelopmentStats()}
               </Card>
             </Col>
             ))

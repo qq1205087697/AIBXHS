@@ -727,6 +727,11 @@ async def init_default_permissions(
         {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
         {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
         {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
+        # 开发机器人 KPI卡片
+        {"name": "新品采购KPI卡片", "code": "development:purchase_kpi", "type": "function", "module": "开发机器人", "sort_order": 80},
+        {"name": "新品仓库KPI卡片", "code": "development:warehouse_kpi", "type": "function", "module": "开发机器人", "sort_order": 81},
+        {"name": "新品美工KPI卡片", "code": "development:designer_kpi", "type": "function", "module": "开发机器人", "sort_order": 82},
+        {"name": "新品审核KPI卡片", "code": "development:review_kpi", "type": "function", "module": "开发机器人", "sort_order": 83},
     ]
 
     for perm in default_permissions:
@@ -828,6 +833,11 @@ async def add_missing_permissions(
         {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
         {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
         {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
+        # 开发机器人 KPI卡片
+        {"name": "新品采购KPI卡片", "code": "development:purchase_kpi", "type": "function", "module": "开发机器人", "sort_order": 80},
+        {"name": "新品仓库KPI卡片", "code": "development:warehouse_kpi", "type": "function", "module": "开发机器人", "sort_order": 81},
+        {"name": "新品美工KPI卡片", "code": "development:designer_kpi", "type": "function", "module": "开发机器人", "sort_order": 82},
+        {"name": "新品审核KPI卡片", "code": "development:review_kpi", "type": "function", "module": "开发机器人", "sort_order": 83},
     ]
 
     # 先清理无用的旧权限码

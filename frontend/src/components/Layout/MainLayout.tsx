@@ -49,6 +49,7 @@ import {
   Star,
   AlertTriangle,
   Table2,
+  Rocket,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -310,6 +311,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         ]
       : []),
     {
+      key: "/development",
+      icon: <Rocket size={20} />,
+      label: "开发机器人",
+      shortLabel: "开发",
+    },
+    {
       key: "/data-alert",
       icon: <AlertTriangle size={20} />,
       label: "数据驾驶舱",
@@ -473,6 +480,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
       "/product-selection": "选品机器人",
+      "/development": "开发机器人",
+      "/development/new": "添加新品",
     };
     return pathMap[location.pathname] || "未知页面";
   };
@@ -696,7 +705,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             icon={item.icon}
             label={item.label}
             shortLabel={item.shortLabel}
-            active={location.pathname === item.key}
+            active={location.pathname.startsWith("/development") ? item.key === "/development" : location.pathname === item.key}
             onClick={() => navigate(item.key as string)}
           />
         );
@@ -764,7 +773,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             ) : (
               <Menu
                 mode="inline"
-                selectedKeys={[location.pathname]}
+                selectedKeys={[location.pathname.startsWith("/development") ? "/development" : location.pathname]}
                 openKeys={openKeys}
                 onOpenChange={(keys) => setOpenKeys(keys)}
                 items={menuItems.map(({ shortLabel, ...rest }: any) => rest)}
