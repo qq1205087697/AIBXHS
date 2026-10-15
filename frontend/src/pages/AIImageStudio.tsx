@@ -18,7 +18,14 @@ import {
   Spin,
   Badge,
   Upload,
+  Radio,
+  Modal,
+  ColorPicker,
+  Pagination,
+  Checkbox,
+  Switch,
 } from 'antd'
+import type { Color } from 'antd/es/color-picker'
 import {
   UploadOutlined,
   PictureOutlined,
@@ -27,6 +34,11 @@ import {
   ThunderboltOutlined,
   DownloadOutlined,
   BulbOutlined,
+  SettingOutlined,
+  SearchOutlined,
+  CopyOutlined,
+  MinusOutlined,
+  PlusOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
 import {
@@ -37,24 +49,40 @@ import {
   AmazonProductAnalysisResult,
 } from '../api'
 
-const { Text, Title } = Typography
+const { Text } = Typography
 const { TextArea } = Input
 
 const MAX_IMAGES = 5
-const GEN_TYPE_LABELS: Record<string, string> = {
+
+/** A+ 类型（单选） */
+const APLUS_OPTIONS = [
+  { value: 'aplus_advanced', label: '高级A+', size: '1464×600', desc: '超宽幅品牌横幅，A+ 页面顶部大图' },
+  { value: 'aplus_normal', label: '普通A+', size: '970×600', desc: '标准 A+ 页面横幅' },
+  { value: 'aplus_mobile', label: '手机A+', size: '600×450', desc: '移动端 A+ 图，小屏浏览' },
+] as const
+
+/** 主副图类型（多选） */
+const MAIN_TYPE_LABELS: Record<string, string> = {
+  selling_point: '卖点图',
   white_background: '白底图',
   scene: '场景图',
   closeup: '特写图',
-  selling_point: '卖点图',
+  closeup_white: '特写白底图',
+}
+const MAIN_TYPE_DESCRIPTIONS: Record<string, string> = {
+  selling_point: '商品置于卖点匹配的场景，配文字排版展示卖点',
+  white_background: '商品精修后放置于纯白色背景',
+  scene: '商品置于卖点匹配的使用场景中',
+  closeup: '与卖点匹配的局部特写细节',
+  closeup_white: '白底局部特写细节',
+}
+
+/** 兼容 v1 旧记录的类型标签 */
+const LEGACY_TYPE_LABELS: Record<string, string> = {
+  ...MAIN_TYPE_LABELS,
   aplus: 'A+图',
 }
-const GEN_TYPE_DESCRIPTIONS: Record<string, string> = {
-  white_background: '电商主图标准白底，突出商品主体',
-  scene: '商品置于真实使用场景中',
-  closeup: '细节特写，突出质感与做工',
-  selling_point: '卖点信息图，图文结合',
-  aplus: '亚马逊 A+ 页面横幅图',
-}
+
 const STATUS_COLORS: Record<string, string> = {
   排队中: 'default',
   生成中: 'processing',
@@ -62,6 +90,17 @@ const STATUS_COLORS: Record<string, string> = {
   部分完成: 'warning',
   失败: 'error',
 }
+
+const BRAND_DEFAULTS = {
+  main_color: '',
+  font_style: '智能字体风格',
+  custom_text: '',
+  country: 'US 美国',
+  language: '英语',
+  platform: '亚马逊',
+}
+
+type BrandSettings = typeof BRAND_DEFAULTS
 
 /** AI 分析结构化结果 → 商品信息文本（供提示词模板拼接） */
 const analysisToText = (r: AmazonProductAnalysisResult): string =>
@@ -88,22 +127,34 @@ const AIImageStudio: React.FC = () => {
   const [fileList, setFileList] = useState<UploadFile[]>([])
   const [analyzing, setAnalyzing] = useState(false)
   const [productInfo, setProductInfo] = useState('')
-  const [selectedTypes, setSelectedTypes] = useState<string[]>([
+  // v2 分组：A+（单选，空=不生成）与主副图（多选）独立设置
+  const [aplusType, setAplusType] = useState<string>('')
+  const [aplusCount, setAplusCount] = useState(1)
+  const [mainEnabled, setMainEnabled] = useState(true)
+  const [selectedMainTypes, setSelectedMainTypes] = useState<string[]>([
     'white_background',
     'scene',
-    'closeup',
   ])
-  const [aspectRatio, setAspectRatio] = useState('1:1')
-  const [imageCount, setImageCount] = useState(1)
+  const [mainCounts, setMainCounts] = useState<Record<string, number>>({
+    white_background: 1,
+    scene: 1,
+  })
+  const [mainAspectRatio, setMainAspectRatio] = useState('1:1')
+  const [mainNoText, setMainNoText] = useState(false)
+  const [brandOpen, setBrandOpen] = useState(false)
+  const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  // ===== 右栏任务状态 =====
+  // ===== 右栏生成记录状态 =====
   const [tasks, setTasks] = useState<AIImageTask[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
+  const [keyword, setKeyword] = useState('')
+  const [statusFilter, setStatusFilter] = useState<string>('')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const pageSize = 10
 
@@ -111,7 +162,7 @@ const AIImageStudio: React.FC = () => {
     async (silent = false) => {
       if (!silent) setLoading(true)
       try {
-        const { data } = await aiImageApi.listTasks(page, pageSize)
+        const { data } = await aiImageApi.listTasks(page, pageSize, keyword)
         setTasks(data.items || [])
         setTotal(data.total || 0)
       } catch (e: any) {
@@ -120,19 +171,23 @@ const AIImageStudio: React.FC = () => {
         if (!silent) setLoading(false)
       }
     },
-    [page],
+    [page, keyword],
   )
 
-  // 有进行中任务时 5 秒轮询
   useEffect(() => {
     fetchTasks()
   }, [fetchTasks])
 
+  // 有进行中任务时 5 秒轮询
   useEffect(() => {
-    const hasActive = tasks.some((t) => t.status === '排队中' || t.status === '生成中')
-    if (hasActive && !timerRef.current) {
+    const active = tasks.filter(
+      (t) =>
+        (t.status === '排队中' || t.status === '生成中') &&
+        (!statusFilter || t.status === statusFilter),
+    )
+    if (active.length && !timerRef.current) {
       timerRef.current = setInterval(() => fetchTasks(true), 5000)
-    } else if (!hasActive && timerRef.current) {
+    } else if (!active.length && timerRef.current) {
       clearInterval(timerRef.current)
       timerRef.current = null
     }
@@ -142,7 +197,7 @@ const AIImageStudio: React.FC = () => {
         timerRef.current = null
       }
     }
-  }, [tasks, fetchTasks])
+  }, [tasks, fetchTasks, statusFilter])
 
   // ===== AI 分析商品信息 =====
   const handleAnalyze = async () => {
@@ -167,15 +222,16 @@ const AIImageStudio: React.FC = () => {
     }
   }
 
-  // ===== 提交生成任务 =====
+  // ===== 提交生成任务（v2 分组参数）=====
   const handleSubmit = async () => {
     const files = fileList.map((f) => f.originFileObj).filter(Boolean) as File[]
     if (!files.length) {
       message.warning('请至少上传一张参考图')
       return
     }
-    if (!selectedTypes.length) {
-      message.warning('请至少选择一种生成类型')
+    const activeMainTypes = mainEnabled ? selectedMainTypes : []
+    if (!aplusType && !activeMainTypes.length) {
+      message.warning('请在「A+图设置」或「主副图设置」中至少选择一种类型')
       return
     }
     setSubmitting(true)
@@ -184,11 +240,20 @@ const AIImageStudio: React.FC = () => {
       const baseName = firstFile.name.replace(/\.[^.]+$/, '')
       await aiImageApi.createTask(files, {
         title: baseName,
-        generation_types: selectedTypes,
-        aspect_ratio: aspectRatio,
-        image_count: imageCount,
+        aplus_type: aplusType || undefined,
+        main_types: activeMainTypes.length
+          ? Object.fromEntries(activeMainTypes.map((t) => [t, mainCounts[t] || 1]))
+          : undefined,
+        main_aspect_ratio: activeMainTypes.length ? mainAspectRatio : undefined,
+        image_count: aplusType ? aplusCount : 1,
         product_info: productInfo,
         prompt: extraPrompt,
+        brand_settings: {
+          ...Object.fromEntries(
+            Object.entries(brand).filter(([, v]) => v !== ''),
+          ),
+          no_text_mode: mainEnabled && mainNoText ? 'true' : '',
+        },
       })
       message.success('任务已提交，正在后台生成')
       setFileList([])
@@ -211,6 +276,42 @@ const AIImageStudio: React.FC = () => {
     }
   }
 
+  /** 一键做同款：把历史任务的参数回填到左侧表单 */
+  const handleReuse = (task: AIImageTask) => {
+    if (task.aplus_type) setAplusType(task.aplus_type)
+    else setAplusType('')
+    setAplusCount(task.image_count || 1)
+    if (Array.isArray(task.main_types)) {
+      setSelectedMainTypes(task.main_types)
+      setMainCounts((m) => {
+        const next = { ...m }
+        for (const t of task.main_types!) if (next[t] == null) next[t] = 1
+        return next
+      })
+    } else if (task.main_types && typeof task.main_types === 'object') {
+      const keys = Object.keys(task.main_types)
+      setSelectedMainTypes(keys)
+      setMainCounts((m) => {
+        const next = { ...m }
+        for (const [t, c] of Object.entries(Object(task.main_types) as Record<string, number>))
+          next[t] = c
+        return next
+      })
+    }
+    else if (!task.aplus_type) {
+      // v1 旧记录：从 generation_types 里取主副图类型
+      const legacy = (task.generation_types || []).filter((t) => MAIN_TYPE_LABELS[t])
+      setSelectedMainTypes(legacy.length ? legacy : ['white_background', 'scene'])
+    }
+    setMainAspectRatio(task.main_aspect_ratio || task.aspect_ratio || '1:1')
+    if (task.brand_settings) setBrand({ ...BRAND_DEFAULTS, ...task.brand_settings })
+    setProductInfo(task.product_info || '')
+    setExtraPrompt(task.prompt || '')
+    setBrandOpen(false)
+    message.success('参数已回填到左侧表单（参考图需重新上传）')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const handleDownload = async (url: string, name: string) => {
     try {
       const { data } = await aiCreationApi.proxyImage(url)
@@ -225,7 +326,9 @@ const AIImageStudio: React.FC = () => {
     }
   }
 
-  // ===== 渲染 =====
+  const brandActiveCount = Object.entries(brand).filter(([, v]) => v !== '').length
+
+  // ===== 渲染：结果图（大图预览画廊）=====
   const renderResultItem = (item: AIImageResultItem, task: AIImageTask) => {
     const name = `${task.title || '套图'}-${item.label}${item.seq > 0 ? `-${item.seq + 1}` : ''}`
     if (item.status === '已完成' && item.url) {
@@ -236,10 +339,7 @@ const AIImageStudio: React.FC = () => {
             alt={name}
             style={{ borderRadius: 6, objectFit: 'cover', width: '100%', maxHeight: 220 }}
           />
-          <Space
-            style={{ position: 'absolute', top: 6, right: 6 }}
-            size={4}
-          >
+          <Space style={{ position: 'absolute', top: 6, right: 6 }} size={4}>
             <Tooltip title="下载">
               <Button
                 size="small"
@@ -302,6 +402,55 @@ const AIImageStudio: React.FC = () => {
     )
   }
 
+  /** 历史卡片的类型标签（v2 分组 + v1 兼容） */
+  const renderTypeTags = (task: AIImageTask) => {
+    const tags: string[] = []
+    if (task.aplus_type) {
+      const a = APLUS_OPTIONS.find((o) => o.value === task.aplus_type)
+      tags.push(a ? a.label : task.aplus_type)
+    }
+    if (Array.isArray(task.main_types) && task.main_types.length) {
+      tags.push(...task.main_types.map((t) => MAIN_TYPE_LABELS[t] || t))
+    } else if (task.main_types && typeof task.main_types === 'object') {
+      tags.push(
+        ...Object.keys(task.main_types).map((t) => MAIN_TYPE_LABELS[t] || t),
+      )
+    }
+    if (!tags.length) {
+      tags.push(...(task.generation_types || []).map((t) => LEGACY_TYPE_LABELS[t] || t))
+    }
+    return tags.map((t) => <Tag key={t}>{t}</Tag>)
+  }
+
+  /** 历史卡片的品牌设置摘要 */
+  const renderBrandSummary = (task: AIImageTask): React.ReactNode => {
+    const bs = task.brand_settings
+    if (!bs) return null
+    const nodes: React.ReactNode[] = []
+    if (bs.main_color) {
+      nodes.push(
+        <Space size={4} key="color">
+          <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: bs.main_color, border: '1px solid #d9d9d9' }} />
+          <Text type="secondary" style={{ fontSize: 12 }}>{bs.main_color}</Text>
+        </Space>,
+      )
+    }
+    if (bs.font_style && bs.font_style !== '智能字体风格') {
+      nodes.push(<Tag key="font" style={{ fontSize: 12 }}>字体：{bs.font_style}</Tag>)
+    }
+    if (bs.country) nodes.push(<Tag key="country" style={{ fontSize: 12 }}>{bs.country}</Tag>)
+    if (bs.language) nodes.push(<Tag key="lang" style={{ fontSize: 12 }}>{bs.language}</Tag>)
+    if (bs.platform) nodes.push(<Tag key="platform" style={{ fontSize: 12 }}>{bs.platform}</Tag>)
+    if (bs.custom_text) {
+      nodes.push(
+        <Tooltip key="custom" title={bs.custom_text}>
+          <Tag style={{ fontSize: 12 }}>自定义…</Tag>
+        </Tooltip>,
+      )
+    }
+    return nodes.length ? <Space wrap size={4}>{nodes}</Space> : null
+  }
+
   return (
     <div style={{ padding: 24 }}>
       <Row gutter={16}>
@@ -358,59 +507,206 @@ const AIImageStudio: React.FC = () => {
                 />
               </div>
 
-              <div>
-                <Text strong>生成类型（可多选）</Text>
-                <div style={{ marginTop: 8 }}>
-                  {Object.entries(GEN_TYPE_LABELS).map(([key, label]) => (
-                    <Tag.CheckableTag
-                      key={key}
-                      checked={selectedTypes.includes(key)}
-                      onChange={(checked) =>
-                        setSelectedTypes((prev) =>
-                          checked ? [...prev, key] : prev.filter((t) => t !== key),
-                        )
-                      }
-                      style={{
-                        border: '1px solid #d9d9d9',
-                        padding: '4px 12px',
-                        fontSize: 13,
-                      }}
-                    >
-                      <Tooltip title={GEN_TYPE_DESCRIPTIONS[key]}>{label}</Tooltip>
-                    </Tag.CheckableTag>
-                  ))}
-                </div>
-              </div>
-
-              <Row gutter={12}>
-                <Col span={12}>
-                  <Text strong>输出比例</Text>
-                  <Select
-                    style={{ width: '100%', marginTop: 8 }}
-                    value={aspectRatio}
-                    onChange={setAspectRatio}
-                    options={[
-                      { value: '1:1', label: '1:1（方形，1248×1248）' },
-                      { value: '3:4', label: '3:4（竖版，1088×1440）' },
-                      { value: '4:3', label: '4:3（横版，1440×1088）' },
-                      { value: '9:16', label: '9:16（全屏竖版）' },
-                      { value: '16:9', label: '16:9（全屏横版）' },
-                    ]}
-                  />
-                </Col>
-                <Col span={12}>
-                  <Text strong>每种类型张数</Text>
+              {/* ===== A+图设置（单选） ===== */}
+              <Card
+                size="small"
+                type="inner"
+                title="A+图设置"
+                extra={
+                  <Radio.Group
+                    size="small"
+                    value={aplusType || 'none'}
+                    onChange={(e) => setAplusType(e.target.value === 'none' ? '' : e.target.value)}
+                  >
+                    <Radio.Button value="none">不生成</Radio.Button>
+                  </Radio.Group>
+                }
+              >
+                <Radio.Group
+                  value={aplusType}
+                  onChange={(e) => setAplusType(e.target.value)}
+                  style={{ width: '100%' }}
+                >
+                  <Space direction="vertical" style={{ width: '100%' }} size={6}>
+                    {APLUS_OPTIONS.map((o) => (
+                      <Radio key={o.value} value={o.value} style={{ width: '100%' }}>
+                        <Space size={6}>
+                          <Text strong={aplusType === o.value}>{o.label}</Text>
+                          <Tag style={{ fontSize: 12 }}>{o.size}</Tag>
+                        </Space>
+                        <div style={{ paddingLeft: 24 }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{o.desc}</Text>
+                        </div>
+                      </Radio>
+                    ))}
+                  </Space>
+                </Radio.Group>
+                {aplusType && (
                   <div style={{ marginTop: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>生成张数</Text>
                     <InputNumber
                       min={1}
                       max={4}
-                      value={imageCount}
-                      onChange={(v) => setImageCount(v || 1)}
-                      style={{ width: '100%' }}
+                      value={aplusCount}
+                      onChange={(v) => setAplusCount(v || 1)}
+                      style={{ width: '100%', marginTop: 4 }}
                     />
                   </div>
-                </Col>
-              </Row>
+                )}
+              </Card>
+
+              {/* ===== 主副图设置（开关 + 行式勾选 + 每类型独立张数 + 比例按钮组） ===== */}
+              <Card
+                size="small"
+                type="inner"
+                title={
+                  <Space>
+                    <span>主副图设置</span>
+                    <Tooltip title="不生成主副图时可关闭此区块">
+                      <Switch
+                        size="small"
+                        checked={mainEnabled}
+                        onChange={(v) => setMainEnabled(v)}
+                      />
+                    </Tooltip>
+                  </Space>
+                }
+              >
+                {mainEnabled && (
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>生成类型（多选）</Text>
+                    <div style={{ marginTop: 8 }}>
+                      {Object.entries(MAIN_TYPE_LABELS).map(([key, label]) => {
+                        const checked = selectedMainTypes.includes(key)
+                        return (
+                          <div key={key} style={{ marginBottom: 4 }}>
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                padding: '6px 10px',
+                                borderRadius: 6,
+                                background: checked ? '#f6f0ff' : 'transparent',
+                                border: checked ? '1px solid #d3adf7' : '1px solid transparent',
+                                cursor: 'pointer',
+                              }}
+                              onClick={() =>
+                                setSelectedMainTypes((prev) =>
+                                  checked ? prev.filter((t) => t !== key) : [...prev, key],
+                                )
+                              }
+                            >
+                              <Space size={8}>
+                                <Checkbox checked={checked} />
+                                <Tooltip title={MAIN_TYPE_DESCRIPTIONS[key]}>
+                                  <Text strong={checked}>{label}</Text>
+                                </Tooltip>
+                              </Space>
+                              {checked && (
+                                <Space size={2} onClick={(e) => e.stopPropagation()}>
+                                  <Button
+                                    size="small"
+                                    type="text"
+                                    icon={<MinusOutlined />}
+                                    disabled={(mainCounts[key] || 1) <= 1}
+                                    onClick={() =>
+                                      setMainCounts((m) => ({
+                                        ...m,
+                                        [key]: Math.max(1, (m[key] || 1) - 1),
+                                      }))
+                                    }
+                                  />
+                                  <Text strong style={{ minWidth: 18, textAlign: 'center' }}>
+                                    {mainCounts[key] || 1}
+                                  </Text>
+                                  <Button
+                                    size="small"
+                                    type="text"
+                                    icon={<PlusOutlined />}
+                                    disabled={(mainCounts[key] || 1) >= 4}
+                                    onClick={() =>
+                                      setMainCounts((m) => ({
+                                        ...m,
+                                        [key]: Math.min(4, (m[key] || 1) + 1),
+                                      }))
+                                    }
+                                  />
+                                </Space>
+                              )}
+                            </div>
+                            {checked && key === selectedMainTypes[0] && (
+                              <div
+                                style={{
+                                  margin: '4px 0 8px',
+                                  padding: '8px 12px',
+                                  background: '#fafafa',
+                                  borderRadius: 6,
+                                }}
+                              >
+                                <Space
+                                  style={{ width: '100%', justifyContent: 'space-between' }}
+                                >
+                                  <Text style={{ fontSize: 12 }}>无文字模式</Text>
+                                  <Switch
+                                    size="small"
+                                    checked={mainNoText}
+                                    onChange={(v) => setMainNoText(v)}
+                                  />
+                                </Space>
+                                <div>
+                                  <Text
+                                    type="secondary"
+                                    style={{ fontSize: 12 }}
+                                  >💡未选择排版时，将由 AI 自由排版生成（排版模板即将上线）</Text>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <div style={{ marginTop: 10 }}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>生成比例</Text>
+                      <div style={{ marginTop: 6 }}>
+                        <Radio.Group
+                          value={mainAspectRatio}
+                          onChange={(e) => setMainAspectRatio(e.target.value)}
+                          optionType="button"
+                          buttonStyle="solid"
+                          size="small"
+                          options={[
+                            { value: '1:1', label: '1:1' },
+                            { value: '3:4', label: '3:4' },
+                            { value: '4:3', label: '4:3' },
+                            { value: '9:16', label: '9:16' },
+                            { value: '16:9', label: '16:9' },
+                          ]}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </Card>
+
+              {/* ===== 品牌与自定义设置 ===== */}
+              <div>
+                <Button
+                  icon={<SettingOutlined />}
+                  onClick={() => setBrandOpen(true)}
+                  style={{ width: '100%', justifyContent: 'flex-start' }}
+                >
+                  品牌与自定义设置
+                  {brandActiveCount > 0 && (
+                    <Badge count={brandActiveCount} size="small" style={{ marginLeft: 8 }} />
+                  )}
+                </Button>
+                {brandActiveCount > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    {renderBrandSummary({ brand_settings: brand } as AIImageTask)}
+                  </div>
+                )}
+              </div>
 
               <div>
                 <Text strong>附加要求（可选）</Text>
@@ -432,25 +728,63 @@ const AIImageStudio: React.FC = () => {
                 block
                 size="large"
               >
-                立即生成（{selectedTypes.length} 类 × {imageCount} 张）
+                立即生成（
+                {[
+                  aplusType && `A+×${aplusCount}`,
+                  mainEnabled &&
+                    selectedMainTypes.length &&
+                    `主副图×${selectedMainTypes.reduce((a, t) => a + (mainCounts[t] || 1), 0)}`,
+                ]
+                  .filter(Boolean)
+                  .join(' + ') || '未选择类型'}
+                ）
               </Button>
             </Space>
           </Card>
         </Col>
 
-        {/* 右栏：任务列表 */}
+        {/* 右栏：生成记录 */}
         <Col xs={24} lg={15}>
           <Card
             title={
               <Space>
                 <span>生成记录</span>
-                {(total > 0) && <Text type="secondary">共 {total} 条</Text>}
+                {total > 0 && <Text type="secondary">共 {total} 条</Text>}
               </Space>
             }
             extra={
-              <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()} size="small">
-                刷新
-              </Button>
+              <Space>
+                <Input
+                  size="small"
+                  allowClear
+                  prefix={<SearchOutlined />}
+                  placeholder="搜索产品名 / 编码"
+                  style={{ width: 180 }}
+                  value={keyword}
+                  onChange={(e) => {
+                    setKeyword(e.target.value)
+                    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+                    searchTimerRef.current = setTimeout(() => {
+                      setPage(1)
+                      fetchTasks(true)
+                    }, 300)
+                  }}
+                />
+                <Select
+                  size="small"
+                  style={{ width: 110 }}
+                  value={statusFilter || 'all'}
+                  onChange={(v) => {
+                    setStatusFilter(v === 'all' ? '' : v)
+                    setPage(1)
+                  }}
+                  options={[
+                    { value: 'all', label: '全部状态' },
+                    ...Object.keys(STATUS_COLORS).map((s) => ({ value: s, label: s })),
+                  ]}
+                />
+                <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()} size="small" />
+              </Space>
             }
           >
             {loading && !tasks.length ? (
@@ -461,82 +795,222 @@ const AIImageStudio: React.FC = () => {
               <Empty description="暂无生成记录，先在左侧提交一个任务吧" />
             ) : (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                {tasks.map((task) => (
-                  <Card
-                    key={task.id}
-                    size="small"
-                    title={
-                      <Space wrap>
-                        <Badge
-                          status={
-                            task.status === '已完成'
-                              ? 'success'
-                              : task.status === '失败'
-                                ? 'error'
-                                : task.status === '部分完成'
-                                  ? 'warning'
-                                  : 'processing'
-                          }
-                          text={<Text strong>{task.title || `任务 #${task.id}`}</Text>}
-                        />
-                        <Tag color={STATUS_COLORS[task.status] || 'default'}>
-                          {task.status}
-                        </Tag>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {task.aspect_ratio} · {task.image_count}/类 · {task.created_at}
-                          {task.creator_name ? ` · ${task.creator_name}` : ''}
-                        </Text>
-                      </Space>
-                    }
-                    extra={
-                      <Popconfirm
-                        title="确定删除该记录？"
-                        onConfirm={() => handleDelete(task.id)}
-                      >
-                        <Button size="small" danger icon={<DeleteOutlined />} />
-                      </Popconfirm>
-                    }
-                  >
-                    <Space direction="vertical" style={{ width: '100%' }} size={8}>
-                      <Space wrap size={4}>
-                        {task.generation_types.map((t) => (
-                          <Tag key={t}>{GEN_TYPE_LABELS[t] || t}</Tag>
-                        ))}
-                        {task.cost_seconds != null && (
+                {tasks
+                  .filter((t) => !statusFilter || t.status === statusFilter)
+                  .map((task) => (
+                    <Card
+                      key={task.id}
+                      size="small"
+                      title={
+                        <Space wrap>
+                          <Badge
+                            status={
+                              task.status === '已完成'
+                                ? 'success'
+                                : task.status === '失败'
+                                  ? 'error'
+                                  : task.status === '部分完成'
+                                    ? 'warning'
+                                    : 'processing'
+                            }
+                            text={<Text strong>{task.title || `任务 #${task.id}`}</Text>}
+                          />
+                          <Tag color={STATUS_COLORS[task.status] || 'default'}>
+                            {task.status}
+                          </Tag>
                           <Text type="secondary" style={{ fontSize: 12 }}>
-                            耗时 {formatCost(task.cost_seconds)}
+                            {task.aplus_type || task.main_types?.length
+                              ? ''
+                              : `${task.aspect_ratio} · `}
+                            {task.image_count}/类 · {task.created_at}
+                            {task.creator_name ? ` · ${task.creator_name}` : ''}
                           </Text>
-                        )}
-                      </Space>
-                      {task.error_message && (
-                        <Text type="danger" style={{ fontSize: 12 }}>
-                          {task.error_message}
-                        </Text>
-                      )}
-                      {task.product_info && (
-                        <Tooltip title={task.product_info}>
-                          <Text
-                            type="secondary"
-                            style={{ fontSize: 12, display: 'block' }}
-                            ellipsis={{ tooltip: task.product_info }}
+                        </Space>
+                      }
+                      extra={
+                        <Space>
+                          <Tooltip title="一键做同款：参数回填到左侧表单">
+                            <Button
+                              size="small"
+                              icon={<CopyOutlined />}
+                              onClick={() => handleReuse(task)}
+                            >
+                              做同款
+                            </Button>
+                          </Tooltip>
+                          <Popconfirm
+                            title="确定删除该记录？"
+                            onConfirm={() => handleDelete(task.id)}
                           >
-                            商品信息：{task.product_info}
+                            <Button size="small" danger icon={<DeleteOutlined />} />
+                          </Popconfirm>
+                        </Space>
+                      }
+                    >
+                      <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                        <Space wrap size={4}>
+                          {renderTypeTags(task)}
+                          {(task.aplus_type || task.main_types?.length) && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {task.main_aspect_ratio || task.aspect_ratio} · {task.image_count}/类
+                            </Text>
+                          )}
+                          {task.cost_seconds != null && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              耗时 {formatCost(task.cost_seconds)}
+                            </Text>
+                          )}
+                        </Space>
+                        {renderBrandSummary(task)}
+                        {task.error_message && (
+                          <Text type="danger" style={{ fontSize: 12 }}>
+                            {task.error_message}
                           </Text>
-                        </Tooltip>
-                      )}
-                      <Row gutter={[12, 12]}>
-                        {(task.result_images || []).map((item) =>
-                          renderResultItem(item, task),
                         )}
-                      </Row>
-                    </Space>
-                  </Card>
-                ))}
+                        {task.product_info && (
+                          <Tooltip title={task.product_info}>
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 12, display: 'block' }}
+                              ellipsis={{ tooltip: task.product_info }}
+                            >
+                              商品信息：{task.product_info}
+                            </Text>
+                          </Tooltip>
+                        )}
+                        <Image.PreviewGroup>
+                          <Row gutter={[12, 12]}>
+                            {(task.result_images || []).map((item) =>
+                              renderResultItem(item, task),
+                            )}
+                          </Row>
+                        </Image.PreviewGroup>
+                      </Space>
+                    </Card>
+                  ))}
               </Space>
+            )}
+            {total > pageSize && (
+              <div style={{ textAlign: 'center', marginTop: 16 }}>
+                <Pagination
+                  current={page}
+                  pageSize={pageSize}
+                  total={total}
+                  onChange={(p: number) => setPage(p)}
+                  showSizeChanger={false}
+                />
+              </div>
             )}
           </Card>
         </Col>
       </Row>
+
+      {/* ===== 品牌与自定义设置弹窗 ===== */}
+      <Modal
+        title="品牌与自定义设置"
+        open={brandOpen}
+        onCancel={() => setBrandOpen(false)}
+        footer={[
+          <Button
+            key="clear"
+            onClick={() => {
+              setBrand({ ...BRAND_DEFAULTS })
+              message.success('已恢复默认')
+            }}
+          >
+            恢复默认
+          </Button>,
+          <Button key="ok" type="primary" onClick={() => setBrandOpen(false)}>
+            完成
+          </Button>,
+        ]}
+        width={520}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={14}>
+          <div>
+            <Text strong>品牌主色</Text>
+            <div style={{ marginTop: 6 }}>
+              <Space>
+                <ColorPicker
+                  value={brand.main_color || '#ffffff'}
+                  onChange={(c: Color) => setBrand((b) => ({ ...b, main_color: c.toHexString() }))}
+                  showText
+                  disabledAlpha
+                />
+                {!brand.main_color && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>未设置时由 AI 根据商品智能取色</Text>
+                )}
+                {brand.main_color && (
+                  <Button size="small" onClick={() => setBrand((b) => ({ ...b, main_color: '' }))}>
+                    智能主色
+                  </Button>
+                )}
+              </Space>
+            </div>
+          </div>
+
+          <div>
+            <Text strong>字体风格</Text>
+            <Select
+              style={{ width: '100%', marginTop: 6 }}
+              value={brand.font_style}
+              onChange={(v) => setBrand((b) => ({ ...b, font_style: v }))}
+              options={['智能字体风格', '现代无衬线', '经典衬线', '圆润可爱', '硬朗工业'].map(
+                (s) => ({ value: s, label: s }),
+              )}
+            />
+          </div>
+
+          <div>
+            <Text strong>自定义设置</Text>
+            <TextArea
+              rows={3}
+              maxLength={500}
+              showCount
+              value={brand.custom_text}
+              onChange={(e) => setBrand((b) => ({ ...b, custom_text: e.target.value }))}
+              placeholder="可输入想要的视觉氛围、设计风格等想自定义的内容"
+              style={{ marginTop: 6 }}
+            />
+          </div>
+
+          <Row gutter={12}>
+            <Col span={12}>
+              <Text strong>销售国家/地区</Text>
+              <Select
+                style={{ width: '100%', marginTop: 6 }}
+                value={brand.country}
+                onChange={(v) => setBrand((b) => ({ ...b, country: v }))}
+                options={['US 美国', 'CA 加拿大', 'UK 英国', 'DE 德国', 'FR 法国',
+                  'IT 意大利', 'ES 西班牙', 'JP 日本', 'AU 澳大利亚'].map((s) => ({ value: s, label: s }))}
+                showSearch
+              />
+            </Col>
+            <Col span={12}>
+              <Text strong>生成图片语言</Text>
+              <Select
+                style={{ width: '100%', marginTop: 6 }}
+                value={brand.language}
+                onChange={(v) => setBrand((b) => ({ ...b, language: v }))}
+                options={['英语', '德语', '法语', '意大利语', '西班牙语', '日语'].map(
+                  (s) => ({ value: s, label: s }),
+                )}
+                showSearch
+              />
+            </Col>
+          </Row>
+
+          <div>
+            <Text strong>发布平台</Text>
+            <Select
+              style={{ width: '100%', marginTop: 6 }}
+              value={brand.platform}
+              onChange={(v) => setBrand((b) => ({ ...b, platform: v }))}
+              options={['亚马逊', 'eBay', '独立站', 'Temu', 'Shein'].map((s) => ({ value: s, label: s }))}
+            />
+          </div>
+        </Space>
+      </Modal>
     </div>
   )
 }

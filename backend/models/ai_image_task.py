@@ -30,6 +30,15 @@ class AIImageTask(BaseModel):
 
     images = Column(Text, nullable=True, comment="参考图地址列表（JSON 数组，TOS 公网地址）")
 
+    # ===== v2（2026-10-15）：A+ 与主副图分组参数 + 品牌自定义设置 =====
+    aplus_type = Column(String(30), nullable=True,
+                        comment="A+ 类型（单选）：aplus_advanced=高级A+(1464:600) / aplus_normal=普通A+(970:600) / aplus_mobile=手机A+(600:450)")
+    main_types = Column(Text, nullable=True,
+                        comment="主副图类型列表（JSON 数组）：selling_point/white_background/scene/closeup/closeup_white")
+    main_aspect_ratio = Column(String(20), nullable=True, comment="主副图生成比例：1:1/3:4/4:3/9:16/16:9")
+    brand_settings = Column(Text, nullable=True,
+                            comment="品牌自定义设置（JSON）：main_color/font_style/custom_text/country/language/platform")
+
     # 结果：JSON 数组 [{type, url, status, error}]，status: 排队中/生成中/已完成/失败
     result_images = Column(Text, nullable=True, comment="生成结果（JSON 数组，按类型逐张）")
     comfy_prompt_ids = Column(Text, nullable=True, comment="ComfyUI 任务ID列表（JSON 数组，恢复轮询用）")

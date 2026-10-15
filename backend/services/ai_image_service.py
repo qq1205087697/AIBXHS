@@ -45,6 +45,79 @@ ASPECT_RATIO_MAP: Dict[str, str] = {
     "16:9": "16:9 (Widescreen)",           # 1664x928
 }
 
+# ===== v2（2026-10-15）：A+ 与主副图分组 =====
+# A+ 类型（单选）：gen_ratio=生成用比例（ResolutionSelector 支持项）；
+# target_size=目标精确尺寸（Pillow 中心裁剪+缩放后处理，A+ 比例 2.44:1/1.62:1 不在节点选项内）
+APLUS_SPECS: Dict[str, Dict[str, Any]] = {
+    "aplus_advanced": {"label": "高级A+图", "gen_ratio": "16:9", "target_size": (1464, 600)},
+    "aplus_normal":   {"label": "普通A+图", "gen_ratio": "16:9", "target_size": (970, 600)},
+    "aplus_mobile":   {"label": "手机A+图", "gen_ratio": "4:3",  "target_size": (600, 450)},
+}
+# 主副图类型（多选）
+MAIN_GEN_TYPES: Dict[str, str] = {
+    "selling_point": "卖点图",
+    "white_background": "白底图",
+    "scene": "场景图",
+    "closeup": "特写图",
+    "closeup_white": "特写白底图",
+}
+# 品牌自定义设置选项（前端下拉用）
+BRAND_OPTIONS: Dict[str, List[str]] = {
+    "countries": ["US 美国", "CA 加拿大", "UK 英国", "DE 德国", "FR 法国",
+                  "IT 意大利", "ES 西班牙", "JP 日本", "AU 澳大利亚"],
+    "languages": ["英语", "德语", "法语", "意大利语", "西班牙语", "日语"],
+    "platforms": ["亚马逊", "eBay", "独立站", "Temu", "Shein"],
+    "font_styles": ["智能字体风格", "现代无衬线", "经典衬线", "圆润可爱", "硬朗工业"],
+}
+
+
+def _compile_brand_genes(bs: Optional[Dict[str, Any]]) -> str:
+    """品牌自定义设置 → 注入提示词的视觉基因文本"""
+    if not bs:
+        return ""
+    parts = []
+    if bs.get("main_color"):
+        parts.append(f"主色调：{bs['main_color']}（场景配色与道具呼应主色）")
+    if bs.get("font_style") and bs["font_style"] != "智能字体风格":
+        parts.append(f"文字排版风格：{bs['font_style']}")
+    if bs.get("custom_text"):
+        parts.append(f"自定义视觉要求：{bs['custom_text']}")
+    if bs.get("country"):
+        parts.append(f"销售国家/地区：{bs['country']}（场景、人物与审美符合当地习惯）")
+    if bs.get("language"):
+        parts.append(f"画面文字语言：{bs['language']}")
+    if bs.get("platform"):
+        parts.append(f"发布平台：{bs['platform']}（符合该平台图片规范）")
+    return "；".join(parts)
+
+
+def _fit_to_target(content: bytes, target: Tuple[int, int]) -> bytes:
+    """A+ 图后处理：中心裁剪到目标宽高比 → 缩放到精确目标尺寸"""
+    from io import BytesIO
+    from PIL import Image as PILImage
+
+    img = PILImage.open(BytesIO(content))
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    tw, th = target
+    tr = tw / th
+    w, h = img.size
+    r = w / h
+    if abs(r - tr) > 0.01:
+        if r > tr:      # 过宽 → 裁左右
+            nw = int(h * tr)
+            x = (w - nw) // 2
+            img = img.crop((x, 0, x + nw, h))
+        else:           # 过高 → 裁上下
+            nh = int(w / tr)
+            y = (h - nh) // 2
+            img = img.crop((0, y, w, y + nh))
+    img = img.resize((tw, th), PILImage.LANCZOS)
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
 # 工作流节点编号（与 workflows/qwen_image_workflow.json 对应）
 NODE_PROMPT = "571"        # PrimitiveStringMultiline，输入 value
 NODE_REF_IMAGE = "475"     # LoadImage，输入 image
@@ -158,15 +231,19 @@ def _load_prompt_templates() -> Dict[str, Dict[str, str]]:
         raise AIImageError(f"读取提示词模板失败: {e}")
 
 
-def _build_prompt(gen_type: str, product_info: str, extra_prompt: str) -> str:
+def _build_prompt(gen_type: str, product_info: str, extra_prompt: str,
+                  brand_genes: str = "") -> str:
     """按生成类型拼接提示词。用 replace 而非 format，避免用户文本中的花括号报错"""
     templates = _load_prompt_templates()
     tpl = templates.get(gen_type, {}).get("template")
     if not tpl:
         raise AIImageError(f"生成类型 {gen_type} 缺少提示词模板")
-    return (tpl
-            .replace("{product_info}", f"商品信息：{product_info}" if product_info else "")
-            .replace("{extra_prompt}", f"\n补充要求：{extra_prompt}" if extra_prompt else ""))
+    out = (tpl
+           .replace("{product_info}", f"商品信息：{product_info}" if product_info else "")
+           .replace("{extra_prompt}", f"\n补充要求：{extra_prompt}" if extra_prompt else ""))
+    if brand_genes:
+        out += f"\n品牌与视觉要求：{brand_genes}"
+    return out
 
 
 def _build_workflow(
@@ -322,6 +399,13 @@ def _run_task(task_id: int, comfy_prompt_ids: List[str]) -> None:
                                 logger.error(f"[AI生图] 任务 {task_id} 子项 {idx} 无输出文件")
                             else:
                                 content, filename = _download_image(finfo)
+                                _ts = (items[idx] or {}).get("target_size")
+                                if _ts and len(_ts) == 2:
+                                    try:
+                                        content = _fit_to_target(content, tuple(_ts))
+                                        filename = filename.rsplit(".", 1)[0] + ".png"
+                                    except Exception as fit_err:
+                                        logger.warning(f"[AI生图] 任务 {task_id} 子项 {idx} 裁剪失败（用原图）: {fit_err}")
                                 url = tos_service.upload_file(
                                     content, filename, content_type="image/png", subdir="ai-image",
                                 )
@@ -418,7 +502,7 @@ def submit_image_task(
     user_id: int,
     creator_name: str = "",
     title: str,
-    generation_types: List[str],
+    generation_types: List[str] = None,
     aspect_ratio: str = "1:1",
     image_count: int = 1,
     product_info: str = "",
@@ -426,6 +510,11 @@ def submit_image_task(
     images: List[Tuple[str, bytes]],
     product_code: str = "",
     product_name: str = "",
+    # ===== v2 分组参数（优先；为空时兼容 v1 旧参数）=====
+    aplus_type: Optional[str] = None,
+    main_types: Optional[List[str]] = None,
+    main_aspect_ratio: Optional[str] = None,
+    brand_settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """提交套图生成任务：落库后立即返回，准备与轮询全部在后台线程
 
@@ -440,33 +529,74 @@ def submit_image_task(
         raise AIImageError("请至少上传一张参考图")
     if len(images) > 5:
         raise AIImageError("最多上传 5 张参考图")
-    bad = [t for t in generation_types if t not in GEN_TYPES]
-    if bad:
-        raise AIImageError(f"不支持的生成类型: {bad}")
-    if not generation_types:
-        raise AIImageError("请至少选择一种生成类型")
     image_count = min(max(1, int(image_count)), 4)
-    if aspect_ratio not in ASPECT_RATIO_MAP:
-        raise AIImageError(f"不支持的比例: {aspect_ratio}")
 
-    # 展开子任务：类型 × 张数，逐项初始化结果
-    items: List[Dict[str, Any]] = []
-    for t in generation_types:
+    # ===== v2 分组解析（兼容 v1：未传新参数时由旧参数映射）=====
+    if aplus_type is None and main_types is None:
+        legacy = [t for t in (generation_types or []) if t in MAIN_GEN_TYPES]
+        main_types = legacy or None
+        main_aspect_ratio = aspect_ratio
+        if "aplus" in (generation_types or []):
+            logger.warning("[AI生图] v1 调用含旧 'aplus' 类型，已忽略（请改用 aplus_type 分组参数）")
+    if aplus_type is not None and aplus_type not in APLUS_SPECS:
+        raise AIImageError(f"不支持的 A+ 类型: {aplus_type}")
+    # main_types v2.1：支持 dict（类型→每类型独立张数）与 list（全部用 image_count）两种形态
+    main_counts: Dict[str, int] = {}
+    if isinstance(main_types, dict):
+        for t, c in main_types.items():
+            if t in MAIN_GEN_TYPES and c:
+                main_counts[t] = min(max(1, int(c)), 4)
+    else:
+        for t in (main_types or []):
+            if t in MAIN_GEN_TYPES:
+                main_counts[t] = image_count
+    bad = [t for t in main_counts if t not in MAIN_GEN_TYPES]
+    if bad:
+        raise AIImageError(f"不支持的主副图类型: {bad}")
+    main_aspect_ratio = main_aspect_ratio or "1:1"
+    if main_counts and main_aspect_ratio not in ASPECT_RATIO_MAP:
+        raise AIImageError(f"不支持的主副图比例: {main_aspect_ratio}")
+    if not aplus_type and not main_counts:
+        raise AIImageError("请至少选择 A+ 类型或主副图类型")
+
+    no_text_mode = bool((brand_settings or {}).get("no_text_mode"))
+
+    # 生成计划：(类型键, 生成比例, 目标裁剪尺寸|None, 展示名, seq, no_text)
+    gen_plan: List[Tuple[str, str, Optional[Tuple[int, int]], str, int, bool]] = []
+    if aplus_type:
+        spec = APLUS_SPECS[aplus_type]
         for seq in range(image_count):
-            items.append({
-                "type": t, "label": GEN_TYPES[t], "seq": seq,
-                "status": "排队中", "url": None, "error": None,
-            })
+            gen_plan.append((aplus_type, spec["gen_ratio"], spec["target_size"], spec["label"], seq, False))
+    for t, c in main_counts.items():
+        for seq in range(c):
+            gen_plan.append((t, main_aspect_ratio, None, MAIN_GEN_TYPES[t], seq, no_text_mode))
+
+    # 展开子任务（target_size 供轮询完成后裁剪；no_text 供提示词追加无文字指令）
+    items: List[Dict[str, Any]] = []
+    for (t, _ratio, target_size, label, seq) in gen_plan:
+        items.append({
+            "type": t, "label": label, "seq": seq,
+            "status": "排队中", "url": None, "error": None,
+            "target_size": list(target_size) if target_size else None,
+            "no_text": no_text_mode and t in MAIN_GEN_TYPES,
+        })
+    display_types = [aplus_type] if aplus_type else []
+    display_types += list(main_counts.keys())
+    total_sheets = (image_count if aplus_type else 0) + sum(main_counts.values())
 
     db = SessionLocal()
     try:
         task = AIImageTask(
             tenant_id=tenant_id, user_id=user_id, creator_name=creator_name,
             title=title, status="排队中",
-            generation_types=json.dumps(generation_types, ensure_ascii=False),
-            aspect_ratio=aspect_ratio, image_count=image_count,
+            generation_types=json.dumps(display_types, ensure_ascii=False),
+            aspect_ratio=main_aspect_ratio, image_count=image_count,
             product_info=product_info or None, prompt=prompt or None,
             product_code=product_code or None, product_name=product_name or None,
+            aplus_type=aplus_type,
+            main_types=json.dumps(main_counts, ensure_ascii=False) if main_counts else None,
+            main_aspect_ratio=main_aspect_ratio if main_counts else None,
+            brand_settings=json.dumps(brand_settings, ensure_ascii=False) if brand_settings else None,
             result_images=json.dumps(items, ensure_ascii=False),
         )
         db.add(task)
@@ -480,11 +610,11 @@ def submit_image_task(
         task_id,
         prep_kwargs={
             "images": images,
-            "generation_types": generation_types,
-            "aspect_ratio": aspect_ratio,
+            "gen_plan": gen_plan,
             "image_count": image_count,
             "product_info": product_info,
             "extra_prompt": prompt,
+            "brand_genes": _compile_brand_genes(brand_settings),
         },
     )
 
@@ -499,11 +629,11 @@ def _prepare_and_run(
     task_id: int,
     *,
     images: List[Tuple[str, bytes]],
-    generation_types: List[str],
-    aspect_ratio: str,
+    gen_plan: List[Tuple[str, str, Optional[Tuple[int, int]], str]],
     image_count: int,
     product_info: str,
     extra_prompt: str,
+    brand_genes: str = "",
 ) -> None:
     """后台线程：参考图传 TOS → 传 ComfyUI → 逐项提交工作流（不同 seed）→ 轮询到完成"""
     from services import tos_service
@@ -546,24 +676,27 @@ def _prepare_and_run(
         # 3. 按「类型 × 张数」逐项提交工作流，不同 seed；先全部提交后统一轮询
         items: List[Dict[str, Any]] = []
         prompt_ids: List[str] = []
-        for t in generation_types:
-            for seq in range(image_count):
-                prompt_text = _build_prompt(t, product_info, extra_prompt)
-                seed = random.randint(1, 2**31 - 1)
-                workflow = _build_workflow(
-                    prompt=prompt_text,
-                    aspect_ratio=aspect_ratio,
-                    seed=seed,
-                    image_name=image_names[0],
-                    filename_prefix=f"AIIMG-{task_id}-{t}-{seq}",
-                )
-                resp = _api("POST", "/prompt", json={"prompt": workflow})
-                pid = resp.json()["prompt_id"]
-                prompt_ids.append(pid)
-                items.append({
-                    "type": t, "label": GEN_TYPES[t], "seq": seq,
-                    "status": "排队中", "url": None, "error": None,
-                })
+        for (t, gen_ratio, target_size, label, seq, no_text) in gen_plan:
+            prompt_text = _build_prompt(t, product_info, extra_prompt, brand_genes)
+            if no_text:
+                prompt_text += "\n无文字模式：画面中不要出现任何文字、标语、水印或标识。"
+            seed = random.randint(1, 2**31 - 1)
+            workflow = _build_workflow(
+                prompt=prompt_text,
+                aspect_ratio=gen_ratio,
+                seed=seed,
+                image_name=image_names[0],
+                filename_prefix=f"AIIMG-{task_id}-{t}-{seq}",
+            )
+            resp = _api("POST", "/prompt", json={"prompt": workflow})
+            pid = resp.json()["prompt_id"]
+            prompt_ids.append(pid)
+            items.append({
+                "type": t, "label": label, "seq": seq,
+                "status": "排队中", "url": None, "error": None,
+                "target_size": list(target_size) if target_size else None,
+                "no_text": no_text,
+            })
 
         _update_task(
             task_id,
@@ -603,6 +736,10 @@ def _serialize(task) -> Dict[str, Any]:
         "creator_name": task.creator_name or "",
         "generation_types": _read_json_list(task.generation_types) if task.generation_types else [],
         "aspect_ratio": task.aspect_ratio,
+        "aplus_type": task.aplus_type,
+        "main_types": _read_json_list(task.main_types) if task.main_types else [],
+        "main_aspect_ratio": task.main_aspect_ratio,
+        "brand_settings": (json.loads(task.brand_settings) if task.brand_settings else None),
         "image_count": task.image_count,
         "product_info": task.product_info or "",
         "prompt": task.prompt or "",

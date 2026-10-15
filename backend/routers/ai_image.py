@@ -13,6 +13,9 @@ from services.ai_image_service import (
     delete_image_task,
     GEN_TYPES,
     ASPECT_RATIO_MAP,
+    APLUS_SPECS,
+    MAIN_GEN_TYPES,
+    BRAND_OPTIONS,
     AIImageError,
 )
 
@@ -34,6 +37,12 @@ async def get_options(current_user: User = Depends(get_current_user)):
     return {
         "generation_types": {k: v for k, v in GEN_TYPES.items()},
         "aspect_ratios": {k: v for k, v in ASPECT_RATIO_MAP.items()},
+        # v2 分组选项
+        "aplus_types": {k: {"label": v["label"], "gen_ratio": v["gen_ratio"],
+                             "target_size": list(v["target_size"])}
+                         for k, v in APLUS_SPECS.items()},
+        "main_types": {k: v for k, v in MAIN_GEN_TYPES.items()},
+        "brand_options": BRAND_OPTIONS,
     }
 
 
@@ -61,9 +70,14 @@ def _validate_images(files: List[UploadFile]) -> List[tuple]:
 async def create_image_task(
     files: List[UploadFile] = File(..., description="参考图，1~5 张"),
     title: str = Form("", description="任务标题（产品名）"),
-    generation_types: str = Form(..., description='生成类型 JSON 数组，如 ["white_background","scene"]'),
+    generation_types: str = Form("[]", description='v1 兼容：生成类型 JSON 数组'),
     aspect_ratio: str = Form("1:1"),
     image_count: int = Form(1, ge=1, le=4),
+    # ===== v2 分组参数 =====
+    aplus_type: str = Form("", description="A+ 类型（单选）：aplus_advanced/aplus_normal/aplus_mobile，空=未选"),
+    main_types: str = Form("[]", description='主副图类型 JSON 数组，如 ["selling_point","white_background"]'),
+    main_aspect_ratio: str = Form("1:1", description="主副图生成比例"),
+    brand_settings: str = Form("", description='品牌自定义设置 JSON（主色/字体/自定义文本/国家/语言/平台）'),
     product_info: str = Form("", description="商品信息（卖点/材质/场景等）"),
     prompt: str = Form("", description="附加提示词"),
     product_code: str = Form(""),
@@ -77,6 +91,20 @@ async def create_image_task(
             raise ValueError
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="generation_types 必须是 JSON 数组")
+    try:
+        main_type_list = json.loads(main_types)
+        if not isinstance(main_type_list, list):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="main_types 必须是 JSON 数组")
+    brand: dict = {}
+    if brand_settings:
+        try:
+            brand = json.loads(brand_settings)
+            if not isinstance(brand, dict):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="brand_settings 必须是 JSON 对象")
 
     images = _validate_images(files)
     try:
@@ -93,6 +121,10 @@ async def create_image_task(
             images=images,
             product_code=product_code,
             product_name=product_name,
+            aplus_type=aplus_type or None,
+            main_types=main_type_list,
+            main_aspect_ratio=main_aspect_ratio,
+            brand_settings=brand or None,
         )
     except AIImageError as e:
         raise HTTPException(status_code=400, detail=str(e))

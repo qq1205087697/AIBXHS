@@ -2061,6 +2061,18 @@ export interface AIImageTask {
   product_name: string;
   images: string[];
   result_images: AIImageResultItem[];
+  /* v2 分组参数 + 品牌设置 */
+  aplus_type?: string | null;
+  main_types?: string[];
+  main_aspect_ratio?: string | null;
+  brand_settings?: {
+    main_color?: string;
+    font_style?: string;
+    custom_text?: string;
+    country?: string;
+    language?: string;
+    platform?: string;
+  } | null;
   cost_seconds: number | null;
   error_message: string | null;
   created_at: string;
@@ -2073,31 +2085,51 @@ export const aiImageApi = {
       success?: boolean;
       generation_types: Record<string, string>;
       aspect_ratios: Record<string, string>;
+      aplus_types?: Record<string, { label: string; gen_ratio: string; target_size: number[] }>;
+      main_types?: Record<string, string>;
+      brand_options?: {
+        countries: string[];
+        languages: string[];
+        platforms: string[];
+        font_styles: string[];
+      };
     }>("/ai-image/options"),
   /** 提交商品套图生成任务（后台生成，立即返回任务记录） */
   createTask: (
     files: File[],
     params: {
       title: string;
-      generation_types: string[];
-      aspect_ratio: string;
+      generation_types?: string[];
+      aspect_ratio?: string;
       image_count: number;
       product_info: string;
       prompt: string;
       product_code?: string;
       product_name?: string;
+      /* v2 分组参数 */
+      aplus_type?: string;
+      main_types?: string[] | Record<string, number>;
+      main_aspect_ratio?: string;
+      brand_settings?: Record<string, string>;
     },
   ) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
     formData.append("title", params.title);
-    formData.append("generation_types", JSON.stringify(params.generation_types));
-    formData.append("aspect_ratio", params.aspect_ratio);
+    formData.append("generation_types", JSON.stringify(params.generation_types || []));
+    formData.append("aspect_ratio", params.aspect_ratio || "1:1");
     formData.append("image_count", String(params.image_count));
     formData.append("product_info", params.product_info);
     formData.append("prompt", params.prompt);
     formData.append("product_code", params.product_code || "");
     formData.append("product_name", params.product_name || "");
+    if (params.aplus_type) formData.append("aplus_type", params.aplus_type);
+    if (params.main_types?.length)
+      formData.append("main_types", JSON.stringify(params.main_types));
+    if (params.main_aspect_ratio)
+      formData.append("main_aspect_ratio", params.main_aspect_ratio);
+    if (params.brand_settings && Object.keys(params.brand_settings).length)
+      formData.append("brand_settings", JSON.stringify(params.brand_settings));
     return apiClient.post<AIImageTask>("/ai-image/tasks", formData, {
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 300000,
