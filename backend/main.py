@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, tags
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, ai_image, tags
 from config import get_settings
 
 settings = get_settings()
@@ -112,6 +112,7 @@ app.include_router(shipments.router)
 app.include_router(suppliers.router)
 app.include_router(upload.router)
 app.include_router(ai_creation.router)
+app.include_router(ai_image.router)
 app.include_router(base_table.router)
 
 app.include_router(ads.router, prefix="/api")
@@ -215,6 +216,13 @@ async def startup_event():
         logger.info("超分未完成任务已恢复监听")
     except Exception as e:
         logger.error(f"超分任务恢复失败: {e}")
+
+    try:
+        from services.ai_image_service import resume_pending_tasks as resume_image_tasks
+        resume_image_tasks()
+        logger.info("AI 生图未完成任务已恢复监听")
+    except Exception as e:
+        logger.error(f"AI 生图任务恢复失败: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -2037,4 +2037,80 @@ export const aiCreationApi = {
     ),
 };
 
+// ========== AI 生图（商品套图） ==========
+export interface AIImageResultItem {
+  type: string;
+  label: string;
+  seq: number;
+  status: "排队中" | "生成中" | "已完成" | "失败";
+  url: string | null;
+  error: string | null;
+}
+
+export interface AIImageTask {
+  id: number;
+  title: string;
+  status: "排队中" | "生成中" | "已完成" | "部分完成" | "失败";
+  creator_name: string;
+  generation_types: string[];
+  aspect_ratio: string;
+  image_count: number;
+  product_info: string;
+  prompt: string;
+  product_code: string;
+  product_name: string;
+  images: string[];
+  result_images: AIImageResultItem[];
+  cost_seconds: number | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+export const aiImageApi = {
+  /** 生成类型与比例选项 */
+  getOptions: () =>
+    apiClient.get<{
+      success?: boolean;
+      generation_types: Record<string, string>;
+      aspect_ratios: Record<string, string>;
+    }>("/ai-image/options"),
+  /** 提交商品套图生成任务（后台生成，立即返回任务记录） */
+  createTask: (
+    files: File[],
+    params: {
+      title: string;
+      generation_types: string[];
+      aspect_ratio: string;
+      image_count: number;
+      product_info: string;
+      prompt: string;
+      product_code?: string;
+      product_name?: string;
+    },
+  ) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("title", params.title);
+    formData.append("generation_types", JSON.stringify(params.generation_types));
+    formData.append("aspect_ratio", params.aspect_ratio);
+    formData.append("image_count", String(params.image_count));
+    formData.append("product_info", params.product_info);
+    formData.append("prompt", params.prompt);
+    formData.append("product_code", params.product_code || "");
+    formData.append("product_name", params.product_name || "");
+    return apiClient.post<AIImageTask>("/ai-image/tasks", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 300000,
+    });
+  },
+  /** 套图生成任务列表（分页 + 关键词搜索） */
+  listTasks: (page = 1, pageSize = 20, keyword = "") =>
+    apiClient.get<{ items: AIImageTask[]; total: number }>("/ai-image/tasks", {
+      params: { page, page_size: pageSize, keyword },
+    }),
+  /** 删除套图生成任务记录 */
+  deleteTask: (taskId: number) =>
+    apiClient.delete<{ success: boolean }>(`/ai-image/tasks/${taskId}`),
+};
+
 export default apiClient;

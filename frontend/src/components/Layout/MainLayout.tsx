@@ -55,6 +55,7 @@ import {
   Table2,
   Video,
   Film,
+  Image as ImageIcon,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -210,7 +211,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/tenants",
     "/stores",
   ];
-  const mediaPaths = ["/ai-creation"];
+  const mediaPaths = ["/ai-creation", "/ai-image"];
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
@@ -335,6 +336,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               key: '/ai-creation',
               icon: <Video size={18} />,
               label: 'AI视频',
+            },
+            {
+              key: '/ai-image',
+              icon: <ImageIcon size={18} />,
+              label: 'AI生图',
             },
             {
               key: '/upscale-center',
@@ -535,6 +541,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/tenants": "公司设置",
       '/product-selection': '选品机器人',
       '/ai-creation': 'AI视频',
+      '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
     };
     return pathMap[location.pathname] || "未知页面";

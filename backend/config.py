@@ -59,6 +59,17 @@ class Settings(BaseSettings):
         os.path.dirname(os.path.abspath(__file__)), "prompts"
     )
 
+    # AI 商品套图（Qwen-Image-2.1 图生图，与 H3 共用同一台 ComfyUI，Basic Auth 复用 H3_*）
+    IMAGE_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "qwen_image_workflow.json"
+    )
+    IMAGE_PROMPT_TEMPLATES_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "prompts", "image_prompt_templates.json"
+    )
+    IMAGE_POLL_INTERVAL: int = 5        # 轮询生成进度间隔（秒），图片耗时短于视频
+    IMAGE_MAX_WAIT_MINUTES: int = 30    # 单任务最长等待时间（分钟），PE 首载 GGUF 可能 1~3 分钟
+    IMAGE_MAX_CONCURRENT_TASKS: int = 2 # 单实例同时轮询的最大任务数（ComfyUI 串行队列，与生视频互让）
+
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
     # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建

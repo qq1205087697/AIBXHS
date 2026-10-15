@@ -32,6 +32,7 @@ import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
+import AIImageStudio from './pages/AIImageStudio';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -336,6 +337,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <UpscaleCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/ai-image"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AIImageStudio />
             </MainLayout>
           </ProtectedRoute>
         }
