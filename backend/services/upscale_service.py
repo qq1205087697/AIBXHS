@@ -203,6 +203,10 @@ def _run_task(task_id: int) -> None:
         timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久
         for _ in range(max_polls):
             threading.Event().wait(interval)
+            # 取消/状态变更检查：任务已不在进行中（如被用户取消）时退出轮询
+            if _get_upscale_task_status(task_id) not in ("排队中", "处理中"):
+                logger.info(f"[超分] 任务 {task_id} 状态已变更，轮询退出")
+                return
             try:
                 history = _api("GET", f"/history/{prompt_id}").json()
             except requests.exceptions.Timeout as e:
@@ -499,6 +503,71 @@ def list_upscale_tasks(
         return {"items": items, "total": total}
     finally:
         db.close()
+
+
+def _get_upscale_task_status(task_id: int):
+    """读取任务当前状态（轮询循环内用于感知取消等状态变更）"""
+    from database.database import SessionLocal
+    from models.video_upscale_task import VideoUpscaleTask
+
+    db = SessionLocal()
+    try:
+        r = db.query(VideoUpscaleTask.status).filter(VideoUpscaleTask.id == task_id).first()
+        return r[0] if r else None
+    finally:
+        db.close()
+
+
+def cancel_upscale_task(tenant_id: int, task_id: int) -> None:
+    """取消排队中/处理中的超分任务：移出 ComfyUI 队列或中断执行，并标记为失败"""
+    from database.database import SessionLocal
+    from models.video_upscale_task import VideoUpscaleTask
+
+    db = SessionLocal()
+    try:
+        task = db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.id == task_id,
+            VideoUpscaleTask.tenant_id == tenant_id,
+            VideoUpscaleTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise UpscaleError("任务不存在或已删除")
+        if task.status not in ("排队中", "处理中"):
+            raise UpscaleError("任务已结束，无需取消")
+        prompt_id = task.comfy_prompt_id
+    finally:
+        db.close()
+
+    # 同步 ComfyUI：执行中的中断，排队中的移出队列
+    cancelled_via = "任务不在 ComfyUI 队列中（直接标记取消）"
+    if prompt_id:
+        try:
+            queue = _api("GET", "/queue", timeout=30).json()
+            running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+            pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+            if prompt_id in running_ids:
+                _api("POST", "/interrupt", timeout=30)
+                cancelled_via = "已中断 ComfyUI 执行中的任务"
+            elif prompt_id in pending_ids:
+                _api("POST", "/queue", timeout=30, json={"delete": [prompt_id]})
+                cancelled_via = "已从 ComfyUI 队列移除"
+        except Exception as e:
+            logger.warning(f"[超分] 取消任务 {task_id} 时操作 ComfyUI 失败: {e}")
+            cancelled_via = "ComfyUI 操作失败（任务仍将标记为取消）"
+
+    db = SessionLocal()
+    try:
+        db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.id == task_id,
+            VideoUpscaleTask.status.in_(["排队中", "处理中"]),
+        ).update({
+            "status": "失败", "error_message": "任务已手动取消",
+            "finished_at": datetime.now(),
+        }, synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    logger.info(f"[超分] 任务 {task_id} 已取消: {cancelled_via}")
 
 
 def delete_upscale_task(tenant_id: int, task_id: int) -> None:

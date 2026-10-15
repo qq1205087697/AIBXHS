@@ -39,6 +39,7 @@ import {
   SearchOutlined,
   EyeOutlined,
   LinkOutlined,
+  PauseCircleOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
@@ -410,6 +411,7 @@ const AICreationCenter: React.FC = () => {
   const [historyKeyword, setHistoryKeyword] = useState('')
   // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
   const [historyBindFilter, setHistoryBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
+  const [cancellingId, setCancellingId] = useState<number | null>(null)
   const keywordTimerRef = useRef<number | null>(null)
 
   const loadTasks = async (
@@ -579,7 +581,9 @@ const AICreationCenter: React.FC = () => {
       message.warning('请先生成或填写视频提示词')
       return
     }
-    const title = result?.product_name_cn || result?.product_name_en || '视频生成任务'
+    // 编辑回填后重新生成：沿用原任务的标题与产品信息，避免丢失后落到默认值
+    const restored = activeHistoryId ? history.find((h) => h.id === activeHistoryId) : null
+    const title = result?.product_name_cn || result?.product_name_en || restored?.title || '视频生成任务'
     const files = await collectFiles()
     if (files.length === 0) {
       message.warning('参考图片读取失败，请重新上传')
@@ -597,8 +601,8 @@ const AICreationCenter: React.FC = () => {
         voiceover_language: voiceoverLanguage,
         video_type: videoType,
         title,
-        product_code: selectedProducts[0]?.product_code || '',
-        product_name: selectedProducts[0]?.name || '',
+        product_code: selectedProducts[0]?.product_code || restored?.product_code || '',
+        product_name: selectedProducts[0]?.name || restored?.product_name || '',
       })
       const task = resp.data.data
       // 新任务在最前：跳回第 1 页刷新
@@ -641,6 +645,12 @@ const AICreationCenter: React.FC = () => {
       )
     }
     setPromptText(item.prompt)
+    // 恢复编辑来源的产品信息：重新生成时标题与产品关联不再丢失
+    setSelectedProducts(
+      item.product_code
+        ? [{ id: 0, product_code: item.product_code, name: item.product_name || '', images: [] }]
+        : []
+    )
     setActiveHistoryId(item.id)
     // 图片与参数已换，原方案与商品分析失效，需重新生成
     invalidatePlans()
@@ -690,6 +700,30 @@ const AICreationCenter: React.FC = () => {
   }
 
   // ===== 失败任务重试：用历史存储的参考图与原参数重新提交（生成新任务记录，原记录保留）=====
+  // 取消排队中/生成中的任务：确认后调用取消接口（同步移除/中断 ComfyUI 任务）
+  const confirmCancelTask = (item: AIVideoTask) => {
+    Modal.confirm({
+      title: '取消该任务？',
+      content: `「${item.title}」将被取消，ComfyUI 中排队/执行中的任务也会同步移除，确定继续吗？`,
+      centered: true,
+      okText: '取消任务',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
+      onOk: async () => {
+        setCancellingId(item.id)
+        try {
+          const resp = await aiCreationApi.cancelVideoTask(item.id)
+          message.success(resp.data.message || '任务已取消')
+          loadTasks()
+        } catch (e: any) {
+          message.error(e?.response?.data?.detail || '取消失败，请稍后重试')
+        } finally {
+          setCancellingId(null)
+        }
+      },
+    })
+  }
+
   const retryTask = async (item: AIVideoTask) => {
     if (retryingId != null) return
     if (!item.images.length) {
@@ -1504,6 +1538,18 @@ const AICreationCenter: React.FC = () => {
                               icon: <ThunderboltOutlined />,
                               disabled: !!item.upscale_video_url,
                               onClick: () => openUpscaleModal(item),
+                            },
+                          ]
+                        : []),
+                      ...(item.status === '排队中' || item.status === '生成中'
+                        ? [
+                            {
+                              key: 'cancel',
+                              label: cancellingId === item.id ? '取消中…' : '取消任务',
+                              icon: <PauseCircleOutlined />,
+                              danger: true,
+                              disabled: cancellingId != null,
+                              onClick: () => confirmCancelTask(item),
                             },
                           ]
                         : []),

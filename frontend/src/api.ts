@@ -1924,6 +1924,11 @@ export const aiCreationApi = {
   /** 删除视频生成任务记录 */
   deleteVideoTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-creation/video-tasks/${taskId}`),
+  /** 取消排队中/生成中的视频生成任务（同步移除/中断 ComfyUI 任务） */
+  cancelVideoTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/cancel`,
+    ),
   /** 提交视频超分任务（Topaz 星光 2.6，后台下载/上传/入队/轮询） */
   createUpscaleTask: (params: {
     title: string;
@@ -1951,6 +1956,11 @@ export const aiCreationApi = {
   /** 删除超分任务 */
   deleteUpscaleTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-creation/upscale-tasks/${taskId}`),
+  /** 取消排队中/处理中的超分任务（同步移除/中断 ComfyUI 任务） */
+  cancelUpscaleTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message: string }>(
+      `/ai-creation/upscale-tasks/${taskId}/cancel`,
+    ),
   /** 下载超分任务视频（target: result=超分结果 / source=源视频），blob 流式下载 */
   downloadUpscaleVideo: (taskId: number, target: "result" | "source") =>
     apiClient.get(`/ai-creation/upscale-tasks/${taskId}/download`, {

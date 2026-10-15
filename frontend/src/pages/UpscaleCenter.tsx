@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Card, Button, Spin, Tag, Typography, Space, Input, Empty, Modal, Pagination, message, Segmented } from 'antd'
-import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined } from '@ant-design/icons'
+import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import BindProductModal from '../components/BindProductModal'
 import CompareVideoModal from '../components/CompareVideoModal'
 import { aiCreationApi, VideoUpscaleTask } from '../api'
@@ -31,6 +31,31 @@ const UpscaleCenter: React.FC = () => {
   const [bindUrl, setBindUrl] = useState('')
   const [bindTitle, setBindTitle] = useState('')
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
+  const [cancellingId, setCancellingId] = useState<number | null>(null)
+
+  // 取消排队中/处理中的任务：确认后调用取消接口（同步移除/中断 ComfyUI 任务）
+  const confirmCancel = (item: VideoUpscaleTask) => {
+    Modal.confirm({
+      title: '取消该任务？',
+      content: `「${item.title || '超分任务'}」将被取消，ComfyUI 中排队/执行中的任务也会同步移除，确定继续吗？`,
+      centered: true,
+      okText: '取消任务',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
+      onOk: async () => {
+        setCancellingId(item.id)
+        try {
+          const resp = await aiCreationApi.cancelUpscaleTask(item.id)
+          message.success(resp.data.message || '任务已取消')
+          loadTasks()
+        } catch (e: any) {
+          message.error(e?.response?.data?.detail || '取消失败，请稍后重试')
+        } finally {
+          setCancellingId(null)
+        }
+      },
+    })
+  }
 
   // 下载源视频/超分结果（入口：对比弹窗「更多」菜单）：走后端代理流式下载（跨域 <a download> 不生效）
   const handleDownload = async (item: VideoUpscaleTask, target: 'source' | 'result' = 'source') => {
@@ -262,6 +287,17 @@ const UpscaleCenter: React.FC = () => {
                       }}
                     >
                       绑定至产品
+                    </Button>
+                  )}
+                  {(item.status === '排队中' || item.status === '处理中') && (
+                    <Button
+                      size="small"
+                      danger
+                      icon={<PauseCircleOutlined />}
+                      loading={cancellingId === item.id}
+                      onClick={() => confirmCancel(item)}
+                    >
+                      取消
                     </Button>
                   )}
                   <Button

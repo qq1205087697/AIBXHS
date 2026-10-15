@@ -22,6 +22,7 @@ from services.h3_video_service import (
     submit_video_task,
     list_video_tasks,
     delete_video_task,
+    cancel_video_task,
     H3VideoError,
 )
 from pydantic import BaseModel
@@ -362,6 +363,21 @@ async def list_upscale_tasks_endpoint(
     }
 
 
+@router.post("/upscale-tasks/{task_id}/cancel")
+async def cancel_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """取消排队中/处理中的超分任务（同步移除/中断 ComfyUI 任务）"""
+    from services.upscale_service import cancel_upscale_task, UpscaleError
+
+    try:
+        cancel_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "任务已取消"}
+
+
 @router.delete("/upscale-tasks/{task_id}")
 async def delete_upscale_task_endpoint(
     task_id: int,
@@ -427,6 +443,19 @@ async def download_upscale_video(
 
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     return StreamingResponse(_stream(), media_type="video/mp4", headers=headers)
+
+
+@router.post("/video-tasks/{task_id}/cancel")
+async def cancel_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """取消排队中/生成中的视频生成任务（同步移除/中断 ComfyUI 任务）"""
+    try:
+        cancel_video_task(current_user.tenant_id, task_id)
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "任务已取消"}
 
 
 @router.delete("/video-tasks/{task_id}")
