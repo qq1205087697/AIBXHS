@@ -43,6 +43,9 @@ ASPECT_RATIO_MAP: Dict[str, str] = {
     "4:3": "4:3 (Standard)",               # 1440x1088
     "9:16": "9:16 (Portrait Widescreen)",  # 928x1664
     "16:9": "16:9 (Widescreen)",           # 1664x928
+    "2:3": "2:3 (Portrait Photo)",
+    "3:2": "3:2 (Photo)",
+    "21:9": "21:9 (Ultrawide)",
 }
 
 # ===== v2（2026-10-15）：A+ 与主副图分组 =====
