@@ -4,6 +4,18 @@
   box-sizing: border-box;
 }
 
+/* 隐藏页面空白处的文本插入光标（点击空白处不显示输入指示），输入框内光标保持正常 */
+body {
+  caret-color: transparent;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.ant-input {
+  caret-color: auto;
+}
+
 html {
   height: 100%;
   width: 100%;
@@ -245,6 +257,28 @@ code {
 /* AutoComplete下拉弹窗最小宽度确保选项完整显示 */
 .ant-select-dropdown {
   min-width: 180px !important;
+}
+
+/* 页面优化机器人：数据卡片列表区域填满剩余高度（穿透Card body和Spin包装层传递flex高度） */
+.rating-list-card > .ant-card-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rating-list-card .ant-spin-nested-loading {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rating-list-card .ant-spin-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* AI 视频页：左右区域独立滚动 */

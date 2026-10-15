@@ -60,6 +60,8 @@ import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import ThemeSwitcher from '../ThemeSwitcher'
 import ChangePasswordModal from '../ChangePasswordModal'
+import ErrorBoundary from '../ErrorBoundary'
+import KeepAliveHost from '../KeepAliveHost'
 import { notificationsApi } from '../../api'
 import dayjs from 'dayjs'
 
@@ -1005,7 +1007,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               minWidth: 1280,
             }}
           >
-            {children}
+            {/* 页面级错误边界：单个页面崩溃不影响侧边栏/顶栏，切换路由自动重置 */}
+            <ErrorBoundary resetKey={location.pathname}>
+              {children}
+            </ErrorBoundary>
+            {/* keep-alive宿主：常驻缓存页面，切换路由仅隐藏不卸载；独立错误边界避免被页面崩溃波及 */}
+            <ErrorBoundary>
+              <KeepAliveHost />
+            </ErrorBoundary>
           </Content>
         </Layout>
         <ChangePasswordModal
