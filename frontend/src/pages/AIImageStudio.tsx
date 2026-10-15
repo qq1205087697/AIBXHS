@@ -452,10 +452,27 @@ const AIImageStudio: React.FC = () => {
   }
 
   return (
+    <>
+    <style>
+      {`
+        /* 生成按钮固定在左栏滚动区底部：按钮是 Space 最后一个 child，
+           antd 会包一层 .ant-space-item（高度收缩，sticky 直接写在按钮上无效），
+           故对最后一个 item wrapper 设 sticky；底衬渐变避免按钮透字。 */
+        .aiimg-form-space > .ant-space-item:last-child {
+          position: sticky;
+          bottom: 0;
+          z-index: 2;
+        }
+        .aiimg-form-space > .ant-space-item:last-child > .ant-space-item {
+          background: linear-gradient(to top, #fff 70%, rgba(255, 255, 255, 0));
+          padding-top: 6px;
+        }
+      `}
+    </style>
     <div style={{ padding: 16, height: '100%', boxSizing: 'border-box' }}>
       <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
         {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
-        <Col xs={24} lg={9} style={{ height: '100%', width: 400, maxWidth: '100%', flexShrink: 0 }}>
+        <Col xs={24} lg={9} style={{ height: '100%', flex: '0 0 400px', maxWidth: '100%' }}>
           <Card
             title={
               <Space>
@@ -466,7 +483,7 @@ const AIImageStudio: React.FC = () => {
             style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
             styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
           >
-            <Space direction="vertical" style={{ width: '100%' }} size={14}>
+            <Space direction="vertical" className="aiimg-form-space" style={{ width: '100%' }} size={14}>
               <div>
                 <Text strong>参考图（1~{MAX_IMAGES} 张，首张为主参考）</Text>
                 <Upload.Dragger
@@ -1022,6 +1039,7 @@ const AIImageStudio: React.FC = () => {
         </Space>
       </Modal>
     </div>
+    </>
   )
 }
 
