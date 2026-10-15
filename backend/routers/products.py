@@ -377,6 +377,14 @@ async def get_products(
                                 adv_parts.append(f"(p.product_type LIKE '%finished%' AND (p.no_accessory IS NULL OR p.no_accessory = 0) AND NOT {exists_sql})")
                             continue
 
+                        # 特殊字段：视频（值为 has_video/no_video，支持等于/不等于）
+                        if field == "video_binding":
+                            has_video_sql = ("((p.video_url IS NOT NULL AND p.video_url != '') "
+                                             "OR (p.videos IS NOT NULL AND p.videos != '' AND p.videos != '[]'))")
+                            wants_video = (value == "has_video") != (operator == "neq")
+                            adv_parts.append(has_video_sql if wants_video else f"NOT {has_video_sql}")
+                            continue
+
                         # 字段映射到SQL列/表达式
                         field_sql_map = {
                             "local_quantity": "COALESCE((SELECT SUM(ib.current_quantity) FROM inventory_batches ib WHERE ib.product_id = p.id AND ib.tenant_id = p.tenant_id AND ib.status = 'active' AND ib.current_quantity > 0 AND ib.deleted_at IS NULL), 0)",
