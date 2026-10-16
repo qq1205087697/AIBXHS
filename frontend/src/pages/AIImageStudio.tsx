@@ -142,7 +142,7 @@ const AIImageStudio: React.FC = () => {
     white_background: 1,
     scene: 1,
   })
-  const [mainAspectRatio, setMainAspectRatio] = useState('auto')
+  const [mainAspectRatio, setMainAspectRatio] = useState('1:1')
   const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -954,18 +954,20 @@ const AIImageStudio: React.FC = () => {
                         }}
                       >
                         {[
-                          { value: 'auto', label: '自适应', shape: 'auto' },
+                          { value: '1:1', label: '1:1', shape: '1:1' },
+                          { value: '2:3', label: '2:3', shape: '2:3' },
+                          { value: '3:2', label: '3:2', shape: '3:2' },
+                          { value: '3:4', label: '3:4', shape: '3:4' },
+                          { value: '4:3', label: '4:3', shape: '4:3' },
                           { value: '9:16', label: '9:16', shape: '9:16' },
                           { value: '16:9', label: '16:9', shape: '16:9' },
-                          { value: '1:1', label: '1:1', shape: '1:1' },
-                          { value: '4:3', label: '4:3', shape: '4:3' },
-                          { value: '3:4', label: '3:4', shape: '3:4' },
                           { value: '21:9', label: '21:9', shape: '21:9' },
                         ].map((o) => {
                           const checked = mainAspectRatio === o.value
                           // 形状图标：按比例绘制的小矩形（36x28 内）
                           const shapeMap: Record<string, [number, number]> = {
-                            auto: [22, 22],
+                            '2:3': [16, 24],
+                            '3:2': [26, 17],
                             '9:16': [13, 24],
                             '16:9': [30, 17],
                             '1:1': [20, 20],
