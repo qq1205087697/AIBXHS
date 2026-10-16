@@ -588,7 +588,7 @@ def submit_image_task(
 
     # 展开子任务（target_size 供轮询完成后裁剪；no_text 供提示词追加无文字指令）
     items: List[Dict[str, Any]] = []
-    for (t, _ratio, target_size, label, seq) in gen_plan:
+    for (t, _ratio, target_size, label, seq, _no_text) in gen_plan:
         items.append({
             "type": t, "label": label, "seq": seq,
             "status": "排队中", "url": None, "error": None,
