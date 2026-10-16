@@ -1186,7 +1186,13 @@ const AIImageStudio: React.FC = () => {
                           {renderTypeTags(task)}
                           {(task.aplus_type || task.main_types?.length) && (
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              {task.main_aspect_ratio || task.aspect_ratio} · {task.image_count}/类
+                              {task.main_aspect_ratio || task.aspect_ratio} ·{' '}
+                              {Array.isArray(task.main_types)
+                                ? `${task.main_types.length} 类`
+                                : task.main_types && typeof task.main_types === 'object'
+                                  ? `${Object.keys(task.main_types).length} 类 · ${Object.values(task.main_types).reduce((a: number, b: any) => a + Number(b || 1), 0)} 张`
+                                  : `${task.image_count}/类`}{' '}
+                              · {task.created_at}
                             </Text>
                           )}
                           {task.cost_seconds != null && (
