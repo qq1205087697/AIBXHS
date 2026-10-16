@@ -1169,6 +1169,12 @@ const AIImageStudio: React.FC = () => {
                     <Card
                       key={task.id}
                       size="small"
+                      onMouseEnter={() => setHoverId(task.id)}
+                      onMouseLeave={() => setHoverId(null)}
+                      style={{
+                        background: hoverId === task.id ? '#fafafa' : undefined,
+                        border: activeHistoryId === task.id ? '1px solid #722ed1' : undefined,
+                      }}
                       title={
                         <Space wrap>
                           <Badge
