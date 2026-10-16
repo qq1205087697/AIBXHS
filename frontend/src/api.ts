@@ -2124,7 +2124,7 @@ export const aiImageApi = {
     formData.append("product_code", params.product_code || "");
     formData.append("product_name", params.product_name || "");
     if (params.aplus_type) formData.append("aplus_type", params.aplus_type);
-    if (params.main_types?.length)
+    if (params.main_types && Object.keys(params.main_types).length > 0)
       formData.append("main_types", JSON.stringify(params.main_types));
     if (params.main_aspect_ratio)
       formData.append("main_aspect_ratio", params.main_aspect_ratio);
