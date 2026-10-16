@@ -622,24 +622,14 @@ const AIImageStudio: React.FC = () => {
     <>
     <style>
       {`
-        /* 生成按钮固定在左栏滚动区底部：按钮是 Space 最后一个 child，
-           antd 会包一层 .ant-space-item（高度收缩，sticky 直接写在按钮上无效），
-           故对最后一个 item wrapper 设 sticky；底衬渐变避免按钮透字。 */
-        .aiimg-form-space > .ant-space-item:last-child {
-          position: sticky;
-          bottom: 0;
-          z-index: 2;
-        }
-        .aiimg-form-space > .ant-space-item:last-child > .ant-space-item {
-          background: linear-gradient(to top, #fff 70%, rgba(255, 255, 255, 0));
-          padding-top: 6px;
-        }
+        /* 生成按钮已移至滚动区外（左栏容器底部固定），无需 sticky */
       `}
     </style>
     <div style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
       <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
         {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
-        <Col xs={24} lg={9} style={{ height: '100%', flex: '0 0 400px', maxWidth: '100%' }}>
+        <Col xs={24} lg={9} style={{ height: '100%', flex: '0 0 400px', maxWidth: '100%', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 4 }}>
           <Card
             title={
               <Space>
@@ -647,8 +637,7 @@ const AIImageStudio: React.FC = () => {
                 <span>商品套图生成</span>
               </Space>
             }
-            style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-            styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 16px 6px' } }}
+            styles={{ body: { padding: '16px 16px 6px' } }}
           >
             <Space direction="vertical" className="aiimg-form-space" style={{ width: '100%' }} size={14}>
               <div>
@@ -1048,33 +1037,29 @@ const AIImageStudio: React.FC = () => {
                 />
               </div>
 
-              <Button
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                loading={submitting}
-                onClick={handleSubmit}
-                block
-                size="large"
-                style={{
-                  position: 'sticky',
-                  bottom: 0,
-                  zIndex: 2,
-                  boxShadow: '0 -4px 12px rgba(0,0,0,0.08)',
-                }}
-              >
-                立即生成（
-                {[
-                  aplusType && `A+×${aplusCount}`,
-                  mainEnabled &&
-                    selectedMainTypes.length &&
-                    `主副图×${selectedMainTypes.reduce((a, t) => a + (mainCounts[t] || 1), 0)}`,
-                ]
-                  .filter(Boolean)
-                  .join(' + ') || '未选择类型'}
-                ）
-              </Button>
             </Space>
           </Card>
+        </div>
+        <Button
+          type="primary"
+          icon={<ThunderboltOutlined />}
+          loading={submitting}
+          onClick={handleSubmit}
+          block
+          size="large"
+          style={{ marginTop: 8, flexShrink: 0 }}
+        >
+          立即生成（
+          {[
+            aplusType && `A+×${aplusCount}`,
+            mainEnabled &&
+              selectedMainTypes.length &&
+              `主副图×${selectedMainTypes.reduce((a, t) => a + (mainCounts[t] || 1), 0)}`,
+          ]
+            .filter(Boolean)
+            .join(' + ') || '未选择类型'}
+          ）
+        </Button>
         </Col>
 
         {/* 右栏：生成记录 */}
