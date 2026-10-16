@@ -93,10 +93,10 @@ async def create_image_task(
         raise HTTPException(status_code=400, detail="generation_types 必须是 JSON 数组")
     try:
         main_type_list = json.loads(main_types)
-        if not isinstance(main_type_list, list):
+        if not isinstance(main_type_list, (list, dict)):
             raise ValueError
     except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="main_types 必须是 JSON 数组")
+        raise HTTPException(status_code=400, detail="main_types 必须是 JSON 数组或对象")
     brand: dict = {}
     if brand_settings:
         try:
