@@ -48,6 +48,18 @@ ASPECT_RATIO_MAP: Dict[str, str] = {
     "21:9": "21:9 (Ultrawide)",
 }
 
+# 各比例的数值（宽/高），用于「自适应」按参考图宽高比选最近项
+RATIO_VALUES: Dict[str, float] = {
+    "1:1": 1.0,
+    "2:3": 2 / 3,
+    "3:2": 1.5,
+    "3:4": 0.75,
+    "4:3": 4 / 3,
+    "9:16": 9 / 16,
+    "16:9": 16 / 9,
+    "21:9": 21 / 9,
+}
+
 # ===== v2（2026-10-15）：A+ 与主副图分组 =====
 # A+ 类型（单选）：gen_ratio=生成用比例（ResolutionSelector 支持项）；
 # target_size=目标精确尺寸（Pillow 中心裁剪+缩放后处理，A+ 比例 2.44:1/1.62:1 不在节点选项内）
@@ -557,7 +569,7 @@ def submit_image_task(
     if bad:
         raise AIImageError(f"不支持的主副图类型: {bad}")
     main_aspect_ratio = main_aspect_ratio or "1:1"
-    if main_counts and main_aspect_ratio not in ASPECT_RATIO_MAP:
+    if main_counts and main_aspect_ratio not in ("auto",) and main_aspect_ratio not in ASPECT_RATIO_MAP:
         raise AIImageError(f"不支持的主副图比例: {main_aspect_ratio}")
     if not aplus_type and not main_counts:
         raise AIImageError("请至少选择 A+ 类型或主副图类型")
@@ -679,7 +691,20 @@ def _prepare_and_run(
         # 3. 按「类型 × 张数」逐项提交工作流，不同 seed；先全部提交后统一轮询
         items: List[Dict[str, Any]] = []
         prompt_ids: List[str] = []
+        # 「自适应」：按首张参考图宽高比选最接近的生成比例
+        resolved_plan: list = []
         for (t, gen_ratio, target_size, label, seq, no_text) in gen_plan:
+            if gen_ratio == "auto":
+                from io import BytesIO
+                from PIL import Image as PILImage
+                ref = PILImage.open(BytesIO(images[0][1]))
+                r = ref.width / max(1, ref.height)
+                gen_ratio = min(
+                    RATIO_VALUES.items(), key=lambda kv: abs(kv[1] - r)
+                )[0]
+                logger.info(f"[AI生图] 自适应比例: 参考图 {ref.width}x{ref.height} -> {gen_ratio}")
+            resolved_plan.append((t, gen_ratio, target_size, label, seq, no_text))
+        for (t, gen_ratio, target_size, label, seq, no_text) in resolved_plan:
             prompt_text = _build_prompt(t, product_info, extra_prompt, brand_genes)
             if no_text:
                 prompt_text += "\n无文字模式：画面中不要出现任何文字、标语、水印或标识。"

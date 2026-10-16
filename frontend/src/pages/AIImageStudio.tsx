@@ -142,7 +142,7 @@ const AIImageStudio: React.FC = () => {
     white_background: 1,
     scene: 1,
   })
-  const [mainAspectRatio, setMainAspectRatio] = useState('1:1')
+  const [mainAspectRatio, setMainAspectRatio] = useState('auto')
   const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -648,7 +648,7 @@ const AIImageStudio: React.FC = () => {
               </Space>
             }
             style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-            styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
+            styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 16px 6px' } }}
           >
             <Space direction="vertical" className="aiimg-form-space" style={{ width: '100%' }} size={14}>
               <div>
@@ -945,22 +945,90 @@ const AIImageStudio: React.FC = () => {
                     </div>
                     <div style={{ marginTop: 10 }}>
                       <Text type="secondary" style={{ fontSize: 12 }}>生成比例</Text>
-                      <Select
-                        style={{ width: '100%', marginTop: 6 }}
-                        value={mainAspectRatio}
-                        onChange={setMainAspectRatio}
-                        size="small"
-                        options={[
-                          { value: '1:1', label: '1:1（方形）' },
-                          { value: '2:3', label: '2:3（竖版照片）' },
-                          { value: '3:2', label: '3:2（横版照片）' },
-                          { value: '3:4', label: '3:4（竖版标准）' },
-                          { value: '4:3', label: '4:3（横版标准）' },
-                          { value: '9:16', label: '9:16（全屏竖版）' },
-                          { value: '16:9', label: '16:9（全屏横版）' },
-                          { value: '21:9', label: '21:9（超宽）' },
-                        ]}
-                      />
+                      <div
+                        style={{
+                          marginTop: 6,
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(4, 1fr)',
+                          gap: 8,
+                        }}
+                      >
+                        {[
+                          { value: 'auto', label: '自适应', shape: 'auto' },
+                          { value: '9:16', label: '9:16', shape: '9:16' },
+                          { value: '16:9', label: '16:9', shape: '16:9' },
+                          { value: '1:1', label: '1:1', shape: '1:1' },
+                          { value: '4:3', label: '4:3', shape: '4:3' },
+                          { value: '3:4', label: '3:4', shape: '3:4' },
+                          { value: '21:9', label: '21:9', shape: '21:9' },
+                        ].map((o) => {
+                          const checked = mainAspectRatio === o.value
+                          // 形状图标：按比例绘制的小矩形（36x28 内）
+                          const shapeMap: Record<string, [number, number]> = {
+                            auto: [22, 22],
+                            '9:16': [13, 24],
+                            '16:9': [30, 17],
+                            '1:1': [20, 20],
+                            '4:3': [26, 20],
+                            '3:4': [20, 26],
+                            '21:9': [32, 14],
+                          }
+                          const [w, h] = shapeMap[o.shape] || [20, 20]
+                          return (
+                            <div
+                              key={o.value}
+                              onClick={() => setMainAspectRatio(o.value)}
+                              style={{
+                                cursor: 'pointer',
+                                textAlign: 'center',
+                                padding: '8px 0 6px',
+                                borderRadius: 8,
+                                border: checked ? '1.5px solid #722ed1' : '1px solid #f0f0f0',
+                                background: checked ? '#f9f0ff' : '#fff',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  height: 30,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                }}
+                              >
+                                {o.shape === 'auto' ? (
+                                  <div
+                                    style={{
+                                      width: 22,
+                                      height: 22,
+                                      border: '1.5px dashed #bfbfbf',
+                                      borderRadius: 4,
+                                    }}
+                                  />
+                                ) : (
+                                  <div
+                                    style={{
+                                      width: w,
+                                      height: h,
+                                      border: checked
+                                        ? '1.5px solid #722ed1'
+                                        : '1.5px solid #8c8c8c',
+                                      borderRadius: 3,
+                                      background: checked ? '#efdbff' : '#fafafa',
+                                    }}
+                                  />
+                                )}
+                              </div>
+                              <Text
+                                style={{ fontSize: 12 }}
+                                type={checked ? undefined : 'secondary'}
+                                strong={checked}
+                              >
+                                {o.label}
+                              </Text>
+                            </div>
+                          )
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
