@@ -1764,9 +1764,16 @@ export const videoBindingApi = {
   /** 提交绑定申请（ai_video:use） */
   submit: (data: { product_id: number; video_url: string; source?: string; task_title?: string }) =>
     apiClient.post<{ success: boolean; message: string }>("/video-bindings", data),
-  /** 申请列表（ai_video:approve），status 不传查全部 */
+  /** 申请列表（ai_video:approve），status 不传查全部；status_counts 为各状态计数（页签括号展示） */
   getList: (params: { status?: string; search?: string; page?: number; page_size?: number }) =>
-    apiClient.get<{ success: boolean; data: { items: VideoBindingRequest[]; total: number } }>(
+    apiClient.get<{
+      success: boolean;
+      data: {
+        items: VideoBindingRequest[];
+        total: number;
+        status_counts?: { pending: number; approved: number; rejected: number; all: number };
+      };
+    }>(
       "/video-bindings",
       { params },
     ),

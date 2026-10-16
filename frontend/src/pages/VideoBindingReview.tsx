@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Card, Table, Button, Tag, Input, Radio, Space, Modal, message, Empty, Tooltip, Pagination } from 'antd'
 import { ReloadOutlined, SearchOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
 import { videoBindingApi, VideoBindingRequest } from '../api'
@@ -26,10 +26,13 @@ const VideoBindingReview: React.FC = () => {
   const [items, setItems] = useState<VideoBindingRequest[]>([])
   const [loading, setLoading] = useState(false)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
+  const [statusCounts, setStatusCounts] = useState({ pending: 0, approved: 0, rejected: 0, all: 0 })
   const [actingId, setActingId] = useState<number | null>(null)
+  const [previewItem, setPreviewItem] = useState<VideoBindingRequest | null>(null)
   const [rejectTarget, setRejectTarget] = useState<VideoBindingRequest | null>(null)
   const [rejectReason, setRejectReason] = useState('')
   const [rejectSubmitting, setRejectSubmitting] = useState(false)
+  const keywordTimerRef = useRef<number | null>(null)
 
   const loadRequests = useCallback(async (page = pagination.current, pageSize = pagination.pageSize) => {
     setLoading(true)
@@ -43,6 +46,7 @@ const VideoBindingReview: React.FC = () => {
       if (res.data.success) {
         setItems(res.data.data.items || [])
         setPagination(prev => ({ ...prev, current: page, pageSize, total: res.data.data.total || 0 }))
+        if (res.data.data.status_counts) setStatusCounts(res.data.data.status_counts)
       }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '获取绑定申请列表失败')
@@ -58,6 +62,25 @@ const VideoBindingReview: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, searchText])
+
+  // 搜索输入：300ms 防抖后回到第 1 页重新加载；清空立即搜、回车立即搜
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value)
+    if (keywordTimerRef.current) window.clearTimeout(keywordTimerRef.current)
+    if (!value) {
+      // 点击清除按钮时立即重置搜索
+      setSearchText('')
+      return
+    }
+    keywordTimerRef.current = window.setTimeout(() => {
+      setSearchText(value.trim())
+    }, 300)
+  }
+
+  const handleSearchEnter = () => {
+    if (keywordTimerRef.current) window.clearTimeout(keywordTimerRef.current)
+    setSearchText(searchInput.trim())
+  }
 
   const handleApprove = async (record: VideoBindingRequest) => {
     setActingId(record.id)
@@ -110,9 +133,26 @@ const VideoBindingReview: React.FC = () => {
       render: (_: any, record: VideoBindingRequest) => (
         <video
           src={record.video_url}
-          controls
+          muted
+          loop
+          playsInline
           preload="metadata"
-          style={{ width: 176, height: 99, background: '#000', borderRadius: 4, display: 'block' }}
+          onMouseEnter={(e) => {
+            e.currentTarget.play().catch(() => {})
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.pause()
+          }}
+          onClick={() => setPreviewItem(record)}
+          style={{
+            width: 176,
+            height: 99,
+            background: '#000',
+            borderRadius: 6,
+            display: 'block',
+            cursor: 'pointer',
+            objectFit: 'cover',
+          }}
         />
       ),
     },
@@ -239,10 +279,10 @@ const VideoBindingReview: React.FC = () => {
             optionType="button"
             buttonStyle="solid"
             options={[
-              { label: '待审核', value: 'pending' },
-              { label: '已通过', value: 'approved' },
-              { label: '已拒绝', value: 'rejected' },
-              { label: '全部', value: 'all' },
+              { label: `全部 (${statusCounts.all})`, value: 'all' },
+              { label: `待审核 (${statusCounts.pending})`, value: 'pending' },
+              { label: `已通过 (${statusCounts.approved})`, value: 'approved' },
+              { label: `已拒绝 (${statusCounts.rejected})`, value: 'rejected' },
             ]}
           />
           <Space>
@@ -252,14 +292,9 @@ const VideoBindingReview: React.FC = () => {
               placeholder="搜索产品编码 / 品名 / 提交人"
               style={{ width: 240 }}
               value={searchInput}
-              onChange={(e) => {
-                setSearchInput(e.target.value)
-                // 点击清除按钮时立即重置搜索
-                if (!e.target.value) setSearchText('')
-              }}
-              onPressEnter={() => setSearchText(searchInput.trim())}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              onPressEnter={handleSearchEnter}
             />
-            <Button icon={<SearchOutlined />} onClick={() => setSearchText(searchInput.trim())}>搜索</Button>
             <Button icon={<ReloadOutlined />} onClick={() => loadRequests()}>刷新</Button>
           </Space>
         </div>
@@ -286,6 +321,28 @@ const VideoBindingReview: React.FC = () => {
           onChange={(page, pageSize) => loadRequests(page, pageSize)}
         />
       </div>
+
+      {/* 视频全屏预览：居中弹窗播放 */}
+      <Modal
+        open={!!previewItem}
+        onCancel={() => setPreviewItem(null)}
+        footer={null}
+        width="90vw"
+        centered
+        destroyOnClose
+        styles={{ body: { padding: 0, background: '#000' } }}
+        title={previewItem?.product_name || '视频预览'}
+      >
+        {previewItem && (
+          <video
+            src={previewItem.video_url}
+            controls
+            autoPlay
+            playsInline
+            style={{ width: '100%', height: '78vh', objectFit: 'contain', display: 'block', background: '#000' }}
+          />
+        )}
+      </Modal>
 
       <Modal
         open={!!rejectTarget}

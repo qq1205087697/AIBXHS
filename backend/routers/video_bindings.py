@@ -149,7 +149,21 @@ async def list_video_bindings(
             "reviewed_at": row[11].strftime("%Y-%m-%d %H:%M:%S") if row[11] else None,
             "created_at": row[12].strftime("%Y-%m-%d %H:%M:%S") if row[12] else None,
         })
-    return {"success": True, "data": {"items": items, "total": int(total)}}
+
+    # 各状态计数（审核页页签括号展示，不受搜索条件影响）
+    count_rows = db.execute(text("""
+        SELECT status, COUNT(*) FROM video_binding_requests
+        WHERE tenant_id = :tid AND deleted_at IS NULL
+        GROUP BY status
+    """), {"tid": current_user.tenant_id}).fetchall()
+    by_status = {row[0]: int(row[1]) for row in count_rows}
+    status_counts = {
+        "pending": by_status.get("pending", 0),
+        "approved": by_status.get("approved", 0),
+        "rejected": by_status.get("rejected", 0),
+        "all": sum(by_status.values()),
+    }
+    return {"success": True, "data": {"items": items, "total": int(total), "status_counts": status_counts}}
 
 
 def _do_bind_video(db: Session, tenant_id: int, product_id: int, video_url: str):
