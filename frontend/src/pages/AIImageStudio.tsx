@@ -668,10 +668,23 @@ const AIImageStudio: React.FC = () => {
                 >
                   {fileList.length === 0 ? (
                     <>
-                      <UploadOutlined style={{ fontSize: 40, color: '#bfbfbf' }} />
-                      <Text type="secondary" style={{ marginTop: 8 }}>
+                      <div
+                        style={{
+                          width: 48,
+                          height: 48,
+                          borderRadius: 10,
+                          background: '#f9f0ff',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          margin: '0 auto',
+                        }}
+                      >
+                        <PictureOutlined style={{ fontSize: 22, color: '#722ed1' }} />
+                      </div>
+                      <div style={{ marginTop: 8, color: '#666', fontSize: 13 }}>
                         上传商品图片（点击或拖拽）
-                      </Text>
+                      </div>
                     </>
                   ) : (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
