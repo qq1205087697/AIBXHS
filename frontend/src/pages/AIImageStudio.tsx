@@ -32,8 +32,8 @@ import {
   DownloadOutlined,
   BulbOutlined,
   AppstoreOutlined,
+  FormOutlined,
   SearchOutlined,
-  CopyOutlined,
   MinusOutlined,
   PlusOutlined,
 } from '@ant-design/icons'
@@ -146,6 +146,8 @@ const AIImageStudio: React.FC = () => {
   const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [hoverId, setHoverId] = useState<number | null>(null)
+  const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null)
 
   // ===== 上传区（本地上传 + 产品库选择，对齐 AI 生视频） =====
   const localInputRef = useRef<HTMLInputElement>(null)
@@ -446,7 +448,21 @@ const AIImageStudio: React.FC = () => {
   }
 
   /** 一键做同款：把历史任务的参数回填到左侧表单 */
-  const handleReuse = (task: AIImageTask) => {
+  /** 编辑（恢复历史）：参考图（URL 形态）+ 参数全部回填左侧表单 */
+  const applyRestore = (task: AIImageTask) => {
+    // 替换上传区图片前先释放旧的 blob 地址
+    fileList.forEach((f) => {
+      if (f.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(f.thumbUrl)
+    })
+    setFileList(
+      (task.images || []).map((url, i) => ({
+        uid: `history-${task.id}-${i}`,
+        name: `参考图${i + 1}.jpg`,
+        status: 'done' as const,
+        url,
+        thumbUrl: url,
+      })),
+    )
     if (task.aplus_type) setAplusType(task.aplus_type)
     else setAplusType('')
     setAplusCount(task.image_count || 1)
@@ -476,8 +492,26 @@ const AIImageStudio: React.FC = () => {
     if (task.brand_settings) setBrand({ ...BRAND_DEFAULTS, ...task.brand_settings })
     setProductInfo(task.product_info || '')
     setExtraPrompt(task.prompt || '')
-    message.success('参数已回填到左侧表单（参考图需重新上传）')
+    setActiveHistoryId(task.id)
+    message.success('已填入该历史的参考图、提示词与参数')
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  /** 编辑前覆盖确认：左侧已有内容时先确认，避免误覆盖 */
+  const handleRestore = (task: AIImageTask) => {
+    const hasExisting = fileList.length > 0 || productInfo.trim().length > 0
+    if (!hasExisting) {
+      applyRestore(task)
+      return
+    }
+    Modal.confirm({
+      title: '覆盖当前内容？',
+      content: '左侧已上传的参考图和已填写的商品信息、参数将被该历史记录覆盖，确定继续吗？',
+      okText: '覆盖',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => applyRestore(task),
+    })
   }
 
   const handleDownload = async (url: string, name: string) => {
@@ -1163,13 +1197,13 @@ const AIImageStudio: React.FC = () => {
                       }
                       extra={
                         <Space>
-                          <Tooltip title="一键做同款：参数回填到左侧表单">
+                          <Tooltip title="编辑：已填入该历史的参考图、提示词与参数">
                             <Button
                               size="small"
-                              icon={<CopyOutlined />}
-                              onClick={() => handleReuse(task)}
+                              icon={<FormOutlined />}
+                              onClick={() => handleRestore(task)}
                             >
-                              做同款
+                              编辑
                             </Button>
                           </Tooltip>
                           <Popconfirm
@@ -1182,6 +1216,23 @@ const AIImageStudio: React.FC = () => {
                       }
                     >
                       <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                        {(task.images || []).length > 0 && (
+                          <div>
+                            <Text type="secondary" style={{ fontSize: 12 }}>原始参考图</Text>
+                            <Image.PreviewGroup>
+                              <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                                {task.images.slice(0, 5).map((url, i) => (
+                                  <img
+                                    key={`${task.id}-ref-${i}`}
+                                    alt={`参考图${i + 1}`}
+                                    src={url}
+                                    style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
+                                  />
+                                ))}
+                              </div>
+                            </Image.PreviewGroup>
+                          </div>
+                        )}
                         <Space wrap size={4}>
                           {renderTypeTags(task)}
                           {(task.aplus_type || task.main_types?.length) && (
