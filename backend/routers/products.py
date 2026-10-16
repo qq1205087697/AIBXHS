@@ -2572,7 +2572,8 @@ async def update_product(
                 SELECT id, product_code, name, name_en, product_type, product_attribute,
                        category, brand, supplier, purchase_price, sale_price, main_image,
                        images, video_url, weight, length, width, height, status, is_robot_monitored,
-                       no_accessory, local_quantity, local_warehouse, local_inbound_date, local_stock_age
+                       no_accessory, local_quantity, local_warehouse, local_inbound_date, local_stock_age,
+                       videos
                 FROM products WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
             """),
             {"id": product_id, "tid": current_user.tenant_id}
@@ -2690,6 +2691,34 @@ async def update_product(
             )
 
             db.commit()
+
+            # 移除的媒体在保存成功后清理 TOS 文件（删除前确认无其他产品引用）
+            try:
+                from services.tos_service import delete_file
+                old_media = set(_parse_json_images(product_row[12]))
+                if product_row[11]:
+                    old_media.add(product_row[11])
+                old_vids = set(_parse_json_images(product_row[25]))
+                if product_row[13]:
+                    old_vids.add(product_row[13])
+                new_media = set(product_data.images) if product_data.images is not None \
+                    else set(_parse_json_images(product_row[12]))
+                if product_data.main_image:
+                    new_media.add(product_data.main_image)
+                new_vids = set(product_data.videos) if product_data.videos is not None \
+                    else set(_parse_json_images(product_row[25]))
+                for url in (old_media - new_media) | (old_vids - new_vids):
+                    if not url:
+                        continue
+                    still = db.execute(text("""
+                        SELECT COUNT(*) FROM products
+                        WHERE deleted_at IS NULL AND id != :id
+                          AND (main_image = :u OR images LIKE :pat OR videos LIKE :pat)
+                    """), {"id": product_id, "u": url, "pat": f"%{url}%"}).scalar()
+                    if not still:
+                        delete_file(url)
+            except Exception as del_err:
+                print(f"清理移除媒体文件失败(不影响保存): {del_err}")
 
         return {"success": True, "message": "商品更新成功"}
     except HTTPException:

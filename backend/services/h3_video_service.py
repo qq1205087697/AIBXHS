@@ -649,7 +649,7 @@ def list_video_tasks(
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
     from models.video_binding_request import VideoBindingRequest
-    from sqlalchemy import or_, text, bindparam
+    from sqlalchemy import or_, text
 
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
@@ -669,28 +669,54 @@ def list_video_tasks(
                     AIVideoTask.title.ilike(like),
                 )
             )
-        # 绑定状态筛选：审核通过的绑定申请命中，或产品视频列表已包含该地址（旧直绑数据无申请记录）
-        # products 表无 ORM 模型映射，产品包含判定用 text SQL 相关子查询
-        bind_exists = or_(
-            db.query(VideoBindingRequest.id)
+        # 绑定状态筛选：预计算"已绑定 URL 集合"，避免逐行相关子查询 + 全表 LIKE（切换标签慢的根因）
+        # 绑定判定口径：审核通过的绑定申请，或产品视频列表已包含该地址（旧直绑数据无申请记录）。
+        # products 里有视频的只有几百行，单列拉取远快于在 SQL 里对每行任务做相关子查询。
+        approved_urls = {
+            u
+            for (u,) in db.query(VideoBindingRequest.video_url)
             .filter(
                 VideoBindingRequest.tenant_id == tenant_id,
                 VideoBindingRequest.status == "approved",
                 VideoBindingRequest.deleted_at.is_(None),
-                VideoBindingRequest.video_url == AIVideoTask.video_url,
             )
-            .exists(),
-            text(
-                "EXISTS (SELECT 1 FROM products p "
-                "WHERE p.tenant_id = :bs_tid AND p.deleted_at IS NULL "
-                "AND (p.video_url = ai_video_tasks.video_url "
-                "OR p.videos LIKE CONCAT('%', ai_video_tasks.video_url, '%')))"
-            ).bindparams(bs_tid=tenant_id),
+            .all()
+            if u
+        }
+        bound_urls: set = set(approved_urls)
+        prod_single = [
+            u
+            for (u,) in db.execute(
+                text("SELECT video_url FROM products WHERE tenant_id = :tid AND deleted_at IS NULL "
+                     "AND video_url IS NOT NULL AND video_url != ''"),
+                {"tid": tenant_id},
+            ).fetchall()
+        ]
+        bound_urls.update(prod_single)
+        for (vids,) in db.execute(
+            text("SELECT videos FROM products WHERE tenant_id = :tid AND deleted_at IS NULL "
+                 "AND videos IS NOT NULL AND videos != ''"),
+            {"tid": tenant_id},
+        ).fetchall():
+            try:
+                parsed = json.loads(vids)
+                if isinstance(parsed, list):
+                    bound_urls.update(u for u in parsed if u)
+                else:
+                    bound_urls.add(parsed)
+            except Exception:
+                bound_urls.add(vids)
+        # 该租户全部任务的 (id, video_url)，在 Python 里算出已绑定任务 id 集合
+        task_url_pairs = (
+            db.query(AIVideoTask.id, AIVideoTask.video_url)
+            .filter(AIVideoTask.tenant_id == tenant_id, AIVideoTask.deleted_at.is_(None))
+            .all()
         )
+        bound_task_ids = {tid for tid, u in task_url_pairs if u and u in bound_urls}
         if bind_status == "bound":
-            query = query.filter(bind_exists)
+            query = query.filter(AIVideoTask.id.in_(bound_task_ids)) if bound_task_ids else query.filter(False)
         elif bind_status == "unbound":
-            query = query.filter(~bind_exists)
+            query = query.filter(~AIVideoTask.id.in_(bound_task_ids)) if bound_task_ids else query
         total = query.count()
         rows = (
             query.order_by(AIVideoTask.id.desc())
@@ -699,48 +725,9 @@ def list_video_tasks(
             .all()
         )
         items = [_serialize(r) for r in rows]
-        # 附加绑定状态：approved 申请命中，或产品视频列表已包含（旧直绑数据）
-        try:
-            video_urls = [r.video_url for r in rows if r.video_url]
-            bound_urls = set()
-            if video_urls:
-                bound_urls = {
-                    u
-                    for (u,) in db.query(VideoBindingRequest.video_url)
-                    .filter(
-                        VideoBindingRequest.tenant_id == tenant_id,
-                        VideoBindingRequest.status == "approved",
-                        VideoBindingRequest.deleted_at.is_(None),
-                        VideoBindingRequest.video_url.in_(video_urls),
-                    )
-                    .all()
-                }
-                remaining = [u for u in video_urls if u not in bound_urls]
-                if remaining:
-                    like_parts = " OR ".join(
-                        [f"videos LIKE CONCAT('%', :u{i}, '%')" for i in range(len(remaining))]
-                    )
-                    prods = db.execute(
-                        text(
-                            "SELECT video_url, videos FROM products "
-                            "WHERE tenant_id = :tid AND deleted_at IS NULL AND "
-                            "(video_url IN :urls OR " + like_parts + ")"
-                        ).bindparams(bindparam("urls", expanding=True)),
-                        {
-                            "tid": tenant_id,
-                            "urls": remaining,
-                            **{f"u{i}": u for i, u in enumerate(remaining)},
-                        },
-                    ).fetchall()
-                    for pv, pv_ids in prods:
-                        blob = (pv or "") + (pv_ids or "")
-                        for u in remaining:
-                            if u in blob:
-                                bound_urls.add(u)
-            for r, item in zip(rows, items):
-                item["bound"] = bool(r.video_url) and r.video_url in bound_urls
-        except Exception as e:
-            logger.warning(f"生成历史附加绑定状态失败: {e}")
+        # 附加绑定状态：直接用预计算的 bound_urls 集合判断，无需再查库
+        for r, item in zip(rows, items):
+            item["bound"] = bool(r.video_url) and r.video_url in bound_urls
         # 附加已完成的超分结果（按源视频地址匹配，取最新一条），供前端并排对比展示
         try:
             from models.video_upscale_task import VideoUpscaleTask
