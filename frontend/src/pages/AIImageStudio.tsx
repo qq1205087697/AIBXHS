@@ -146,6 +146,7 @@ const AIImageStudio: React.FC = () => {
   const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [previewTask, setPreviewTask] = useState<AIImageTask | null>(null)
   const [hoverId, setHoverId] = useState<number | null>(null)
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null)
 
@@ -624,34 +625,6 @@ const AIImageStudio: React.FC = () => {
   }
 
   /** 历史卡片的品牌设置摘要 */
-  const renderBrandSummary = (task: AIImageTask): React.ReactNode => {
-    const bs = task.brand_settings
-    if (!bs) return null
-    const nodes: React.ReactNode[] = []
-    if (bs.main_color) {
-      nodes.push(
-        <Space size={4} key="color">
-          <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: bs.main_color, border: '1px solid #d9d9d9' }} />
-          <Text type="secondary" style={{ fontSize: 12 }}>{bs.main_color}</Text>
-        </Space>,
-      )
-    }
-    if (bs.font_style && bs.font_style !== '智能字体风格') {
-      nodes.push(<Tag key="font" style={{ fontSize: 12 }}>字体：{bs.font_style}</Tag>)
-    }
-    if (bs.country) nodes.push(<Tag key="country" style={{ fontSize: 12 }}>{bs.country}</Tag>)
-    if (bs.language) nodes.push(<Tag key="lang" style={{ fontSize: 12 }}>{bs.language}</Tag>)
-    if (bs.platform) nodes.push(<Tag key="platform" style={{ fontSize: 12 }}>{bs.platform}</Tag>)
-    if (bs.custom_text) {
-      nodes.push(
-        <Tooltip key="custom" title={bs.custom_text}>
-          <Tag style={{ fontSize: 12 }}>自定义…</Tag>
-        </Tooltip>,
-      )
-    }
-    return nodes.length ? <Space wrap size={4}>{nodes}</Space> : null
-  }
-
   return (
     <>
     <style>
@@ -1221,68 +1194,113 @@ const AIImageStudio: React.FC = () => {
                         </Space>
                       }
                     >
-                      <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                      <div style={{ display: 'flex', gap: 10 }}>
+                        {/* 左：原始参考图缩略条（前 3 张，点击预览） */}
                         {(task.images || []).length > 0 && (
-                          <div>
-                            <Text type="secondary" style={{ fontSize: 12 }}>原始参考图</Text>
-                            <Image.PreviewGroup>
-                              <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
-                                {task.images.slice(0, 5).map((url, i) => (
-                                  <img
-                                    key={`${task.id}-ref-${i}`}
-                                    alt={`参考图${i + 1}`}
-                                    src={url}
-                                    style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
-                                  />
-                                ))}
-                              </div>
-                            </Image.PreviewGroup>
-                          </div>
+                          <Image.PreviewGroup>
+                            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                              {task.images.slice(0, 3).map((url, i) => (
+                                <img
+                                  key={`${task.id}-ref-${i}`}
+                                  alt={`参考图${i + 1}`}
+                                  src={url}
+                                  style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0', cursor: 'zoom-in' }}
+                                />
+                              ))}
+                            </div>
+                          </Image.PreviewGroup>
                         )}
-                        <Space wrap size={4}>
-                          {renderTypeTags(task)}
-                          {(task.aplus_type || task.main_types?.length) && (
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              {task.main_aspect_ratio || task.aspect_ratio} ·{' '}
-                              {Array.isArray(task.main_types)
-                                ? `${task.main_types.length} 类`
-                                : task.main_types && typeof task.main_types === 'object'
-                                  ? `${Object.keys(task.main_types).length} 类 · ${Object.values(task.main_types).reduce((a: number, b: any) => a + Number(b || 1), 0)} 张`
-                                  : `${task.image_count}/类`}{' '}
-                              · {task.created_at}
-                            </Text>
-                          )}
-                          {task.cost_seconds != null && (
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              耗时 {formatCost(task.cost_seconds)}
-                            </Text>
-                          )}
-                        </Space>
-                        {renderBrandSummary(task)}
-                        {task.error_message && (
-                          <Text type="danger" style={{ fontSize: 12 }}>
-                            {task.error_message}
-                          </Text>
-                        )}
-                        {task.product_info && (
-                          <Tooltip title={task.product_info}>
+                        {/* 右：标题下三行信息（类型 / 状态或耗时 / 参数与摘要） */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Space wrap size={4}>
+                            {renderTypeTags(task)}
+                          </Space>
+                          {task.status === '排队中' || task.status === '生成中' ? (
+                            <div style={{ marginTop: 2 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>{task.status}…</Text>
+                            </div>
+                          ) : task.status === '失败' ? (
+                            <div style={{ marginTop: 2 }}>
+                              <Tag color="error" style={{ marginRight: 0 }}>失败</Tag>
+                              {task.error_message && (
+                                <Text type="danger" style={{ fontSize: 12 }}>{task.error_message}</Text>
+                              )}
+                            </div>
+                          ) : task.cost_seconds != null ? (
+                            <div style={{ marginTop: 2 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                耗时 {formatCost(task.cost_seconds)}
+                              </Text>
+                            </div>
+                          ) : null}
+                          <Tooltip
+                            title={
+                              (task.product_info || task.prompt)
+                                ? `${task.product_info ? `商品信息：${task.product_info}` : ''}${task.prompt ? `${task.product_info ? '\n' : ''}附加要求：${task.prompt}` : ''}`
+                                : undefined
+                            }
+                            overlayStyle={{ maxWidth: 560 }}
+                            overlayInnerStyle={{
+                              maxWidth: 560,
+                              width: 560,
+                              maxHeight: 380,
+                              overflowY: 'auto',
+                              whiteSpace: 'pre-wrap',
+                              fontSize: 12,
+                              lineHeight: 1.7,
+                            }}
+                          >
                             <Text
                               type="secondary"
-                              style={{ fontSize: 12, display: 'block' }}
-                              ellipsis={{ tooltip: task.product_info }}
+                              style={{
+                                fontSize: 12,
+                                display: 'block',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
                             >
-                              商品信息：{task.product_info}
+                              {task.created_at}
+                              {task.creator_name ? ` · ${task.creator_name}` : ''}
+                              {task.brand_settings?.country ? ` · ${task.brand_settings.country}` : ''}
+                              {task.brand_settings?.language ? ` · ${task.brand_settings.language}` : ''}
+                              {task.brand_settings?.platform ? ` · ${task.brand_settings.platform}` : ''}
+                              {` · ${task.main_aspect_ratio || task.aspect_ratio || ''}`}
+                              {Array.isArray(task.main_types) && task.main_types.length
+                                ? ` · ${task.main_types.length} 类 ${Object.values(task.main_types).reduce((a: number, b: any) => a + Number(b || 1), 0)} 张`
+                                : task.main_types && typeof task.main_types === 'object'
+                                  ? ` · ${Object.keys(task.main_types).length} 类 ${Object.values(task.main_types).reduce((a: number, b: any) => a + Number(b || 1), 0)} 张`
+                                  : ''}
+                              {task.aplus_type ? ` · A+×${task.image_count}` : ''}
+                              {task.product_info ? ` · ${task.product_info}` : ''}
                             </Text>
                           </Tooltip>
-                        )}
-                        <Image.PreviewGroup>
-                          <Row gutter={[12, 12]}>
-                            {(task.result_images || []).map((item) =>
-                              renderResultItem(item, task),
-                            )}
-                          </Row>
-                        </Image.PreviewGroup>
-                      </Space>
+                        </div>
+                      </div>
+                      {/* 结果缩略条：已完成的前 3 张，点击「查看全部结果」进详情 */}
+                      {(task.result_images || []).some((x) => x.status === '已完成' && x.url) && (
+                        <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' }}>
+                          {(task.result_images || [])
+                            .filter((x) => x.status === '已完成' && x.url)
+                            .slice(0, 3)
+                            .map((x) => (
+                              <img
+                                key={`${x.type}-${x.seq}`}
+                                alt={x.label}
+                                src={x.url!}
+                                style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
+                              />
+                            ))}
+                          {(task.result_images || []).filter((x) => x.status === '已完成' && x.url).length > 3 && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              +{(task.result_images || []).filter((x) => x.status === '已完成' && x.url).length - 3}
+                            </Text>
+                          )}
+                          <Button size="small" type="link" onClick={() => setPreviewTask(task)}>
+                            查看全部结果
+                          </Button>
+                        </div>
+                      )}
                     </Card>
                   ))}
               </Space>
@@ -1410,6 +1428,105 @@ const AIImageStudio: React.FC = () => {
               />
             </div>
           </>
+        )}
+      </Modal>
+      {/* ===== 任务详情：字段清单 + 结果网格 ===== */}
+      <Modal
+        title={previewTask ? previewTask.title || `任务 #${previewTask.id}` : ''}
+        open={!!previewTask}
+        onCancel={() => setPreviewTask(null)}
+        footer={[
+          <Button key="close" onClick={() => setPreviewTask(null)}>
+            关闭
+          </Button>,
+        ]}
+        width={860}
+      >
+        {previewTask && (
+          <div>
+            <Text strong style={{ fontSize: 15 }}>
+              {previewTask.title || `任务 #${previewTask.id}`}
+            </Text>
+            <div style={{ marginTop: 10 }}>
+              {[
+                ['任务ID', String(previewTask.id)],
+                ['生成状态', previewTask.status],
+                ['生成者', previewTask.creator_name || '-'],
+                [
+                  '生成类型',
+                  [
+                    previewTask.aplus_type
+                      ? { aplus_advanced: '高级A+', aplus_normal: '普通A+', aplus_mobile: '手机A+' }[
+                          previewTask.aplus_type
+                        ] || previewTask.aplus_type
+                      : '',
+                    ...(Array.isArray(previewTask.main_types)
+                      ? previewTask.main_types.map((t) => MAIN_TYPE_LABELS[t] || t)
+                      : previewTask.main_types && typeof previewTask.main_types === 'object'
+                        ? Object.keys(previewTask.main_types).map((t) => MAIN_TYPE_LABELS[t] || t)
+                        : (previewTask.generation_types || []).map((t) => LEGACY_TYPE_LABELS[t] || t)),
+                  ]
+                    .filter(Boolean)
+                    .join(' + '),
+                ],
+                ['生成比例', previewTask.main_aspect_ratio || previewTask.aspect_ratio || '-'],
+                ['销售国家/地区', previewTask.brand_settings?.country || '-'],
+                ['生成图片语言', previewTask.brand_settings?.language || '-'],
+                ['发布平台', previewTask.brand_settings?.platform || '-'],
+                ['商品信息', previewTask.product_info || '-'],
+              ].map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', marginBottom: 4 }}>
+                  <Text type="secondary" style={{ fontSize: 13, width: 120, flexShrink: 0 }}>
+                    {k}：
+                  </Text>
+                  <Text style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{v}</Text>
+                </div>
+              ))}
+              {previewTask.prompt && (
+                <div style={{ display: 'flex', marginBottom: 4 }}>
+                  <Text type="secondary" style={{ fontSize: 13, width: 120, flexShrink: 0 }}>
+                    提示词描述：
+                  </Text>
+                  <Text style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                    {previewTask.prompt}
+                  </Text>
+                </div>
+              )}
+              {previewTask.error_message && (
+                <div style={{ display: 'flex', marginBottom: 4 }}>
+                  <Text type="secondary" style={{ fontSize: 13, width: 120, flexShrink: 0 }}>
+                    失败原因：
+                  </Text>
+                  <Text type="danger" style={{ fontSize: 13 }}>
+                    {previewTask.error_message}
+                  </Text>
+                </div>
+              )}
+            </div>
+
+            {(previewTask.images || []).length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <Text type="secondary" style={{ fontSize: 13 }}>原始参考图：</Text>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                  {previewTask.images.map((url, i) => (
+                    <img
+                      key={`ref-${i}`}
+                      alt={`参考图${i + 1}`}
+                      src={url}
+                      style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: 12 }}>
+              <Text type="secondary" style={{ fontSize: 13 }}>生成结果：</Text>
+              <Row gutter={[12, 12]} style={{ marginTop: 6 }}>
+                {(previewTask.result_images || []).map((item) => renderResultItem(item, previewTask))}
+              </Row>
+            </div>
+          </div>
         )}
       </Modal>
     </div>
