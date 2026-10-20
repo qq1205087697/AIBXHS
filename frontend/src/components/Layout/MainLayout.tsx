@@ -52,6 +52,7 @@ import {
   AlertTriangle,
   Sparkles,
   Table2,
+  Rocket,
   Video,
   Film,
   ClipboardCheck,
@@ -346,6 +347,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               : []),
           ],
         }] : []),
+    ...(hasPermission("development:view")
+      ? [{
+          key: "/development",
+          icon: <Rocket size={20} />,
+          label: "开发机器人",
+          shortLabel: "开发",
+        }]
+      : []),
     {
       key: "/data-alert",
       icon: <AlertTriangle size={20} />,
@@ -536,7 +545,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/base-table': '底表管理',
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
-      '/product-selection': '选品机器人',
+      "/product-selection": "选品机器人",
+      "/development": "开发机器人",
+      "/development/new": "添加新品",
       '/ai-creation': 'AI视频',
       '/upscale-center': '高清处理',
       '/video-binding-review': '视频绑定审核',
@@ -763,7 +774,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             icon={item.icon}
             label={item.label}
             shortLabel={item.shortLabel}
-            active={location.pathname === item.key}
+            active={location.pathname.startsWith("/development") ? item.key === "/development" : location.pathname === item.key}
             onClick={() => navigate(item.key as string)}
           />
         );
@@ -866,7 +877,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             ) : (
               <Menu
                 mode="inline"
-                selectedKeys={[location.pathname]}
+                selectedKeys={[location.pathname.startsWith("/development") ? "/development" : location.pathname]}
                 openKeys={isMenuSearching ? searchedOpenKeys : openKeys}
                 onOpenChange={(keys) => setOpenKeys(keys)}
                 items={filteredMenuItems.map(
