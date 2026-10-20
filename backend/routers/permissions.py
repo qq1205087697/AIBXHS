@@ -732,6 +732,24 @@ async def init_default_permissions(
         {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
         {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
         {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
+        # 开发机器人 KPI卡片
+        {"name": "新品采购KPI卡片", "code": "development:purchase_kpi", "type": "function", "module": "开发机器人", "sort_order": 80},
+        {"name": "新品仓库KPI卡片", "code": "development:warehouse_kpi", "type": "function", "module": "开发机器人", "sort_order": 81},
+        {"name": "新品美工KPI卡片", "code": "development:designer_kpi", "type": "function", "module": "开发机器人", "sort_order": 82},
+        {"name": "新品审核KPI卡片", "code": "development:review_kpi", "type": "function", "module": "开发机器人", "sort_order": 83},
+        # 开发机器人 功能权限
+        {"name": "查看开发机器人", "code": "development:view", "type": "function", "module": "开发机器人", "sort_order": 84},
+        {"name": "新增新品", "code": "development:create", "type": "function", "module": "开发机器人", "sort_order": 85},
+        {"name": "编辑新品", "code": "development:edit", "type": "function", "module": "开发机器人", "sort_order": 86},
+        {"name": "删除新品", "code": "development:delete", "type": "function", "module": "开发机器人", "sort_order": 87},
+        {"name": "导入新品", "code": "development:import", "type": "function", "module": "开发机器人", "sort_order": 88},
+        {"name": "复制新品", "code": "development:copy", "type": "function", "module": "开发机器人", "sort_order": 89},
+        {"name": "采购填写", "code": "development:purchase_fill", "type": "function", "module": "开发机器人", "sort_order": 90},
+        {"name": "生成采购单", "code": "development:create_order", "type": "function", "module": "开发机器人", "sort_order": 91},
+        {"name": "上传六面图", "code": "development:warehouse", "type": "function", "module": "开发机器人", "sort_order": 92},
+        {"name": "上传产品图", "code": "development:designer_upload", "type": "function", "module": "开发机器人", "sort_order": 93},
+        {"name": "审核产品图", "code": "development:review", "type": "function", "module": "开发机器人", "sort_order": 94},
+        {"name": "回传飞书", "code": "development:push_feishu", "type": "function", "module": "开发机器人", "sort_order": 95},
     ]
 
     for perm in default_permissions:
@@ -838,6 +856,24 @@ async def add_missing_permissions(
         {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
         {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
         {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
+        # 开发机器人 KPI卡片
+        {"name": "新品采购KPI卡片", "code": "development:purchase_kpi", "type": "function", "module": "开发机器人", "sort_order": 80},
+        {"name": "新品仓库KPI卡片", "code": "development:warehouse_kpi", "type": "function", "module": "开发机器人", "sort_order": 81},
+        {"name": "新品美工KPI卡片", "code": "development:designer_kpi", "type": "function", "module": "开发机器人", "sort_order": 82},
+        {"name": "新品审核KPI卡片", "code": "development:review_kpi", "type": "function", "module": "开发机器人", "sort_order": 83},
+        # 开发机器人 功能权限
+        {"name": "查看开发机器人", "code": "development:view", "type": "function", "module": "开发机器人", "sort_order": 84},
+        {"name": "新增新品", "code": "development:create", "type": "function", "module": "开发机器人", "sort_order": 85},
+        {"name": "编辑新品", "code": "development:edit", "type": "function", "module": "开发机器人", "sort_order": 86},
+        {"name": "删除新品", "code": "development:delete", "type": "function", "module": "开发机器人", "sort_order": 87},
+        {"name": "导入新品", "code": "development:import", "type": "function", "module": "开发机器人", "sort_order": 88},
+        {"name": "复制新品", "code": "development:copy", "type": "function", "module": "开发机器人", "sort_order": 89},
+        {"name": "采购填写", "code": "development:purchase_fill", "type": "function", "module": "开发机器人", "sort_order": 90},
+        {"name": "生成采购单", "code": "development:create_order", "type": "function", "module": "开发机器人", "sort_order": 91},
+        {"name": "上传六面图", "code": "development:warehouse", "type": "function", "module": "开发机器人", "sort_order": 92},
+        {"name": "上传产品图", "code": "development:designer_upload", "type": "function", "module": "开发机器人", "sort_order": 93},
+        {"name": "审核产品图", "code": "development:review", "type": "function", "module": "开发机器人", "sort_order": 94},
+        {"name": "回传飞书", "code": "development:push_feishu", "type": "function", "module": "开发机器人", "sort_order": 95},
     ]
 
     # 先清理无用的旧权限码

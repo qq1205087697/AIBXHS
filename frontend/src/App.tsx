@@ -29,6 +29,8 @@ import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from "./pages/PermissionManagement";
 import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
+import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
+import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
 import VideoBindingReview from './pages/VideoBindingReview';
@@ -287,6 +289,26 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <ProductSelection />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/development/new"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ProductDevelopmentCreate />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/development"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ProductDevelopmentBot />
             </MainLayout>
           </ProtectedRoute>
         }

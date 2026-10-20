@@ -17,6 +17,7 @@ from models.product_shipment_notice import ProductShipmentNotice
 from models.threshold_setting import ThresholdSetting
 from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
 from models.local_inventory import LocalInventory
+from models.ad_product_info import AdProductInfo
 from models.group_message import GroupMessage, GroupsFs, GroupUserPermission
 
 __all__ = [
@@ -46,6 +47,7 @@ __all__ = [
     "InboundShipmentDetail",
     "ReplenishmentDecision",
     "LocalInventory",
+    "AdProductInfo",
     "GroupMessage",
     "GroupsFs",
     "GroupUserPermission",
