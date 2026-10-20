@@ -291,6 +291,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
     try:
         consecutive_failures = 0  # 连续查询失败：配置缺失/服务不可达等确定性错误，快速失败
         timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久
+        last_query_error = ""     # 最近一次查询异常（写入失败原因，便于直接定位配置/网络问题）
         for _ in range(max_polls):
             threading.Event().wait(interval)
             # 取消/状态变更检查：任务已不在进行中（如被用户取消）时退出轮询
@@ -317,13 +318,14 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                 continue
             except Exception as e:
                 consecutive_failures += 1
+                last_query_error = str(e)
                 logger.warning(
                     f"[H3视频] 任务 {task_id} 查询失败（连续 {consecutive_failures} 次）: {e}"
                 )
                 if consecutive_failures >= 20:
                     _update_task(
                         task_id, only_active=True, status="失败",
-                        error_message="ComfyUI 服务连接失败（连续 5 分钟查询异常），请检查 H3_BASE_URL 等配置后重新提交",
+                        error_message=f"ComfyUI 服务连接失败（连续 5 分钟查询异常）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
                         finished_at=datetime.now(),
                     )
                     logger.error(f"[H3视频] 任务 {task_id} 连续查询失败，终止轮询")
@@ -822,6 +824,74 @@ def cancel_video_task(tenant_id: int, task_id: int) -> None:
     finally:
         db.close()
     logger.info(f"[H3视频] 任务 {task_id} 已取消: {cancelled_via}")
+
+
+def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], str]:
+    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+
+    返回 (action, message)：action="resumed" 表示已接续原 ComfyUI 任务（后台轮询收片），
+    action="resubmit" 表示原任务在 ComfyUI 上已无踪迹，需要走重新提交。
+    """
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    db = SessionLocal()
+    try:
+        task = db.query(AIVideoTask).filter(
+            AIVideoTask.id == task_id,
+            AIVideoTask.tenant_id == tenant_id,
+            AIVideoTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise H3VideoError("任务不存在或已删除")
+        if task.status != "失败":
+            raise H3VideoError("仅失败的任务可以重试")
+        prompt_id = task.h3_prompt_id
+    finally:
+        db.close()
+
+    if not prompt_id:
+        # 从未成功提交到 ComfyUI（上传/优化阶段失败）：只能重新提交
+        return "resubmit", "原任务未提交到 ComfyUI，将重新提交"
+
+    # 查 ComfyUI history/queue 判断原提交的执行情况
+    resume = False   # 保留 prompt_id 接续（已有成片或仍在生成）
+    running = False  # 原任务仍在 ComfyUI 执行中/排队
+    try:
+        item = _api("GET", f"/history/{prompt_id}", timeout=30).json().get(prompt_id)
+        if item and (item.get("status") or {}).get("status_str") == "success" \
+                and _extract_output_file(item):
+            resume = True
+        elif not item:
+            queue = _api("GET", "/queue", timeout=30).json()
+            running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+            pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+            if prompt_id in running_ids or prompt_id in pending_ids:
+                resume = True
+                running = True
+    except Exception as e:
+        # 查询失败（网络抖动等）：保守接续，由后台轮询线程继续判断
+        logger.warning(f"[H3视频] 重试任务 {task_id} 查询 ComfyUI 失败，保守接续轮询: {e}")
+        resume = True
+
+    if not resume:
+        return "resubmit", "原任务在 ComfyUI 上已无记录，将重新提交"
+
+    db = SessionLocal()
+    try:
+        task = db.query(AIVideoTask).filter(AIVideoTask.id == task_id).first()
+        task.status = "生成中"
+        task.error_message = None
+        task.finished_at = None
+        db.commit()
+    finally:
+        db.close()
+
+    message = "检测到 ComfyUI 仍在生成中，继续等待原任务完成" if running \
+        else "检测到 ComfyUI 已有成片，正在收片回填"
+    logger.info(f"[H3视频] 重试任务 {task_id}：{message}（prompt_id={prompt_id}）")
+    _ensure_worker(task_id, prompt_id)
+    return "resumed", message
 
 
 def delete_video_task(tenant_id: int, task_id: int) -> None:

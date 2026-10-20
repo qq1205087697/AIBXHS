@@ -2090,6 +2090,12 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/video-tasks/${taskId}/cancel`,
     ),
+  /** 智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+   *  action="resumed" 已接续原任务（后台收片回填）；action="resubmit" 需走重新提交流程 */
+  recoverVideoTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; action: "resumed" | "resubmit"; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/recover`,
+    ),
   /** 提交视频超分任务（Topaz 星光 2.6，后台下载/上传/入队/轮询） */
   createUpscaleTask: (params: {
     title: string;

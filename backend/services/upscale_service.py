@@ -201,6 +201,7 @@ def _run_task(task_id: int) -> None:
         # 3. 轮询直到完成
         consecutive_failures = 0  # 连续查询失败：配置缺失/服务不可达等确定性错误，快速失败
         timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久
+        last_query_error = ""     # 最近一次查询异常（写入失败原因，便于直接定位配置/网络问题）
         for _ in range(max_polls):
             threading.Event().wait(interval)
             # 取消/状态变更检查：任务已不在进行中（如被用户取消）时退出轮询
@@ -225,12 +226,13 @@ def _run_task(task_id: int) -> None:
                 continue
             except Exception as e:
                 consecutive_failures += 1
+                last_query_error = str(e)
                 logger.warning(
                     f"[超分] 任务 {task_id} 查询失败（连续 {consecutive_failures} 次）: {e}"
                 )
                 if consecutive_failures >= 20:
                     _update_task(task_id, only_active=True, status="失败",
-                                 error_message="ComfyUI 服务连接失败（连续 5 分钟查询异常），请检查 H3_BASE_URL 等配置后重新提交",
+                                 error_message=f"ComfyUI 服务连接失败（连续 5 分钟查询异常）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
                                  finished_at=datetime.now())
                     logger.error(f"[超分] 任务 {task_id} 连续查询失败，终止轮询")
                     return
@@ -597,14 +599,23 @@ def retry_upscale_task(tenant_id: int, task_id: int) -> Tuple[Dict[str, Any], st
     finally:
         db.close()
 
-    # 查 ComfyUI history 判断原提交是否已有完整成片
-    resume_prompt = False
+    # 查 ComfyUI history/queue 判断原提交的执行情况
+    resume_prompt = False   # 保留 prompt_id 接续（已有成片或仍在生成）
+    resume_running = False  # 原任务仍在 ComfyUI 执行中/排队
     if prompt_id:
         try:
             item = _api("GET", f"/history/{prompt_id}", timeout=30).json().get(prompt_id)
             if item and (item.get("status") or {}).get("status_str") == "success" \
                     and _extract_output_file(item):
                 resume_prompt = True
+            elif not item:
+                # 不在 history：查队列，仍在生成/排队则接续等待原任务完成，不重复提交
+                queue = _api("GET", "/queue", timeout=30).json()
+                running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+                pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+                if prompt_id in running_ids or prompt_id in pending_ids:
+                    resume_prompt = True
+                    resume_running = True
         except Exception as e:
             # 查询失败（网络抖动等）：保守保留 prompt_id 接续轮询，由后台线程继续判断
             logger.warning(f"[超分] 重试任务 {task_id} 查询 ComfyUI history 失败，保守接续轮询: {e}")
@@ -613,20 +624,28 @@ def retry_upscale_task(tenant_id: int, task_id: int) -> Tuple[Dict[str, Any], st
     db = SessionLocal()
     try:
         task = db.query(VideoUpscaleTask).filter(VideoUpscaleTask.id == task_id).first()
-        # 接续收片场景直接置「处理中」（不经过排队观感，ComfyUI 无需重跑，仅等待后台收片回填）
-        task.status = "处理中" if resume_prompt else "排队中"
+        # 接续场景直接置「处理中」（不经过排队观感，ComfyUI 无需重跑，仅等待收片回填）；
+        # 原任务仍在 ComfyUI 排队时置「排队中」如实反映
+        if resume_prompt:
+            task.status = "排队中" if resume_running else "处理中"
+        else:
+            task.status = "排队中"
         task.error_message = None
         task.started_at = None
         task.finished_at = None
         task.video_url = None
         if not resume_prompt:
-            # 无成片：清空原 ComfyUI 任务 ID，重新走完整流程
+            # 无成片且不在生成：清空原 ComfyUI 任务 ID，重新走完整流程
             task.comfy_prompt_id = None
         db.commit()
     finally:
         db.close()
 
-    message = "检测到 ComfyUI 已有成片，正在收片回填" if resume_prompt else "已重新提交超分任务，排队中"
+    if resume_prompt:
+        message = "检测到 ComfyUI 仍在生成中，继续等待原任务完成" if resume_running \
+            else "检测到 ComfyUI 已有成片，正在收片回填"
+    else:
+        message = "已重新提交超分任务，排队中"
     logger.info(f"[超分] 重试任务 {task_id}：{message}（prompt_id={prompt_id}）")
     _ensure_worker(task_id)
 

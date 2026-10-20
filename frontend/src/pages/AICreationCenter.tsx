@@ -1037,12 +1037,26 @@ const AICreationCenter: React.FC = () => {
 
   const retryTask = async (item: AIVideoTask) => {
     if (retryingId != null) return
-    if (!item.images.length) {
-      message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
-      return
-    }
     setRetryingId(item.id)
     try {
+      // 先尝试智能恢复：ComfyUI 上已有成片/仍在生成时接续原任务，不重新提交
+      let needResubmit = true
+      try {
+        const rec = await aiCreationApi.recoverVideoTask(item.id)
+        if (rec.data.action === 'resumed') {
+          message.success(rec.data.message || '已接续原任务，等待收片回填')
+          loadTasks(1)
+          needResubmit = false
+        }
+      } catch {
+        // 恢复检查失败（接口异常等）：回退到原重新提交流程
+      }
+      if (!needResubmit) return
+
+      if (!item.images.length) {
+        message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
+        return
+      }
       const files: File[] = []
       for (let i = 0; i < item.images.length; i++) {
         const blob = await fetchImageBlob(item.images[i])
