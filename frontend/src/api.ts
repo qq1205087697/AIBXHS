@@ -1968,6 +1968,11 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/upscale-tasks/${taskId}/cancel`,
     ),
+  /** 重试失败的超分任务：在原记录上重置状态并重新入队 */
+  retryUpscaleTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message: string; data: VideoUpscaleTask }>(
+      `/ai-creation/upscale-tasks/${taskId}/retry`,
+    ),
   /** 下载超分任务视频（target: result=超分结果 / source=源视频），blob 流式下载 */
   downloadUpscaleVideo: (taskId: number, target: "result" | "source") =>
     apiClient.get(`/ai-creation/upscale-tasks/${taskId}/download`, {

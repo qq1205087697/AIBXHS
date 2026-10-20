@@ -570,6 +570,73 @@ def cancel_upscale_task(tenant_id: int, task_id: int) -> None:
     logger.info(f"[超分] 任务 {task_id} 已取消: {cancelled_via}")
 
 
+def retry_upscale_task(tenant_id: int, task_id: int) -> Tuple[Dict[str, Any], str]:
+    """重试失败的超分任务。
+
+    先查 ComfyUI history：原提交已有完整成片时保留 comfy_prompt_id 接续收片
+    （后台线程接续轮询第一轮即收片回填，ComfyUI 不重跑）；无成片才清空重置、
+    重新走完整流程（下载/上传/入队/轮询）。返回 (任务序列化, 提示文案)。
+    """
+    from database.database import SessionLocal
+    from models.video_upscale_task import VideoUpscaleTask
+
+    db = SessionLocal()
+    try:
+        task = db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.tenant_id == tenant_id,
+            VideoUpscaleTask.id == task_id,
+            VideoUpscaleTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise UpscaleError("任务不存在或已删除")
+        if task.status != "失败":
+            raise UpscaleError("仅失败的任务可以重试")
+        if not task.source_video_url:
+            raise UpscaleError("找不到源视频地址，无法重试")
+        prompt_id = task.comfy_prompt_id
+    finally:
+        db.close()
+
+    # 查 ComfyUI history 判断原提交是否已有完整成片
+    resume_prompt = False
+    if prompt_id:
+        try:
+            item = _api("GET", f"/history/{prompt_id}", timeout=30).json().get(prompt_id)
+            if item and (item.get("status") or {}).get("status_str") == "success" \
+                    and _extract_output_file(item):
+                resume_prompt = True
+        except Exception as e:
+            # 查询失败（网络抖动等）：保守保留 prompt_id 接续轮询，由后台线程继续判断
+            logger.warning(f"[超分] 重试任务 {task_id} 查询 ComfyUI history 失败，保守接续轮询: {e}")
+            resume_prompt = True
+
+    db = SessionLocal()
+    try:
+        task = db.query(VideoUpscaleTask).filter(VideoUpscaleTask.id == task_id).first()
+        # 接续收片场景直接置「处理中」（不经过排队观感，ComfyUI 无需重跑，仅等待后台收片回填）
+        task.status = "处理中" if resume_prompt else "排队中"
+        task.error_message = None
+        task.started_at = None
+        task.finished_at = None
+        task.video_url = None
+        if not resume_prompt:
+            # 无成片：清空原 ComfyUI 任务 ID，重新走完整流程
+            task.comfy_prompt_id = None
+        db.commit()
+    finally:
+        db.close()
+
+    message = "检测到 ComfyUI 已有成片，正在收片回填" if resume_prompt else "已重新提交超分任务，排队中"
+    logger.info(f"[超分] 重试任务 {task_id}：{message}（prompt_id={prompt_id}）")
+    _ensure_worker(task_id)
+
+    db = SessionLocal()
+    try:
+        return _serialize(db.query(VideoUpscaleTask).filter(VideoUpscaleTask.id == task_id).first()), message
+    finally:
+        db.close()
+
+
 def delete_upscale_task(tenant_id: int, task_id: int) -> None:
     """软删除超分任务"""
     from database.database import SessionLocal

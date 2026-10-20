@@ -378,6 +378,21 @@ async def cancel_upscale_task_endpoint(
     return {"success": True, "message": "任务已取消"}
 
 
+@router.post("/upscale-tasks/{task_id}/retry")
+async def retry_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """重试失败的超分任务：先查 ComfyUI history，有成片直接接续收片，无成片重新入队"""
+    from services.upscale_service import retry_upscale_task, UpscaleError
+
+    try:
+        task, message = retry_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": message, "data": task}
+
+
 @router.delete("/upscale-tasks/{task_id}")
 async def delete_upscale_task_endpoint(
     task_id: int,
