@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Card, Button, Spin, Tag, Typography, Space, Input, Empty, Modal, Pagination, message, Segmented } from 'antd'
-import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined, PauseCircleOutlined } from '@ant-design/icons'
+import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined, PauseCircleOutlined, RedoOutlined } from '@ant-design/icons'
 import BindProductModal from '../components/BindProductModal'
 import CompareVideoModal from '../components/CompareVideoModal'
 import { aiCreationApi, VideoUpscaleTask } from '../api'
@@ -32,6 +32,23 @@ const UpscaleCenter: React.FC = () => {
   const [bindTitle, setBindTitle] = useState('')
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [cancellingId, setCancellingId] = useState<number | null>(null)
+  // 失败任务重试中标记（一次只允许一个重试请求，防止重复提交）
+  const [retryingId, setRetryingId] = useState<number | null>(null)
+
+  // 失败任务重试：在原记录上重置状态并重新入队（不产生新记录）
+  const retryTask = async (item: VideoUpscaleTask) => {
+    if (retryingId != null) return
+    setRetryingId(item.id)
+    try {
+      const resp = await aiCreationApi.retryUpscaleTask(item.id)
+      loadTasks()
+      message.success(resp.data.message || '已重新提交超分任务，排队中')
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '重试失败，请稍后再试')
+    } finally {
+      setRetryingId(null)
+    }
+  }
 
   // 取消排队中/处理中的任务：确认后调用取消接口（同步移除/中断 ComfyUI 任务）
   const confirmCancel = (item: VideoUpscaleTask) => {
@@ -298,6 +315,17 @@ const UpscaleCenter: React.FC = () => {
                       onClick={() => confirmCancel(item)}
                     >
                       取消
+                    </Button>
+                  )}
+                  {item.status === '失败' && (
+                    <Button
+                      size="small"
+                      icon={<RedoOutlined />}
+                      loading={retryingId === item.id}
+                      disabled={retryingId != null}
+                      onClick={() => retryTask(item)}
+                    >
+                      重试
                     </Button>
                   )}
                   <Button
