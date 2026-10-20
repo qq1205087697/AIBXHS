@@ -473,6 +473,25 @@ async def cancel_video_task_endpoint(
     return {"success": True, "message": "任务已取消"}
 
 
+@router.post("/video-tasks/{task_id}/recover")
+async def recover_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+
+    action="resumed"：已接续原 ComfyUI 任务（后台轮询收片回填原记录）；
+    action="resubmit"：原任务在 ComfyUI 上无记录/从未提交成功，前端需走重新提交流程。
+    """
+    from services.h3_video_service import recover_failed_task, H3VideoError
+
+    try:
+        action, message = recover_failed_task(current_user.tenant_id, task_id)
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
+
+
 @router.delete("/video-tasks/{task_id}")
 async def delete_video_task_endpoint(
     task_id: int,
