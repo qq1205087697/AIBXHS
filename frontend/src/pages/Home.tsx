@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Card, Row, Col, Typography, Select, Empty, Modal, Table, Button, Radio, Tag, message, Spin, Space } from 'antd'
-import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList, Rocket } from 'lucide-react'
+import { MessageSquare, Package, Bot, ChevronRight, Mail, Clock, AlertTriangle, Ship, ClipboardList, Rocket, ClipboardCheck } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
-import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi, developmentBotApi } from '../api'
+import { reviewsApi, inventoryApi, emailsApi, dashboardApi, inboundOrdersApi, shipmentsApi, developmentBotApi, videoBindingApi } from '../api'
 import { useResponsive } from '../hooks/useResponsive'
 
 const { Title, Text } = Typography
@@ -21,7 +21,7 @@ const DEFAULT_REVIEW_STATS: ReviewStats = {
 }
 
 // 差评板块配色（与差评机器人页保持一致）
-const REVIEW_SECTION_MAP: Record<string, { label: string; color: string }> = {
+const REVIEW_SECTION_MAP: Record<string, { label: string; color: string; bg?: string }> = {
   operations: { label: '运营', color: '#fa8c16', bg: '#fff7e6' },
   purchasing: { label: '采购', color: '#722ed1', bg: '#f9f0ff' },
   warehouse: { label: '仓库', color: '#1890ff', bg: '#e6f7ff' },
@@ -51,6 +51,7 @@ const Home: React.FC = () => {
   const [cancelledShipmentCount, setCancelledShipmentCount] = useState(0) // 已取消发货单数
   const [pendingReplenishmentCount, setPendingReplenishmentCount] = useState(0) // 补货单待审批数量
   const [devCounts, setDevCounts] = useState<{ purchase: number; six_face: number; designer: number; review: number }>({ purchase: 0, six_face: 0, designer: 0, review: 0 })
+  const [pendingVideoBindingCount, setPendingVideoBindingCount] = useState(0) // 视频绑定待审核数量
   const [diffModalOpen, setDiffModalOpen] = useState(false)
   const [diffItems, setDiffItems] = useState<any[]>([])
   const [diffLoading, setDiffLoading] = useState(false)
@@ -154,6 +155,7 @@ const Home: React.FC = () => {
       loadInboundDiffCount(),
       loadPendingShipmentCount(),
       loadDevCounts(),
+      loadPendingVideoBindingCount(),
     ]).finally(() => {
       setLoading(false)
     })
@@ -190,6 +192,17 @@ const Home: React.FC = () => {
       if (res.data?.success) setDevCounts(res.data.data || { purchase: 0, six_face: 0, designer: 0, review: 0 })
     } catch (e) {
       console.error('加载开发机器人待办统计失败:', e)
+    }
+  }
+
+  const loadPendingVideoBindingCount = async () => {
+    try {
+      const res = await videoBindingApi.getPendingCount()
+      if (res.data.success) {
+        setPendingVideoBindingCount(res.data.pending_count || 0)
+      }
+    } catch (e) {
+      console.error('加载视频绑定待审核数量失败:', e)
     }
   }
 
@@ -345,7 +358,19 @@ const Home: React.FC = () => {
       hasPending: devCounts.purchase + devCounts.six_face + devCounts.designer + devCounts.review > 0,
       priority: 0,
     },
-  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount, devCounts])
+    {
+      id: 'video_binding',
+      title: '视频机器人',
+      requiredPermission: 'ai_video:approve',
+      icon: <ClipboardCheck size={32} />,
+      color: '#eb2f96',
+      description: 'AI视频/高清处理绑定至产品的待审核申请',
+      path: '/video-binding-review',
+      stats: pendingVideoBindingCount,
+      hasPending: pendingVideoBindingCount > 0,
+      priority: 1,
+    },
+  ], [reviewStats, inventoryStats, emailStats, overduePurchaseCount, realPendingDiffCount, purchaseOrderStatusCounts, pendingShipmentCount, confirmedShipmentCount, cancelledShipmentCount, pendingReplenishmentCount, devCounts, pendingVideoBindingCount])
 
   const permittedBots = useMemo(() =>
     allBots.filter(bot => {
@@ -623,6 +648,32 @@ const Home: React.FC = () => {
               </div>
             </Col>
           ))}
+        </Row>
+      </div>
+    )
+  }
+
+  const renderVideoBindingStats = () => {
+    const hasPending = pendingVideoBindingCount > 0
+    return (
+      <div style={{ marginTop: 16 }}>
+        <Row gutter={[8, 8]}>
+          <Col span={24}>
+            <div style={{
+              textAlign: 'center',
+              padding: '12px 0',
+              background: hasPending ? '#fff0f6' : '#f6ffed',
+              borderRadius: 8
+            }}>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>绑定至产品待审核</div>
+              <div style={{ fontSize: 28, fontWeight: 'bold', color: hasPending ? '#eb2f96' : '#52c41a' }}>
+                {pendingVideoBindingCount} 条
+              </div>
+              {hasPending && (
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>点击前往审核</div>
+              )}
+            </div>
+          </Col>
         </Row>
       </div>
     )
@@ -928,6 +979,7 @@ const Home: React.FC = () => {
                 {module.id === 'pending_shipment' && renderPendingShipmentStats()}
                 {module.id === 'pending_replenishment' && renderPendingReplenishmentStats()}
                 {module.id === 'development' && renderDevelopmentStats()}
+                {module.id === 'video_binding' && renderVideoBindingStats()}
               </Card>
             </Col>
             ))

@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings
 from config import get_settings
 
 settings = get_settings()
@@ -111,6 +111,7 @@ app.include_router(shipments.router)
 app.include_router(suppliers.router)
 app.include_router(upload.router)
 app.include_router(ai_creation.router)
+app.include_router(video_bindings.router)
 app.include_router(base_table.router)
 
 app.include_router(ads.router, prefix="/api")
@@ -187,6 +188,15 @@ async def clear_today_notifications():
 async def startup_event():
     """应用启动事件"""
     logger.info("宝鑫华盛AI助手后端服务启动中...")
+    try:
+        from config import get_settings
+        if not get_settings().H3_BASE_URL:
+            logger.warning(
+                "H3_BASE_URL 未配置（为空），AI视频/高清处理的 ComfyUI 任务将无法执行或查询，"
+                "请检查 backend/.env 的 H3_BASE_URL/H3_AUTH_USER/H3_AUTH_PASSWORD 配置"
+            )
+    except Exception:
+        pass
     try:
         from database.database import init_db
         init_db()

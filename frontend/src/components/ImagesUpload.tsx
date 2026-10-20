@@ -84,16 +84,13 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
 
         if (url) {
           const idx = targetIndex + i
-          const oldUrl = idx >= 0 && idx < newImages.length ? newImages[idx] : undefined
           if (idx >= 0 && idx < newImages.length) {
             newImages[idx] = url
           } else {
             newImages.push(url)
           }
           successCount++
-          if (oldUrl && oldUrl !== url) {
-            uploadApi.deleteFile(oldUrl).catch(() => {})
-          }
+          // 被替换的旧图不在此处删除: 保存成功后由后端对比差集清理
         } else {
           message.error(`第 ${i + 1} 张图片上传失败：未获取到URL`)
         }
@@ -147,13 +144,10 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
   }
 
   const handleRemove = (index: number) => {
-    const removedUrl = previewImages[index]
     const newImages = previewImages.filter((_, i) => i !== index)
     setPreviewImages(newImages)
     onChange?.(newImages)
-    if (removedUrl) {
-      uploadApi.deleteFile(removedUrl).catch(() => {})
-    }
+    // 不在此处删除 TOS 文件: 保存成功后由后端对比差集清理(避免未保存误删/共享误删)
   }
 
   const handleAdd = () => {
