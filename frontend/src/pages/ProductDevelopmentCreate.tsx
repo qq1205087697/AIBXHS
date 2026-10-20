@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Cascader,
   Col,
   DatePicker,
   Descriptions,
@@ -23,7 +24,7 @@ import {
 import { ArrowLeft, CopyPlus, Download, FileSpreadsheet, ImagePlus, MinusCircle, Plus, PlusCircle, Save } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import dayjs, { Dayjs } from "dayjs";
-import { developmentBotApi, departmentsApi, storesApi, type DevelopmentProject, type ProductDevelopmentPayload } from "../api";
+import { developmentBotApi, departmentsApi, storeGroupsApi, type DevelopmentProject, type ProductDevelopmentPayload } from "../api";
 import { useAuth } from "../contexts/AuthContext";
 import ImagesUpload from "../components/ImagesUpload";
 
@@ -74,21 +75,35 @@ interface EmployeeItem {
   department_names?: string;
 }
 
+// 采购链接 + 采购图片 + 采购信息按组对应（一组 = 链接框 + 图片框 + 信息框）
+interface PurchaseItem {
+  link?: string;
+  images?: string[];
+  info?: string;
+}
+
+// 关联店铺：[{path: [分组名, 店铺名], quantity: 采购数量}]
+interface StoreRow {
+  path?: string[];
+  quantity?: number;
+}
+
 interface ProductFormRow {
   title: string;
   product_title: string;
   product_name_zh: string;
   category: string;
-  related_store?: string;
-  purchase_links?: string[];
+  store_rows?: StoreRow[];
+  purchase_items?: PurchaseItem[];
   purchase_info?: string;
   urgency: string;
   seasonality?: string;
   competitors?: string;
   purchase_price?: number;
   selling_price?: number; // 仅表单展示，数据库无对应列
-  de_title?: string;
   de_keywords?: string;
+  en_keywords?: string;
+  au_keywords?: string;
   development_date?: Dayjs | null;
   reference_images?: string[];
   warehouse_note?: string;
@@ -109,13 +124,28 @@ const toPayload = (row: ProductFormRow, developer?: string): ProductDevelopmentP
   seasonality: row.seasonality || "",
   competitors: row.competitors?.trim() || "",
   purchase_price: row.purchase_price,
-  related_store: row.related_store || undefined,
-  purchase_links: (row.purchase_links || []).map((s) => s.trim()).filter(Boolean),
+  // 店铺分组一级选择：数量对应分组下所有店铺
+  related_store: (row.store_rows || [])
+    .map((r) => (r.path?.[0] || "").trim())
+    .filter(Boolean)
+    .join("，") || undefined,
+  store_quantities: (row.store_rows || [])
+    .map((r) => ({ store: (r.path?.[0] || "").trim(), quantity: r.quantity ?? 0 }))
+    .filter((s) => s.store),
+  purchase_links: (row.purchase_items || [])
+    .map((it) => (it.link || "").trim())
+    .filter(Boolean),
   purchase_info: row.purchase_info?.trim() || undefined,
-  de_title: row.de_title?.trim() || "",
+  purchase_items: (row.purchase_items || []).map((it) => ({
+    link: (it.link || "").trim() || undefined,
+    images: it.images || [],
+    info: (it.info || "").trim() || undefined,
+  })),
   de_keywords: row.de_keywords?.trim() || "",
+  en_keywords: row.en_keywords?.trim() || "",
+  au_keywords: row.au_keywords?.trim() || "",
   development_date: row.development_date ? dayjs(row.development_date).format("YYYY-MM-DD") : "",
-  reference_images: row.reference_images || [],
+  reference_images: (row.purchase_items || []).flatMap((it) => it.images || []),
   warehouse_note: row.warehouse_note?.trim() || undefined,
   site_owners: Array.isArray(row.site_owners)
     ? row.site_owners.join(",").trim() || undefined
@@ -175,8 +205,36 @@ const ProductDevelopmentCreate: React.FC = () => {
     }
     return false; // 阻止 antd Upload 自动上传
   };
-  interface StoreItem { id?: number; name?: string }
-  const [stores, setStores] = React.useState<StoreItem[]>([]);
+  interface StoreNode { id: number; name: string; stores: { id: number; name: string; site?: string | null }[] }
+  interface StoreTreeData { groups: StoreNode[]; owner_sites: Record<string, string[]> }
+  // 店铺分组树（系统设置-店铺管理）+ 站点负责人站点映射
+  const [storeTree, setStoreTree] = React.useState<StoreTreeData>({ groups: [], owner_sites: {} });
+  const productsWatch = Form.useWatch("products", form) as ProductFormRow[] | undefined;
+
+  React.useEffect(() => {
+    storeGroupsApi
+      .getTree()
+      .then((res) => {
+        const d = res.data?.data;
+        if (d) setStoreTree({ groups: d.groups || [], owner_sites: d.owner_sites || {} });
+      })
+      .catch(() => {});
+  }, []);
+
+  // 按站点负责人员过滤店铺级联选项：取所选负责人名下站点集合，无映射或未选则展示全部
+  // 添加新品只需选择店铺分组一级；数量对应分组下所有店铺，保存时存分组名
+  const storeCascaderOptions = (index: number) => {
+    const owners = (productsWatch?.[index]?.site_owners as string[] | undefined) || [];
+    let allowed: Set<string> | null = null;
+    if (owners.length) {
+      allowed = new Set<string>();
+      owners.forEach((o) => (storeTree.owner_sites[o] || []).forEach((s) => allowed!.add(s)));
+      if (allowed.size === 0) allowed = null;
+    }
+    return storeTree.groups
+      .filter((g) => !allowed || g.stores.some((s) => s.site && allowed.has(s.site)))
+      .map((g) => ({ label: g.name, value: g.name }));
+  };
 
   // 仓库回填模式：加载已有新品记录
   React.useEffect(() => {
@@ -226,41 +284,22 @@ const ProductDevelopmentCreate: React.FC = () => {
       .map((name) => ({ label: name, value: name }));
   }, [employees]);
 
-  // 拉取产品管理里的全部店铺（关联店铺选项）
-  React.useEffect(() => {
-    storesApi
-      .getAll()
-      .then((res) => {
-        const list = res.data?.data;
-        if (Array.isArray(list)) setStores(list);
-        else if (Array.isArray(res.data)) setStores(res.data);
-      })
-      .catch(() => {});
-  }, []);
-
-  const storeOptions = useMemo(
-    () =>
-      Array.from(new Set(stores.map((s) => (s.name || "").trim()).filter(Boolean)))
-        .sort((a, b) => a.localeCompare(b, "zh"))
-        .map((name) => ({ label: name, value: name })),
-    [stores],
-  );
-
   const emptyRow = (): ProductFormRow => ({
     title: "",
     product_title: "",
     product_name_zh: "",
     category: undefined as unknown as string,
-    related_store: undefined,
-    purchase_links: [""],
+    store_rows: [{ path: undefined, quantity: undefined }],
+    purchase_items: [{ link: "", images: [], info: "" }],
     purchase_info: "",
     urgency: "一般",
     seasonality: "日常",
     competitors: "",
     purchase_price: undefined,
     selling_price: undefined,
-    de_title: "",
     de_keywords: "",
+    en_keywords: "",
+    au_keywords: "",
     development_date: dayjs(),
     reference_images: [],
     warehouse_note: "",
@@ -376,7 +415,14 @@ const ProductDevelopmentCreate: React.FC = () => {
                             if (!row) return;
                             const copy: any = { ...row };
                             if (Array.isArray(copy.site_owners)) copy.site_owners = [...copy.site_owners];
-                            if (Array.isArray(copy.purchase_links)) copy.purchase_links = [...copy.purchase_links];
+                            if (Array.isArray(copy.store_rows)) copy.store_rows = copy.store_rows.map((r: any) => ({ path: r.path ? [...r.path] : undefined, quantity: r.quantity }));
+                            if (Array.isArray(copy.purchase_items)) {
+                              copy.purchase_items = copy.purchase_items.map((it: any) => ({
+                                link: it.link,
+                                images: Array.isArray(it.images) ? [...it.images] : [],
+                                info: it.info,
+                              }));
+                            }
                             if (Array.isArray(copy.reference_images)) copy.reference_images = [...copy.reference_images];
                             add(copy, field.name + 1);
                             message.success("已复制当前新品内容到新行");
@@ -416,17 +462,6 @@ const ProductDevelopmentCreate: React.FC = () => {
                         </Form.Item>
                       </Col>
                       <Col xs={24} md={8}>
-                        <Form.Item name={[field.name, "related_store"]} label="关联店铺">
-                          <Select
-                            showSearch
-                            allowClear
-                            optionFilterProp="label"
-                            placeholder="选择产品管理里的店铺"
-                            options={storeOptions}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} md={8}>
                         <Form.Item name={[field.name, "urgency"]} label="产品紧急度" rules={[{ required: true, message: "请选择紧急度" }]}>
                           <Select options={URGENCY_OPTIONS} />
                         </Form.Item>
@@ -461,50 +496,120 @@ const ProductDevelopmentCreate: React.FC = () => {
                     </div>
 
                     <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 16, marginTop: 2 }}>
-                      <Text strong style={{ display: "block", marginBottom: 12 }}>采购链接</Text>
-                      <Form.List name={[field.name, "purchase_links"]}>
-                        {(linkFields, { add: addLink, remove: removeLink }) => (
-                          <>
-                            {linkFields.map((lf) => (
-                              <Row key={lf.key} gutter={[12, 0]} align="middle" style={{ marginBottom: 8 }}>
-                                <Col flex="auto">
-                                  <Form.Item name={lf.name} style={{ marginBottom: 0 }}>
-                                    <Input placeholder="粘贴采购链接（1688/淘宝等，可添加多个）" allowClear />
-                                  </Form.Item>
-                                </Col>
-                                <Col flex="none" style={{ paddingLeft: 8 }}>
-                                  {linkFields.length > 1 && (
-                                    <Button type="text" danger icon={<MinusCircle size={16} />} onClick={() => removeLink(lf.name)} />
-                                  )}
-                                </Col>
-                              </Row>
-                            ))}
-                            <Button type="dashed" size="small" icon={<PlusCircle size={15} />} onClick={() => addLink("")}>
-                              添加链接输入框
-                            </Button>
-                          </>
-                        )}
-                      </Form.List>
-                    </div>
-
-                    <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 16, marginTop: 16 }}>
-                      <Form.Item
-                        name={[field.name, "reference_images"]}
-                        label={<Space><ImagePlus size={16} />采购图片（支持拖拽上传）</Space>}
-                        style={{ marginBottom: 12 }}
-                      >
-                        <ImagesUpload maxCount={9} placeholder="上传/拖入图片" />
-                      </Form.Item>
-                      <Form.Item name={[field.name, "purchase_info"]} label="采购信息">
-                        <Input.TextArea rows={3} maxLength={2000} showCount placeholder="供应商、交期、质量要求等采购信息" />
-                      </Form.Item>
+                      <Text strong style={{ display: "block", marginBottom: 12 }}>采购信息与关联店铺</Text>
+                      <Row gutter={[20, 0]}>
+                        <Col xs={24} md={14}>
+                          <Form.List name={[field.name, "purchase_items"]}>
+                            {(itemFields, { add: addItem, remove: removeItem }) => (
+                              <>
+                                {itemFields.map((pf) => (
+                                  <div
+                                    key={pf.key}
+                                    style={{
+                                      border: "1px solid #f1f5f9",
+                                      borderRadius: 8,
+                                      padding: "12px 14px 4px",
+                                      marginBottom: 10,
+                                      background: "#fafbfc",
+                                    }}
+                                  >
+                                    <Form.Item
+                                      name={[pf.name, "link"]}
+                                      label={<Text type="secondary" style={{ fontSize: 12 }}>采购链接 {pf.name + 1}</Text>}
+                                      style={{ marginBottom: 10 }}
+                                    >
+                                      <Input placeholder="粘贴采购链接（1688/淘宝等）" allowClear />
+                                    </Form.Item>
+                                    <Form.Item
+                                      name={[pf.name, "images"]}
+                                      label={<Space size={4}><ImagePlus size={14} /><Text type="secondary" style={{ fontSize: 12 }}>对应采购图片（支持拖拽上传）</Text></Space>}
+                                      style={{ marginBottom: 10 }}
+                                    >
+                                      <ImagesUpload maxCount={9} placeholder="上传/拖入该链接的采购图片" />
+                                    </Form.Item>
+                                    <Form.Item
+                                      name={[pf.name, "info"]}
+                                      label={<Text type="secondary" style={{ fontSize: 12 }}>对应采购信息</Text>}
+                                      style={{ marginBottom: 10 }}
+                                    >
+                                      <Input.TextArea rows={2} maxLength={2000} placeholder="该链接对应的供应商、交期、质量要求等信息" />
+                                    </Form.Item>
+                                    {itemFields.length > 1 && (
+                                      <div style={{ textAlign: "right", paddingBottom: 6 }}>
+                                        <Button type="text" danger size="small" icon={<MinusCircle size={15} />} onClick={() => removeItem(pf.name)}>
+                                          删除该组
+                                        </Button>
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                                <Button
+                                  type="dashed"
+                                  size="small"
+                                  icon={<PlusCircle size={15} />}
+                                  onClick={() => addItem({ link: "", images: [], info: "" })}
+                                >
+                                  添加链接和图片
+                                </Button>
+                              </>
+                            )}
+                          </Form.List>
+                          <Form.Item name={[field.name, "purchase_info"]} label="采购信息" style={{ marginTop: 14 }}>
+                            <Input.TextArea rows={3} maxLength={2000} showCount placeholder="供应商、交期、质量要求等采购信息" />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={10}>
+                          <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                            关联店铺分组与采购数量（选择分组一级，数量对应分组下所有店铺；可按站点负责人筛选）
+                          </Text>
+                          <Form.List name={[field.name, "store_rows"]}>
+                            {(storeFields, { add: addStore, remove: removeStore }) => (
+                              <>
+                                {storeFields.map((sf) => (
+                                  <div key={sf.key} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "flex-start" }}>
+                                    <Form.Item
+                                      name={[sf.name, "path"]}
+                                      style={{ flex: 1, minWidth: 0, marginBottom: 0 }}
+                                    >
+                                      <Cascader
+                                        options={storeCascaderOptions(field.name)}
+                                        showSearch
+                                        placeholder="店铺分组"
+                                        changeOnSelect={false}
+                                      />
+                                    </Form.Item>
+                                    <Form.Item
+                                      name={[sf.name, "quantity"]}
+                                      style={{ width: 110, marginBottom: 0 }}
+                                    >
+                                      <InputNumber min={0} precision={0} placeholder="采购数量" style={{ width: "100%" }} />
+                                    </Form.Item>
+                                    {storeFields.length > 1 && (
+                                      <Button type="text" danger icon={<MinusCircle size={15} />} onClick={() => removeStore(sf.name)} />
+                                    )}
+                                  </div>
+                                ))}
+                                <Button
+                                  type="dashed"
+                                  size="small"
+                                  icon={<PlusCircle size={15} />}
+                                  onClick={() => addStore({ path: undefined, quantity: undefined })}
+                                >
+                                  添加店铺
+                                </Button>
+                              </>
+                            )}
+                          </Form.List>
+                        </Col>
+                      </Row>
                     </div>
 
                     <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 16, marginTop: 2 }}>
                       <Text strong style={{ display: "block", marginBottom: 12 }}>多语言资料</Text>
                       <Row gutter={[16, 0]}>
-                        <Col xs={24} md={8}><Form.Item name={[field.name, "de_title"]} label="德语标题"><Input.TextArea rows={2} placeholder="德语商品标题" /></Form.Item></Col>
                         <Col xs={24} md={8}><Form.Item name={[field.name, "de_keywords"]} label="德语关键词"><Input.TextArea rows={2} placeholder="德语关键词，用逗号分隔" /></Form.Item></Col>
+                        <Col xs={24} md={8}><Form.Item name={[field.name, "en_keywords"]} label="英语关键词"><Input.TextArea rows={2} placeholder="英语关键词，用逗号分隔" /></Form.Item></Col>
+                        <Col xs={24} md={8}><Form.Item name={[field.name, "au_keywords"]} label="澳洲关键词"><Input.TextArea rows={2} placeholder="澳洲关键词，用逗号分隔" /></Form.Item></Col>
                       </Row>
                     </div>
 

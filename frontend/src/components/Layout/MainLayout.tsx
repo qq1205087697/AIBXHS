@@ -339,12 +339,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             },
           ],
         }] : []),
-    {
-      key: "/development",
-      icon: <Rocket size={20} />,
-      label: "开发机器人",
-      shortLabel: "开发",
-    },
+    ...(hasPermission("development:view")
+      ? [{
+          key: "/development",
+          icon: <Rocket size={20} />,
+          label: "开发机器人",
+          shortLabel: "开发",
+        }]
+      : []),
     {
       key: "/data-alert",
       icon: <AlertTriangle size={20} />,

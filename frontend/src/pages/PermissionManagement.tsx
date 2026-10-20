@@ -403,6 +403,7 @@ const PermissionManagement: React.FC = () => {
         '底表管理': { icon: <TableOutlined />, color: '#13c2c2' },
         '供应商管理': { icon: <ContactsOutlined />, color: '#fa8c16' },
         '媒体创作中心': { icon: <VideoCameraOutlined />, color: '#722ed1' },
+        '开发机器人': { icon: <RobotOutlined />, color: '#1677ff' },
     };
 
   // 计算权限总数

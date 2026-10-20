@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Cascader,
   Checkbox,
   Col,
   DatePicker,
@@ -20,19 +21,22 @@ import {
   Space,
   Spin,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
 import {
   CheckCircle2,
-  DollarSign,
+  Copy,
   ExternalLink,
   FileText,
   ImageOff,
   ImagePlus,
   Info,
+  MinusCircle,
   Pencil,
   Plus,
+  PlusCircle,
   RefreshCw,
   Rocket,
   RotateCcw,
@@ -52,10 +56,20 @@ import {
   type ProductDevelopmentPayload,
   type ProjectDocInfo,
 } from "../api";
+import { useAuth } from "../contexts/AuthContext";
 import ImagesUpload from "../components/ImagesUpload";
 
 const { Title, Text } = Typography;
 const PAGE_SIZE = 12;
+
+// 卡片操作栏图标按钮统一样式
+const CardOpBtnStyle = () => (
+  <style>{`
+    .card-op-btn { width: 34px; height: 30px; display: inline-flex; align-items: center; justify-content: center; color: #475569; }
+    .card-op-btn:hover { color: #1677ff !important; background: #eff6ff !important; }
+    .card-op-btn.ant-btn-dangerous, .card-op-btn.ant-btn-dangerous:hover { color: #ef4444; }
+  `}</style>
+);
 
 // 数据库 ad_product_info 商品类目真实取值
 const CATEGORY_OPTIONS = [
@@ -86,9 +100,27 @@ const STATUS_FILTER_OPTIONS = [
   { label: "待上传六面图", value: "six_face" },
   { label: "待上传产品图", value: "designer" },
   { label: "待审核产品图", value: "review" },
+  { label: "美工未通过", value: "review_rejected" },
+  { label: "待生成采购单", value: "not_ordered" },
 ];
 
-const PURCHASED_OPTIONS = ["未采购", "已采购"].map((value) => ({ label: value, value }));
+// 信息缺失筛选：下拉选择缺失字段，筛选出该字段为空的商品
+const MISSING_FIELD_OPTIONS = [
+  { label: "英文标题", value: "title" },
+  { label: "产品中文名", value: "product_name_zh" },
+  { label: "商品类目", value: "category" },
+  { label: "关键词", value: "keywords" },
+  { label: "采购单价", value: "purchase_price" },
+  { label: "关联店铺", value: "related_store" },
+  { label: "采购链接", value: "purchase_links" },
+  { label: "采购图片/信息分组", value: "purchase_items" },
+  { label: "仓库备注", value: "warehouse_note" },
+  { label: "站点负责人", value: "site_owners" },
+  { label: "竞品ASIN", value: "competitors" },
+  { label: "德语关键词", value: "de_keywords" },
+  { label: "英语关键词", value: "en_keywords" },
+  { label: "澳洲关键词", value: "au_keywords" },
+];
 
 const SEASONALITY_OPTIONS = [
   "日常",
@@ -112,9 +144,15 @@ interface EmployeeItem {
   department_names?: string;
 }
 
+const purchasedTagColor = (value?: string | null) => {
+  if (value === "已采购") return "green";
+  if (value === "已生成采购单") return "blue";
+  return "orange";
+};
+
 const getValidImageUrl = (images: string[]) => images.find((image) => /^(https?:\/\/|\/)/i.test(image));
 
-const ProductVisual: React.FC<{ images: string[] }> = ({ images }) => {
+const ProductVisual: React.FC<{ images: string[]; unapprovedWithImages?: boolean }> = ({ images, unapprovedWithImages }) => {
   const [failed, setFailed] = useState(false);
   const imageUrl = getValidImageUrl(images);
   const showImage = Boolean(imageUrl) && !failed;
@@ -122,11 +160,11 @@ const ProductVisual: React.FC<{ images: string[] }> = ({ images }) => {
   return (
     <div style={{ height: 190, background: "#f1f5f9", position: "relative", overflow: "hidden" }}>
       {showImage ? (
-        <img src={imageUrl} alt="新品采购图" onError={() => setFailed(true)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        <img src={imageUrl} alt="新品美工图" onError={() => setFailed(true)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
       ) : (
         <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, color: "#94a3b8" }}>
           <ImageOff size={34} strokeWidth={1.5} />
-          <Text type="secondary">{images.length ? "图片待上传" : "暂无采购图"}</Text>
+          <Text type="secondary">{unapprovedWithImages ? "美工图片暂未通过" : images.length ? "图片待上传" : "暂无美工图片"}</Text>
         </div>
       )}
       {images.length > 1 && <Tag style={{ position: "absolute", right: 12, bottom: 12, margin: 0 }}>{images.length} 张</Tag>}
@@ -311,9 +349,9 @@ const DocButton: React.FC<{ record: DevelopmentProject }> = ({ record }) => {
         }
         content={<div style={{ width: 420, maxWidth: "70vw", overflow: "hidden" }}>{renderSections(true)}</div>}
       >
-        <Button type="text" icon={<FileText size={15} />} onClick={handleOpenModal}>
-          文档
-        </Button>
+        <Tooltip title={docTitle}>
+          <Button type="text" icon={<FileText size={15} />} onClick={handleOpenModal} />
+        </Tooltip>
       </Popover>
       <Modal
         open={modalOpen}
@@ -425,6 +463,51 @@ const ProductDevelopmentBot: React.FC = () => {
   const [editing, setEditing] = useState<DevelopmentProject | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [editForm] = Form.useForm();
+  const [copyingId, setCopyingId] = useState<string | null>(null);
+  const { user } = useAuth();
+
+  // 店铺分组树（编辑弹窗级联选项）+ 站点负责人站点映射
+  interface StoreNode { id: number; name: string; stores: { id: number; name: string; site?: string | null }[] }
+  const [storeTree, setStoreTree] = useState<{ groups: StoreNode[]; owner_sites: Record<string, string[]> }>({ groups: [], owner_sites: {} });
+  React.useEffect(() => {
+    storeGroupsApi
+      .getTree()
+      .then((res) => {
+        const d = res.data?.data;
+        if (d) setStoreTree({ groups: d.groups || [], owner_sites: d.owner_sites || {} });
+      })
+      .catch(() => {});
+  }, []);
+
+  const storeToGroup = useMemo(() => {
+    const map: Record<string, string> = {};
+    storeTree.groups.forEach((g) => g.stores.forEach((s) => { map[s.name] = g.name; }));
+    return map;
+  }, [storeTree]);
+
+  // 编辑弹窗店铺选择与添加新品一致：只到分组一级，数量对应分组下所有店铺
+  const editSiteOwners = Form.useWatch("site_owners", editForm) as string[] | undefined;
+  const editStoreOptions = useMemo(() => {
+    let allowed: Set<string> | null = null;
+    if (editSiteOwners?.length) {
+      allowed = new Set<string>();
+      editSiteOwners.forEach((o) => (storeTree.owner_sites[o] || []).forEach((s) => allowed!.add(s)));
+      if (allowed.size === 0) allowed = null;
+    }
+    return storeTree.groups
+      .filter((g) => !allowed || g.stores.some((s) => s.site && allowed.has(s.site)))
+      .map((g) => ({ label: g.name, value: g.name }));
+  }, [storeTree, editSiteOwners]);
+
+  // 站点负责人员选项（全部员工昵称去重）
+  const siteOwnerOptions = useMemo(() => {
+    const names = new Set<string>();
+    employees.forEach((emp) => {
+      const name = (emp.nickname || emp.username || "").trim();
+      if (name) names.add(name);
+    });
+    return Array.from(names).sort((a, b) => a.localeCompare(b, "zh")).map((n) => ({ label: n, value: n }));
+  }, [employees]);
 
   // 筛选栏状态（与选品机器人筛选栏一致）
   const [categoryFilter, setCategoryFilter] = useState<string>();
@@ -433,6 +516,7 @@ const ProductDevelopmentBot: React.FC = () => {
   const [developerFilter, setDeveloperFilter] = useState<string>();
   const [dateFilter, setDateFilter] = useState<dayjs.Dayjs | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>();
+  const [missingFilter, setMissingFilter] = useState<string>();
   const [filterOptions, setFilterOptions] = useState<{
     categories: string[];
     urgencies: string[];
@@ -471,6 +555,7 @@ const ProductDevelopmentBot: React.FC = () => {
         developer: developerFilter,
         date: dateFilter ? dateFilter.format("YYYY-MM-DD") : undefined,
         status: statusFilter,
+        missing: missingFilter,
       });
       if (res.data?.success) {
         setItems(res.data.data?.items || []);
@@ -482,12 +567,12 @@ const ProductDevelopmentBot: React.FC = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter]);
+  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
 
   React.useEffect(() => {
     fetchData(page, search);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter]);
+  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
 
   // 搜索防抖
   React.useEffect(() => {
@@ -708,11 +793,26 @@ const ProductDevelopmentBot: React.FC = () => {
       seasonality: editing.seasonality || undefined,
       competitors: editing.competitors || "",
       purchase_price: editing.purchase_price ?? undefined,
-      de_title: editing.de_title || "",
       de_keywords: editing.de_keywords || "",
+      en_keywords: editing.en_keywords || "",
+      au_keywords: editing.au_keywords || "",
       development_date: editing.development_date ? dayjs(editing.development_date) : undefined,
       reference_images: editing.purchase_images || [],
+      site_owners: editing.site_owners
+        ? String(editing.site_owners).split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
+        : [],
+      store_rows: (editing.store_quantities && editing.store_quantities.length > 0
+        ? editing.store_quantities.map((s) => ({
+            path: storeToGroup[s.store] ? [storeToGroup[s.store]] : [s.store],
+            quantity: s.quantity,
+          }))
+        : [{ path: undefined, quantity: undefined }]),
+      purchase_items: editing.purchase_items && editing.purchase_items.length > 0
+        ? editing.purchase_items.map((it) => ({ link: it.link || "", images: it.images || [], info: it.info || "" }))
+        : [{ link: "", images: [], info: "" }],
+      purchase_info: editing.purchase_info || "",
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, editForm]);
 
   const handleEditSave = async (values: any) => {
@@ -727,10 +827,24 @@ const ProductDevelopmentBot: React.FC = () => {
       seasonality: values.seasonality || "",
       competitors: values.competitors?.trim() || "",
       purchase_price: values.purchase_price,
-      de_title: values.de_title?.trim() || "",
       de_keywords: values.de_keywords?.trim() || "",
+      en_keywords: values.en_keywords?.trim() || "",
+      au_keywords: values.au_keywords?.trim() || "",
       development_date: values.development_date ? dayjs(values.development_date).format("YYYY-MM-DD") : "",
       reference_images: values.reference_images || [],
+      site_owners: (values.site_owners || []).join(",") || undefined,
+      related_store: (values.store_rows || [])
+        .map((r: any) => (r?.path?.[0] || "").trim())
+        .filter(Boolean)
+        .join("，") || undefined,
+      store_quantities: (values.store_rows || [])
+        .map((r: any) => ({ store: (r?.path?.[0] || "").trim(), quantity: r?.quantity ?? 0 }))
+        .filter((s: any) => s.store),
+      purchase_items: (values.purchase_items || [])
+        .map((it: any) => ({ link: (it?.link || "").trim() || undefined, images: it?.images || [], info: (it?.info || "").trim() || undefined }))
+        .filter((it: any) => it.link || (it.images && it.images.length) || it.info),
+      purchase_info: values.purchase_info?.trim() || undefined,
+      warehouse_note: values.warehouse_note?.trim() || undefined,
     };
     setSavingEdit(true);
     try {
@@ -755,8 +869,80 @@ const ProductDevelopmentBot: React.FC = () => {
     }
   };
 
+  // 生成采购单：按店铺分组采购数量在进销存采购管理创建采购单
+  const [orderingId, setOrderingId] = useState<string | null>(null);
+  const handleCreatePurchaseOrder = async (record: DevelopmentProject) => {
+    setOrderingId(record.record_id);
+    try {
+      const res = await developmentBotApi.createPurchaseOrder(record.record_id);
+      message.success(`已生成采购单 ${res.data?.data?.order_number || ""}`);
+      fetchData();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "生成采购单失败，请稍后重试");
+    } finally {
+      setOrderingId(null);
+    }
+  };
+
+  // 回传飞书：新增/修改多维表记录并回传记录 ID
+  const [pushingId, setPushingId] = useState<string | null>(null);
+  const handlePushToFeishu = async (record: DevelopmentProject) => {
+    setPushingId(record.record_id);
+    try {
+      const res = await developmentBotApi.pushToFeishu(record.record_id);
+      const d = res.data?.data || {};
+      message.success(
+        d.mode === "created"
+          ? `已新增飞书记录 ${d.record_id}（回填 ${d.fields_filled ?? 0} 个字段${d.images_attached ? `，附图 ${d.images_attached} 张` : ""}）`
+          : `已更新飞书记录 ${d.record_id}`,
+      );
+      fetchData();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "回传飞书失败，请稍后重试");
+    } finally {
+      setPushingId(null);
+    }
+  };
+
+  // 复制商品：以原记录字段生成一条新记录（开发人员为当前账号），随后可编辑修改
+  const handleCopyProduct = async (record: DevelopmentProject) => {
+    setCopyingId(record.record_id);
+    try {
+      const payload: ProductDevelopmentPayload = {
+        title: record.title || "",
+        product_title: record.keywords || "",
+        product_name_zh: record.product_name_zh || "",
+        category: record.category || "",
+        developer: user?.nickname || record.developer || "",
+        urgency: record.urgency || "一般",
+        seasonality: record.seasonality || "",
+        competitors: record.competitors || "",
+        purchase_price: record.purchase_price,
+        de_keywords: record.de_keywords || "",
+        en_keywords: record.en_keywords || "",
+        au_keywords: record.au_keywords || "",
+        development_date: dayjs().format("YYYY-MM-DD"),
+        reference_images: record.purchase_images || [],
+        site_owners: record.site_owners || undefined,
+        related_store: record.related_store || undefined,
+        store_quantities: record.store_quantities,
+        purchase_items: record.purchase_items,
+        purchase_info: record.purchase_info || undefined,
+        warehouse_note: record.warehouse_note || undefined,
+      };
+      await developmentBotApi.create(payload);
+      message.success("已复制为一条新品记录，可点击「编辑」修改内容");
+      fetchData();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "复制失败，请稍后重试");
+    } finally {
+      setCopyingId(null);
+    }
+  };
+
   return (
     <div style={{ height: "100%", overflowY: "auto", background: "#fff" }}>
+      <CardOpBtnStyle />
       <div style={{ padding: "24px 28px 40px", maxWidth: 1720, margin: "0 auto" }}>
         <Card bordered={false} style={{ marginBottom: 20 }} styles={{ body: { padding: "22px 26px" } }}>
           <Space align="start" size={14}>
@@ -829,6 +1015,16 @@ const ProductDevelopmentBot: React.FC = () => {
                 allowClear
                 style={{ width: 140 }}
               />
+              <Select
+                placeholder="信息缺失"
+                options={MISSING_FIELD_OPTIONS}
+                value={missingFilter}
+                onChange={(v) => { setMissingFilter(v); setPage(1); }}
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                style={{ width: 150 }}
+              />
               <Button
                 icon={<RotateCcw size={15} />}
                 onClick={() => {
@@ -840,6 +1036,7 @@ const ProductDevelopmentBot: React.FC = () => {
                   setDeveloperFilter(undefined);
                   setDateFilter(null);
                   setStatusFilter(undefined);
+                  setMissingFilter(undefined);
                   setPage(1);
                 }}
               >
@@ -875,7 +1072,8 @@ const ProductDevelopmentBot: React.FC = () => {
               {items.map((product) => {
                 const reviewText = product.image_review || "";
                 const reviewed = reviewText.includes("通过") && !reviewText.includes("不通过");
-                const displayImages = reviewed && (product.designer_images || []).length > 0 ? product.designer_images! : product.purchase_images || [];
+                // 只显示美工图片；未审核一律不显示图片
+                const displayImages = reviewed ? product.designer_images || [] : [];
                 const hasRoleAction = roles?.can_purchase || roles?.can_warehouse || roles?.can_design || roles?.can_review;
                 return (
                 <div key={product.record_id}>
@@ -884,21 +1082,36 @@ const ProductDevelopmentBot: React.FC = () => {
                     styles={{ body: { padding: 0 } }}
                     hoverable
                     actions={[
-                      <Button type="text" icon={<Pencil size={15} />} onClick={() => setEditing(product)}>编辑</Button>,
-                      <DocButton key="doc" record={product} />,
-                      <Popconfirm title="确认删除这条新品记录？" description="删除后不可恢复" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => handleDelete(product)}>
-                        <Button type="text" danger icon={<Trash2 size={15} />}>删除</Button>
-                      </Popconfirm>,
+                      <div key="ops" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 2, width: "100%" }}>
+                        <Tooltip title="编辑商品信息">
+                          <Button className="card-op-btn" type="text" icon={<Pencil size={16} />} onClick={() => setEditing(product)} />
+                        </Tooltip>
+                        <Tooltip title="复制为一条新品，可再编辑">
+                          <Button className="card-op-btn" type="text" icon={<Copy size={16} />} loading={copyingId === product.record_id} onClick={() => handleCopyProduct(product)} />
+                        </Tooltip>
+                        <span style={{ width: 1, height: 16, background: "#e2e8f0", margin: "0 6px" }} />
+                        <Tooltip title="回传飞书多维表（已存在则修改，否则新增并回传记录ID）">
+                          <Button className="card-op-btn" type="text" icon={<Rocket size={16} />} loading={pushingId === product.record_id} onClick={() => handlePushToFeishu(product)} />
+                        </Tooltip>
+                        <DocButton record={product} />
+                        <Popconfirm title="确认删除这条新品记录？" description="删除后不可恢复" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => handleDelete(product)}>
+                          <Tooltip title="删除">
+                            <Button className="card-op-btn" type="text" danger icon={<Trash2 size={16} />} />
+                          </Tooltip>
+                        </Popconfirm>
+                      </div>,
                     ]}
                   >
                     <div style={{ position: "relative" }}>
-                      <ProductVisual images={displayImages} />
+                      <ProductVisual images={displayImages} unapprovedWithImages={!reviewed && (product.designer_images || []).length > 0} />
                       <div style={{ position: "absolute", left: 10, top: 10, zIndex: 2 }}>
                         <Checkbox checked={selectedIds.has(product.record_id)} onChange={(e) => toggleSelect(product.record_id, e.target.checked)} />
                       </div>
                       {reviewed
                         ? <Tag color="green" style={{ position: "absolute", right: 12, top: 10, margin: 0 }}>已审核</Tag>
-                        : <Tag color="orange" style={{ position: "absolute", right: 12, top: 10, margin: 0 }}>未审核</Tag>}
+                        : reviewText.includes("不通过")
+                          ? <Tag color="red" style={{ position: "absolute", right: 12, top: 10, margin: 0 }}>未通过</Tag>
+                          : <Tag color="orange" style={{ position: "absolute", right: 12, top: 10, margin: 0 }}>未审核</Tag>}
                     </div>
                     <div style={{ padding: 16 }}>
                       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
@@ -912,11 +1125,7 @@ const ProductDevelopmentBot: React.FC = () => {
                           <Text strong ellipsis={{ tooltip: product.product_name_zh }} style={{ display: "block", marginTop: 6, minWidth: 0, fontSize: 15 }}>{product.product_name_zh || "-"}</Text>
                         </div>
                         {product.urgency && <Tag color={urgencyTagColor(product.urgency)}>{product.urgency}</Tag>}
-                      </div>
-
-                      <div style={{ marginTop: 10, padding: "8px 0", borderTop: "1px solid #f1f5f9", borderBottom: "1px solid #f1f5f9" }}>
-                        <Text type="secondary" style={{ fontSize: 12 }}>是否采购</Text>
-                        <div><Tag color={product.purchased === "已采购" ? "green" : "orange"} style={{ margin: 0 }}>{product.purchased || "未采购"}</Tag></div>
+                        <Tag color={purchasedTagColor(product.purchased)} style={{ margin: 0 }}>{product.purchased || "未采购"}</Tag>
                       </div>
 
                       {product.purchase_note && (
@@ -929,7 +1138,7 @@ const ProductDevelopmentBot: React.FC = () => {
                       {hasRoleAction && (
                         <Space wrap size={6} style={{ marginTop: 10 }}>
                           {roles?.can_purchase && (
-                            <Button size="small" icon={<DollarSign size={13} />} onClick={() => { purchaseForm.setFieldsValue({ purchase_price: product.purchase_price, purchased: product.purchased || "未采购", purchase_note: product.purchase_note || "" }); setPurchaseRecord(product); }}>采购填写</Button>
+                            <Button size="small" icon={<span style={{ fontSize: 13, fontWeight: 600, lineHeight: 1 }}>¥</span>} onClick={() => { purchaseForm.setFieldsValue({ purchase_price: product.purchase_price, purchased: product.purchased || "未采购", purchase_note: product.purchase_note || "" }); setPurchaseRecord(product); }}>采购填写</Button>
                           )}
                           {roles?.can_warehouse && (
                             <Button size="small" icon={<Warehouse size={13} />} onClick={() => { setWarehouseImages(product.six_face_images || []); setWarehouseNote(product.warehouse_note || ""); setWarehouseRecord(product); }}>仓库上传</Button>
@@ -1003,7 +1212,9 @@ const ProductDevelopmentBot: React.FC = () => {
             {detailRecord && (
               <div style={{ maxHeight: "72vh", overflowY: "auto", paddingRight: 6 }}>
                 {(() => {
-                  const imgs = ((detailRecord.designer_images || []).length > 0 ? detailRecord.designer_images! : detailRecord.purchase_images || [])
+                  const reviewText = detailRecord.image_review || "";
+                  const detailReviewed = reviewText.includes("通过") && !reviewText.includes("不通过");
+                  const imgs = (detailReviewed ? detailRecord.designer_images || [] : [])
                     .filter((u) => /^(https?:\/\/|\/)/i.test(u));
                   return imgs.length > 0 ? (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 }}>
@@ -1027,34 +1238,105 @@ const ProductDevelopmentBot: React.FC = () => {
                     <Descriptions.Item label="日期">{detailRecord.development_date || "-"}</Descriptions.Item>
                     <Descriptions.Item label="开发人员">{detailRecord.developer || "-"}</Descriptions.Item>
                     <Descriptions.Item label="关联店铺">{detailRecord.related_store || "-"}</Descriptions.Item>
+                    <Descriptions.Item label="产品编码">{detailRecord.product_code || "暂无"}</Descriptions.Item>
                   </Descriptions>
                 </DetailSection>
+
+                {(detailRecord.platform_items || []).length > 0 && (
+                  <DetailSection title="平台商品（产品库店铺对应）">
+                    <div style={{ border: "1px solid #f0f0f0", borderRadius: 6, overflow: "hidden" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1.4fr 1fr", background: "#fafafa", padding: "8px 12px", fontWeight: 600, fontSize: 13, color: "#475569" }}>
+                        <span>店铺</span><span>SKU</span><span>ASIN</span>
+                      </div>
+                      {(detailRecord.platform_items || []).map((it: { store?: string; sku?: string; asin?: string }, i: number) => (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.4fr 1.4fr 1fr", padding: "8px 12px", fontSize: 13, borderTop: i === 0 ? "none" : "1px solid #f0f0f0", color: "#334155" }}>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.store || "-"}</span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.sku || "-"}</span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.asin || "-"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </DetailSection>
+                )}
 
                 <DetailSection title="价格与采购">
                   <Descriptions column={2} size="small" bordered labelStyle={{ width: 110, color: "#64748b" }}>
                     <Descriptions.Item label="采购单价">{detailRecord.purchase_price == null ? "-" : `¥${Number(detailRecord.purchase_price).toFixed(2)}`}</Descriptions.Item>
-                    <Descriptions.Item label="是否采购">{detailRecord.purchased || "未采购"}</Descriptions.Item>
+                    <Descriptions.Item label="采购状态">
+                      <Space size={8}>
+                        <Tag color={purchasedTagColor(detailRecord.purchased)} style={{ margin: 0 }}>{detailRecord.purchased || "未采购"}</Tag>
+                        {(detailRecord.purchased || "未采购") === "未采购" && (
+                          <Button size="small" icon={<ShoppingCart size={13} />} loading={orderingId === detailRecord.record_id} onClick={() => handleCreatePurchaseOrder(detailRecord)}>
+                            采购
+                          </Button>
+                        )}
+                      </Space>
+                    </Descriptions.Item>
                     <Descriptions.Item label="采购备注" span={2}>{detailRecord.purchase_note || "-"}</Descriptions.Item>
                     <Descriptions.Item label="竞品ASIN" span={2}>{detailRecord.competitors || "-"}</Descriptions.Item>
-                    <Descriptions.Item label="采购链接" span={2}>
-                      {(detailRecord.purchase_links || []).length > 0 ? (
-                        <div>
-                          {detailRecord.purchase_links!.map((l, i) => (
-                            <a key={i} href={l} target="_blank" rel="noreferrer" style={{ display: "block", wordBreak: "break-all", lineHeight: 1.8 }}>{l}</a>
+                    {(detailRecord.store_quantities || []).length > 0 && (
+                      <Descriptions.Item label="店铺采购数量" span={2}>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {detailRecord.store_quantities!.map((s, i) => (
+                            <Tag key={i} style={{ margin: 0 }}>{s.store} × {s.quantity}</Tag>
                           ))}
                         </div>
-                      ) : "-"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="采购信息" span={2}>
-                      <div style={{ whiteSpace: "pre-wrap" }}>{detailRecord.purchase_info || "-"}</div>
-                    </Descriptions.Item>
+                      </Descriptions.Item>
+                    )}
                   </Descriptions>
+                  {(detailRecord.purchase_items || []).length > 0 ? (
+                    <div style={{ marginTop: 12 }}>
+                      <Text strong style={{ display: "block", marginBottom: 8, fontSize: 13 }}>采购链接 / 图片 / 信息（一一对应）</Text>
+                      {(detailRecord.purchase_items || []).map((it, i) => {
+                        const imgs = (it.images || []).filter((u) => /^(https?:\/\/|\/)/i.test(u));
+                        return (
+                          <div key={i} style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: "10px 14px", marginBottom: 8, background: "#fafbfc" }}>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                              <Tag color="blue">组 {i + 1}</Tag>
+                              {it.link ? (
+                                <a href={it.link} target="_blank" rel="noreferrer" style={{ wordBreak: "break-all", fontSize: 13 }}>{it.link}</a>
+                              ) : (
+                                <Text type="secondary" style={{ fontSize: 13 }}>无链接</Text>
+                              )}
+                            </div>
+                            {it.info && (
+                              <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 13, color: "#334155", marginBottom: imgs.length ? 8 : 0 }}>{it.info}</div>
+                            )}
+                            {imgs.length > 0 && (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                {imgs.map((u, j) => (
+                                  <img key={j} src={u} alt={`采购图${i + 1}-${j + 1}`} loading="lazy"
+                                    style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 6, background: "#f8fafc" }} />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <Descriptions column={1} size="small" bordered labelStyle={{ width: 110, color: "#64748b" }} style={{ marginTop: 12 }}>
+                      <Descriptions.Item label="采购链接">
+                        {(detailRecord.purchase_links || []).length > 0 ? (
+                          <div>
+                            {detailRecord.purchase_links!.map((l, i) => (
+                              <a key={i} href={l} target="_blank" rel="noreferrer" style={{ display: "block", wordBreak: "break-all", lineHeight: 1.8 }}>{l}</a>
+                            ))}
+                          </div>
+                        ) : "-"}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="采购信息">
+                        <div style={{ whiteSpace: "pre-wrap" }}>{detailRecord.purchase_info || "-"}</div>
+                      </Descriptions.Item>
+                    </Descriptions>
+                  )}
                 </DetailSection>
 
                 <DetailSection title="多语言资料">
                   <Descriptions column={1} size="small" bordered labelStyle={{ width: 110, color: "#64748b" }}>
-                    <Descriptions.Item label="德语标题">{detailRecord.de_title || "-"}</Descriptions.Item>
                     <Descriptions.Item label="德语关键词">{detailRecord.de_keywords || "-"}</Descriptions.Item>
+                    <Descriptions.Item label="英语关键词">{detailRecord.en_keywords || "-"}</Descriptions.Item>
+                    <Descriptions.Item label="澳洲关键词">{detailRecord.au_keywords || "-"}</Descriptions.Item>
                   </Descriptions>
                 </DetailSection>
 
@@ -1142,16 +1424,95 @@ const ProductDevelopmentBot: React.FC = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
-              <Form.Item name="de_title" label="德语标题">
-                <Input.TextArea rows={1} placeholder="德语商品标题" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
               <Form.Item name="de_keywords" label="德语关键词">
                 <Input.TextArea rows={1} placeholder="德语关键词，用逗号分隔" />
               </Form.Item>
             </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="en_keywords" label="英语关键词">
+                <Input.TextArea rows={1} placeholder="英语关键词，用逗号分隔" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="au_keywords" label="澳洲关键词">
+                <Input.TextArea rows={1} placeholder="澳洲关键词，用逗号分隔" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="site_owners" label="相关站点负责人员">
+                <Select
+                  mode="multiple"
+                  showSearch
+                  allowClear
+                  maxTagCount="responsive"
+                  placeholder="选择站点负责人员（可多选，筛选下方店铺选项）"
+                  options={siteOwnerOptions}
+                  optionFilterProp="label"
+                />
+              </Form.Item>
+            </Col>
           </Row>
+          <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 14, marginTop: 4 }}>
+            <Text strong style={{ display: "block", marginBottom: 10 }}>关联店铺分组与采购数量（选择分组一级，数量对应分组下所有店铺）</Text>
+            <Form.List name="store_rows">
+              {(storeFields, { add: addStore, remove: removeStore }) => (
+                <>
+                  {storeFields.map((sf) => (
+                    <div key={sf.key} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "flex-start" }}>
+                      <Form.Item name={[sf.name, "path"]} style={{ flex: 1, minWidth: 0, marginBottom: 0 }}>
+                        <Cascader options={editStoreOptions} showSearch placeholder="店铺分组" changeOnSelect={false} />
+                      </Form.Item>
+                      <Form.Item name={[sf.name, "quantity"]} style={{ width: 120, marginBottom: 0 }}>
+                        <InputNumber min={0} precision={0} placeholder="采购数量" style={{ width: "100%" }} />
+                      </Form.Item>
+                      {storeFields.length > 1 && (
+                        <Button type="text" danger icon={<MinusCircle size={15} />} onClick={() => removeStore(sf.name)} />
+                      )}
+                    </div>
+                  ))}
+                  <Button type="dashed" size="small" icon={<PlusCircle size={15} />} onClick={() => addStore({ path: undefined, quantity: undefined })}>
+                    添加店铺
+                  </Button>
+                </>
+              )}
+            </Form.List>
+          </div>
+          <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 14, marginTop: 14 }}>
+            <Text strong style={{ display: "block", marginBottom: 10 }}>采购链接 / 图片 / 信息（一一对应）</Text>
+            <Form.List name="purchase_items">
+              {(itemFields, { add: addItem, remove: removeItem }) => (
+                <>
+                  {itemFields.map((pf) => (
+                    <div key={pf.key} style={{ border: "1px solid #f1f5f9", borderRadius: 8, padding: "12px 14px 4px", marginBottom: 10, background: "#fafbfc" }}>
+                      <Form.Item name={[pf.name, "link"]} label={<Text type="secondary" style={{ fontSize: 12 }}>采购链接 {pf.name + 1}</Text>} style={{ marginBottom: 10 }}>
+                        <Input placeholder="粘贴采购链接（1688/淘宝等）" allowClear />
+                      </Form.Item>
+                      <Form.Item name={[pf.name, "images"]} label={<Text type="secondary" style={{ fontSize: 12 }}>对应采购图片（支持拖拽上传）</Text>} style={{ marginBottom: 10 }}>
+                        <ImagesUpload maxCount={9} placeholder="上传/拖入该链接的采购图片" />
+                      </Form.Item>
+                      <Form.Item name={[pf.name, "info"]} label={<Text type="secondary" style={{ fontSize: 12 }}>对应采购信息</Text>} style={{ marginBottom: 10 }}>
+                        <Input.TextArea rows={2} maxLength={2000} placeholder="该链接对应的供应商、交期、质量要求等信息" />
+                      </Form.Item>
+                      {itemFields.length > 1 && (
+                        <div style={{ textAlign: "right", paddingBottom: 6 }}>
+                          <Button type="text" danger size="small" icon={<MinusCircle size={15} />} onClick={() => removeItem(pf.name)}>删除该组</Button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <Button type="dashed" size="small" icon={<PlusCircle size={15} />} onClick={() => addItem({ link: "", images: [], info: "" })}>
+                    添加链接和图片
+                  </Button>
+                </>
+              )}
+            </Form.List>
+            <Form.Item name="purchase_info" label="采购信息" style={{ marginTop: 14 }}>
+              <Input.TextArea rows={3} maxLength={2000} showCount placeholder="供应商、交期、质量要求等采购信息" />
+            </Form.Item>
+            <Form.Item name="warehouse_note" label="仓库备注">
+              <Input.TextArea rows={2} placeholder="填写仓库备注" />
+            </Form.Item>
+          </div>
           <Form.Item name="reference_images" label="采购图片">
             <ImagesUpload maxCount={9} placeholder="上传图片" />
           </Form.Item>
@@ -1211,11 +1572,11 @@ const ProductDevelopmentBot: React.FC = () => {
         </div>
       </Modal>
 
-      {/* 采购填写弹窗 */}
+      {/* 采购填写弹窗：采购状态 + 生成采购单按钮 + 采购链接/图片/信息 + 采购单价/状态/备注 */}
       <Modal
         open={!!purchaseRecord}
         title={`采购填写 - ${purchaseRecord?.product_name_zh || purchaseRecord?.title || ""}`}
-        width={640}
+        width={720}
         okText="保存"
         cancelText="取消"
         confirmLoading={purchaseSaving}
@@ -1223,12 +1584,80 @@ const ProductDevelopmentBot: React.FC = () => {
         onCancel={() => setPurchaseRecord(null)}
         forceRender
       >
+        {purchaseRecord && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <Text strong style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 3, height: 14, background: "#1677ff", borderRadius: 2, display: "inline-block" }} />
+                采购链接信息
+              </Text>
+              <Space size={10}>
+                <Tag color={purchasedTagColor(purchaseRecord.purchased)} style={{ margin: 0, fontSize: 13, padding: "3px 12px" }}>
+                  {purchaseRecord.purchased || "未采购"}
+                </Tag>
+                {(purchaseRecord.purchased || "未采购") === "未采购" && (
+                  <Button
+                    icon={<ShoppingCart size={15} />}
+                    loading={orderingId === purchaseRecord.record_id}
+                    onClick={async () => {
+                      await handleCreatePurchaseOrder(purchaseRecord);
+                      setPurchaseRecord(null);
+                    }}
+                  >
+                    采购
+                  </Button>
+                )}
+              </Space>
+            </div>
+            {(purchaseRecord.store_quantities || []).length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>采购店铺 / 数量：</Text>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                  {purchaseRecord.store_quantities!.map((s, i) => (
+                    <Tag key={i} style={{ margin: 0 }}>{s.store} × {s.quantity}</Tag>
+                  ))}
+                </div>
+              </div>
+            )}
+            {(purchaseRecord.purchase_items || []).length > 0 ? (
+              (purchaseRecord.purchase_items || []).map((it, i) => (
+                <div key={i} style={{ border: "1px solid #f1f5f9", borderRadius: 8, padding: "8px 12px", marginBottom: 8, background: "#fafbfc" }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>采购组 {i + 1}</Text>
+                  {it.link ? (
+                    <div style={{ fontSize: 12, marginTop: 2 }}>
+                      <Text type="secondary">链接：</Text>
+                      <a href={it.link} target="_blank" rel="noreferrer" style={{ wordBreak: "break-all" }}>{it.link}</a>
+                    </div>
+                  ) : null}
+                  {((it.images || []).filter((u) => /^(https?:\/\/|\/)/i.test(u))).length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                      {(it.images || []).filter((u) => /^(https?:\/\/|\/)/i.test(u)).map((u, j) => (
+                        <img key={j} src={u} alt={`采购图${i + 1}-${j + 1}`} loading="lazy"
+                          style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 4, background: "#f8fafc" }}
+                          onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
+                      ))}
+                    </div>
+                  )}
+                  {it.info ? (
+                    <div style={{ fontSize: 12, color: "#334155", marginTop: 6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                      <Text type="secondary">信息：</Text>{it.info}
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            ) : purchaseRecord.purchase_info ? (
+              <div style={{ fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#334155" }}>{purchaseRecord.purchase_info}</div>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>暂无采购链接信息</Text>
+            )}
+          </div>
+        )}
         <Form form={purchaseForm} layout="vertical" onFinish={handlePurchaseSave}>
           <Form.Item name="purchase_price" label="采购单价" rules={[{ required: true, message: "请输入采购单价" }]}>
-            <InputNumber min={0} precision={2} addonBefore="$" style={{ width: "100%" }} />
+            <InputNumber min={0} precision={2} addonBefore="¥" style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item name="purchased" label="是否采购">
-            <Select options={PURCHASED_OPTIONS} />
+          <Form.Item name="purchased" hidden>
+            <Input />
           </Form.Item>
           <Form.Item name="purchase_note" label="采购备注">
             <Input.TextArea rows={3} maxLength={500} showCount placeholder="选填，如供应商、交期、质量要求等" />

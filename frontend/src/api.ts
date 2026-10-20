@@ -725,6 +725,7 @@ export const inventoryCountApi = {
 // ========== Store Groups API ==========
 export const storeGroupsApi = {
   getList: () => apiClient.get("/store-groups/"),
+  getTree: () => apiClient.get("/store-groups/tree"),
   getMyGroup: () => apiClient.get("/store-groups/my-group"),
   getGroupStores: (groupId: number) =>
     apiClient.get(`/store-groups/${groupId}/stores`),
@@ -1571,8 +1572,9 @@ export interface ProductDevelopmentPayload {
   seasonality?: string;
   competitors?: string;
   purchase_price?: number;
-  de_title?: string;
   de_keywords?: string;
+  en_keywords?: string;
+  au_keywords?: string;
   development_date?: string;
   reference_images?: string[];
   warehouse_note?: string;
@@ -1580,12 +1582,18 @@ export interface ProductDevelopmentPayload {
   related_store?: string;
   purchase_links?: string[];
   purchase_info?: string;
+  // 采购分组对应：[{link, images[], info}]
+  purchase_items?: { link?: string; images?: string[]; info?: string }[];
+  // 关联店铺采购数量对应：[{store, quantity}]
+  store_quantities?: { store: string; quantity: number }[];
 }
 
 export interface DevelopmentProject
   extends Omit<ProductDevelopmentPayload, "warehouse_note" | "site_owners"> {
   record_id: string;
   purchase_images: string[];
+  // 产品库平台商品对应（店铺/SKU/ASIN 列表）
+  platform_items?: { store?: string; sku?: string; asin?: string }[];
   purchased?: string;
   purchase_note?: string | null;
   product_code?: string | null;
@@ -1644,6 +1652,7 @@ export const developmentBotApi = {
     developer?: string;
     date?: string;
     status?: string;
+    missing?: string;
   }) => apiClient.get("/product-development/projects", { params }),
   getFilters: () => apiClient.get("/product-development/projects/filters"),
   getDetail: (record_id: string) =>
@@ -1686,6 +1695,15 @@ export const developmentBotApi = {
     notes?: string;
     items: { record_id: string; quantity: number; notes?: string }[];
   }) => apiClient.post("/product-development/projects/replenishment", data),
+  // 按店铺分组采购数量生成进销存采购单
+  createPurchaseOrder: (record_id: string) =>
+    apiClient.post(`/product-development/projects/${record_id}/purchase-order`),
+  // 回传飞书多维表（存在则修改，不存在则新增并回传记录ID）
+  pushToFeishu: (record_id: string) =>
+    apiClient.post(`/product-development/projects/${record_id}/push-to-feishu`),
+  // 美工图片批量迁移到 TOS（管理员，分批执行）
+  migrateDesignerImages: (batch = 100) =>
+    apiClient.post(`/product-development/designer-images/migrate-to-tos?batch=${batch}`),
 };
 
 // ========== AI 创作中心 API ==========
