@@ -80,21 +80,21 @@ def _merge_keywords(payload: ProductDevelopmentPayload) -> Optional[str]:
     return merged or None
 
 
-def _images_to_blob(images: Optional[List[str]]) -> Optional[bytes]:
+def _images_to_blob(images: Optional[List[str]]) -> Optional[str]:
+    """图片 URL 列表 -> 逗号分隔字符串（列已改为 TEXT 存储）"""
     if not images:
         return None
     joined = ",".join([i.strip() for i in images if i and i.strip()])
-    return joined.encode("utf-8") if joined else None
+    return joined or None
 
 
 def _blob_to_images(blob) -> List[str]:
+    """兼容 TEXT(str) 与历史 mediumblob(bytes) 两种存储"""
     if not blob:
         return []
-    try:
-        text = blob.decode("utf-8", errors="ignore")
-    except Exception:
-        return []
-    return [p.strip() for p in text.split(",") if p.strip()]
+    if isinstance(blob, bytes):
+        blob = blob.decode("utf-8", errors="ignore")
+    return [p.strip() for p in str(blob).split(",") if p.strip()]
 
 
 def _normalize_purchase_items(items: Optional[List[dict]]) -> Optional[List[dict]]:
@@ -150,9 +150,12 @@ def _generate_record_id(db: Session) -> str:
             return rid
 
 
-def _get_by_record_id(db: Session, record_id: str) -> Optional[AdProductInfo]:
-    """按业务副键 record_id 查询单条记录（表主键已改为自增 id）"""
-    return db.query(AdProductInfo).filter(AdProductInfo.record_id == record_id).first()
+def _get_by_record_id(db: Session, record_id: str, tenant_id: Optional[int] = None) -> Optional[AdProductInfo]:
+    """按业务副键 record_id 查询单条记录（表主键已改为自增 id）；传入 tenant_id 时做租户隔离"""
+    q = db.query(AdProductInfo).filter(AdProductInfo.record_id == record_id)
+    if tenant_id:
+        q = q.filter(AdProductInfo.tenant_id == tenant_id)
+    return q.first()
 
 
 # ==================== 部门 / 权限 / 通知辅助 ====================
@@ -182,7 +185,11 @@ def _can_view_all(db: Session, user: User) -> bool:
 
 
 def _apply_visibility_filter(query, db: Session, user: User):
-    """运营部门数据拆分：相关站点负责人员 / 开发人员 包含本人昵称或用户名才可见"""
+    """租户主副隔离：开发新品数据按 tenant_id 隔离，各账号只能看到本租户数据；
+    运营部门再做数据拆分（相关站点负责人员 / 开发人员 包含本人昵称或用户名才可见）"""
+    tid = getattr(user, "tenant_id", None)
+    if tid:
+        query = query.filter(AdProductInfo.tenant_id == tid)
     if _can_view_all(db, user):
         return query
     names = [n for n in {user.nickname or "", user.username or ""} if n]
@@ -404,7 +411,9 @@ async def list_projects(
     seasonality: Optional[str] = Query(None, description="季节性筛选"),
     developer: Optional[str] = Query(None, description="开发人员筛选"),
     date: Optional[str] = Query(None, description="日期筛选（YYYY-MM-DD）"),
-    status: Optional[str] = Query(None, description="待办筛选: purchase/six_face/designer/review/review_rejected/not_ordered"),
+    date_start: Optional[str] = Query(None, description="日期范围开始（YYYY-MM-DD）"),
+    date_end: Optional[str] = Query(None, description="日期范围结束（YYYY-MM-DD）"),
+    status: Optional[str] = Query(None, description="状态筛选: purchase/six_face/designer/review/review_rejected/reviewed/not_ordered/purchased"),
     missing: Optional[str] = Query(None, description="信息缺失筛选：字段 key，筛选出该字段为空的记录"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -413,16 +422,20 @@ async def list_projects(
     try:
         query = db.query(AdProductInfo)
         if search and search.strip():
+            # 搜索范围：产品中文名 + 平台商品的 ASIN/SKU（ad_product_info.product_code → products → platform_products）
             kw = f"%{search.strip()}%"
+            sub = text(
+                "SELECT p.product_code FROM products p "
+                "JOIN platform_products pp ON pp.product_id = p.id AND pp.deleted_at IS NULL AND pp.tenant_id = p.tenant_id "
+                "WHERE p.deleted_at IS NULL AND (pp.asin LIKE :kw OR pp.sku LIKE :kw) AND p.product_code != ''"
+            )
             query = query.filter(
                 or_(
-                    AdProductInfo.title_en.like(kw),
-                    AdProductInfo.keywords_en.like(kw),
                     AdProductInfo.product_name_zh.like(kw),
-                    AdProductInfo.de_title.like(kw),
-                    AdProductInfo.category.like(kw),
+                    AdProductInfo.product_code.in_(sub),
                 )
             )
+            query = query.params(kw=kw)
         if category:
             query = query.filter(AdProductInfo.category == category)
         if urgency:
@@ -433,7 +446,14 @@ async def list_projects(
         if developer:
             query = query.filter(AdProductInfo.developer == developer)
         if date:
-            query = query.filter(AdProductInfo.purchase_date == date)
+            # 日期范围筛选：支持 date=YYYY-MM-DD 或 date_start/date_end
+            if date_start or date_end:
+                if date_start:
+                    query = query.filter(AdProductInfo.purchase_date >= date_start)
+                if date_end:
+                    query = query.filter(AdProductInfo.purchase_date <= date_end)
+            else:
+                query = query.filter(AdProductInfo.purchase_date == date)
         if status == "purchase":
             query = query.filter(AdProductInfo.purchase_cost.is_(None))
         elif status == "six_face":
@@ -456,6 +476,16 @@ async def list_projects(
             query = query.filter(
                 or_(AdProductInfo.purchased.is_(None), AdProductInfo.purchased == "", AdProductInfo.purchased == "未采购"),
             )
+        elif status == "reviewed":
+            # 图片已审核：已上传产品图且审核通过（含「通过」且不含「不通过」）
+            query = query.filter(
+                AdProductInfo.designer_image.isnot(None),
+                AdProductInfo.image_review.like("%通过%"),
+                AdProductInfo.image_review.notlike("%不通过%"),
+            )
+        elif status == "purchased":
+            # 产品已采购：采购流程已标记为已采购
+            query = query.filter(AdProductInfo.purchased == "已采购")
         # 信息缺失筛选：指定字段为空的记录
         _MISSING_FIELD_FILTERS = {
             "title": AdProductInfo.title_en,
@@ -901,7 +931,7 @@ async def update_project(
 ):
     """更新开发新品记录（仅更新传入的字段）"""
     try:
-        item = _get_by_record_id(db, record_id)
+        item = _get_by_record_id(db, record_id, current_user.tenant_id)
         if not item:
             raise HTTPException(status_code=404, detail="记录不存在")
 
@@ -971,7 +1001,7 @@ async def delete_project(
 ):
     """删除开发新品记录（物理删除）"""
     try:
-        item = _get_by_record_id(db, record_id)
+        item = _get_by_record_id(db, record_id, current_user.tenant_id)
         if not item:
             raise HTTPException(status_code=404, detail="记录不存在")
         db.delete(item)
@@ -1065,7 +1095,7 @@ async def update_purchase(
     current_user: User = Depends(get_current_user),
 ):
     """采购部门填写采购单价、是否采购与采购备注"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     item.purchase_cost = payload.purchase_price
@@ -1088,7 +1118,7 @@ async def update_warehouse(
     current_user: User = Depends(get_current_user),
 ):
     """仓库部门上传六面图并填写仓库备注"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     if payload.six_face_images is not None:
@@ -1111,7 +1141,7 @@ async def upload_designer_image(
     current_user: User = Depends(get_current_user),
 ):
     """美工上传产品图片：自动生成完成图片日期，并推送管理层审核"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     item.designer_image = _images_to_blob(payload.images)
@@ -1143,7 +1173,7 @@ async def review_designer_image(
     current_user: User = Depends(get_current_user),
 ):
     """管理层审核产品图片，通过后开发机器人首页展示产品图片"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     item.image_review = "已通过" if payload.approved else "不通过请看评论"
@@ -1226,7 +1256,7 @@ async def create_replenishment_from_dev(
 
         count = 0
         for it in payload.items:
-            product = _get_by_record_id(db, it.record_id)
+            product = _get_by_record_id(db, it.record_id, current_user.tenant_id)
             if not product:
                 continue
             product_id = _resolve_product_id(db, current_user.tenant_id, product)
@@ -1260,7 +1290,7 @@ async def create_purchase_order_from_dev(
 ):
     """点击「采购」按钮：按店铺分组采购数量在进销存采购管理创建采购单（状态 draft）。
     明细：店铺分组 = 添加新品选择的分组，数量 = 采购数量，备注 = 采购备注（仓库备注）"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     if (item.purchased or "") == "已生成采购单":
@@ -1445,7 +1475,7 @@ async def get_project_doc(
 ):
     """读取记录对应飞书文档的内容（文本+图片按文档顺序，用于卡片悬停预览）"""
     try:
-        item = _get_by_record_id(db, record_id)
+        item = _get_by_record_id(db, record_id, current_user.tenant_id)
         if not item:
             raise HTTPException(status_code=404, detail="记录不存在")
         if not item.doc_link:
@@ -1565,9 +1595,12 @@ async def get_attachment_image(table_id: str, file_token: str):
 
 # ==================== 飞书多维表回传 / 美工图片迁移 TOS ====================
 
-# 开发新品多维表（与历史同步脚本一致）
-FEISHU_BASE_TOKEN = "Az8BbeLkBawI1IsqdQIcr75AnSN"
-FEISHU_DESIGN_TABLE_ID = "tblfOr6tUWIPFcDd"
+# 开发新品多维表（配置从 .env 读取，避免在业务代码中暴露）
+from config import get_settings as _get_settings
+
+_settings_dev = _get_settings()
+FEISHU_BASE_TOKEN = _settings_dev.FEISHU_DESIGN_BASE_TOKEN
+FEISHU_DESIGN_TABLE_ID = _settings_dev.FEISHU_DESIGN_TABLE_ID
 
 # 回传时跳过的数据库列（主键/系统列/二进制列单独处理）
 _PUSH_SKIP_COLUMNS = {
@@ -1664,7 +1697,7 @@ async def push_project_to_feishu(
     - 美工图片作为附件写入「美工图片/产品图片」附件字段"""
     from sqlalchemy.exc import IntegrityError
 
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     try:
@@ -1832,7 +1865,9 @@ async def _migrate_designer_batch(batch: int = 100) -> dict:
             """处理一条记录的全部代理图片，返回 (pid, new_urls, changed, migrated, failed)"""
             pid, rid, name_zh, purchase_date, blob = row
             try:
-                urls = [u.strip() for u in blob.decode("utf-8", errors="ignore").split(",") if u.strip()]
+                if isinstance(blob, bytes):
+                    blob = blob.decode("utf-8", errors="ignore")
+                urls = [u.strip() for u in str(blob).split(",") if u.strip()]
             except Exception:
                 return pid, None, False, 0, 0
             date_part = str(purchase_date or "").replace("-", "")[:8] or datetime.now().strftime("%Y%m%d")
@@ -1858,13 +1893,13 @@ async def _migrate_designer_batch(batch: int = 100) -> dict:
         async with _httpx.AsyncClient(timeout=60) as client:
             results = await asyncio.gather(*(migrate_record(row) for row in rows))
 
-        for (pid, _rid, new_urls, changed, rec_migrated, rec_failed), row in zip(results, rows):
+        for (pid, new_urls, changed, rec_migrated, rec_failed), row in zip(results, rows):
             scanned += 1
             migrated += rec_migrated
             failed += rec_failed
             if changed and new_urls:
                 db.execute(text("UPDATE ad_product_info SET designer_image = :img WHERE id = :pid"),
-                           {"img": ",".join(new_urls).encode("utf-8"), "pid": pid})
+                           {"img": ",".join(new_urls), "pid": pid})
                 db.commit()
 
         remaining = db.execute(remaining_q).scalar() or 0
@@ -1874,13 +1909,22 @@ async def _migrate_designer_batch(batch: int = 100) -> dict:
 
 
 async def auto_migrate_designer_images():
-    """服务启动后自动后台迁移多维表美工图片到 TOS，循环执行直到全部完成"""
+    """服务启动后自动后台迁移多维表美工图片到 TOS，循环执行直到全部完成。
+
+    可通过环境变量 DESIGNER_IMAGE_AUTO_MIGRATE=false 关闭；连续两批无进展时自动停止。
+    """
     global _MIGRATE_RUNNING
+    import os
     if _MIGRATE_RUNNING:
+        return
+    from config import get_settings
+    if get_settings().DESIGNER_IMAGE_AUTO_MIGRATE.strip().lower() in ("false", "0", "no"):
+        logger.info("美工图片 TOS 自动迁移已通过环境变量关闭")
         return
     _MIGRATE_RUNNING = True
     try:
         await asyncio.sleep(5)  # 等服务与 DB 就绪
+        no_progress_rounds = 0
         while True:
             try:
                 result = await _migrate_designer_batch(100)
@@ -1891,6 +1935,13 @@ async def auto_migrate_designer_images():
             if result.get("done"):
                 logger.info(f"美工图片已全部迁移到 TOS（最后一批迁移 {result.get('migrated', 0)} 张，失败 {result.get('failed', 0)} 张）")
                 break
+            if result.get("migrated", 0) == 0:
+                no_progress_rounds += 1
+                if no_progress_rounds >= 2:
+                    logger.warning(f"美工图片迁移连续 {no_progress_rounds} 批无进展，剩余 {result.get('remaining')} 条（均为无法下载的失效附件），自动任务已停止；可查看失败链接或手动处理")
+                    break
+            else:
+                no_progress_rounds = 0
             logger.info(f"美工图片自动迁移进行中：剩余 {result.get('remaining')} 条")
             await asyncio.sleep(1)
     finally:
@@ -1904,3 +1955,31 @@ async def migrate_designer_images_to_tos(
 ):
     """手动触发一批美工图片迁移（自动迁移已在服务启动时后台执行）"""
     return {"success": True, "data": await _migrate_designer_batch(batch)}
+
+
+@router.get("/designer-images/migrate-status")
+async def designer_migrate_status(current_user: User = Depends(get_current_admin_user)):
+    """美工图片 TOS 迁移进度（管理员）：剩余未迁移 / 总记录数"""
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        row = db.execute(text(
+            "SELECT COUNT(*) AS total, "
+            "SUM(designer_image LIKE '%attachment-image%') AS remaining, "
+            "SUM(designer_image LIKE '%tos-%') AS migrated "
+            "FROM ad_product_info WHERE designer_image IS NOT NULL AND designer_image != ''"
+        )).fetchone()
+        total = int(row[0] or 0)
+        remaining = int(row[1] or 0)
+        migrated = int(row[2] or 0)
+        return {
+            "success": True,
+            "data": {
+                "total": total,
+                "remaining": remaining,
+                "migrated": migrated,
+                "done": remaining == 0,
+            },
+        }
+    finally:
+        db.close()

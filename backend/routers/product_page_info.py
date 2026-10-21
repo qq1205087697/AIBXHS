@@ -970,8 +970,9 @@ async def submit_rating(
             "数据库ID": str(item.id),
         })
 
-    # 发送到飞书webhook
-    feishu_webhook_url = "https://pcn4p6l5do51.feishu.cn/base/automation/webhook/event/KgcgaTUPhwqeE9hB09CciwyLnrb"
+    # 发送到飞书webhook（地址从 .env 读取，避免在业务代码中暴露）
+    from config import get_settings as _get_settings
+    feishu_webhook_url = _get_settings().FEISHU_PAGE_INFO_WEBHOOK_URL
 
     try:
         async with httpx.AsyncClient() as client:
