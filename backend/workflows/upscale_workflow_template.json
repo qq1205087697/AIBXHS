@@ -20,12 +20,12 @@
       "empty_cache": true,
       "gc_collect": true
     },
-    "class_type": "VRAMDebug",
+    "class_type": "VRAM_Debug",
     "_meta": { "title": "VRAM Debug（超分前清理显存，卸载 H3 驻留模型）" }
   },
   "24": {
     "inputs": {
-      "图像": ["26", 0],
+      "图像": ["26", 1],
       "模型": "星光 2.6",
       "显存上限": 16,
       "放大倍数": 2,
