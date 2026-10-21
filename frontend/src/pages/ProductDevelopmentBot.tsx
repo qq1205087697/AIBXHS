@@ -94,14 +94,16 @@ const CATEGORY_OPTIONS = [
 
 const URGENCY_OPTIONS = ["一般", "十分紧急"].map((value) => ({ label: value, value }));
 
-// 待办状态筛选（与 KPI 卡片联动：?tab=purchase|six_face|designer|review）
+// 状态筛选（与 KPI 卡片联动：?tab=purchase|six_face|designer|review）
 const STATUS_FILTER_OPTIONS = [
   { label: "待填采购单价", value: "purchase" },
   { label: "待上传六面图", value: "six_face" },
   { label: "待上传产品图", value: "designer" },
   { label: "待审核产品图", value: "review" },
   { label: "美工未通过", value: "review_rejected" },
+  { label: "图片已审核", value: "reviewed" },
   { label: "待生成采购单", value: "not_ordered" },
+  { label: "产品已采购", value: "purchased" },
 ];
 
 // 信息缺失筛选：下拉选择缺失字段，筛选出该字段为空的商品
@@ -386,6 +388,7 @@ const ProductDevelopmentBot: React.FC = () => {
   const [items, setItems] = useState<DevelopmentProject[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -514,7 +517,7 @@ const ProductDevelopmentBot: React.FC = () => {
   const [urgencyFilter, setUrgencyFilter] = useState<string>();
   const [seasonalityFilter, setSeasonalityFilter] = useState<string>();
   const [developerFilter, setDeveloperFilter] = useState<string>();
-  const [dateFilter, setDateFilter] = useState<dayjs.Dayjs | null>(null);
+  const [dateFilter, setDateFilter] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null] | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>();
   const [missingFilter, setMissingFilter] = useState<string>();
   const [filterOptions, setFilterOptions] = useState<{
@@ -547,13 +550,14 @@ const ProductDevelopmentBot: React.FC = () => {
     try {
       const res = await developmentBotApi.list({
         page: targetPage,
-        page_size: PAGE_SIZE,
+        page_size: pageSize,
         search: targetSearch || undefined,
         category: categoryFilter,
         urgency: urgencyFilter,
         seasonality: seasonalityFilter,
         developer: developerFilter,
-        date: dateFilter ? dateFilter.format("YYYY-MM-DD") : undefined,
+        date_start: dateFilter?.[0] ? dateFilter[0].format("YYYY-MM-DD") : undefined,
+        date_end: dateFilter?.[1] ? dateFilter[1].format("YYYY-MM-DD") : undefined,
         status: statusFilter,
         missing: missingFilter,
       });
@@ -567,12 +571,12 @@ const ProductDevelopmentBot: React.FC = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
+  }, [page, pageSize, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
 
   React.useEffect(() => {
     fetchData(page, search);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
+  }, [page, pageSize, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
 
   // 搜索防抖
   React.useEffect(() => {
@@ -957,7 +961,7 @@ const ProductDevelopmentBot: React.FC = () => {
               <Input
                 allowClear
                 prefix={<Search size={16} />}
-                placeholder="搜索英文标题、关键词、中文名称、类目"
+                placeholder="搜索 ASIN / SKU / 中文名"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
                 style={{ width: 250 }}
@@ -1000,15 +1004,15 @@ const ProductDevelopmentBot: React.FC = () => {
                 optionFilterProp="label"
                 style={{ width: 130 }}
               />
-              <DatePicker
-                placeholder="日期"
+              <DatePicker.RangePicker
+                placeholder={["开始日期", "结束日期"]}
                 value={dateFilter}
                 onChange={(v) => { setDateFilter(v); setPage(1); }}
                 allowClear
-                style={{ width: 130 }}
+                style={{ width: 250 }}
               />
               <Select
-                placeholder="待办状态"
+                placeholder="状态筛选"
                 options={STATUS_FILTER_OPTIONS}
                 value={statusFilter}
                 onChange={(v) => { setStatusFilter(v); setPage(1); }}
@@ -1352,9 +1356,24 @@ const ProductDevelopmentBot: React.FC = () => {
             )}
           </Modal>
 
-          {total > PAGE_SIZE && (
+          {total > 0 && (
             <div style={{ display: "flex", justifyContent: "center", marginTop: 24 }}>
-              <Pagination current={page} pageSize={PAGE_SIZE} total={total} onChange={(p) => setPage(p)} showTotal={(t) => `共 ${t} 条`} />
+              <Pagination
+                current={page}
+                pageSize={pageSize}
+                total={total}
+                showSizeChanger
+                pageSizeOptions={[12, 24, 48, 96]}
+                showTotal={(t) => `共 ${t} 条`}
+                onChange={(p, size) => {
+                  if (size !== pageSize) {
+                    setPageSize(size);
+                    setPage(1);
+                  } else {
+                    setPage(p);
+                  }
+                }}
+              />
             </div>
           )}
         </Spin>

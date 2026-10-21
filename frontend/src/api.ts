@@ -1651,6 +1651,8 @@ export const developmentBotApi = {
     seasonality?: string;
     developer?: string;
     date?: string;
+    date_start?: string;
+    date_end?: string;
     status?: string;
     missing?: string;
   }) => apiClient.get("/product-development/projects", { params }),

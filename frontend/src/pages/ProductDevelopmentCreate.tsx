@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Cascader,
+  ConfigProvider,
   Col,
   DatePicker,
   Descriptions,
@@ -342,7 +343,8 @@ const ProductDevelopmentCreate: React.FC = () => {
   if (warehouseRecordId) {
     return (
       <div style={{ height: "100%", overflowY: "auto", background: "#f5f7fb" }}>
-        <div style={{ padding: "24px 28px 40px", maxWidth: 900, margin: "0 auto" }}>
+      <ConfigProvider theme={{ token: { fontSize: 15 } }}>
+      <div style={{ padding: "24px 32px 40px", maxWidth: 1200, margin: "0 auto", fontSize: 15 }}>
           <Space direction="vertical" size={4} style={{ marginBottom: 20 }}>
             <Button type="link" icon={<ArrowLeft size={16} />} onClick={() => navigate("/development")} style={{ padding: 0 }}>返回新品记录</Button>
             <Title level={2} style={{ margin: 0 }}>上传六面图与仓库备注</Title>
@@ -374,14 +376,16 @@ const ProductDevelopmentCreate: React.FC = () => {
             </Card>
           )}
         </div>
+      </ConfigProvider>
       </div>
     );
   }
 
   // ============ 批量添加新品模式 ============
   return (
+    <ConfigProvider theme={{ token: { fontSize: 15 } }}>
     <div style={{ height: "100%", overflowY: "auto", background: "#f5f7fb" }}>
-      <div style={{ padding: "24px 28px 40px", maxWidth: 1440, margin: "0 auto" }}>
+      <div style={{ padding: "24px 32px 40px", maxWidth: 1800, margin: "0 auto", fontSize: 15 }}>
         <Space direction="vertical" size={4} style={{ marginBottom: 20 }}>
           <Button type="link" icon={<ArrowLeft size={16} />} onClick={() => navigate("/development")} style={{ padding: 0 }}>返回新品记录</Button>
           <Title level={2} style={{ margin: 0 }}>批量添加新品</Title>
@@ -695,6 +699,7 @@ const ProductDevelopmentCreate: React.FC = () => {
         </Form>
       </div>
     </div>
+    </ConfigProvider>
   );
 };
 
