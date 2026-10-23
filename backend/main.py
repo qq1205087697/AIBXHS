@@ -228,11 +228,13 @@ async def startup_event():
 
     try:
         import asyncio as _asyncio
-        from routers.product_development import auto_migrate_designer_images
+        from routers.product_development import auto_migrate_designer_images, auto_migrate_sixface_images
         _asyncio.create_task(auto_migrate_designer_images())
         logger.info("美工图片 TOS 自动迁移任务已启动")
+        _asyncio.create_task(auto_migrate_sixface_images())
+        logger.info("六面图 TOS 自动迁移任务已启动")
     except Exception as e:
-        logger.error(f"启动美工图片自动迁移任务失败: {e}")
+        logger.error(f"启动图片自动迁移任务失败: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
