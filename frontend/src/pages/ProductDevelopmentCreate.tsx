@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Cascader,
+  ConfigProvider,
   Col,
   DatePicker,
   Descriptions,
@@ -193,13 +194,46 @@ const ProductDevelopmentCreate: React.FC = () => {
     setImporting(true);
     setImportResult(null);
     try {
-      const res = await developmentBotApi.importProjects(file);
-      const data = res.data?.data || { created: 0, errors: [] };
-      setImportResult(data);
-      if (data.created > 0) message.success(`成功导入 ${data.created} 条新品`);
-      else message.warning("没有导入任何记录，请检查模板内容");
+      // 解析模板为草稿行，填入表单供编辑确认后再保存发布（不入库、不推送通知）
+      const res = await developmentBotApi.parseImportProjects(file);
+      const data = res.data?.data || { rows: [], failed: 0, errors: [] };
+      if (data.failed > 0) {
+        setImportResult({ created: 0, failed: data.failed, errors: data.errors || [] });
+        message.warning(`${data.errors?.length || 0} 行校验未通过，已跳过；其余将填入表单`);
+      }
+      const rows = (data.rows || []) as any[];
+      if (rows.length === 0) {
+        if (data.failed === 0) message.warning("模板中没有可导入的数据行");
+        return false;
+      }
+      const mapped: ProductFormRow[] = rows.map((r) => ({
+        title: r.title || "",
+        product_title: r.product_title || "",
+        product_name_zh: r.product_name_zh || "",
+        category: r.category,
+        store_rows: (r.store_quantities || []).map((s: any) => ({ path: [s.store], quantity: s.quantity || undefined })),
+        purchase_items: (r.purchase_items || []).map((it: any) => ({ link: it.link || "", images: [], info: it.info || "" })),
+        purchase_info: "",
+        urgency: r.urgency || "一般",
+        seasonality: r.seasonality || "日常",
+        competitors: r.competitors || "",
+        purchase_price: r.purchase_price ?? undefined,
+        selling_price: undefined,
+        de_keywords: r.de_keywords || "",
+        en_keywords: r.en_keywords || "",
+        au_keywords: r.au_keywords || "",
+        development_date: r.development_date ? dayjs(r.development_date) : dayjs(),
+        reference_images: [],
+        warehouse_note: r.warehouse_note || "",
+        site_owners: r.site_owners
+          ? String(r.site_owners).split(/[,，、]/).map((s: string) => s.trim()).filter(Boolean)
+          : [],
+      }));
+      form.setFieldsValue({ products: mapped });
+      setImportOpen(false);
+      message.success(`已解析 ${rows.length} 条新品草稿，请在表单中检查编辑后保存发布`);
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || "导入失败，请检查文件格式");
+      message.error(e?.response?.data?.detail || "解析失败，请检查文件格式");
     } finally {
       setImporting(false);
     }
@@ -342,7 +376,8 @@ const ProductDevelopmentCreate: React.FC = () => {
   if (warehouseRecordId) {
     return (
       <div style={{ height: "100%", overflowY: "auto", background: "#f5f7fb" }}>
-        <div style={{ padding: "24px 28px 40px", maxWidth: 900, margin: "0 auto" }}>
+      <ConfigProvider theme={{ token: { fontSize: 15 } }}>
+      <div style={{ padding: "24px 32px 40px", maxWidth: 1200, margin: "0 auto", fontSize: 15 }}>
           <Space direction="vertical" size={4} style={{ marginBottom: 20 }}>
             <Button type="link" icon={<ArrowLeft size={16} />} onClick={() => navigate("/development")} style={{ padding: 0 }}>返回新品记录</Button>
             <Title level={2} style={{ margin: 0 }}>上传六面图与仓库备注</Title>
@@ -374,14 +409,16 @@ const ProductDevelopmentCreate: React.FC = () => {
             </Card>
           )}
         </div>
+      </ConfigProvider>
       </div>
     );
   }
 
   // ============ 批量添加新品模式 ============
   return (
+    <ConfigProvider theme={{ token: { fontSize: 15 } }}>
     <div style={{ height: "100%", overflowY: "auto", background: "#f5f7fb" }}>
-      <div style={{ padding: "24px 28px 40px", maxWidth: 1440, margin: "0 auto" }}>
+      <div style={{ padding: "24px 32px 40px", maxWidth: 1800, margin: "0 auto", fontSize: 15 }}>
         <Space direction="vertical" size={4} style={{ marginBottom: 20 }}>
           <Button type="link" icon={<ArrowLeft size={16} />} onClick={() => navigate("/development")} style={{ padding: 0 }}>返回新品记录</Button>
           <Title level={2} style={{ margin: 0 }}>批量添加新品</Title>
@@ -522,10 +559,10 @@ const ProductDevelopmentCreate: React.FC = () => {
                                     </Form.Item>
                                     <Form.Item
                                       name={[pf.name, "images"]}
-                                      label={<Space size={4}><ImagePlus size={14} /><Text type="secondary" style={{ fontSize: 12 }}>对应采购图片（支持拖拽上传）</Text></Space>}
+                                      label={<Space size={4}><ImagePlus size={14} /><Text type="secondary" style={{ fontSize: 12 }}>对应采购图片（支持拖拽/粘贴上传）</Text></Space>}
                                       style={{ marginBottom: 10 }}
                                     >
-                                      <ImagesUpload maxCount={9} placeholder="上传/拖入该链接的采购图片" />
+                                      <ImagesUpload maxCount={9} placeholder="上传/拖入/粘贴该链接的采购图片" />
                                     </Form.Item>
                                     <Form.Item
                                       name={[pf.name, "info"]}
@@ -635,7 +672,7 @@ const ProductDevelopmentCreate: React.FC = () => {
                 下载导入新品模板
               </Button>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                模板中类目、季节性、紧急度、关联店铺列已带下拉选项；一行一条新品，上传后自动批量创建并推送部门提醒。
+                模板中类目、季节性、紧急度、关联店铺列已带下拉选项；一行一条新品。关联店铺支持「分组×数量」多组（顿号分隔，如 美东×100、美西×50）；采购链接/采购信息可填多行，按行一一对应成组。上传解析后填入下方表单，检查编辑再保存发布（不会直接入库）。
               </Text>
               <Upload.Dragger
                 accept=".xlsx"
@@ -695,6 +732,7 @@ const ProductDevelopmentCreate: React.FC = () => {
         </Form>
       </div>
     </div>
+    </ConfigProvider>
   );
 };
 

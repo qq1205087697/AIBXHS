@@ -28,8 +28,24 @@ class Settings(BaseSettings):
     FEISHU_INVENTORY_TABLE_ID: str = ""
     FEISHU_REVIEW_BASE_TOKEN: str = ""
     FEISHU_REVIEW_TABLE_ID: str = ""
+    # 开发机器人：新品多维表（回传/美工图片附件）
+    FEISHU_DESIGN_BASE_TOKEN: str = ""
+    FEISHU_DESIGN_TABLE_ID: str = ""
+    # 飞书多维表同步服务（独立应用 + 数据表）
+    FEISHU_SYNC_APP_ID: str = ""
+    FEISHU_SYNC_APP_SECRET: str = ""
+    FEISHU_SYNC_BASE_TOKEN: str = ""
+    FEISHU_SYNC_TABLE_ID: str = ""
+    # 飞书 webhook - 邮件机器人自动化
+    FEISHU_EMAIL_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 产品页信息自动化
+    FEISHU_PAGE_INFO_WEBHOOK_URL: str = ""
     # 飞书 webhook - 开广告提交地址
     FEISHU_AD_WEBHOOK_URL: str = ""
+    # 美工图片 TOS 自动迁移开关（false 关闭启动时自动迁移）
+    DESIGNER_IMAGE_AUTO_MIGRATE: str = "true"
+    # 六面图 TOS 自动迁移开关（false 关闭启动时自动迁移）
+    SIXFACE_IMAGE_AUTO_MIGRATE: str = "true"
     # 飞书 webhook - 编辑基础信息提交地址
     FEISHU_EDIT_WEBHOOK_URL: str = ""
     # 飞书 webhook - 一键优化提交地址

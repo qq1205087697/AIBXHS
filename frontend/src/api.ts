@@ -1651,6 +1651,8 @@ export const developmentBotApi = {
     seasonality?: string;
     developer?: string;
     date?: string;
+    date_start?: string;
+    date_end?: string;
     status?: string;
     missing?: string;
   }) => apiClient.get("/product-development/projects", { params }),
@@ -1676,6 +1678,13 @@ export const developmentBotApi = {
     const form = new FormData();
     form.append("file", file);
     return apiClient.post("/product-development/import-projects", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  parseImportProjects: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.post("/product-development/import-projects/parse", form, {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },

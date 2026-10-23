@@ -60,7 +60,7 @@ import { useAuth } from "../contexts/AuthContext";
 import ImagesUpload from "../components/ImagesUpload";
 
 const { Title, Text } = Typography;
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 10;
 
 // 卡片操作栏图标按钮统一样式
 const CardOpBtnStyle = () => (
@@ -94,14 +94,17 @@ const CATEGORY_OPTIONS = [
 
 const URGENCY_OPTIONS = ["一般", "十分紧急"].map((value) => ({ label: value, value }));
 
-// 待办状态筛选（与 KPI 卡片联动：?tab=purchase|six_face|designer|review）
+// 状态筛选（与 KPI 卡片联动：?tab=purchase|six_face|designer|review）
 const STATUS_FILTER_OPTIONS = [
   { label: "待填采购单价", value: "purchase" },
   { label: "待上传六面图", value: "six_face" },
+  { label: "已上传六面图", value: "six_face_uploaded" },
   { label: "待上传产品图", value: "designer" },
   { label: "待审核产品图", value: "review" },
   { label: "美工未通过", value: "review_rejected" },
+  { label: "图片已审核", value: "reviewed" },
   { label: "待生成采购单", value: "not_ordered" },
+  { label: "产品已采购", value: "purchased" },
 ];
 
 // 信息缺失筛选：下拉选择缺失字段，筛选出该字段为空的商品
@@ -199,7 +202,7 @@ const DetailSection: React.FC<{ title: string; children: React.ReactNode }> = ({
 );
 
 // 飞书文档/采购详情按钮：点击弹窗分三段展示（文档链接/采购图片/采购信息）；无文档链接时按记录字段显示
-const DocButton: React.FC<{ record: DevelopmentProject }> = ({ record }) => {
+const DocButton: React.FC<{ record: DevelopmentProject; canViewPurchase: boolean }> = ({ record, canViewPurchase }) => {
   const [open, setOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -259,7 +262,10 @@ const DocButton: React.FC<{ record: DevelopmentProject }> = ({ record }) => {
       return <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><Spin /></div>;
     }
     if (!hasDocLink) {
-      // 文档链接为空：按新品填写的采购链接/采购图片/采购信息字段显示
+      // 文档链接为空：按新品填写的采购链接/采购图片/采购信息字段显示（仅采购部与管理员可见）
+      if (!canViewPurchase) {
+        return <Text type="secondary" style={{ fontSize: 13 }}>采购信息仅采购部与管理员可见</Text>;
+      }
       return (
         <>
           <Section label="采购链接">
@@ -386,6 +392,7 @@ const ProductDevelopmentBot: React.FC = () => {
   const [items, setItems] = useState<DevelopmentProject[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -458,6 +465,8 @@ const ProductDevelopmentBot: React.FC = () => {
   const [designerSaving, setDesignerSaving] = useState(false);
   const [reviewRecord, setReviewRecord] = useState<DevelopmentProject | null>(null);
   const [detailRecord, setDetailRecord] = useState<DevelopmentProject | null>(null);
+  // 采购信息可见性：仅采购部门与管理员（查看详情里的采购单价/链接/图片/信息/备注）
+  const canViewPurchase = !!(roles?.can_purchase || roles?.is_admin);
   const [reviewSaving, setReviewSaving] = useState(false);
 
   const [editing, setEditing] = useState<DevelopmentProject | null>(null);
@@ -514,9 +523,9 @@ const ProductDevelopmentBot: React.FC = () => {
   const [urgencyFilter, setUrgencyFilter] = useState<string>();
   const [seasonalityFilter, setSeasonalityFilter] = useState<string>();
   const [developerFilter, setDeveloperFilter] = useState<string>();
-  const [dateFilter, setDateFilter] = useState<dayjs.Dayjs | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>();
-  const [missingFilter, setMissingFilter] = useState<string>();
+  const [dateFilter, setDateFilter] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null] | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string[]>();
+  const [missingFilter, setMissingFilter] = useState<string[]>();
   const [filterOptions, setFilterOptions] = useState<{
     categories: string[];
     urgencies: string[];
@@ -547,15 +556,16 @@ const ProductDevelopmentBot: React.FC = () => {
     try {
       const res = await developmentBotApi.list({
         page: targetPage,
-        page_size: PAGE_SIZE,
+        page_size: pageSize,
         search: targetSearch || undefined,
         category: categoryFilter,
         urgency: urgencyFilter,
         seasonality: seasonalityFilter,
         developer: developerFilter,
-        date: dateFilter ? dateFilter.format("YYYY-MM-DD") : undefined,
-        status: statusFilter,
-        missing: missingFilter,
+        date_start: dateFilter?.[0] ? dateFilter[0].format("YYYY-MM-DD") : undefined,
+        date_end: dateFilter?.[1] ? dateFilter[1].format("YYYY-MM-DD") : undefined,
+        status: statusFilter && statusFilter.length ? statusFilter.join(",") : undefined,
+        missing: missingFilter && missingFilter.length ? missingFilter.join(",") : undefined,
       });
       if (res.data?.success) {
         setItems(res.data.data?.items || []);
@@ -567,12 +577,12 @@ const ProductDevelopmentBot: React.FC = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
+  }, [page, pageSize, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
 
   React.useEffect(() => {
     fetchData(page, search);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
+  }, [page, pageSize, search, categoryFilter, urgencyFilter, seasonalityFilter, developerFilter, dateFilter, statusFilter, missingFilter]);
 
   // 搜索防抖
   React.useEffect(() => {
@@ -627,7 +637,7 @@ const ProductDevelopmentBot: React.FC = () => {
     const tab = searchParams.get("tab");
     if (!record && !tab) return;
     if (tab && !record) {
-      if (STATUS_FILTER_OPTIONS.some((o) => o.value === tab)) setStatusFilter(tab);
+      if (STATUS_FILTER_OPTIONS.some((o) => o.value === tab)) setStatusFilter([tab]);
       setSearchParams({}, { replace: true });
       return;
     }
@@ -949,7 +959,6 @@ const ProductDevelopmentBot: React.FC = () => {
             <div style={{ width: 44, height: 44, borderRadius: 12, display: "grid", placeItems: "center", background: "#e0e7ff", color: "#4338ca" }}><Rocket size={23} /></div>
             <div>
               <Title level={2} style={{ margin: 0 }}>开发机器人</Title>
-              <Text type="secondary">连接产品开发数据库（ad_product_info），支持查询、编辑与删除</Text>
             </div>
           </Space>
           <div style={{ marginTop: 22, display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
@@ -957,7 +966,7 @@ const ProductDevelopmentBot: React.FC = () => {
               <Input
                 allowClear
                 prefix={<Search size={16} />}
-                placeholder="搜索英文标题、关键词、中文名称、类目"
+                placeholder="搜索 ASIN / SKU / 中文名"
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}
                 style={{ width: 250 }}
@@ -1000,30 +1009,34 @@ const ProductDevelopmentBot: React.FC = () => {
                 optionFilterProp="label"
                 style={{ width: 130 }}
               />
-              <DatePicker
-                placeholder="日期"
+              <DatePicker.RangePicker
+                placeholder={["开始日期", "结束日期"]}
                 value={dateFilter}
                 onChange={(v) => { setDateFilter(v); setPage(1); }}
                 allowClear
-                style={{ width: 130 }}
+                style={{ width: 250 }}
               />
               <Select
-                placeholder="待办状态"
+                placeholder="状态筛选"
                 options={STATUS_FILTER_OPTIONS}
+                mode="multiple"
                 value={statusFilter}
                 onChange={(v) => { setStatusFilter(v); setPage(1); }}
                 allowClear
-                style={{ width: 140 }}
+                maxTagCount={2}
+                style={{ width: 240 }}
               />
               <Select
                 placeholder="信息缺失"
                 options={MISSING_FIELD_OPTIONS}
+                mode="multiple"
                 value={missingFilter}
                 onChange={(v) => { setMissingFilter(v); setPage(1); }}
                 allowClear
                 showSearch
                 optionFilterProp="label"
-                style={{ width: 150 }}
+                maxTagCount={2}
+                style={{ width: 220 }}
               />
               <Button
                 icon={<RotateCcw size={15} />}
@@ -1075,6 +1088,7 @@ const ProductDevelopmentBot: React.FC = () => {
                 // 只显示美工图片；未审核一律不显示图片
                 const displayImages = reviewed ? product.designer_images || [] : [];
                 const hasRoleAction = roles?.can_purchase || roles?.can_warehouse || roles?.can_design || roles?.can_review;
+                const devInfo = [product.developer, product.development_date].filter(Boolean).join(" · ") || "-";
                 return (
                 <div key={product.record_id}>
                   <Card
@@ -1093,12 +1107,14 @@ const ProductDevelopmentBot: React.FC = () => {
                         <Tooltip title="回传飞书多维表（已存在则修改，否则新增并回传记录ID）">
                           <Button className="card-op-btn" type="text" icon={<Rocket size={16} />} loading={pushingId === product.record_id} onClick={() => handlePushToFeishu(product)} />
                         </Tooltip>
-                        <DocButton record={product} />
-                        <Popconfirm title="确认删除这条新品记录？" description="删除后不可恢复" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => handleDelete(product)}>
-                          <Tooltip title="删除">
-                            <Button className="card-op-btn" type="text" danger icon={<Trash2 size={16} />} />
-                          </Tooltip>
-                        </Popconfirm>
+                        <DocButton record={product} canViewPurchase={canViewPurchase} />
+                        {roles?.is_admin && (
+                          <Popconfirm title="确认删除这条新品记录？" description="删除后不可恢复" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => handleDelete(product)}>
+                            <Tooltip title="删除（仅管理员）">
+                              <Button className="card-op-btn" type="text" danger icon={<Trash2 size={16} />} />
+                            </Tooltip>
+                          </Popconfirm>
+                        )}
                       </div>,
                     ]}
                   >
@@ -1114,26 +1130,27 @@ const ProductDevelopmentBot: React.FC = () => {
                           : <Tag color="orange" style={{ position: "absolute", right: 12, top: 10, margin: 0 }}>未审核</Tag>}
                     </div>
                     <div style={{ padding: 16 }}>
-                      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>{product.category || "-"}</Text>
-                            {product.product_code
-                              ? <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>{product.product_code}</Tag>
-                              : <Tag style={{ margin: 0, fontSize: 11, color: "#94a3b8", borderColor: "#e2e8f0", background: "#f8fafc" }}>产品编码：暂无</Tag>}
-                          </div>
-                          <Text strong ellipsis={{ tooltip: product.product_name_zh }} style={{ display: "block", marginTop: 6, minWidth: 0, fontSize: 15 }}>{product.product_name_zh || "-"}</Text>
-                        </div>
-                        {product.urgency && <Tag color={urgencyTagColor(product.urgency)}>{product.urgency}</Tag>}
-                        <Tag color={purchasedTagColor(product.purchased)} style={{ margin: 0 }}>{product.purchased || "未采购"}</Tag>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Text strong ellipsis={{ tooltip: product.product_name_zh }} style={{ flex: 1, minWidth: 0, fontSize: 14, lineHeight: "22px", color: "#1e293b" }}>{product.product_name_zh || "-"}</Text>
+                        <Space size={4} style={{ flexShrink: 0 }}>
+                          {product.urgency && <Tag color={urgencyTagColor(product.urgency)} style={{ margin: 0 }}>{product.urgency}</Tag>}
+                          <Tag color={purchasedTagColor(product.purchased)} style={{ margin: 0 }}>{product.purchased || "未采购"}</Tag>
+                        </Space>
                       </div>
 
-                      {product.purchase_note && (
-                        <div style={{ marginTop: 8, padding: "6px 10px", background: "#fff7e6", border: "1px solid #ffd591", borderRadius: 4, fontSize: 12, color: "#d46b08" }}>
-                          <Text type="secondary" style={{ fontSize: 12, color: "#d46b08" }}>采购备注：</Text>
-                          <span style={{ wordBreak: "break-all" }}>{product.purchase_note}</span>
-                        </div>
-                      )}
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                        {product.product_code
+                          ? <Tag color="blue" style={{ margin: 0, fontSize: 11, lineHeight: "18px" }}>{product.product_code}</Tag>
+                          : <Tag style={{ margin: 0, fontSize: 11, lineHeight: "18px", color: "#94a3b8", borderColor: "#e2e8f0", background: "#f8fafc" }}>产品编码：暂无</Tag>}
+                        {product.category && <Tag style={{ margin: 0, fontSize: 11, lineHeight: "18px", color: "#64748b", borderColor: "#e2e8f0", background: "#f8fafc" }}>{product.category}</Tag>}
+                      </div>
+
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8 }}>
+                        <Text type="secondary" style={{ fontSize: 12, color: "#64748b", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{devInfo}</Text>
+                        {canViewPurchase && product.purchase_price != null && (
+                          <Text strong style={{ fontSize: 12, color: "#1e293b", flexShrink: 0 }}>¥{Number(product.purchase_price).toFixed(2)}</Text>
+                        )}
+                      </div>
 
                       {hasRoleAction && (
                         <Space wrap size={6} style={{ marginTop: 10 }}>
@@ -1156,10 +1173,10 @@ const ProductDevelopmentBot: React.FC = () => {
                         type="link"
                         size="small"
                         icon={<Info size={14} />}
-                        style={{ padding: 0, marginTop: 12, height: "auto" }}
+                        style={{ padding: 0, marginTop: 12, height: "auto", fontSize: 12 }}
                         onClick={() => setDetailRecord(product)}
                       >
-                        查看详细信息
+                        查看详情
                       </Button>
                     </div>
                   </Card>
@@ -1261,18 +1278,19 @@ const ProductDevelopmentBot: React.FC = () => {
 
                 <DetailSection title="价格与采购">
                   <Descriptions column={2} size="small" bordered labelStyle={{ width: 110, color: "#64748b" }}>
-                    <Descriptions.Item label="采购单价">{detailRecord.purchase_price == null ? "-" : `¥${Number(detailRecord.purchase_price).toFixed(2)}`}</Descriptions.Item>
-                    <Descriptions.Item label="采购状态">
+                    <Descriptions.Item label="采购状态" span={2}>
                       <Space size={8}>
                         <Tag color={purchasedTagColor(detailRecord.purchased)} style={{ margin: 0 }}>{detailRecord.purchased || "未采购"}</Tag>
-                        {(detailRecord.purchased || "未采购") === "未采购" && (
+                        {canViewPurchase && (detailRecord.purchased || "未采购") === "未采购" && (
                           <Button size="small" icon={<ShoppingCart size={13} />} loading={orderingId === detailRecord.record_id} onClick={() => handleCreatePurchaseOrder(detailRecord)}>
                             采购
                           </Button>
                         )}
                       </Space>
                     </Descriptions.Item>
-                    <Descriptions.Item label="采购备注" span={2}>{detailRecord.purchase_note || "-"}</Descriptions.Item>
+                    {canViewPurchase && (
+                      <Descriptions.Item label="采购备注" span={2}>{detailRecord.purchase_note || "-"}</Descriptions.Item>
+                    )}
                     <Descriptions.Item label="竞品ASIN" span={2}>{detailRecord.competitors || "-"}</Descriptions.Item>
                     {(detailRecord.store_quantities || []).length > 0 && (
                       <Descriptions.Item label="店铺采购数量" span={2}>
@@ -1284,7 +1302,7 @@ const ProductDevelopmentBot: React.FC = () => {
                       </Descriptions.Item>
                     )}
                   </Descriptions>
-                  {(detailRecord.purchase_items || []).length > 0 ? (
+                  {canViewPurchase && ((detailRecord.purchase_items || []).length > 0 ? (
                     <div style={{ marginTop: 12 }}>
                       <Text strong style={{ display: "block", marginBottom: 8, fontSize: 13 }}>采购链接 / 图片 / 信息（一一对应）</Text>
                       {(detailRecord.purchase_items || []).map((it, i) => {
@@ -1329,7 +1347,7 @@ const ProductDevelopmentBot: React.FC = () => {
                         <div style={{ whiteSpace: "pre-wrap" }}>{detailRecord.purchase_info || "-"}</div>
                       </Descriptions.Item>
                     </Descriptions>
-                  )}
+                  ))}
                 </DetailSection>
 
                 <DetailSection title="多语言资料">
@@ -1348,13 +1366,44 @@ const ProductDevelopmentBot: React.FC = () => {
                     <Descriptions.Item label="站点负责人员" span={2}>{detailRecord.site_owners || "-"}</Descriptions.Item>
                   </Descriptions>
                 </DetailSection>
+
+                {(() => {
+                  const sixImgs = (detailRecord.six_face_images || [])
+                    .filter((u: string) => /^(https?:\/\/|\/)/i.test(u));
+                  return sixImgs.length > 0 ? (
+                    <DetailSection title="六面图">
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 }}>
+                        {sixImgs.map((u: string, i: number) => (
+                          <img key={i} src={u} alt={`六面图${i + 1}`} loading="lazy"
+                            style={{ width: "100%", height: 120, objectFit: "cover", borderRadius: 6, background: "#f8fafc" }}
+                            onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
+                        ))}
+                      </div>
+                    </DetailSection>
+                  ) : null;
+                })()}
               </div>
             )}
           </Modal>
 
-          {total > PAGE_SIZE && (
+          {total > 0 && (
             <div style={{ display: "flex", justifyContent: "center", marginTop: 24 }}>
-              <Pagination current={page} pageSize={PAGE_SIZE} total={total} onChange={(p) => setPage(p)} showTotal={(t) => `共 ${t} 条`} />
+              <Pagination
+                current={page}
+                pageSize={pageSize}
+                total={total}
+                showSizeChanger
+                pageSizeOptions={[10, 20, 40, 80, 100]}
+                showTotal={(t) => `共 ${t} 条`}
+                onChange={(p, size) => {
+                  if (size !== pageSize) {
+                    setPageSize(size);
+                    setPage(1);
+                  } else {
+                    setPage(p);
+                  }
+                }}
+              />
             </div>
           )}
         </Spin>

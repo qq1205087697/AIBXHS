@@ -25,7 +25,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import bindparam, or_, text
+from sqlalchemy import and_, bindparam, or_, text
 from sqlalchemy.orm import Session
 
 from database.database import get_db
@@ -79,21 +79,21 @@ def _merge_keywords(payload: ProductDevelopmentPayload) -> Optional[str]:
     return merged or None
 
 
-def _images_to_blob(images: Optional[List[str]]) -> Optional[bytes]:
+def _images_to_blob(images: Optional[List[str]]) -> Optional[str]:
+    """图片 URL 列表 -> 逗号分隔字符串（列已改为 TEXT 存储）"""
     if not images:
         return None
     joined = ",".join([i.strip() for i in images if i and i.strip()])
-    return joined.encode("utf-8") if joined else None
+    return joined or None
 
 
 def _blob_to_images(blob) -> List[str]:
+    """兼容 TEXT(str) 与历史 mediumblob(bytes) 两种存储"""
     if not blob:
         return []
-    try:
-        text = blob.decode("utf-8", errors="ignore")
-    except Exception:
-        return []
-    return [p.strip() for p in text.split(",") if p.strip()]
+    if isinstance(blob, bytes):
+        blob = blob.decode("utf-8", errors="ignore")
+    return [p.strip() for p in str(blob).split(",") if p.strip()]
 
 
 def _normalize_purchase_items(items: Optional[List[dict]]) -> Optional[List[dict]]:
@@ -149,9 +149,12 @@ def _generate_record_id(db: Session) -> str:
             return rid
 
 
-def _get_by_record_id(db: Session, record_id: str) -> Optional[AdProductInfo]:
-    """按业务副键 record_id 查询单条记录（表主键已改为自增 id）"""
-    return db.query(AdProductInfo).filter(AdProductInfo.record_id == record_id).first()
+def _get_by_record_id(db: Session, record_id: str, tenant_id: Optional[int] = None) -> Optional[AdProductInfo]:
+    """按业务副键 record_id 查询单条记录（表主键已改为自增 id）；传入 tenant_id 时做租户隔离"""
+    q = db.query(AdProductInfo).filter(AdProductInfo.record_id == record_id)
+    if tenant_id:
+        q = q.filter(AdProductInfo.tenant_id == tenant_id)
+    return q.first()
 
 
 # ==================== 部门 / 权限 / 通知辅助 ====================
@@ -181,7 +184,11 @@ def _can_view_all(db: Session, user: User) -> bool:
 
 
 def _apply_visibility_filter(query, db: Session, user: User):
-    """运营部门数据拆分：相关站点负责人员 / 开发人员 包含本人昵称或用户名才可见"""
+    """租户主副隔离：开发新品数据按 tenant_id 隔离，各账号只能看到本租户数据；
+    运营部门再做数据拆分（相关站点负责人员 / 开发人员 包含本人昵称或用户名才可见）"""
+    tid = getattr(user, "tenant_id", None)
+    if tid:
+        query = query.filter(AdProductInfo.tenant_id == tid)
     if _can_view_all(db, user):
         return query
     names = [n for n in {user.nickname or "", user.username or ""} if n]
@@ -403,7 +410,9 @@ async def list_projects(
     seasonality: Optional[str] = Query(None, description="季节性筛选"),
     developer: Optional[str] = Query(None, description="开发人员筛选"),
     date: Optional[str] = Query(None, description="日期筛选（YYYY-MM-DD）"),
-    status: Optional[str] = Query(None, description="待办筛选: purchase/six_face/designer/review/review_rejected/not_ordered"),
+    date_start: Optional[str] = Query(None, description="日期范围开始（YYYY-MM-DD）"),
+    date_end: Optional[str] = Query(None, description="日期范围结束（YYYY-MM-DD）"),
+    status: Optional[str] = Query(None, description="状态筛选: purchase/six_face/designer/review/review_rejected/reviewed/not_ordered/purchased"),
     missing: Optional[str] = Query(None, description="信息缺失筛选：字段 key，筛选出该字段为空的记录"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -412,16 +421,20 @@ async def list_projects(
     try:
         query = db.query(AdProductInfo)
         if search and search.strip():
+            # 搜索范围：产品中文名 + 平台商品的 ASIN/SKU（ad_product_info.product_code → products → platform_products）
             kw = f"%{search.strip()}%"
+            sub = text(
+                "SELECT p.product_code FROM products p "
+                "JOIN platform_products pp ON pp.product_id = p.id AND pp.deleted_at IS NULL AND pp.tenant_id = p.tenant_id "
+                "WHERE p.deleted_at IS NULL AND (pp.asin LIKE :kw OR pp.sku LIKE :kw) AND p.product_code != ''"
+            )
             query = query.filter(
                 or_(
-                    AdProductInfo.title_en.like(kw),
-                    AdProductInfo.keywords_en.like(kw),
                     AdProductInfo.product_name_zh.like(kw),
-                    AdProductInfo.de_title.like(kw),
-                    AdProductInfo.category.like(kw),
+                    AdProductInfo.product_code.in_(sub),
                 )
             )
+            query = query.params(kw=kw)
         if category:
             query = query.filter(AdProductInfo.category == category)
         if urgency:
@@ -432,30 +445,56 @@ async def list_projects(
         if developer:
             query = query.filter(AdProductInfo.developer == developer)
         if date:
-            query = query.filter(AdProductInfo.purchase_date == date)
-        if status == "purchase":
-            query = query.filter(AdProductInfo.purchase_cost.is_(None))
-        elif status == "six_face":
-            query = query.filter(AdProductInfo.six_face_image.is_(None))
-        elif status == "designer":
-            query = query.filter(AdProductInfo.designer_image.is_(None))
-        elif status == "review":
-            query = query.filter(
-                AdProductInfo.designer_image.isnot(None),
-                or_(AdProductInfo.image_review.is_(None), AdProductInfo.image_review == ""),
-            )
-        elif status == "review_rejected":
-            # 美工未通过：已上传产品图片但审核结果包含「不通过」
-            query = query.filter(
-                AdProductInfo.designer_image.isnot(None),
-                AdProductInfo.image_review.like("%不通过%"),
-            )
-        elif status == "not_ordered":
-            # 待生成采购单：尚未生成采购单（也未被采购流程标记为已采购）
-            query = query.filter(
-                or_(AdProductInfo.purchased.is_(None), AdProductInfo.purchased == "", AdProductInfo.purchased == "未采购"),
-            )
-        # 信息缺失筛选：指定字段为空的记录
+            # 日期范围筛选：支持 date=YYYY-MM-DD 或 date_start/date_end
+            if date_start or date_end:
+                if date_start:
+                    query = query.filter(AdProductInfo.purchase_date >= date_start)
+                if date_end:
+                    query = query.filter(AdProductInfo.purchase_date <= date_end)
+            else:
+                query = query.filter(AdProductInfo.purchase_date == date)
+        # 状态筛选：支持逗号分隔多选，多选之间取并集（OR）
+        def _status_cond(s: str):
+            if s == "purchase":
+                return AdProductInfo.purchase_cost.is_(None)
+            if s == "six_face":
+                return AdProductInfo.six_face_image.is_(None)
+            if s == "six_face_uploaded":
+                # 已上传六面图：六面图字段非空
+                return and_(AdProductInfo.six_face_image.isnot(None), AdProductInfo.six_face_image != "")
+            if s == "designer":
+                return AdProductInfo.designer_image.is_(None)
+            if s == "review":
+                return and_(
+                    AdProductInfo.designer_image.isnot(None),
+                    or_(AdProductInfo.image_review.is_(None), AdProductInfo.image_review == ""),
+                )
+            if s == "review_rejected":
+                # 美工未通过：已上传产品图片但审核结果包含「不通过」
+                return and_(
+                    AdProductInfo.designer_image.isnot(None),
+                    AdProductInfo.image_review.like("%不通过%"),
+                )
+            if s == "not_ordered":
+                # 待生成采购单：尚未生成采购单（也未被采购流程标记为已采购）
+                return or_(AdProductInfo.purchased.is_(None), AdProductInfo.purchased == "", AdProductInfo.purchased == "未采购")
+            if s == "reviewed":
+                # 图片已审核：已上传产品图且审核通过（含「通过」且不含「不通过」）
+                return and_(
+                    AdProductInfo.designer_image.isnot(None),
+                    AdProductInfo.image_review.like("%通过%"),
+                    AdProductInfo.image_review.notlike("%不通过%"),
+                )
+            if s == "purchased":
+                # 产品已采购：采购流程已标记为已采购
+                return AdProductInfo.purchased == "已采购"
+            return None
+
+        if status:
+            conds = [c for c in (_status_cond(s.strip()) for s in status.split(",")) if c is not None]
+            if conds:
+                query = query.filter(or_(*conds))
+        # 信息缺失筛选：指定字段为空的记录（支持逗号分隔多选，任一字段缺失即命中）
         _MISSING_FIELD_FILTERS = {
             "title": AdProductInfo.title_en,
             "product_name_zh": AdProductInfo.product_name_zh,
@@ -472,9 +511,14 @@ async def list_projects(
             "en_keywords": AdProductInfo.en_keywords,
             "au_keywords": AdProductInfo.au_keywords,
         }
-        if missing and missing in _MISSING_FIELD_FILTERS:
-            col = _MISSING_FIELD_FILTERS[missing]
-            query = query.filter(or_(col.is_(None), col == ""))
+        if missing:
+            m_conds = []
+            for m in (x.strip() for x in missing.split(",")):
+                col = _MISSING_FIELD_FILTERS.get(m)
+                if col is not None:
+                    m_conds.append(or_(col.is_(None), col == ""))
+            if m_conds:
+                query = query.filter(or_(*m_conds))
         query = _apply_visibility_filter(query, db, current_user)
         total = query.count()
         items = (
@@ -632,7 +676,7 @@ BUILTIN_URGENCIES = ["一般", "十分紧急"]
 
 IMPORT_COLUMNS = [
     "英文标题", "英文标题关键词", "产品中文名称", "类目", "产品季节性", "产品紧急度", "日期",
-    "进货价", "竞品ASIN", "德语标题", "德语关键词", "关联店铺", "相关站点负责人员",
+    "进货价", "竞品ASIN", "德语关键词", "英语关键词", "澳洲关键词", "关联店铺", "相关站点负责人员",
     "仓库备注", "采购链接", "采购信息",
 ]
 
@@ -654,8 +698,8 @@ async def download_import_template(
     ), {"tid": current_user.tenant_id}).fetchall()]
     categories = BUILTIN_CATEGORIES + [c for c in custom if c not in BUILTIN_CATEGORIES]
     stores = [r[0] for r in db.execute(text(
-        "SELECT DISTINCT name FROM stores WHERE tenant_id = :tid AND deleted_at IS NULL AND name IS NOT NULL AND name != '' ORDER BY name"
-    ), {"tid": current_user.tenant_id}).fetchall()] if _has_table(db, "stores") else []
+        "SELECT name FROM store_groups WHERE tenant_id = :tid AND name IS NOT NULL AND name != '' ORDER BY name"
+    ), {"tid": current_user.tenant_id}).fetchall()] if _has_table(db, "store_groups") else []
 
     wb = Workbook()
     ws = wb.active
@@ -672,8 +716,13 @@ async def download_import_template(
     ws.cell(row=2, column=6, value="一般")
     ws.cell(row=2, column=7, value="2026-10-14")
     ws.cell(row=2, column=8, value=9.9)
-    ws.cell(row=2, column=15, value="https://detail.1688.com/example.html")
-    ws.cell(row=2, column=16, value="供应商/交期等采购信息")
+    ws.cell(row=2, column=9, value="B0XXXXXXXX")
+    ws.cell(row=2, column=10, value="luftballons, silber")
+    ws.cell(row=2, column=11, value="balloon, party")
+    ws.cell(row=2, column=12, value="balloon, party")
+    ws.cell(row=2, column=13, value="美东×100、美西×50")
+    ws.cell(row=2, column=16, value="https://detail.1688.com/example1.html\nhttps://detail.1688.com/example2.html")
+    ws.cell(row=2, column=17, value="供应商A/交期7天\n供应商B/交期15天")
     ws.freeze_panes = "A2"
 
     # 选项 sheet + 数据验证下拉
@@ -692,6 +741,43 @@ async def download_import_template(
             col_idx = IMPORT_COLUMNS.index(target_cols) + 1
             letter = ws.cell(row=1, column=col_idx).column_letter
             dv.add(f"{letter}2:{letter}1000")
+
+    # 填写说明 sheet
+    guide = wb.create_sheet("填写说明")
+    guide.column_dimensions["A"].width = 16
+    guide.column_dimensions["B"].width = 100
+    guide_rows = [
+        ("列名", "填写说明"),
+        ("英文标题", "必填；最长 75 个字符，超长会被校验拦截"),
+        ("英文标题关键词", "选填；英文搜索关键词，多个用英文逗号分隔"),
+        ("产品中文名称", "必填；用于匹配产品库产品编码，未匹配时保存后会自动在产品库新增成品商品"),
+        ("类目", "必填；从下拉选项中选择（下拉含全部可用类目）"),
+        ("产品季节性", "选填；从下拉选项中选择，默认「日常」"),
+        ("产品紧急度", "选填；下拉选择「一般」或「十分紧急」，默认「一般」"),
+        ("日期", "选填；开发日期，格式 YYYY-MM-DD（如 2026-10-14）"),
+        ("进货价", "选填；数字，不能为负数"),
+        ("竞品ASIN", "选填；多个用逗号分隔"),
+        ("德语关键词", "选填；德语搜索关键词，多个用英文逗号分隔"),
+        ("英语关键词", "选填；英语搜索关键词，多个用英文逗号分隔"),
+        ("澳洲关键词", "选填；澳洲站搜索关键词，多个用英文逗号分隔"),
+        ("关联店铺", "选填；只需填到店铺分组一级。支持多组，用顿号/逗号分隔；每组可带数量：分组名×数量（如 美东×100、美西×50），不带数量则默认 0。可从下拉选择分组名后再补 ×数量"),
+        ("相关站点负责人员", "选填；多个用逗号分隔"),
+        ("仓库备注", "选填；给仓库的备注说明"),
+        ("采购链接", "选填；可填多行（单元格内 Alt+Enter 换行），每行一个采购链接；也可用分号分隔"),
+        ("采购信息", "选填；可填多行（单元格内 Alt+Enter 换行），与「采购链接」按行一一对应成组：第 1 行信息对应第 1 行链接，依此类推"),
+        ("采购图片", "无法随 Excel 导入；保存发布后在开发机器人卡片/采购填写弹窗中补充上传（支持拖拽与粘贴）"),
+        ("整体规则", "一行一条新品；导入解析后数据填入「添加新品」表单作为草稿，检查编辑后点保存才正式入库并推送部门提醒，导入本身不会直接发布"),
+    ]
+    for ri, (k, v) in enumerate(guide_rows, start=1):
+        a = guide.cell(row=ri, column=1, value=k)
+        b = guide.cell(row=ri, column=2, value=v)
+        a.alignment = a.alignment.copy(vertical="top", wrap_text=True)
+        b.alignment = b.alignment.copy(vertical="top", wrap_text=True)
+        if ri == 1:
+            a.font = a.font.copy(bold=True)
+            b.font = b.font.copy(bold=True)
+            a.fill = a.fill.copy(start_color="E0E7FF", end_color="E0E7FF", fill_type="solid")
+            b.fill = b.fill.copy(start_color="E0E7FF", end_color="E0E7FF", fill_type="solid")
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -826,8 +912,9 @@ async def import_projects(
                 seasonality=str(cell_val(row_idx, "产品季节性") or "") or None,
                 competitors=str(cell_val(row_idx, "竞品ASIN") or "") or None,
                 purchase_price=price,
-                de_title=str(cell_val(row_idx, "德语标题") or "") or None,
                 de_keywords=str(cell_val(row_idx, "德语关键词") or "") or None,
+                en_keywords=str(cell_val(row_idx, "英语关键词") or "") or None,
+                au_keywords=str(cell_val(row_idx, "澳洲关键词") or "") or None,
                 development_date=date_str or None,
                 related_store=str(cell_val(row_idx, "关联店铺") or "") or None,
                 site_owners=str(cell_val(row_idx, "相关站点负责人员") or "") or None,
@@ -847,6 +934,147 @@ async def import_projects(
         _notify_new_product(db, current_user.tenant_id, it)
     db.commit()
     return {"success": True, "data": {"created": created, "failed": len(errors), "errors": errors}}
+
+
+@router.post("/import-projects/parse")
+async def import_projects_parse(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """解析导入模板并校验，返回草稿行（不入库、不推送通知）。
+    前端将草稿行填入「添加新品」页面，用户编辑确认后再保存发布。"""
+    import io
+    from openpyxl import load_workbook
+
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="请上传 .xlsx 格式的模板文件")
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="无法解析文件，请使用下载的导入模板填写")
+    ws = wb.active
+
+    header_map: dict = {}
+    for cell in next(ws.iter_rows(min_row=1, max_row=1)):
+        if cell.value:
+            header_map[str(cell.value).strip()] = cell.column
+
+    def cell_val(row: int, header: str):
+        col = header_map.get(header)
+        if not col:
+            return None
+        v = ws.cell(row=row, column=col).value
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
+
+    valid_categories = set(BUILTIN_CATEGORIES) | {
+        r[0] for r in db.execute(text(
+            "SELECT name FROM ad_product_categories WHERE tenant_id = :tid"
+        ), {"tid": current_user.tenant_id}).fetchall()
+    }
+    valid_urgencies = set(BUILTIN_URGENCIES)
+
+    def parse_store_quantities(raw: str) -> List[dict]:
+        """关联店铺支持多组：「分组×数量」「分组:数量」「分组」，顿号/逗号/换行分隔"""
+        out = []
+        for part in re.split(r"[、，,;；\n]+", str(raw or "")):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.match(r"^(.+?)[×xX*:：](\d+(?:\.\d+)?)$", part)
+            if m:
+                out.append({"store": m.group(1).strip(), "quantity": int(float(m.group(2)))})
+            else:
+                out.append({"store": part, "quantity": 0})
+        return out
+
+    def parse_purchase_items(links_raw, info_raw) -> List[dict]:
+        """采购链接与采购信息按行一一对应成组（图片无法随 Excel 导入，留空）"""
+        links = [p.strip() for p in re.split(r"[\n;；]+", str(links_raw or "")) if p.strip()]
+        infos = [p.strip() for p in re.split(r"\n+", str(info_raw or "")) if p.strip()]
+        n = max(len(links), len(infos))
+        return [{"link": links[i] if i < len(links) else "",
+                 "info": infos[i] if i < len(infos) else ""} for i in range(n)]
+
+    rows: List[dict] = []
+    errors: List[dict] = []
+    for row_idx in range(2, ws.max_row + 1):
+        title = cell_val(row_idx, "英文标题")
+        name_zh = cell_val(row_idx, "产品中文名称")
+        if not title and not name_zh:
+            continue
+
+        row_errors: List[str] = []
+        title_str = str(title or "").strip()
+        name_str = str(name_zh or "").strip()
+        if not title_str:
+            row_errors.append("英文标题未填写")
+        elif len(title_str) > 75:
+            row_errors.append(f"英文标题超过75个字符（当前{len(title_str)}个）")
+        if not name_str:
+            row_errors.append("产品中文名称未填写")
+
+        category_str = str(cell_val(row_idx, "类目") or "").strip()
+        if not category_str:
+            row_errors.append("类目未填写")
+        elif category_str not in valid_categories:
+            row_errors.append(f"类目「{category_str}」不在可选类目中")
+
+        urgency_str = str(cell_val(row_idx, "产品紧急度") or "").strip() or "一般"
+        if urgency_str not in valid_urgencies:
+            row_errors.append(f"产品紧急度「{urgency_str}」不是有效选项（一般/十分紧急）")
+
+        price = None
+        price_val = cell_val(row_idx, "进货价")
+        if price_val not in (None, ""):
+            try:
+                price = float(price_val)
+                if price < 0:
+                    row_errors.append(f"进货价不能为负数（{price_val}）")
+            except (TypeError, ValueError):
+                row_errors.append(f"进货价不是有效数字：{price_val}")
+
+        date_val = cell_val(row_idx, "日期")
+        date_str = ""
+        if date_val:
+            if hasattr(date_val, "strftime"):
+                date_str = date_val.strftime("%Y-%m-%d")
+            else:
+                date_str = str(date_val)[:10]
+                try:
+                    datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    row_errors.append(f"日期格式异常：{date_val}（应为 YYYY-MM-DD）")
+
+        if row_errors:
+            errors.append({"row": row_idx, "msg": "；".join(row_errors)})
+            continue
+
+        rows.append({
+            "title": title_str,
+            "product_title": str(cell_val(row_idx, "英文标题关键词") or ""),
+            "product_name_zh": name_str,
+            "category": category_str,
+            "seasonality": str(cell_val(row_idx, "产品季节性") or "") or "日常",
+            "urgency": urgency_str,
+            "development_date": date_str,
+            "purchase_price": price,
+            "competitors": str(cell_val(row_idx, "竞品ASIN") or ""),
+            "de_keywords": str(cell_val(row_idx, "德语关键词") or ""),
+            "en_keywords": str(cell_val(row_idx, "英语关键词") or ""),
+            "au_keywords": str(cell_val(row_idx, "澳洲关键词") or ""),
+            "store_quantities": parse_store_quantities(cell_val(row_idx, "关联店铺") or ""),
+            "site_owners": str(cell_val(row_idx, "相关站点负责人员") or ""),
+            "warehouse_note": str(cell_val(row_idx, "仓库备注") or ""),
+            "purchase_items": parse_purchase_items(cell_val(row_idx, "采购链接"), cell_val(row_idx, "采购信息")),
+        })
+    return {"success": True, "data": {"rows": rows, "failed": len(errors), "errors": errors}}
 
 
 @router.post("/projects")
@@ -900,7 +1128,7 @@ async def update_project(
 ):
     """更新开发新品记录（仅更新传入的字段）"""
     try:
-        item = _get_by_record_id(db, record_id)
+        item = _get_by_record_id(db, record_id, current_user.tenant_id)
         if not item:
             raise HTTPException(status_code=404, detail="记录不存在")
 
@@ -966,11 +1194,11 @@ async def update_project(
 async def delete_project(
     record_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
 ):
-    """删除开发新品记录（物理删除）"""
+    """删除开发新品记录（物理删除，仅管理员）"""
     try:
-        item = _get_by_record_id(db, record_id)
+        item = _get_by_record_id(db, record_id, current_user.tenant_id)
         if not item:
             raise HTTPException(status_code=404, detail="记录不存在")
         db.delete(item)
@@ -1064,7 +1292,7 @@ async def update_purchase(
     current_user: User = Depends(get_current_user),
 ):
     """采购部门填写采购单价、是否采购与采购备注"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     item.purchase_cost = payload.purchase_price
@@ -1087,7 +1315,7 @@ async def update_warehouse(
     current_user: User = Depends(get_current_user),
 ):
     """仓库部门上传六面图并填写仓库备注"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     if payload.six_face_images is not None:
@@ -1110,7 +1338,7 @@ async def upload_designer_image(
     current_user: User = Depends(get_current_user),
 ):
     """美工上传产品图片：自动生成完成图片日期，并推送管理层审核"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     item.designer_image = _images_to_blob(payload.images)
@@ -1142,7 +1370,7 @@ async def review_designer_image(
     current_user: User = Depends(get_current_user),
 ):
     """管理层审核产品图片，通过后开发机器人首页展示产品图片"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     item.image_review = "已通过" if payload.approved else "不通过请看评论"
@@ -1225,7 +1453,7 @@ async def create_replenishment_from_dev(
 
         count = 0
         for it in payload.items:
-            product = _get_by_record_id(db, it.record_id)
+            product = _get_by_record_id(db, it.record_id, current_user.tenant_id)
             if not product:
                 continue
             product_id = _resolve_product_id(db, current_user.tenant_id, product)
@@ -1259,7 +1487,7 @@ async def create_purchase_order_from_dev(
 ):
     """点击「采购」按钮：按店铺分组采购数量在进销存采购管理创建采购单（状态 draft）。
     明细：店铺分组 = 添加新品选择的分组，数量 = 采购数量，备注 = 采购备注（仓库备注）"""
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     if (item.purchased or "") == "已生成采购单":
@@ -1444,7 +1672,7 @@ async def get_project_doc(
 ):
     """读取记录对应飞书文档的内容（文本+图片按文档顺序，用于卡片悬停预览）"""
     try:
-        item = _get_by_record_id(db, record_id)
+        item = _get_by_record_id(db, record_id, current_user.tenant_id)
         if not item:
             raise HTTPException(status_code=404, detail="记录不存在")
         if not item.doc_link:
@@ -1564,9 +1792,12 @@ async def get_attachment_image(table_id: str, file_token: str):
 
 # ==================== 飞书多维表回传 / 美工图片迁移 TOS ====================
 
-# 开发新品多维表（与历史同步脚本一致）
-FEISHU_BASE_TOKEN = "Az8BbeLkBawI1IsqdQIcr75AnSN"
-FEISHU_DESIGN_TABLE_ID = "tblfOr6tUWIPFcDd"
+# 开发新品多维表（配置从 .env 读取，避免在业务代码中暴露）
+from config import get_settings as _get_settings
+
+_settings_dev = _get_settings()
+FEISHU_BASE_TOKEN = _settings_dev.FEISHU_DESIGN_BASE_TOKEN
+FEISHU_DESIGN_TABLE_ID = _settings_dev.FEISHU_DESIGN_TABLE_ID
 
 # 回传时跳过的数据库列（主键/系统列/二进制列单独处理）
 _PUSH_SKIP_COLUMNS = {
@@ -1663,7 +1894,7 @@ async def push_project_to_feishu(
     - 美工图片作为附件写入「美工图片/产品图片」附件字段"""
     from sqlalchemy.exc import IntegrityError
 
-    item = _get_by_record_id(db, record_id)
+    item = _get_by_record_id(db, record_id, current_user.tenant_id)
     if not item:
         raise HTTPException(status_code=404, detail="记录不存在")
     try:
@@ -1770,3 +2001,231 @@ async def push_project_to_feishu(
             "images_attached": attached,
         },
     }
+
+
+_MIGRATE_RUNNING: dict = {}  # 按迁移列记录运行状态，避免美工图/六面图任务互斥
+
+
+def _safe_image_name(name: str) -> str:
+    """文件名安全化（清洗非法字符）"""
+    return re.sub(r"[\\/:*?\"<>|\s,，;；]", "", name or "").strip()[:40]
+
+
+async def _migrate_designer_batch(batch: int = 100, column: str = "designer_image", name_prefix: str = "新品") -> dict:
+    """把多维表同步来的图片（代理 URL）批量转存到 TOS（并发加速版）。
+    column 支持 designer_image（美工图）与 six_face_image（六面图）；
+    文件名格式：{前缀}_中文产品名_日期_序号"""
+    from database.database import SessionLocal
+    from services.tos_service import upload_image
+    import httpx as _httpx
+
+    if column not in ("designer_image", "six_face_image"):
+        raise ValueError(f"不支持的迁移列: {column}")
+
+    db = SessionLocal()
+    try:
+        remaining_q = text(
+            f"SELECT COUNT(*) FROM ad_product_info WHERE {column} IS NOT NULL AND {column} LIKE '%attachment-image%'"
+        )
+        total_remaining = db.execute(remaining_q).scalar() or 0
+        if total_remaining == 0:
+            return {"remaining": 0, "scanned": 0, "migrated": 0, "failed": 0, "done": True}
+
+        rows = db.execute(text(
+            f"SELECT id, record_id, product_name_zh, purchase_date, {column} FROM ad_product_info "
+            f"WHERE {column} IS NOT NULL AND {column} LIKE '%attachment-image%' LIMIT :lim"
+        ), {"lim": batch}).fetchall()
+
+        token_holder = {"token": None}
+        sem = asyncio.Semaphore(8)  # 最多 8 张图片并发下载/上传
+
+        async def migrate_one(table_id: str, file_token: str, custom_name: str) -> Optional[str]:
+            """下载单张飞书附件并上传 TOS（在线程池执行阻塞上传），失败返回 None"""
+            async with sem:
+                try:
+                    if token_holder["token"] is None:
+                        token_holder["token"] = await get_access_token()
+                    headers = {"Authorization": f"Bearer {token_holder['token']}"}
+                    extra = json.dumps({"bitablePerm": {"tableId": table_id}})
+                    resp = await client.get(
+                        f"{FEISHU_API_BASE}/drive/v1/medias/{file_token}/download",
+                        headers=headers, params={"extra": extra},
+                    )
+                    if resp.status_code != 200:
+                        return None
+                    return await asyncio.to_thread(
+                        upload_image, resp.content, f"{file_token}.jpg", custom_name
+                    )
+                except Exception as e:
+                    logger.warning(f"美工图迁移单张失败 {file_token}: {e}")
+                    return None
+
+        scanned = migrated = failed = 0
+
+        async def migrate_record(row) -> tuple:
+            """处理一条记录的全部代理图片，返回 (pid, new_urls, changed, migrated, failed)"""
+            pid, rid, name_zh, purchase_date, blob = row
+            try:
+                if isinstance(blob, bytes):
+                    blob = blob.decode("utf-8", errors="ignore")
+                urls = [u.strip() for u in str(blob).split(",") if u.strip()]
+            except Exception:
+                return pid, None, False, 0, 0
+            date_part = str(purchase_date or "").replace("-", "")[:8] or datetime.now().strftime("%Y%m%d")
+            safe = _safe_image_name(name_zh) or rid
+            tasks, proxy_index = [], []
+            for i, u in enumerate(urls):
+                m = re.search(r"/attachment-image/(tbl[A-Za-z0-9]+)/([A-Za-z0-9]+)", u)
+                if m:
+                    tasks.append(migrate_one(m.group(1), m.group(2), f"{name_prefix}_{safe}_{date_part}_{i + 1}"))
+                    proxy_index.append(i)
+                # 非代理 URL 直接保留
+            results = await asyncio.gather(*tasks) if tasks else []
+            new_urls = list(urls)
+            rec_migrated = rec_failed = 0
+            for idx, new_url in zip(proxy_index, results):
+                if new_url:
+                    new_urls[idx] = new_url
+                    rec_migrated += 1
+                else:
+                    rec_failed += 1
+            return pid, new_urls, rec_migrated > 0, rec_migrated, rec_failed
+
+        async with _httpx.AsyncClient(timeout=60) as client:
+            results = await asyncio.gather(*(migrate_record(row) for row in rows))
+
+        for (pid, new_urls, changed, rec_migrated, rec_failed), row in zip(results, rows):
+            scanned += 1
+            migrated += rec_migrated
+            failed += rec_failed
+            if changed and new_urls:
+                db.execute(text(f"UPDATE ad_product_info SET {column} = :img WHERE id = :pid"),
+                           {"img": ",".join(new_urls), "pid": pid})
+                db.commit()
+
+        remaining = db.execute(remaining_q).scalar() or 0
+        return {"remaining": remaining, "scanned": scanned, "migrated": migrated, "failed": failed, "done": remaining == 0}
+    finally:
+        db.close()
+
+
+async def auto_migrate_designer_images(column: str = "designer_image", name_prefix: str = "新品", env_key: str = "DESIGNER_IMAGE_AUTO_MIGRATE", label: str = "美工图片"):
+    """服务启动后自动后台迁移多维表图片到 TOS，循环执行直到全部完成。
+
+    可通过环境变量（env_key）=false 关闭；连续两批无进展时自动停止。
+    """
+    global _MIGRATE_RUNNING
+    import os
+    if _MIGRATE_RUNNING.get(column):
+        return
+    from config import get_settings
+    if getattr(get_settings(), env_key, "true").strip().lower() in ("false", "0", "no"):
+        logger.info(f"{label} TOS 自动迁移已通过环境变量关闭")
+        return
+    _MIGRATE_RUNNING[column] = True
+    try:
+        await asyncio.sleep(5)  # 等服务与 DB 就绪
+        no_progress_rounds = 0
+        while True:
+            try:
+                result = await _migrate_designer_batch(100, column=column, name_prefix=name_prefix)
+            except Exception as e:
+                logger.warning(f"{label}自动迁移异常，60 秒后重试: {e}")
+                await asyncio.sleep(60)
+                continue
+            if result.get("done"):
+                logger.info(f"{label}已全部迁移到 TOS（最后一批迁移 {result.get('migrated', 0)} 张，失败 {result.get('failed', 0)} 张）")
+                break
+            if result.get("migrated", 0) == 0:
+                no_progress_rounds += 1
+                if no_progress_rounds >= 2:
+                    logger.warning(f"{label}迁移连续 {no_progress_rounds} 批无进展，剩余 {result.get('remaining')} 条（均为无法下载的失效附件），自动任务已停止；可查看失败链接或手动处理")
+                    break
+            else:
+                no_progress_rounds = 0
+            logger.info(f"{label}自动迁移进行中：剩余 {result.get('remaining')} 条")
+            await asyncio.sleep(1)
+    finally:
+        _MIGRATE_RUNNING[column] = False
+
+
+async def auto_migrate_sixface_images():
+    """六面图 TOS 自动迁移（复用美工图迁移逻辑，列=six_face_image）"""
+    await auto_migrate_designer_images(
+        column="six_face_image", name_prefix="六面图",
+        env_key="SIXFACE_IMAGE_AUTO_MIGRATE", label="六面图",
+    )
+
+
+@router.post("/designer-images/migrate-to-tos")
+async def migrate_designer_images_to_tos(
+    batch: int = Query(100, ge=1, le=500, description="每批处理的记录数"),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """手动触发一批美工图片迁移（自动迁移已在服务启动时后台执行）"""
+    return {"success": True, "data": await _migrate_designer_batch(batch)}
+
+
+@router.get("/designer-images/migrate-status")
+async def designer_migrate_status(current_user: User = Depends(get_current_admin_user)):
+    """美工图片 TOS 迁移进度（管理员）：剩余未迁移 / 总记录数"""
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        row = db.execute(text(
+            "SELECT COUNT(*) AS total, "
+            "SUM(designer_image LIKE '%attachment-image%') AS remaining, "
+            "SUM(designer_image LIKE '%tos-%') AS migrated "
+            "FROM ad_product_info WHERE designer_image IS NOT NULL AND designer_image != ''"
+        )).fetchone()
+        total = int(row[0] or 0)
+        remaining = int(row[1] or 0)
+        migrated = int(row[2] or 0)
+        return {
+            "success": True,
+            "data": {
+                "total": total,
+                "remaining": remaining,
+                "migrated": migrated,
+                "done": remaining == 0,
+            },
+        }
+    finally:
+        db.close()
+
+
+@router.post("/six-face-images/migrate-to-tos")
+async def migrate_sixface_images_to_tos(
+    batch: int = Query(100, ge=1, le=500, description="每批处理的记录数"),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """手动触发一批六面图迁移（自动迁移已在服务启动时后台执行）"""
+    return {"success": True, "data": await _migrate_designer_batch(batch, column="six_face_image", name_prefix="六面图")}
+
+
+@router.get("/six-face-images/migrate-status")
+async def sixface_migrate_status(current_user: User = Depends(get_current_admin_user)):
+    """六面图 TOS 迁移进度（管理员）：剩余未迁移 / 总记录数"""
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        row = db.execute(text(
+            "SELECT COUNT(*) AS total, "
+            "SUM(six_face_image LIKE '%attachment-image%') AS remaining, "
+            "SUM(six_face_image LIKE '%tos-%') AS migrated "
+            "FROM ad_product_info WHERE six_face_image IS NOT NULL AND six_face_image != ''"
+        )).fetchone()
+        total = int(row[0] or 0)
+        remaining = int(row[1] or 0)
+        migrated = int(row[2] or 0)
+        return {
+            "success": True,
+            "data": {
+                "total": total,
+                "remaining": remaining,
+                "migrated": migrated,
+                "done": remaining == 0,
+            },
+        }
+    finally:
+        db.close()
