@@ -91,6 +91,7 @@ def init_db():
         )
         from models.ai_video_task import AIVideoTask
         from models.video_binding_request import VideoBindingRequest
+        from models.admin_robot_item import AdminRobotItem
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)

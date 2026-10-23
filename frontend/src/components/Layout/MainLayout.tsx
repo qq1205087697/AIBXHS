@@ -356,6 +356,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         }]
       : []),
     {
+      key: "/admin-robot",
+      icon: <ClipboardList size={20} />,
+      label: "行政机器人",
+      shortLabel: "行政",
+    },
+    {
       key: "/data-alert",
       icon: <AlertTriangle size={20} />,
       label: "数据驾驶舱",
@@ -547,6 +553,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/tenants": "公司设置",
       "/product-selection": "选品机器人",
       "/development": "开发机器人",
+      "/admin-robot": "行政机器人",
       "/development/new": "添加新品",
       '/ai-creation': 'AI视频',
       '/upscale-center': '高清处理',

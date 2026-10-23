@@ -722,6 +722,16 @@ export const inventoryCountApi = {
     apiClient.post("/inventory-count/confirm", data),
 };
 
+// ========== Admin Robot API（行政机器人） ==========
+export const adminRobotApi = {
+  getTree: () => apiClient.get("/admin-robot/tree"),
+  createItem: (data: { category: string; item_group?: string; title: string; note?: string; assignee?: string }) =>
+    apiClient.post("/admin-robot/items", data),
+  updateItem: (id: number, data: { title?: string; note?: string; assignee?: string; status?: string }) =>
+    apiClient.patch(`/admin-robot/items/${id}`, data),
+  deleteItem: (id: number) => apiClient.delete(`/admin-robot/items/${id}`),
+};
+
 // ========== Store Groups API ==========
 export const storeGroupsApi = {
   getList: () => apiClient.get("/store-groups/"),

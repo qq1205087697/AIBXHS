@@ -30,6 +30,7 @@ import PermissionManagement from "./pages/PermissionManagement";
 import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
 import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
+import AdminRobot from "./pages/AdminRobot";
 import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
@@ -299,6 +300,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <ProductDevelopmentCreate />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin-robot"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AdminRobot />
             </MainLayout>
           </ProtectedRoute>
         }
