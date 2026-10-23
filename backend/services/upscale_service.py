@@ -91,22 +91,40 @@ def _extract_output_file(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _download(url: str, timeout: int = 1800) -> bytes:
-    """流式下载文件到内存"""
-    resp = requests.get(url, timeout=timeout, stream=True)
-    resp.raise_for_status()
-    buf = io.BytesIO()
-    for chunk in resp.iter_content(1 << 20):
-        buf.write(chunk)
-    return buf.getvalue()
+    """流式下载文件到内存；网络中断（IncompleteRead 等）自动重试 3 次"""
+    last_err: Exception = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, timeout=timeout, stream=True)
+            resp.raise_for_status()
+            buf = io.BytesIO()
+            for chunk in resp.iter_content(1 << 20):
+                buf.write(chunk)
+            return buf.getvalue()
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                logger.warning(f"[超分] 文件下载中断（第 {attempt} 次），5 秒后重试: {e}")
+                threading.Event().wait(5)
+    raise last_err
 
 
 def _download_comfy_file(finfo: Dict[str, Any]) -> Tuple[bytes, str]:
-    """按 ComfyUI 文件信息下载结果文件"""
-    resp = _api("GET", "/view", timeout=1800, params=finfo, stream=True)
-    buf = io.BytesIO()
-    for chunk in resp.iter_content(1 << 20):
-        buf.write(chunk)
-    return buf.getvalue(), finfo.get("filename") or "upscaled.mp4"
+    """按 ComfyUI 文件信息下载结果文件；网络中断自动重试 3 次"""
+    last_err: Exception = None
+    for attempt in range(1, 4):
+        try:
+            resp = _api("GET", "/view", timeout=1800, params=finfo, stream=True)
+            buf = io.BytesIO()
+            for chunk in resp.iter_content(1 << 20):
+                buf.write(chunk)
+            return buf.getvalue(), finfo.get("filename") or "upscaled.mp4"
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                logger.warning(f"[超分] 成片下载中断（第 {attempt} 次），5 秒后重试: {e}")
+                threading.Event().wait(5)
+    raise last_err
 
 
 def _update_task(task_id: int, only_active: bool = False, **fields) -> None:
@@ -232,7 +250,7 @@ def _run_task(task_id: int) -> None:
                 )
                 if consecutive_failures >= 20:
                     _update_task(task_id, only_active=True, status="失败",
-                                 error_message=f"ComfyUI 服务连接失败（连续 5 分钟查询异常）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
+                                 error_message=f"ComfyUI 服务连接失败（连续 {consecutive_failures} 次查询异常，轮询间隔 {interval} 秒）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
                                  finished_at=datetime.now())
                     logger.error(f"[超分] 任务 {task_id} 连续查询失败，终止轮询")
                     return
@@ -259,16 +277,22 @@ def _run_task(task_id: int) -> None:
             if status_str == "success":
                 finfo = _extract_output_file(item)
                 if not finfo:
-                    _update_task(task_id, status="失败", error_message="处理完成但未找到输出文件",
+                    _update_task(task_id, only_active=True, status="失败", error_message="处理完成但未找到输出文件",
                                  finished_at=datetime.now())
                     logger.error(f"[超分] 任务 {task_id} 找不到输出文件: {item.get('outputs')}")
                     return
+
+                # 防重复收片：双进程同库场景下其他进程可能已完成本任务（下载+上传耗时长，竞态窗口大）
+                if _get_upscale_task_status(task_id) == "已完成":
+                    logger.info(f"[超分] 任务 {task_id} 已被其他进程完成，跳过重复收片")
+                    return
+
                 result, filename = _download_comfy_file(finfo)
                 logger.info(f"[超分] 任务 {task_id} 成片已下载，{len(result) // 1024}KB")
                 video_url = tos_service.upload_file(
                     result, filename, content_type="video/mp4", subdir="upscale-video",
                 )
-                _update_task(task_id, status="已完成", video_url=video_url,
+                _update_task(task_id, only_active=True, status="已完成", video_url=video_url,
                              finished_at=datetime.now(), error_message=None)
                 logger.info(f"[超分] 任务 {task_id} 完成: {video_url}")
                 return
@@ -276,7 +300,7 @@ def _run_task(task_id: int) -> None:
             if status_str in ("error", "failed"):
                 msgs = json.dumps((item.get("status") or {}).get("messages", []),
                                   ensure_ascii=False)[:800]
-                _update_task(task_id, status="失败", error_message=msgs or "处理失败",
+                _update_task(task_id, only_active=True, status="失败", error_message=msgs or "处理失败",
                              finished_at=datetime.now())
                 logger.error(f"[超分] 任务 {task_id} 处理失败: {msgs}")
                 return
@@ -288,8 +312,10 @@ def _run_task(task_id: int) -> None:
                      finished_at=datetime.now())
         logger.error(f"[超分] 任务 {task_id} 等待超时")
     except Exception as e:
+        # only_active：本异常多发生在收片阶段（下载/上传），此时其他进程可能已把任务置为已完成，不得覆盖
         logger.error(f"[超分] 任务 {task_id} 处理异常: {e}")
-        _update_task(task_id, status="失败", error_message=str(e)[:900],
+        _update_task(task_id, only_active=True, status="失败",
+                     error_message=f"收片阶段异常（ComfyUI 生成结果不受影响，可点重试收片）：{str(e)[:600]}",
                      finished_at=datetime.now())
     finally:
         with _lock:
@@ -676,8 +702,20 @@ def delete_upscale_task(tenant_id: int, task_id: int) -> None:
         db.close()
 
 
-def resume_pending_tasks() -> None:
-    """服务启动时恢复未完成的超分任务：已有 ComfyUI 任务 ID 的接续轮询，未提交成功的标失败（与 H3 恢复逻辑一致）"""
+def resume_pending_tasks() -> Optional[int]:
+    """服务启动时恢复未完成的超分任务：已有 ComfyUI 任务 ID 的接续轮询，未提交成功的标失败（与 H3 恢复逻辑一致）
+
+    返回值：恢复的任务数；H3_BASE_URL 未配置时返回 None（跳过恢复）。
+    配置为空的进程接手任务会因无法查询 ComfyUI 而把任务误标失败。
+    """
+    if not settings.H3_BASE_URL:
+        logger.error(
+            "[超分] H3_BASE_URL 未配置，跳过未完成任务恢复："
+            "本进程无法查询 ComfyUI，接手任务会误标失败。"
+            "请检查 backend/.env 的 H3_BASE_URL/H3_AUTH_USER/H3_AUTH_PASSWORD 后重启"
+        )
+        return None
+
     from database.database import SessionLocal
     from models.video_upscale_task import VideoUpscaleTask
 
@@ -714,3 +752,5 @@ def resume_pending_tasks() -> None:
     for task_id, prompt_id in pending:
         logger.info(f"[超分] 恢复未完成任务 {task_id}（ComfyUI {prompt_id}）")
         _ensure_worker(task_id)
+
+    return len(pending)

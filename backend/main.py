@@ -214,27 +214,23 @@ async def startup_event():
 
     try:
         from services.h3_video_service import resume_pending_tasks
-        resume_pending_tasks()
-        logger.info("H3 视频未完成任务已恢复监听")
+        resumed = resume_pending_tasks()
+        if resumed is None:
+            logger.error("H3 视频未完成任务恢复已跳过（H3_BASE_URL 未配置）")
+        else:
+            logger.info(f"H3 视频未完成任务已恢复监听（{resumed} 条）")
     except Exception as e:
         logger.error(f"H3 视频任务恢复失败: {e}")
 
     try:
         from services.upscale_service import resume_pending_tasks as resume_upscale_tasks
-        resume_upscale_tasks()
-        logger.info("超分未完成任务已恢复监听")
+        resumed_upscale = resume_upscale_tasks()
+        if resumed_upscale is None:
+            logger.error("超分未完成任务恢复已跳过（H3_BASE_URL 未配置）")
+        else:
+            logger.info(f"超分未完成任务已恢复监听（{resumed_upscale} 条）")
     except Exception as e:
         logger.error(f"超分任务恢复失败: {e}")
-
-    try:
-        import asyncio as _asyncio
-        from routers.product_development import auto_migrate_designer_images, auto_migrate_sixface_images
-        _asyncio.create_task(auto_migrate_designer_images())
-        logger.info("美工图片 TOS 自动迁移任务已启动")
-        _asyncio.create_task(auto_migrate_sixface_images())
-        logger.info("六面图 TOS 自动迁移任务已启动")
-    except Exception as e:
-        logger.error(f"启动图片自动迁移任务失败: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
