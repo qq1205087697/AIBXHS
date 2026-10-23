@@ -315,8 +315,9 @@ if __name__ == "__main__":
     from config import get_settings
     settings = get_settings()
     
-    # Windows 不支持多 worker 的 multiprocessing spawn 模式，强制使用 1
-    workers = 1 if platform.system() == 'Windows' else 4
+    # 强制单进程模式（项目约定）：多 worker 会并发执行建表/列补丁、定时任务×N 重复运行、
+    # 视频任务 resume 竞态（同一成片被多进程重复上传 TOS）、日志成对出现等问题
+    workers = 1
     
     uvicorn.run(
         "main:app",
