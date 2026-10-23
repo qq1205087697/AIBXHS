@@ -269,11 +269,12 @@ def _do_bind_video(db: Session, tenant_id: int, product_id: int, video_url: str)
     if len(videos) >= 6:
         raise HTTPException(status_code=400, detail="产品已达到视频上限")
 
-    # TOS 复制改名为「产品编码_序号」，失败回退原地址不阻断绑定
+    # TOS 复制改名为「产品编码_序号_时间戳」（时间戳防删除重绑后 URL 复用命中缓存旧内容），
+    # 失败回退原地址不阻断绑定
     final_url = video_url
     try:
-        from services.tos_service import rename_file
-        final_url = rename_file(video_url, f"{row[2]}_{len(videos) + 1}")
+        from services.tos_service import bound_video_target_name, rename_file
+        final_url = rename_file(video_url, bound_video_target_name(row[2], len(videos) + 1))
     except Exception as rename_err:
         import logging
         logging.getLogger(__name__).warning(
