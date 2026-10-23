@@ -60,7 +60,7 @@ import { useAuth } from "../contexts/AuthContext";
 import ImagesUpload from "../components/ImagesUpload";
 
 const { Title, Text } = Typography;
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 10;
 
 // 卡片操作栏图标按钮统一样式
 const CardOpBtnStyle = () => (
@@ -1393,7 +1393,7 @@ const ProductDevelopmentBot: React.FC = () => {
                 pageSize={pageSize}
                 total={total}
                 showSizeChanger
-                pageSizeOptions={[12, 24, 48, 96]}
+                pageSizeOptions={[10, 20, 40, 80, 100]}
                 showTotal={(t) => `共 ${t} 条`}
                 onChange={(p, size) => {
                   if (size !== pageSize) {
