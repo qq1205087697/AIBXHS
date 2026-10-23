@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     FEISHU_AD_WEBHOOK_URL: str = ""
     # 美工图片 TOS 自动迁移开关（false 关闭启动时自动迁移）
     DESIGNER_IMAGE_AUTO_MIGRATE: str = "true"
+    # 六面图 TOS 自动迁移开关（false 关闭启动时自动迁移）
+    SIXFACE_IMAGE_AUTO_MIGRATE: str = "true"
     # 飞书 webhook - 编辑基础信息提交地址
     FEISHU_EDIT_WEBHOOK_URL: str = ""
     # 飞书 webhook - 一键优化提交地址

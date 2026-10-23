@@ -1681,6 +1681,13 @@ export const developmentBotApi = {
       headers: { "Content-Type": "multipart/form-data" },
     });
   },
+  parseImportProjects: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.post("/product-development/import-projects/parse", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
   getPendingCounts: () =>
     apiClient.get("/product-development/pending-counts"),
   getMyRoles: () => apiClient.get("/product-development/my-roles"),
