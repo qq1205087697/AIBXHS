@@ -30,7 +30,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         detail="无法验证凭据",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         token = credentials.credentials
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -41,7 +41,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    
+
     from services.auth_service import get_user_by_identity
     user = get_user_by_identity(
         db,

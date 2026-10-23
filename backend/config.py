@@ -28,10 +28,33 @@ class Settings(BaseSettings):
     FEISHU_INVENTORY_TABLE_ID: str = ""
     FEISHU_REVIEW_BASE_TOKEN: str = ""
     FEISHU_REVIEW_TABLE_ID: str = ""
+    # 开发机器人：新品多维表（回传/美工图片附件）
+    FEISHU_DESIGN_BASE_TOKEN: str = ""
+    FEISHU_DESIGN_TABLE_ID: str = ""
+    # 飞书多维表同步服务（独立应用 + 数据表）
+    FEISHU_SYNC_APP_ID: str = ""
+    FEISHU_SYNC_APP_SECRET: str = ""
+    FEISHU_SYNC_BASE_TOKEN: str = ""
+    FEISHU_SYNC_TABLE_ID: str = ""
+    # 飞书 webhook - 邮件机器人自动化
+    FEISHU_EMAIL_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 产品页信息自动化
+    FEISHU_PAGE_INFO_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 开广告提交地址
+    FEISHU_AD_WEBHOOK_URL: str = ""
+    # 美工图片 TOS 自动迁移开关（false 关闭启动时自动迁移）
+    DESIGNER_IMAGE_AUTO_MIGRATE: str = "true"
+    # 飞书 webhook - 编辑基础信息提交地址
+    FEISHU_EDIT_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 一键优化提交地址
+    FEISHU_OPTIMIZE_WEBHOOK_URL: str = ""
     
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
     OPENAI_MODEL: str = "deepseek-v4-flash"
+    # AI 调用参数（可按需在 .env 调整）
+    OPENAI_TEMPERATURE: float = 0.7
+    OPENAI_TIMEOUT: int = 60
     OPENAI_VISION_MODEL: str = ""
     OPENAI_VISION_RESPONSE_FORMAT: str = ""
 
@@ -81,7 +104,7 @@ class Settings(BaseSettings):
     TOS_ENDPOINT: str = ""            # 如: tos-cn-beijing.volces.com
     TOS_REGION: str = ""              # 如: cn-beijing
     TOS_BUCKET: str = ""              # 桶名称
-    TOS_PREFIX: str = "uploads/"      # 对象前缀（目录）
+    TOS_PREFIX: str = "uploads/"     # 对象前缀（目录）
     # 桶访问域名（用于拼接公网访问URL，若为空则使用 https://{bucket}.{endpoint} 形式）
     TOS_CUSTOM_DOMAIN: str = ""
 
@@ -114,7 +137,13 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
-    model_config = {"env_file": os.path.join(os.path.dirname(__file__), ".env")}
+    model_config = {
+        "env_file": [
+            os.path.join(os.path.dirname(__file__), ".env"),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+        ],
+        "env_file_encoding": "utf-8",
+    }
 
 
 def get_settings() -> Settings:

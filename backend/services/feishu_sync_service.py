@@ -14,11 +14,14 @@ import threading
 import time
 import concurrent.futures
 
-# 飞书应用配置
-FEISHU_APP_ID = "cli_a88206945560500c"
-FEISHU_APP_SECRET = "zwTlhqW5d1dDkVZVEsGTxfOuUbpfBZVg"
-FEISHU_APP_TOKEN = "N4DoblLB6a3nbKsmngrcQxc6nMh"
-FEISHU_TABLE_ID = "tblDHtSEjlu5eK6l"
+# 飞书应用配置（从 .env 读取，避免在业务代码中暴露）
+from config import get_settings
+
+_settings = get_settings()
+FEISHU_APP_ID = _settings.FEISHU_SYNC_APP_ID
+FEISHU_APP_SECRET = _settings.FEISHU_SYNC_APP_SECRET
+FEISHU_APP_TOKEN = _settings.FEISHU_SYNC_BASE_TOKEN
+FEISHU_TABLE_ID = _settings.FEISHU_SYNC_TABLE_ID
 
 # 内存状态（仅当前进程有效）
 _sync_status = {

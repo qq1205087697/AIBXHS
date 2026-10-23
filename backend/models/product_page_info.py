@@ -15,6 +15,7 @@ class ProductPageInfo(BaseModel):
 
     sku = Column(String(50), nullable=False, comment="SKU")
     asin = Column(String(20), nullable=True, comment="ASIN")
+    product_name = Column(String(500), nullable=True, comment="品名")
     store = Column(String(100), nullable=False, comment="店铺")
     title = Column(String(500), nullable=True, comment="标题")
     keywords = Column(Text, nullable=True, comment="关键词")
@@ -23,13 +24,19 @@ class ProductPageInfo(BaseModel):
     price = Column(String(50), nullable=True, comment="价格")
     image_count = Column(Integer, default=0, comment="图片数")
 
-    # 评分字段（数据库中为 varchar 类型）
+    # 评分字段（数据库中为 varchar 类型，各项满分10分）
     title_rating = Column(String(20), nullable=True, comment="标题评分")
-    description_rating = Column(String(20), nullable=True, comment="描述评分")
+    description_rating = Column(String(20), nullable=True, comment="五点描述评分")
     keywords_rating = Column(String(20), nullable=True, comment="关键词评分")
-    star_rating = Column(Float, nullable=True, comment="星级评分")
-    competitor_price = Column(Text, nullable=True, comment="竞品价格")
     image_rating = Column(String(20), nullable=True, comment="图片评分")
+    product_description_rating = Column(String(20), nullable=True, comment="产品描述评分")
+    star = Column(String(20), nullable=True, comment="星级")
+    star_rating = Column(String(20), nullable=True, comment="星级评分（得分）")
+    ad_rating = Column(String(20), nullable=True, comment="广告评分")
+    aplus_rating = Column(String(20), nullable=True, comment="A+评分")
+    video_rating = Column(String(20), nullable=True, comment="视频评分")
+    listing_suggestions = Column(Text, nullable=True, comment="产品建议")
+    competitor_price = Column(Text, nullable=True, comment="竞品价格")
 
     # 其他字段
     has_ad = Column(Integer, default=0, comment="广告数量")

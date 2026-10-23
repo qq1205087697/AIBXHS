@@ -22,6 +22,7 @@ from services.h3_video_service import (
     submit_video_task,
     list_video_tasks,
     delete_video_task,
+    cancel_video_task,
     H3VideoError,
 )
 from pydantic import BaseModel
@@ -281,13 +282,18 @@ async def list_video_tasks_endpoint(
     page: int = 1,
     page_size: int = 10,
     keyword: str = "",
+    bind_status: str = "all",
     current_user: User = Depends(get_current_user),
 ):
-    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询"""
+    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询；bind_status: all/bound/unbound"""
     return {
         "success": True,
         "data": list_video_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+            current_user.tenant_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            bind_status=bind_status,
         ),
     }
 
@@ -339,17 +345,52 @@ async def list_upscale_tasks_endpoint(
     page: int = 1,
     page_size: int = 20,
     keyword: str = "",
+    bind_status: str = "all",
     current_user: User = Depends(get_current_user),
 ):
-    """超分任务列表（分页 + 标题搜索），用于高清处理页面与进度轮询"""
+    """超分任务列表（分页 + 标题搜索 + 绑定状态筛选），用于高清处理页面与进度轮询"""
     from services.upscale_service import list_upscale_tasks
 
     return {
         "success": True,
         "data": list_upscale_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+            current_user.tenant_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            bind_status=bind_status,
         ),
     }
+
+
+@router.post("/upscale-tasks/{task_id}/cancel")
+async def cancel_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """取消排队中/处理中的超分任务（同步移除/中断 ComfyUI 任务）"""
+    from services.upscale_service import cancel_upscale_task, UpscaleError
+
+    try:
+        cancel_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "任务已取消"}
+
+
+@router.post("/upscale-tasks/{task_id}/retry")
+async def retry_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """重试失败的超分任务：先查 ComfyUI history，有成片直接接续收片，无成片重新入队"""
+    from services.upscale_service import retry_upscale_task, UpscaleError
+
+    try:
+        task, message = retry_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": message, "data": task}
 
 
 @router.delete("/upscale-tasks/{task_id}")
@@ -417,6 +458,38 @@ async def download_upscale_video(
 
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     return StreamingResponse(_stream(), media_type="video/mp4", headers=headers)
+
+
+@router.post("/video-tasks/{task_id}/cancel")
+async def cancel_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """取消排队中/生成中的视频生成任务（同步移除/中断 ComfyUI 任务）"""
+    try:
+        cancel_video_task(current_user.tenant_id, task_id)
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "任务已取消"}
+
+
+@router.post("/video-tasks/{task_id}/recover")
+async def recover_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+
+    action="resumed"：已接续原 ComfyUI 任务（后台轮询收片回填原记录）；
+    action="resubmit"：原任务在 ComfyUI 上无记录/从未提交成功，前端需走重新提交流程。
+    """
+    from services.h3_video_service import recover_failed_task, H3VideoError
+
+    try:
+        action, message = recover_failed_task(current_user.tenant_id, task_id)
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
 
 
 @router.delete("/video-tasks/{task_id}")

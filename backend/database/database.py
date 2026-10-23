@@ -91,6 +91,7 @@ def init_db():
         )
         from models.ai_video_task import AIVideoTask
         from models.ai_image_task import AIImageTask
+        from models.video_binding_request import VideoBindingRequest
 
         # 创建所有表
         Base.metadata.create_all(bind=engine)
@@ -301,6 +302,13 @@ def init_db():
             # products 表新增无配件标记字段（如果不存在）
             try:
                 conn.execute(text("ALTER TABLE products ADD COLUMN no_accessory TINYINT(1) NOT NULL DEFAULT 0 COMMENT '无配件标记(是:数据补齐不再提示未绑配件)'"))
+                conn.commit()
+            except Exception:
+                pass
+
+            # 页面优化机器人表品名字段（与库存快照表品名长度一致，每次启动幂等执行）
+            try:
+                conn.execute(text("ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'"))
                 conn.commit()
             except Exception:
                 pass

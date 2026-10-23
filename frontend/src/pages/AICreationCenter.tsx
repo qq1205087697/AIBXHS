@@ -39,6 +39,7 @@ import {
   SearchOutlined,
   EyeOutlined,
   LinkOutlined,
+  PauseCircleOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
@@ -56,6 +57,7 @@ import {
   VoiceoverLanguage,
   VideoType,
   AIVideoTask,
+  VoiceoverPlanResult,
 } from '../api'
 
 const { Text } = Typography
@@ -64,6 +66,185 @@ const { TextArea } = Input
 const MAX_IMAGES = 9
 const MAX_PROMPT_LENGTH = 4000
 const PRODUCT_PAGE_SIZE = 8
+
+// ===== 方案临时缓存（sessionStorage，10 分钟滑动过期） =====
+// 生成方案后切换页面再切回，可恢复产品信息卡与 3 套方案；关闭标签页即清空。
+// 停留在本页期间由心跳持续续期；离开页面超过 10 分钟未回，下次进入时静默清理（不提示）
+const PLAN_CACHE_KEY = 'ai_creation_plan_cache'
+const PLAN_CACHE_TTL = 10 * 60 * 1000
+
+interface PlanCachePayload {
+  ts: number
+  result: AmazonProductAnalysisResult | null
+  concepts: VideoConcept[] | null
+  conceptsDirty: boolean
+  planRefreshLeft: number
+  planModalOpen: boolean
+  selectedProducts: ProductOptionItem[]
+  promptText: string
+}
+
+const readPlanCache = (): PlanCachePayload | null => {
+  try {
+    const raw = sessionStorage.getItem(PLAN_CACHE_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw) as PlanCachePayload
+    if (!data || typeof data.ts !== 'number' || Date.now() - data.ts > PLAN_CACHE_TTL) {
+      sessionStorage.removeItem(PLAN_CACHE_KEY)
+      return null
+    }
+    return data
+  } catch {
+    return null
+  }
+}
+
+const writePlanCache = (payload: Omit<PlanCachePayload, 'ts'>) => {
+  try {
+    const hasAny =
+      payload.result ||
+      (payload.concepts && payload.concepts.length > 0) ||
+      payload.promptText.trim() ||
+      payload.selectedProducts.length > 0
+    if (!hasAny) {
+      sessionStorage.removeItem(PLAN_CACHE_KEY)
+      return
+    }
+    sessionStorage.setItem(PLAN_CACHE_KEY, JSON.stringify({ ...payload, ts: Date.now() }))
+  } catch {
+    // 存储异常（隐私模式/空间已满）时静默忽略，不影响正常流程
+  }
+}
+
+// 进行中的方案生成请求：切页导致组件卸载后请求仍在后台，切回时接续恢复结果
+type InflightPlanPromise = Promise<{
+  data: { success: boolean; data: VoiceoverPlanResult }
+}>
+let inflightPlanReq: InflightPlanPromise | null = null
+
+// ===== 参考图片缓存（IndexedDB 原生支持存 File 对象，与方案缓存同为 10 分钟滑动过期） =====
+// SPA 切页用内存快照（blob 地址仍有效）；页面刷新后从 IndexedDB 恢复 File 并重建 blob 地址
+let cachedFileList: UploadFile[] | null = null
+
+const openImgCacheDb = (): Promise<IDBDatabase | null> =>
+  new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('ai_creation_img_cache', 1)
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains('kv')) req.result.createObjectStore('kv')
+      }
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => resolve(null)
+    } catch {
+      resolve(null)
+    }
+  })
+
+const saveImgCache = async (items: UploadFile[]) => {
+  const db = await openImgCacheDb()
+  if (!db) return
+  try {
+    const tx = db.transaction('kv', 'readwrite')
+    const store = tx.objectStore('kv')
+    if (items.length === 0) {
+      store.delete('fileList')
+    } else {
+      store.put(
+        {
+          ts: Date.now(),
+          items: items.map((f) => ({
+            uid: f.uid,
+            name: f.name,
+            url: f.url, // 远程图（编辑回填）直接存 URL
+            file: f.originFileObj || null, // IndexedDB 原生支持存 File，无需 base64
+          })),
+        },
+        'fileList',
+      )
+    }
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve
+      tx.onerror = reject
+    })
+  } catch {
+    // 存储异常（隐私模式/空间已满）时静默忽略，不影响正常流程
+  } finally {
+    db.close()
+  }
+}
+
+const readImgCache = async (): Promise<UploadFile[]> => {
+  const db = await openImgCacheDb()
+  if (!db) return []
+  try {
+    const rec = await new Promise<any>((resolve, reject) => {
+      const r = db.transaction('kv').objectStore('kv').get('fileList')
+      r.onsuccess = () => resolve(r.result)
+      r.onerror = reject
+    })
+    if (!rec || typeof rec.ts !== 'number' || Date.now() - rec.ts > PLAN_CACHE_TTL) return []
+    return (rec.items || [])
+      .map((it: any): UploadFile | null => {
+        if (it.file) {
+          // 本地文件：旧 blob 地址已随页面刷新失效，用恢复出的 File 重建
+          return {
+            uid: it.uid,
+            name: it.name,
+            status: 'done',
+            thumbUrl: URL.createObjectURL(it.file),
+            originFileObj: it.file,
+          }
+        }
+        if (it.url) {
+          return { uid: it.uid, name: it.name, status: 'done', url: it.url, thumbUrl: it.url }
+        }
+        return null
+      })
+      .filter(Boolean) as UploadFile[]
+  } catch {
+    return []
+  } finally {
+    db.close()
+  }
+}
+
+// 心跳续期：停留在 AI 视频页期间刷新缓存时间戳（滑动过期）；
+// 离开页面后时间戳冻结，超过 10 分钟未回来即过期，下次进入时静默清理、不提示
+const touchPlanCache = () => {
+  try {
+    const raw = sessionStorage.getItem(PLAN_CACHE_KEY)
+    if (!raw) return
+    const data = JSON.parse(raw) as PlanCachePayload
+    if (!data || typeof data.ts !== 'number') return
+    sessionStorage.setItem(PLAN_CACHE_KEY, JSON.stringify({ ...data, ts: Date.now() }))
+  } catch {
+    /* ignore */
+  }
+}
+
+const touchImgCache = async () => {
+  const db = await openImgCacheDb()
+  if (!db) return
+  try {
+    const tx = db.transaction('kv', 'readwrite')
+    const store = tx.objectStore('kv')
+    const req = store.get('fileList')
+    req.onsuccess = () => {
+      const rec = req.result
+      if (rec && typeof rec.ts === 'number') {
+        store.put({ ...rec, ts: Date.now() }, 'fileList')
+      }
+    }
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve
+      tx.onerror = reject
+    })
+  } catch {
+    /* ignore */
+  } finally {
+    db.close()
+  }
+}
 
 // ===== 变高清（Topaz 星光 2.6）：放大倍数与 2K 上限自动计算 =====
 // 处理后总像素不得超过 2K（2560×1440），否则运行时长过久；倍数按 0.05 卡位拖动
@@ -80,6 +261,35 @@ const formatMp = (w?: number | null, h?: number | null): string => {
   if (!w || !h) return '-'
   return `${((w * h) / 1000000).toFixed(1)}MP`
 }
+
+// ===== 预计耗时估算（依据实测耗时表线性插值） =====
+// H3 生成实测耗时表（分钟）：像素档 × 时长秒，耗时与像素数、时长均近似线性
+const H3_COST_TABLE: Record<number, Record<number, number>> = {
+  0.3: { 5: 1.6, 10: 3.3, 15: 4.9 },
+  0.5: { 5: 2.8, 10: 5.6, 15: 8.4 },
+  0.9: { 5: 4.9, 10: 9.9, 15: 14.9 },
+}
+// 按档位实际像素 MP 在 0.3/0.5/0.9 档间线性插值（超出范围按端点取值，如 768P≈1.0MP 按 0.9 档）
+const estimateH3CostMinutes = (resolution: VideoResolution, duration: VideoDuration): number => {
+  const [w, h] = H3_SIZE_TABLE[resolution] || H3_SIZE_TABLE['0.5']
+  const mp = Math.min(0.9, Math.max(0.3, (w * h) / 1000000))
+  const stops = [0.3, 0.5, 0.9]
+  let lo = stops[0]
+  let hi = stops[stops.length - 1]
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (mp >= stops[i] && mp <= stops[i + 1]) {
+      lo = stops[i]
+      hi = stops[i + 1]
+      break
+    }
+  }
+  const t = hi === lo ? 0 : (mp - lo) / (hi - lo)
+  return H3_COST_TABLE[lo][duration] + (H3_COST_TABLE[hi][duration] - H3_COST_TABLE[lo][duration]) * t
+}
+
+// 超分实测耗时（分钟，快路径）拟合：耗时 ≈ 4.05 × 输出MP × 时长秒/5（实测 9 组数据误差 <2%）
+const estimateUpscaleCostMinutes = (srcW: number, srcH: number, scale: number, duration: number): number =>
+  (((srcW * srcH) / 1000000) * scale * scale * 4.05 * duration) / 5
 // 耗时格式化：60 秒内显示「N 秒」，超过显示「N 分 M 秒」
 const formatCost = (s?: number | null): string => {
   if (s == null) return '-'
@@ -252,6 +462,8 @@ const AICreationCenter: React.FC = () => {
   const [productDraftDirty, setProductDraftDirty] = useState(false)
   const [history, setHistory] = useState<AIVideoTask[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
+  // 失败任务重试中标记（一次只允许一个重试请求，防止重复提交）
+  const [retryingId, setRetryingId] = useState<number | null>(null)
   const [previewTask, setPreviewTask] = useState<AIVideoTask | null>(null)
   // 生成历史缩略图大图预览：记录当前打开的历史项 id 与图片下标（受控，支持"+N"直达后面的图）
   const [historyPreview, setHistoryPreview] = useState<{ id: number; index: number } | null>(null)
@@ -406,12 +618,22 @@ const AICreationCenter: React.FC = () => {
   const [historyPageSize, setHistoryPageSize] = useState(20)
   const [historyTotal, setHistoryTotal] = useState(0)
   const [historyKeyword, setHistoryKeyword] = useState('')
+  // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
+  const [historyBindFilter, setHistoryBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
+  const [cancellingId, setCancellingId] = useState<number | null>(null)
   const keywordTimerRef = useRef<number | null>(null)
+  // 图片缓存恢复完成前禁止写入缓存，防止挂载时空列表先把 IndexedDB 里的图片清掉
+  const fileListCacheReadyRef = useRef(false)
 
-  const loadTasks = async (page = historyPage, size = historyPageSize, kw = historyKeyword) => {
+  const loadTasks = async (
+    page = historyPage,
+    size = historyPageSize,
+    kw = historyKeyword,
+    bind = historyBindFilter,
+  ) => {
     setTasksLoading(true)
     try {
-      const resp = await aiCreationApi.listVideoTasks(page, size, kw)
+      const resp = await aiCreationApi.listVideoTasks(page, size, kw, bind)
       setHistory(resp.data.data.items || [])
       setHistoryTotal(resp.data.data.total || 0)
     } catch {
@@ -421,6 +643,114 @@ const AICreationCenter: React.FC = () => {
     }
   }
 
+  // 方案生成成功后的统一落位（含缓存写入）：handleGeneratePlans 与切页接续恢复共用
+  const applyPlanResult = (
+    data: { product: AmazonProductAnalysisResult; concepts: VideoConcept[] },
+    isRefresh: boolean,
+    productForState?: AmazonProductAnalysisResult,
+  ) => {
+    const finalResult = productForState || data.product
+    setResult(finalResult)
+    setConcepts(data.concepts)
+    setConceptsDirty(false)
+    // 每次打开弹窗时商品信息默认收起
+    setProductInfoExpanded(false)
+    setDraftProduct(null)
+    setProductDraftDirty(false)
+    setPlanModalOpen(true)
+    if (isRefresh) {
+      setPlanRefreshLeft((n) => n - 1)
+    } else {
+      setPlanRefreshLeft(2)
+    }
+    message.success(isRefresh ? '已重新生成 3 套方案' : '已生成 3 套方案，请选择一套')
+    // 组件已卸载时（切页后请求才完成）setter 全部无效，显式写缓存保证切回后可恢复
+    writePlanCache({
+      result: finalResult,
+      concepts: data.concepts,
+      conceptsDirty: false,
+      planRefreshLeft: isRefresh ? planRefreshLeft - 1 : 2,
+      planModalOpen: true,
+      selectedProducts,
+      promptText,
+    })
+  }
+
+  useEffect(() => {
+    loadTasks(1)
+    setHistoryPage(1)
+    // 恢复 30 分钟内的方案缓存（切页/刷新回来不丢已生成的方案）
+    const cached = readPlanCache()
+    if (cached) {
+      setResult(cached.result)
+      setConcepts(cached.concepts)
+      setConceptsDirty(cached.conceptsDirty)
+      setPlanRefreshLeft(cached.planRefreshLeft)
+      setSelectedProducts(cached.selectedProducts)
+      setPromptText(cached.promptText)
+      if (cached.planModalOpen && cached.concepts && cached.concepts.length > 0) {
+        setPlanModalOpen(true)
+      }
+      if (cached.result || (cached.concepts && cached.concepts.length > 0)) {
+        message.info('已恢复 10 分钟内生成的方案')
+      }
+    }
+    // 生成中切页再切回：接续等待进行中的请求，完成后直接展示
+    if (inflightPlanReq) {
+      setLoading(true)
+      inflightPlanReq
+        .then((res) => {
+          if (res.data?.success && res.data?.data) {
+            applyPlanResult(res.data.data, false)
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false))
+    }
+    // 恢复参考图片：SPA 切页用内存快照；页面刷新后 blob 地址失效，从 IndexedDB 恢复 File 并重建预览
+    if (cachedFileList && cachedFileList.length > 0) {
+      setFileList(cachedFileList)
+      fileListCacheReadyRef.current = true
+    } else {
+      readImgCache().then((items) => {
+        if (items.length > 0) setFileList(items)
+        fileListCacheReadyRef.current = true
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 方案相关状态变化时同步临时缓存（选择方案/编辑提示词/关闭弹窗/清空等自动更新或失效）
+  useEffect(() => {
+    writePlanCache({
+      result,
+      concepts,
+      conceptsDirty,
+      planRefreshLeft,
+      planModalOpen,
+      selectedProducts,
+      promptText,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, concepts, conceptsDirty, planRefreshLeft, planModalOpen, selectedProducts, promptText])
+
+  // 参考图片变化时同步缓存（内存快照 + IndexedDB，跨刷新可恢复 File）；恢复完成前不写入
+  useEffect(() => {
+    if (!fileListCacheReadyRef.current) return
+    cachedFileList = fileList
+    saveImgCache(fileList)
+  }, [fileList])
+
+  // 停留心跳：每分钟刷新两类缓存的时间戳——只要停留在 AI 视频页就一直保持不过期；
+  // 切到其他页面后时间戳冻结，超过 10 分钟未回来即过期，下次进入时静默清理（无提示）
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      touchPlanCache()
+      touchImgCache()
+    }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   // 历史搜索：300ms 防抖后回到第 1 页重新加载
   const handleHistoryKeywordChange = (kw: string) => {
     setHistoryKeyword(kw)
@@ -429,6 +759,12 @@ const AICreationCenter: React.FC = () => {
       setHistoryPage(1)
       loadTasks(1, historyPageSize, kw)
     }, 300)
+  }
+
+  // 绑定状态页签切换：回到第 1 页重新加载
+  const handleHistoryBindFilterChange = (v: 'all' | 'unbound' | 'bound') => {
+    setHistoryBindFilter(v)
+    loadTasks(1, historyPageSize, historyKeyword, v)
   }
 
   useEffect(() => {
@@ -443,7 +779,7 @@ const AICreationCenter: React.FC = () => {
     const timer = window.setInterval(() => loadTasks(historyPage), 15000)
     return () => window.clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [history, historyPage, historyPageSize, historyKeyword])
+  }, [history, historyPage, historyPageSize, historyKeyword, historyBindFilter])
 
   // 下载 URL 图片为 Blob：先浏览器直连，被 CORS 拦截或网络失败时改走后端代理
   const fetchImageBlob = async (url: string): Promise<Blob | null> => {
@@ -505,8 +841,9 @@ const AICreationCenter: React.FC = () => {
 
     setLoading(true)
 
+    let reqPromise: InflightPlanPromise | null = null
     try {
-      const res = await aiCreationApi.generateVoiceoverPlans(files, {
+      reqPromise = aiCreationApi.generateVoiceoverPlans(files, {
         duration,
         target_market: getMarketLabel(market),
         voiceover_language: voiceoverLanguage,
@@ -519,21 +856,11 @@ const AICreationCenter: React.FC = () => {
             : undefined,
         confirmed_card: confirmedCard,
       })
+      // 注册进行中请求：生成期间切页后，切回时可接续恢复结果
+      inflightPlanReq = reqPromise
+      const res = await reqPromise
       if (res.data?.success && res.data?.data) {
-        setResult(productForState || res.data.data.product)
-        setConcepts(res.data.data.concepts)
-        setConceptsDirty(false)
-        // 每次打开弹窗时商品信息默认收起
-        setProductInfoExpanded(false)
-        setDraftProduct(null)
-        setProductDraftDirty(false)
-        setPlanModalOpen(true)
-        if (isRefresh) {
-          setPlanRefreshLeft((n) => n - 1)
-        } else {
-          setPlanRefreshLeft(2)
-        }
-        message.success(isRefresh ? '已重新生成 3 套方案' : '已生成 3 套方案，请选择一套')
+        applyPlanResult(res.data.data, isRefresh, productForState)
       } else {
         message.error('方案生成异常，请稍后重试')
       }
@@ -541,6 +868,7 @@ const AICreationCenter: React.FC = () => {
       const msg = error.response?.data?.detail || error.message || '方案生成失败'
       message.error(msg)
     } finally {
+      if (inflightPlanReq && inflightPlanReq === reqPromise) inflightPlanReq = null
       setLoading(false)
     }
   }
@@ -564,7 +892,9 @@ const AICreationCenter: React.FC = () => {
       message.warning('请先生成或填写视频提示词')
       return
     }
-    const title = result?.product_name_cn || result?.product_name_en || '视频生成任务'
+    // 编辑回填后重新生成：沿用原任务的标题与产品信息，避免丢失后落到默认值
+    const restored = activeHistoryId ? history.find((h) => h.id === activeHistoryId) : null
+    const title = result?.product_name_cn || result?.product_name_en || restored?.title || '视频生成任务'
     const files = await collectFiles()
     if (files.length === 0) {
       message.warning('参考图片读取失败，请重新上传')
@@ -582,8 +912,8 @@ const AICreationCenter: React.FC = () => {
         voiceover_language: voiceoverLanguage,
         video_type: videoType,
         title,
-        product_code: selectedProducts[0]?.product_code || '',
-        product_name: selectedProducts[0]?.name || '',
+        product_code: selectedProducts[0]?.product_code || restored?.product_code || '',
+        product_name: selectedProducts[0]?.name || restored?.product_name || '',
       })
       const task = resp.data.data
       // 新任务在最前：跳回第 1 页刷新
@@ -626,6 +956,12 @@ const AICreationCenter: React.FC = () => {
       )
     }
     setPromptText(item.prompt)
+    // 恢复编辑来源的产品信息：重新生成时标题与产品关联不再丢失
+    setSelectedProducts(
+      item.product_code
+        ? [{ id: 0, product_code: item.product_code, name: item.product_name || '', images: [] }]
+        : []
+    )
     setActiveHistoryId(item.id)
     // 图片与参数已换，原方案与商品分析失效，需重新生成
     invalidatePlans()
@@ -672,6 +1008,90 @@ const AICreationCenter: React.FC = () => {
         }
       },
     })
+  }
+
+  // ===== 失败任务重试：用历史存储的参考图与原参数重新提交（生成新任务记录，原记录保留）=====
+  // 取消排队中/生成中的任务：确认后调用取消接口（同步移除/中断 ComfyUI 任务）
+  const confirmCancelTask = (item: AIVideoTask) => {
+    Modal.confirm({
+      title: '取消该任务？',
+      content: `「${item.title}」将被取消，ComfyUI 中排队/执行中的任务也会同步移除，确定继续吗？`,
+      centered: true,
+      okText: '取消任务',
+      okButtonProps: { danger: true },
+      cancelText: '再想想',
+      onOk: async () => {
+        setCancellingId(item.id)
+        try {
+          const resp = await aiCreationApi.cancelVideoTask(item.id)
+          message.success(resp.data.message || '任务已取消')
+          loadTasks()
+        } catch (e: any) {
+          message.error(e?.response?.data?.detail || '取消失败，请稍后重试')
+        } finally {
+          setCancellingId(null)
+        }
+      },
+    })
+  }
+
+  const retryTask = async (item: AIVideoTask) => {
+    if (retryingId != null) return
+    setRetryingId(item.id)
+    try {
+      // 先尝试智能恢复：ComfyUI 上已有成片/仍在生成时接续原任务，不重新提交
+      let needResubmit = true
+      try {
+        const rec = await aiCreationApi.recoverVideoTask(item.id)
+        if (rec.data.action === 'resumed') {
+          message.success(rec.data.message || '已接续原任务，等待收片回填')
+          loadTasks(1)
+          needResubmit = false
+        }
+      } catch {
+        // 恢复检查失败（接口异常等）：回退到原重新提交流程
+      }
+      if (!needResubmit) return
+
+      if (!item.images.length) {
+        message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
+        return
+      }
+      const files: File[] = []
+      for (let i = 0; i < item.images.length; i++) {
+        const blob = await fetchImageBlob(item.images[i])
+        if (blob) {
+          files.push(new File([blob], `ref-${i + 1}.jpg`, { type: blob.type || 'image/jpeg' }))
+        }
+      }
+      if (files.length === 0) {
+        message.error('参考图片读取失败，请使用「编辑」重新上传')
+        return
+      }
+      const storedLang = item.voiceover_language || '自动'
+      const resp = await aiCreationApi.generateVideo(files, {
+        prompt: item.prompt,
+        duration: item.duration,
+        resolution: item.resolution,
+        ratio: item.ratio,
+        model: item.model,
+        market: item.market,
+        voiceover_language: storedLang === '自动' ? 'auto' : (storedLang as VoiceoverLanguage),
+        title: item.title,
+        product_code: item.product_code || '',
+        product_name: item.product_name || '',
+      })
+      const task = resp.data.data
+      // 新任务在最前：跳回第 1 页刷新
+      setHistoryPage(1)
+      loadTasks(1)
+      setActiveHistoryId(task.id)
+      message.success('已重新提交生成任务，排队中')
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '重试失败，请稍后再试')
+    } finally {
+      setRetryingId(null)
+    }
   }
 
   // ===== 绑定至产品 / 变高清 =====
@@ -1292,6 +1712,19 @@ const AICreationCenter: React.FC = () => {
       style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}
       styles={{ body: { flex: 1, minHeight: 0, padding: 16, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
     >
+      {/* 绑定状态页签：全部 / 未绑定 / 已绑定 */}
+      <div style={{ marginBottom: 10, flexShrink: 0 }}>
+        <Segmented
+          size="small"
+          value={historyBindFilter}
+          onChange={(v) => handleHistoryBindFilterChange(v as 'all' | 'unbound' | 'bound')}
+          options={[
+            { label: '全部', value: 'all' },
+            { label: '未绑定', value: 'unbound' },
+            { label: '已绑定', value: 'bound' },
+          ]}
+        />
+      </div>
       {history.length === 0 ? (
         tasksLoading ? (
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
@@ -1381,9 +1814,18 @@ const AICreationCenter: React.FC = () => {
                     失败
                   </Tag>
                 ) : item.status === '已完成' && item.cost_seconds != null ? (
-                  <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                    耗时 {formatCost(item.cost_seconds)}
-                  </Text>
+                  <>
+                    {item.bound ? (
+                      <Tag color="success" style={{ flexShrink: 0, marginRight: 0 }}>
+                        已绑定
+                      </Tag>
+                    ) : (
+                      <Tag style={{ flexShrink: 0, marginRight: 0, color: '#999' }}>未绑定</Tag>
+                    )}
+                    <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+                      耗时 {formatCost(item.cost_seconds)}
+                    </Text>
+                  </>
                 ) : null}
                 <div style={{ flex: 1 }} />
                 <Button icon={<EyeOutlined />} onClick={() => setPreviewTask(item)}>
@@ -1396,6 +1838,17 @@ const AICreationCenter: React.FC = () => {
                   trigger={['click']}
                   menu={{
                     items: [
+                      ...(item.status === '失败'
+                        ? [
+                            {
+                              key: 'retry',
+                              label: retryingId === item.id ? '重试中…' : '重试生成',
+                              icon: <ReloadOutlined />,
+                              disabled: retryingId != null,
+                              onClick: () => retryTask(item),
+                            },
+                          ]
+                        : []),
                       ...(item.status === '已完成' && item.video_url
                         ? [
                             {
@@ -1410,6 +1863,18 @@ const AICreationCenter: React.FC = () => {
                               icon: <ThunderboltOutlined />,
                               disabled: !!item.upscale_video_url,
                               onClick: () => openUpscaleModal(item),
+                            },
+                          ]
+                        : []),
+                      ...(item.status === '排队中' || item.status === '生成中'
+                        ? [
+                            {
+                              key: 'cancel',
+                              label: cancellingId === item.id ? '取消中…' : '取消任务',
+                              icon: <PauseCircleOutlined />,
+                              danger: true,
+                              disabled: cancellingId != null,
+                              onClick: () => confirmCancelTask(item),
                             },
                           ]
                         : []),
@@ -1836,7 +2301,7 @@ const AICreationCenter: React.FC = () => {
         </Card>
         </div>
 
-        {/* 固定在左栏底部的立即生成按钮（不随左侧滚动） */}
+        {/* 固定在左栏底部的立即生成按钮（不随左侧滚动），按钮内展示预计耗时 */}
         <div style={{ flexShrink: 0, paddingTop: 12, background: '#fff' }}>
           <Button
             type="primary"
@@ -1847,6 +2312,9 @@ const AICreationCenter: React.FC = () => {
             disabled={loading}
           >
             立即生成
+            <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.85 }}>
+              （预计耗时约 {Math.round(estimateH3CostMinutes(resolution, duration))} 分钟）
+            </span>
           </Button>
         </div>
       </div>
@@ -1859,10 +2327,12 @@ const AICreationCenter: React.FC = () => {
       {renderPlanModal()}
       {renderProductModal()}
 
-      {/* 绑定至产品：选择产品后把视频写入产品详情（无视频小窗） */}
+      {/* 绑定至产品：选择产品后提交绑定申请，审核通过才写入产品详情（无视频小窗） */}
       <BindProductModal
         open={bindModalOpen}
         videoUrl={bindTask?.video_url || ''}
+        source="ai_video"
+        taskTitle={bindTask?.title}
         onClose={() => setBindModalOpen(false)}
       />
 
@@ -1919,6 +2389,17 @@ const AICreationCenter: React.FC = () => {
           <div>
             <Text type="secondary" style={{ fontSize: 12 }}>
               当前倍数：×{(upscaleScale ?? 1).toFixed(2)}
+            </Text>
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              预计耗时：约{' '}
+              {upscaleRes && upscaleScale
+                ? Math.round(
+                    estimateUpscaleCostMinutes(upscaleRes.w, upscaleRes.h, upscaleScale, upscaleTask?.duration || 15),
+                  )
+                : '-'}{' '}
+              分钟
             </Text>
           </div>
           <div>

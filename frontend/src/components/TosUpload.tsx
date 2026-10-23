@@ -111,7 +111,8 @@ const TosUpload: React.FC<TosUploadProps> = ({
   }
 
   const handleRemove = () => {
-    onChange?.(undefined)
+    // 传空串而非 undefined: undefined 会被 JSON 序列化丢弃, 导致后端跳过更新而删不掉
+    onChange?.("")
   }
 
   // 渲染已上传内容预览
@@ -264,7 +265,8 @@ export const VideosUpload: React.FC<{
 
   const handleRemove = (index: number) => {
     const next = videos.filter((_, i) => i !== index)
-    onChange?.(next.length ? next : undefined)
+    // 必须始终传数组(含空数组): 传 undefined 会被 JSON 序列化丢弃, 导致后端跳过更新
+    onChange?.(next)
   }
 
   return (

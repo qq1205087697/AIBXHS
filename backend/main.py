@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, ai_image, tags
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings, ai_image, tags
 from config import get_settings
 
 settings = get_settings()
@@ -112,6 +112,7 @@ app.include_router(shipments.router)
 app.include_router(suppliers.router)
 app.include_router(upload.router)
 app.include_router(ai_creation.router)
+app.include_router(video_bindings.router)
 app.include_router(ai_image.router)
 app.include_router(base_table.router)
 
@@ -123,6 +124,7 @@ app.include_router(product_aging.router, prefix="/api")
 app.include_router(product_buybox.router, prefix="/api")
 app.include_router(product_shipment_notice.router, prefix="/api")
 app.include_router(group_messages.router, prefix="/api")
+app.include_router(product_development.router, prefix="/api")
 
 @app.get("/api/health")
 async def health_check():
@@ -189,6 +191,15 @@ async def startup_event():
     """应用启动事件"""
     logger.info("宝鑫华盛AI助手后端服务启动中...")
     try:
+        from config import get_settings
+        if not get_settings().H3_BASE_URL:
+            logger.warning(
+                "H3_BASE_URL 未配置（为空），AI视频/高清处理的 ComfyUI 任务将无法执行或查询，"
+                "请检查 backend/.env 的 H3_BASE_URL/H3_AUTH_USER/H3_AUTH_PASSWORD 配置"
+            )
+    except Exception:
+        pass
+    try:
         from database.database import init_db
         init_db()
         logger.info("数据库初始化完成")
@@ -223,6 +234,14 @@ async def startup_event():
         logger.info("AI 生图未完成任务已恢复监听")
     except Exception as e:
         logger.error(f"AI 生图任务恢复失败: {e}")
+
+    try:
+        import asyncio as _asyncio
+        from routers.product_development import auto_migrate_designer_images
+        _asyncio.create_task(auto_migrate_designer_images())
+        logger.info("美工图片 TOS 自动迁移任务已启动")
+    except Exception as e:
+        logger.error(f"启动美工图片自动迁移任务失败: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():

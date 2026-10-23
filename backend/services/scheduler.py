@@ -636,12 +636,12 @@ def push_daily_review_notifications_job():
                 group_id = row[5]
                 group_name = row[6] or f"分组{group_id}"
                 tenant_id = row[7]
-            
+
             key = (tenant_id, group_id)
             if key not in group_stats:
                 group_stats[key] = {"tenant_id": tenant_id, "group_id": group_id, "name": group_name, "total": 0, "high": 0, "medium": 0, "low": 0, "review_ids": []}
             group_stats[key]["total"] += 1
-            
+
             if has_importance_level:
                 level = str(row[4]) if row[4] else "medium"
                 if level == "high":
@@ -691,14 +691,13 @@ def push_daily_review_notifications_job():
                     SELECT COUNT(*) FROM notifications
                     WHERE tenant_id = :tenant_id AND user_id = :uid AND title = :title
                       AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-                """), {"tenant_id": tenant_id, "uid": user_id, "title": title}).scalar()
+                """), {"tenant_id": stats["tenant_id"], "uid": user_id, "title": title}).scalar()
                 if exists > 0:
                     logger.info(f"  用户 ID={user_id} 已在5分钟内收到相同通知，跳过")
                     continue
                 logger.info(f"  准备推送给用户 ID={user_id}")
                 notification_rows.append({
-                    "tenant_id": tenant_id,
-                    "tenant_id": tenant_id,
+                    "tenant_id": stats["tenant_id"],
                     "uid": user_id,
                     "title": title,
                     "content": content
