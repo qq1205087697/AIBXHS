@@ -12,6 +12,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { VideosUpload } from '../components/TosUpload'
 import ImagesUpload from '../components/ImagesUpload'
 import ImageGallery from '../components/ImageGallery'
+import VideoGallery from '../components/VideoGallery'
 import { useResponsive } from '../hooks/useResponsive'
 
 interface Product {
@@ -3739,19 +3740,7 @@ const productAttributeLabelMap: Record<string, string> = {
                           : []
                       return (
                         <Card size="small" title={`产品视频（${galleryVideos.length}）`}>
-                          {galleryVideos.length > 0 ? (
-                            galleryVideos.map((v, i) => (
-                              <video
-                                key={i}
-                                src={v}
-                                controls
-                                preload="metadata"
-                                style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto 8px' }}
-                              />
-                            ))
-                          ) : (
-                            <div style={{ color: '#999', fontSize: 13, textAlign: 'center', padding: '16px 0' }}>暂无视频</div>
-                          )}
+                          <VideoGallery videos={galleryVideos} />
                         </Card>
                       )
                     })()}

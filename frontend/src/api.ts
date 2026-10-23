@@ -1701,9 +1701,6 @@ export const developmentBotApi = {
   // 回传飞书多维表（存在则修改，不存在则新增并回传记录ID）
   pushToFeishu: (record_id: string) =>
     apiClient.post(`/product-development/projects/${record_id}/push-to-feishu`),
-  // 美工图片批量迁移到 TOS（管理员，分批执行）
-  migrateDesignerImages: (batch = 100) =>
-    apiClient.post(`/product-development/designer-images/migrate-to-tos?batch=${batch}`),
 };
 
 // ========== AI 创作中心 API ==========

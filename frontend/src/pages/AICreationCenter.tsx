@@ -408,12 +408,8 @@ const MODEL_OPTIONS: { label: string; desc: string; value: VideoModel }[] = [
   { label: 'MiniMax H3', desc: '适合批量测款与日常上新', value: 'minimax-h3' },
 ]
 
-// 视频分辨率档位：0.3 / 0.5 为 megapixels 档位，768P 即 0.98 满画幅
-const RESOLUTION_OPTIONS: { label: string; value: VideoResolution; desc: string }[] = [
-  { label: '0.3（测试/多任务）', value: '0.3', desc: '草稿档，生成最快' },
-  { label: '0.5', value: '0.5', desc: '标准档' },
-  { label: '768P', value: '768P', desc: '满画幅，画质最好' },
-]
+// 分辨率档位已从页面移除选择，统一固定草稿档（0.3，生成最快）
+const H3_FIXED_RESOLUTION: VideoResolution = '0.3'
 
 // MiniMax H3 仅支持 5 / 10 / 15 秒三档时长
 const DURATION_MARKS: Record<number, React.ReactNode> = {
@@ -453,7 +449,6 @@ const AICreationCenter: React.FC = () => {
   const [duration, setDuration] = useState<VideoDuration>(15)
   const [ratio, setRatio] = useState<VideoRatio>('9:16')
   const [model, setModel] = useState<VideoModel>('minimax-h3')
-  const [resolution, setResolution] = useState<VideoResolution>('0.3')
   const [promptText, setPromptText] = useState('')
   const [planModalOpen, setPlanModalOpen] = useState(false)
   const [planRefreshLeft, setPlanRefreshLeft] = useState(2)
@@ -905,7 +900,7 @@ const AICreationCenter: React.FC = () => {
       const resp = await aiCreationApi.generateVideo(files, {
         prompt: promptText,
         duration,
-        resolution,
+        resolution: H3_FIXED_RESOLUTION,
         ratio,
         model,
         market,
@@ -946,7 +941,6 @@ const AICreationCenter: React.FC = () => {
     )
     setMarket(item.market)
     setModel(item.model)
-    setResolution(item.resolution)
     setDuration(item.duration)
     setRatio(item.ratio)
     setVideoType(item.video_type === '产品展示' ? '产品展示' : '口播带货')
@@ -2254,22 +2248,6 @@ const AICreationCenter: React.FC = () => {
             }))}
           />
 
-          <Text strong style={{ display: 'block', margin: '16px 0 8px' }}>视频分辨率</Text>
-          <Segmented
-            block
-            value={resolution}
-            onChange={(v) => setResolution(v as VideoResolution)}
-            disabled={loading}
-            options={RESOLUTION_OPTIONS.map((opt) => ({
-              value: opt.value,
-              label: (
-                <Tooltip title={opt.desc}>
-                  <span>{opt.label}</span>
-                </Tooltip>
-              ),
-            }))}
-          />
-
           <Text strong style={{ display: 'block', margin: '16px 0 4px' }}>生成设置</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>视频时长（5 / 10 / 15 秒）</Text>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -2313,7 +2291,7 @@ const AICreationCenter: React.FC = () => {
           >
             立即生成
             <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.85 }}>
-              （预计耗时约 {Math.round(estimateH3CostMinutes(resolution, duration))} 分钟）
+              （预计耗时约 {Math.round(estimateH3CostMinutes(H3_FIXED_RESOLUTION, duration))} 分钟）
             </span>
           </Button>
         </div>
