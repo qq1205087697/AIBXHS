@@ -842,11 +842,90 @@ def cancel_video_task(tenant_id: int, task_id: int) -> None:
     logger.info(f"[H3视频] 任务 {task_id} 已取消: {cancelled_via}")
 
 
+def _download_reference_images(urls: List[str]) -> List[Tuple[str, bytes]]:
+    """服务端并行下载历史参考图字节（同区域 TOS/CDN，不走浏览器，避开 CORS 与前端代理）。
+
+    任一张失败即抛错：静默少图会改变生成内容，宁可明确失败。
+    """
+    import requests as _requests
+
+    def _fetch(idx_url: Tuple[int, str]) -> Tuple[str, bytes]:
+        idx, url = idx_url
+        resp = _requests.get(url, timeout=60)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
+        if not content_type.startswith("image/"):
+            raise H3VideoError(f"参考图 {idx + 1} 地址不是图片")
+        return (f"ref-{idx + 1}.jpg", resp.content)
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        return list(ex.map(_fetch, enumerate(urls)))
+
+
+def _resubmit_failed_task(task) -> Tuple[str, str]:
+    """失败任务原位重试：服务端下载历史参考图，重置原记录并后台重跑准备+轮询。
+
+    复用原任务记录（id 不变），提示词与全部生成参数沿用原任务；
+    重置后由 _prepare_and_run 重新上传参考图/优化提示词/提交工作流。
+    """
+    import json as _json
+
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    try:
+        urls = _json.loads(task.images) if task.images else []
+    except Exception:
+        urls = []
+    urls = [u for u in urls if u]
+    if not urls:
+        raise H3VideoError("任务没有参考图地址，无法重试，请使用「编辑」重新上传")
+
+    try:
+        images = _download_reference_images(urls)
+    except H3VideoError:
+        raise
+    except Exception as e:
+        raise H3VideoError(f"参考图下载失败，请稍后重试: {str(e)[:200]}")
+
+    db = SessionLocal()
+    try:
+        row = db.query(AIVideoTask).filter(AIVideoTask.id == task.id).first()
+        if not row:
+            raise H3VideoError("任务不存在或已删除")
+        row.status = "排队中"
+        row.error_message = None
+        row.video_url = None
+        row.h3_prompt_id = None
+        row.started_at = None
+        row.finished_at = None
+        db.commit()
+    finally:
+        db.close()
+
+    _ensure_worker(
+        task.id,
+        prep_kwargs={
+            "title": task.title or "视频生成任务",
+            "prompt": task.prompt or "",
+            "images": images,
+            "duration": task.duration,
+            "resolution": task.resolution,
+            "ratio": task.ratio,
+            "voiceover_language": task.voiceover_language or "自动",
+            "video_type": task.video_type or "口播带货",
+        },
+    )
+    logger.info(f"[H3视频] 任务 {task.id} 原位重试：{len(images)} 张参考图已重新提交")
+    return "resubmitted", "已重新提交生成，排队中"
+
+
 def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], str]:
-    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+    """智能重试失败的视频任务：先查 ComfyUI history/queue，能接续就接续原任务；
+    无法接续（无提交记录/已无踪迹）时服务端直接取历史参考图原位重新提交。
 
     返回 (action, message)：action="resumed" 表示已接续原 ComfyUI 任务（后台轮询收片），
-    action="resubmit" 表示原任务在 ComfyUI 上已无踪迹，需要走重新提交。
+    action="resubmitted" 表示已复用原记录重新提交生成。
     """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
@@ -867,8 +946,8 @@ def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], st
         db.close()
 
     if not prompt_id:
-        # 从未成功提交到 ComfyUI（上传/优化阶段失败）：只能重新提交
-        return "resubmit", "原任务未提交到 ComfyUI，将重新提交"
+        # 从未成功提交到 ComfyUI（上传/优化阶段失败）：服务端取历史参考图原位重试
+        return _resubmit_failed_task(task)
 
     # 查 ComfyUI history/queue 判断原提交的执行情况
     resume = False   # 保留 prompt_id 接续（已有成片或仍在生成）
@@ -891,7 +970,7 @@ def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], st
         resume = True
 
     if not resume:
-        return "resubmit", "原任务在 ComfyUI 上已无记录，将重新提交"
+        return _resubmit_failed_task(task)
 
     db = SessionLocal()
     try:

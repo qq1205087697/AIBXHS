@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     FEISHU_SYNC_APP_SECRET: str = ""
     FEISHU_SYNC_BASE_TOKEN: str = ""
     FEISHU_SYNC_TABLE_ID: str = ""
+    # 飞书多维表 - AI视频首绑SKU上传表（产品首条视频绑定后可选直传SKU）
+    FEISHU_VIDEO_BASE_TOKEN: str = ""
+    FEISHU_VIDEO_TABLE_ID: str = ""
+    # 填报人（人员字段）飞书 open_id，留空自动尝试取应用机器人自身身份
+    FEISHU_VIDEO_REPORTER_OPEN_ID: str = ""
+    # 紫鸟启动名→紫鸟登录账号映射（JSON 字符串，按顺序取登录账号命中的第一个启动名）
+    ZINIAO_ACCOUNT_MAP: str = ""
     # 飞书 webhook - 邮件机器人自动化
     FEISHU_EMAIL_WEBHOOK_URL: str = ""
     # 飞书 webhook - 产品页信息自动化

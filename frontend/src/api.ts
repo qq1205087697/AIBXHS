@@ -449,6 +449,8 @@ export const storesApi = {
     name_search?: string;
     site_search?: string;
     search?: string;
+    platform?: string;
+    site?: string;
     assignment_fallback?: boolean;
   }) => apiClient.get("/stores/", { params }),
   getAll: () => apiClient.get("/stores/all"),
@@ -1920,6 +1922,19 @@ export interface VideoBindingRequest {
   created_at?: string;
 }
 
+/** AMAZON 平台 SKU×店铺组合（首条视频绑定弹窗数据源） */
+export interface AmazonSkuEntry {
+  pp_id: number;
+  store_id: number;
+  sku: string;
+  asin: string;
+  has_asin: boolean;
+  store_name: string;
+  site: string;
+  ziniao_account: string;
+  ziniao_start_name: string;
+}
+
 export const videoBindingApi = {
   /** 提交绑定申请（ai_video:use） */
   submit: (data: { product_id: number; video_url: string; source?: string; task_title?: string }) =>
@@ -1940,12 +1955,32 @@ export const videoBindingApi = {
   /** 待审核数量（首页视频机器人KPI卡片，ai_video:approve） */
   getPendingCount: () =>
     apiClient.get<{ success: boolean; pending_count: number }>("/video-bindings/pending-count"),
-  /** 通过申请并真正绑定视频 */
+  /** 通过申请并真正绑定视频；data.is_first_video=true 表示该产品首条视频且飞书视频表已配置 */
   approve: (id: number) =>
-    apiClient.post<{ success: boolean; message: string }>(`/video-bindings/${id}/approve`),
+    apiClient.post<{ success: boolean; message: string; data?: { videos?: string[]; is_first_video?: boolean } }>(
+      `/video-bindings/${id}/approve`,
+    ),
   /** 拒绝申请（可带原因） */
   reject: (id: number, reason?: string) =>
     apiClient.post<{ success: boolean; message: string }>(`/video-bindings/${id}/reject`, { reason }),
+  /** 产品 AMAZON 平台 SKU×店铺列表（首条视频直传弹窗） */
+  getAmazonSkus: (productId: number) =>
+    apiClient.get<{ success: boolean; data: { items: AmazonSkuEntry[] } }>(
+      "/video-bindings/amazon-skus",
+      { params: { product_id: productId } },
+    ),
+  /** 视频直传飞书多维表 SKU 记录（记录数=视频数×SKU数；video_urls 多视频或 video_url 单视频） */
+  uploadSkuToFeishu: (data: {
+    product_id: number;
+    video_url?: string;
+    video_urls?: string[];
+    items: { pp_id: number; store_id: number }[];
+  }) =>
+    apiClient.post<{
+      success: boolean;
+      message: string;
+      data?: { success: number; failed: number; errors: string[] };
+    }>("/video-bindings/feishu-sku-upload", data),
 };
 
 export const aiCreationApi = {
@@ -2096,10 +2131,10 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/video-tasks/${taskId}/cancel`,
     ),
-  /** 智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
-   *  action="resumed" 已接续原任务（后台收片回填）；action="resubmit" 需走重新提交流程 */
+  /** 智能重试失败的视频任务（原记录重试）：能接续 ComfyUI 就接续收片，
+   *  否则服务端直接取历史参考图原位重新提交，无需前端取图 */
   recoverVideoTask: (taskId: number) =>
-    apiClient.post<{ success: boolean; action: "resumed" | "resubmit"; message: string }>(
+    apiClient.post<{ success: boolean; action: "resumed" | "resubmitted"; message: string }>(
       `/ai-creation/video-tasks/${taskId}/recover`,
     ),
   /** 提交视频超分任务（Topaz 星光 2.6，后台下载/上传/入队/轮询） */
