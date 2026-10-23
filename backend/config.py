@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     FEISHU_EDIT_WEBHOOK_URL: str = ""
     # 飞书 webhook - 一键优化提交地址
     FEISHU_OPTIMIZE_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 邮件回复通知地址
+    FEISHU_EMAIL_WEBHOOK_URL: str = ""
     
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"

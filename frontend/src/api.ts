@@ -394,6 +394,7 @@ export const productPageInfoApi = {
     store_filter?: string | null;
     rating_status?: number | null;
     low_score?: boolean | null;
+    rated_no_video?: boolean | null;
   }) => apiClient.get("/product-page-info/", { params: params }),
   getById: (id: number) => apiClient.get(`/product-page-info/${id}`),
   getStoreOptions: () => apiClient.get("/product-page-info/stores/options"),

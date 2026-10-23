@@ -35,7 +35,8 @@ def is_admin_user(user: User, db: Session) -> bool:
     """), {"role_id": user.role_id}).fetchone()
     return role and role[0] == "admin"
 
-FEISHU_WEBHOOK_URL = "https://pcn4p6l5do51.feishu.cn/base/automation/webhook/event/ScaZalvInwme5rhCQ0PckNA1nfx"
+# 飞书 webhook - 邮件回复通知地址（从根目录 .env 的 FEISHU_EMAIL_WEBHOOK_URL 读取）
+FEISHU_WEBHOOK_URL = settings.FEISHU_EMAIL_WEBHOOK_URL
 
 SITE_NAME_MAP = {
     "amazon_us": "美国", "amazon_uk": "英国", "amazon_de": "德国",

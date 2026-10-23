@@ -8,6 +8,7 @@ from models.product_page_info import ProductPageInfo
 from models.store import Store
 from models.restock import InventorySnapshot
 from dependencies import get_current_user
+from services.tos_service import build_thumbnail_url
 from models.user import User
 from services.operation_log import write_log
 from config import get_settings
@@ -237,6 +238,7 @@ async def get_product_page_info_list(
     store_filter: Optional[str] = Query(None),
     rating_status: Optional[int] = Query(None, description="评分状态筛选：0=未评分，1=已评分"),
     low_score: Optional[bool] = Query(None, description="低分筛选：已评分且总分<60"),
+    rated_no_video: Optional[bool] = Query(None, description="已评分但无视频筛选：rating_status=1 且 has_video 为 0/NULL"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -256,6 +258,13 @@ async def get_product_page_info_list(
 
     if rating_status is not None:
         query = query.filter(ProductPageInfo.rating_status == rating_status)
+
+    if rated_no_video:
+        # 已评分但无视频筛选：已评分 且 视频字段为 0 或 NULL
+        query = query.filter(
+            ProductPageInfo.rating_status == 1,
+            (ProductPageInfo.has_video == 0) | (ProductPageInfo.has_video.is_(None)),
+        )
 
     if asin_search:
         query = query.filter(ProductPageInfo.asin.ilike(f"%{asin_search}%"))
@@ -353,6 +362,7 @@ async def get_product_page_info_list(
                 "rating_status": item.rating_status or 0,
                 "total_score": total_score,
                 "main_image_url": main_image_map.get(item.asin, ""),
+                "main_image_thumb_url": build_thumbnail_url(main_image_map.get(item.asin, ""), 128),
             })
 
         return {"success": True, "data": result, "total": total}
@@ -492,6 +502,7 @@ async def get_product_page_info_list(
             "rating_status": item.rating_status or 0,
             "total_score": total_score,
             "main_image_url": main_image_map.get(item.asin, ""),
+            "main_image_thumb_url": build_thumbnail_url(main_image_map.get(item.asin, ""), 128),
         })
 
     return {"success": True, "data": result, "total": total}
@@ -1440,6 +1451,26 @@ def extract_text_content(raw: str) -> str:
     return "\n".join(parts) if parts else text
 
 
+def _flatten_forbidden_terms(forbidden_dict: dict) -> list:
+    """展平 global_constraints.forbidden_terms 分类字典为禁用词列表"""
+    terms = []
+    for _, words in (forbidden_dict or {}).items():
+        if isinstance(words, list):
+            terms.extend([str(w).strip() for w in words if str(w).strip()])
+    return terms
+
+
+def _check_forbidden_terms(text: str, forbidden_list: list) -> list:
+    """检查生成内容中的禁用词命中（词边界匹配，忽略大小写）"""
+    hits = []
+    lower = (text or "").lower()
+    for w in forbidden_list:
+        pattern = r"(?<![a-z0-9])" + re.escape(str(w).lower()) + r"(?![a-z0-9])"
+        if re.search(pattern, lower):
+            hits.append(str(w))
+    return hits
+
+
 @router.post("/ai-write")
 async def ai_write_content(
     request: Request,
@@ -1456,7 +1487,10 @@ async def ai_write_content(
       {{original_listing}} - 原Listing内容(JSON)
       {{original_title}}/{{original_bullets}}/{{original_description}}/{{original_search_terms}}/{{original_qa}} - 各位置原始内容
       {{traffic_keywords}} - 流量关键词(JSON数组)
+      {{constraint_prompt}} - 全局禁用词约束(optimizer_config.json global_constraints)
       {{localization_requirements}} - 区域本地化要求
+    生成后按 global_constraints.forbidden_terms 做代码层禁用词校验，
+    命中词记录日志并随响应 data.forbidden_hits 返回。
     """
     body = await request.json()
     item_id = body.get("item_id")
@@ -1531,6 +1565,10 @@ async def ai_write_content(
     prompt_templates = config.get("prompt_templates", {})
     analysis_config = config.get("analysis_config", {})
     constraints = analysis_config.get("constraints", {})
+    # 全局禁用词约束：注入prompt + 生成后代码层校验
+    global_constraints = config.get("global_constraints", {})
+    constraint_prompt = (global_constraints.get("constraint_prompt") or "").strip()
+    forbidden_terms_list = _flatten_forbidden_terms(global_constraints.get("forbidden_terms", {}))
 
     # 店铺未匹配到市场时回退配置文件的默认 market_profile_key
     if not market_key:
@@ -1632,6 +1670,7 @@ async def ai_write_content(
             "{{original_search_terms}}": original_parts["search_terms"] or "（未提供）",
             "{{original_qa}}": original_parts["qa"] or "（未提供）",
             "{{traffic_keywords}}": json.dumps(traffic_kw_list, ensure_ascii=False),
+            "{{constraint_prompt}}": constraint_prompt,
             "{{localization_requirements}}": localization_requirements,
         }
         system_prompt = custom_template
@@ -1674,6 +1713,9 @@ async def ai_write_content(
             + length_constraint
         )
         user_prompt = f"字段类型：{field_label}\n参考流量词：{traffic_keywords}\n原始内容：\n{content}"
+        # 无模板回退时同样注入禁用词约束
+        if constraint_prompt:
+            system_prompt += "\n\n" + constraint_prompt
         if suggestion_block:
             system_prompt += suggestion_block
 
@@ -1694,7 +1736,11 @@ async def ai_write_content(
         generated = extract_text_content(generated)
         if not generated:
             return {"success": False, "message": "AI生成内容为空"}
-        return {"success": True, "data": {"content": generated}}
+        # 代码层禁用词校验：命中时记录日志并随响应返回，供前端提示
+        forbidden_hits = _check_forbidden_terms(generated, forbidden_terms_list)
+        if forbidden_hits:
+            logger.warning(f"[AI编写] {field_label} 命中禁用词: {forbidden_hits} (item_id={item_id}, sku={item.sku})")
+        return {"success": True, "data": {"content": generated, "forbidden_hits": forbidden_hits}}
     except Exception as e:
         logger.error(f"AI编写失败: {e}")
         return {"success": False, "message": f"AI生成失败: {str(e)}"}
