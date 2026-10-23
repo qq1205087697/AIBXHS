@@ -525,11 +525,17 @@ const AICreationCenter: React.FC = () => {
 
   const handleRemoveImage = (uid: string) => {
     invalidatePlans()
-    setFileList((prev) => {
-      const target = prev.find((f) => f.uid === uid)
-      if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
-      return prev.filter((f) => f.uid !== uid)
-    })
+    const target = fileList.find((f) => f.uid === uid)
+    if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
+    const next = fileList.filter((f) => f.uid !== uid)
+    setFileList(next)
+    // 产品图片被移除后同步取消该产品标记，防止下个任务误挂上一个产品编码
+    const remainUrls = new Set(
+      next.map((f) => f.url || f.thumbUrl).filter((u): u is string => !!u),
+    )
+    setSelectedProducts((prev) =>
+      prev.filter((p) => (p.images || []).some((u) => remainUrls.has(u))),
+    )
   }
 
   const handleClear = () => {

@@ -179,6 +179,15 @@ def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
     return upload_file(file_bytes, file_name, content_type=content_type, subdir="videos", custom_name=custom_name)
 
 
+def bound_video_target_name(product_code: str, seq: int) -> str:
+    """绑定视频的 TOS 目标名「产品编码_序号_时间戳」。
+
+    时间戳成分保证删除视频后重新绑定时 URL 不与历史重复，
+    避免 CDN/浏览器缓存按同名 URL 返回旧视频内容。
+    """
+    return f"{product_code}_{seq}_{int(datetime.now().timestamp())}"
+
+
 def rename_file(src_url: str, new_name: str) -> str:
     """服务端复制对象为新名称（保留原对象），返回新公网 URL。
 
