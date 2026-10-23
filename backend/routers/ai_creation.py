@@ -67,29 +67,46 @@ class GeneratePromptsRequest(BaseModel):
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
-# 代理取图域名白名单（后缀匹配）：TOS 桶未配置 CORS，浏览器 fetch 会被拦截，
-# 由后端代取字节；顺带覆盖亚马逊图片 CDN 以兜底其偶发跨域限制
+# 代理取图静态白名单后缀（后缀匹配）：亚马逊图片 CDN + 历史 volces.com 直连地址。
+# TOS 侧域名（自定义 CDN 域名 / 桶域名）由 _proxy_image_hosts 动态拼装，
+# 避免 .env 换域名后白名单失效导致代理取图被拒。
 PROXY_IMAGE_HOST_SUFFIXES = (
-    "volces.com",             # 火山引擎 TOS
+    "volces.com",             # 火山引擎 TOS（历史直连地址）
     "media-amazon.com",       # 亚马逊图片 CDN
     "ssl-images-amazon.com",  # 亚马逊图片 CDN（旧域名）
 )
 PROXY_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 
+def _proxy_image_hosts() -> set:
+    """代理白名单完整主机集合：静态后缀 + 当前 TOS 配置的自定义域名 / 桶域名"""
+    from config import get_settings
+
+    hosts = set(PROXY_IMAGE_HOST_SUFFIXES)
+    settings = get_settings()
+    if settings.TOS_CUSTOM_DOMAIN:
+        host = urlparse(f"https://{settings.TOS_CUSTOM_DOMAIN.strip('/')}").hostname
+        if host:
+            hosts.add(host.lower())
+    if settings.TOS_BUCKET and settings.TOS_ENDPOINT:
+        hosts.add(f"{settings.TOS_BUCKET}.{settings.TOS_ENDPOINT.strip('/')}".lower())
+    return hosts
+
+
 @router.get("/proxy-image")
 async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
     """服务端代取图片字节。
 
-    历史记录编辑回填、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
-    TOS 桶未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
+    历史记录编辑回填/重试、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
+    TOS / CDN 未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
     此时前端改走本接口由后端下载并回传图片字节。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise HTTPException(status_code=400, detail="无效的图片地址")
     host = parsed.hostname.lower()
-    if not any(host == s or host.endswith("." + s) for s in PROXY_IMAGE_HOST_SUFFIXES):
+    allowed = _proxy_image_hosts()
+    if not any(host == h or host.endswith("." + h) for h in allowed):
         raise HTTPException(status_code=400, detail="该图片域名不在代理白名单内")
 
     try:
@@ -478,15 +495,18 @@ async def recover_video_task_endpoint(
     task_id: int,
     current_user: User = Depends(get_current_user),
 ):
-    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+    """智能重试失败的视频任务（原记录重试）。
 
     action="resumed"：已接续原 ComfyUI 任务（后台轮询收片回填原记录）；
-    action="resubmit"：原任务在 ComfyUI 上无记录/从未提交成功，前端需走重新提交流程。
+    action="resubmitted"：服务端已下载历史参考图并复用原记录重新提交生成。
+    含 ComfyUI 查询与参考图下载（秒级），放到线程池执行避免阻塞事件循环。
     """
     from services.h3_video_service import recover_failed_task, H3VideoError
 
     try:
-        action, message = recover_failed_task(current_user.tenant_id, task_id)
+        action, message = await asyncio.to_thread(
+            recover_failed_task, current_user.tenant_id, task_id
+        )
     except H3VideoError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "action": action, "message": message}

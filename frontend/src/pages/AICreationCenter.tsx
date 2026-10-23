@@ -1033,54 +1033,12 @@ const AICreationCenter: React.FC = () => {
     if (retryingId != null) return
     setRetryingId(item.id)
     try {
-      // 先尝试智能恢复：ComfyUI 上已有成片/仍在生成时接续原任务，不重新提交
-      let needResubmit = true
-      try {
-        const rec = await aiCreationApi.recoverVideoTask(item.id)
-        if (rec.data.action === 'resumed') {
-          message.success(rec.data.message || '已接续原任务，等待收片回填')
-          loadTasks(1)
-          needResubmit = false
-        }
-      } catch {
-        // 恢复检查失败（接口异常等）：回退到原重新提交流程
-      }
-      if (!needResubmit) return
-
-      if (!item.images.length) {
-        message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
-        return
-      }
-      const files: File[] = []
-      for (let i = 0; i < item.images.length; i++) {
-        const blob = await fetchImageBlob(item.images[i])
-        if (blob) {
-          files.push(new File([blob], `ref-${i + 1}.jpg`, { type: blob.type || 'image/jpeg' }))
-        }
-      }
-      if (files.length === 0) {
-        message.error('参考图片读取失败，请使用「编辑」重新上传')
-        return
-      }
-      const storedLang = item.voiceover_language || '自动'
-      const resp = await aiCreationApi.generateVideo(files, {
-        prompt: item.prompt,
-        duration: item.duration,
-        resolution: item.resolution,
-        ratio: item.ratio,
-        model: item.model,
-        market: item.market,
-        voiceover_language: storedLang === '自动' ? 'auto' : (storedLang as VoiceoverLanguage),
-        title: item.title,
-        product_code: item.product_code || '',
-        product_name: item.product_name || '',
-      })
-      const task = resp.data.data
-      // 新任务在最前：跳回第 1 页刷新
-      setHistoryPage(1)
-      loadTasks(1)
-      setActiveHistoryId(task.id)
-      message.success('已重新提交生成任务，排队中')
+      // 原位重试：后端智能恢复（ComfyUI 可接续则接续收片），
+      // 否则服务端直接下载历史参考图并复用原记录重新提交，无需前端取图
+      const resp = await aiCreationApi.recoverVideoTask(item.id)
+      message.success(resp.data.message || '已重新提交生成，排队中')
+      setActiveHistoryId(item.id)
+      loadTasks()
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '重试失败，请稍后再试')
     } finally {
