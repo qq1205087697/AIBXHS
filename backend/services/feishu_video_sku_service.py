@@ -190,7 +190,18 @@ async def create_sku_video_records(
             except Exception as e:
                 raise RuntimeError(f"视频下载失败: {e}") from e
 
+        # 每个视频只上传一次拿 file_token，全部 SKU 记录复用绑定（实测飞书允许跨记录复用），
+        # 避免 N 条记录重复分片上传导致接口响应极慢
         for video in videos:
+            try:
+                video["file_token"] = await _upload_bitable_attachment(
+                    client, auth, video["name"], video["bytes"]
+                )
+            except Exception as ue:
+                raise RuntimeError(f"视频 {video['name']} 上传飞书失败: {ue}") from ue
+
+        for video in videos:
+            ft = video["file_token"]
             for idx, e in enumerate(entries, 1):
                 label = f"{video['name']} → {e.get('sku') or f'第{idx}条'}（{e.get('site') or '-'}）"
                 fields = {
@@ -231,15 +242,7 @@ async def create_sku_video_records(
                         continue
                     record_id = (cdata.get("data") or {}).get("record", {}).get("record_id")
 
-                    # 2. 上传视频附件（云空间拿 file_token，≤20MB 单请求 / 大文件分片）
-                    try:
-                        ft = await _upload_bitable_attachment(client, auth, video["name"], video["bytes"])
-                    except Exception as ue:
-                        failed += 1
-                        errors.append(f"{label}: 视频附件上传失败 {ue}")
-                        continue
-
-                    # 3. 绑定附件到「视频附件」字段（更新记录必须用 PUT，PATCH 会 404）
+                    # 2. 绑定附件到「视频附件」字段（复用 file_token；更新记录必须用 PUT，PATCH 会 404）
                     presp = await client.put(
                         f"{base}/records/{record_id}",
                         headers={**auth, "Content-Type": "application/json"},

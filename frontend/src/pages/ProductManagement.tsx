@@ -4113,7 +4113,7 @@ const productAttributeLabelMap: Record<string, string> = {
                 indeterminate={vuSkuSelected.length > 0 && vuSkuSelected.length < vuSkuItems.length}
                 onChange={(e) => setVuSkuSelected(e.target.checked ? vuSkuItems.map(e => `${e.pp_id}_${e.store_id}`) : [])}
               >
-                全选/取消全选
+                全选
               </Checkbox>
             </div>
             <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 12px' }}>

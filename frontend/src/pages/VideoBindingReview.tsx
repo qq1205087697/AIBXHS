@@ -450,7 +450,18 @@ const VideoBindingReview: React.FC = () => {
         onCancel={() => setSkuModalOpen(false)}
         width={560}
       >
-        <div style={{ marginBottom: 12 }}>该视频为该产品的首条视频，是否直接上传至以下SKU：</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <span>该视频为该产品的首条视频，是否直接上传至以下SKU：</span>
+          {!skuLoading && skuItems.length > 0 && (
+            <Checkbox
+              checked={skuSelected.length > 0 && skuSelected.length === skuItems.length}
+              indeterminate={skuSelected.length > 0 && skuSelected.length < skuItems.length}
+              onChange={(e) => setSkuSelected(e.target.checked ? skuItems.map(e => `${e.pp_id}_${e.store_id}`) : [])}
+            >
+              全选
+            </Checkbox>
+          )}
+        </div>
         {skuLoading ? (
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
             <Spin />
