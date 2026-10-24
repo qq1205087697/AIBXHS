@@ -391,6 +391,11 @@ async def get_product_page_info_list(
         raw_where.append("rating_status = :rating_status")
         raw_params["rating_status"] = rating_status
 
+    if rated_no_video:
+        # 已评分但无视频筛选（与ORM query保持一致）
+        raw_where.append("rating_status = 1")
+        raw_where.append("(has_video = 0 OR has_video IS NULL)")
+
     if asin_search:
         raw_where.append("asin LIKE :asin_search")
         raw_params["asin_search"] = f"%{asin_search}%"
@@ -1165,22 +1170,36 @@ def refresh_inventory(
     与页面优化机器人数据比对：
     - SKU和店铺都相同的记录：补全ASIN和品名
     - 库存中存在但表中不存在的：新增SKU、ASIN、店铺、品名
+    - 表中存在但库存最新快照已不存在的：物理删除
+    权限范围：管理员刷新全部店铺；非管理员仅刷新其所属店铺分组下的店铺（快照查询、
+    比对、新增、删除均限定在这些店铺内）
     注意：使用def而非async def，快照数据量大（数万行），走线程池避免阻塞事件循环
     """
     try:
         tenant_id = current_user.tenant_id
 
+        # 0. 当前用户可管理的店铺范围（None表示管理员不限店铺）
+        if is_admin_user(current_user, db):
+            managed_stores = None
+        else:
+            managed_stores = get_user_store_names(current_user, db)
+            if not managed_stores:
+                return {"success": False, "message": "你没有被分配任何店铺分组，无法刷新库存"}
+
         # 1. 取库存快照最新日期（与库存机器人显示逻辑一致）
-        latest_snap = db.query(InventorySnapshot.snapshot_date).filter(
+        snap_query = db.query(InventorySnapshot.snapshot_date).filter(
             InventorySnapshot.tenant_id == tenant_id,
             InventorySnapshot.deleted_at.is_(None),
-        ).order_by(InventorySnapshot.snapshot_date.desc()).first()
+        )
+        if managed_stores is not None:
+            snap_query = snap_query.filter(InventorySnapshot.account.in_(managed_stores))
+        latest_snap = snap_query.order_by(InventorySnapshot.snapshot_date.desc()).first()
         if not latest_snap or not latest_snap[0]:
             return {"success": False, "message": "库存快照暂无数据，无法刷新"}
         latest_date = latest_snap[0]
 
         # 2. 读取最新日期的全部快照行（含汇总行），按(SKU,店铺)去重
-        snapshots = db.query(
+        snap_item_query = db.query(
             InventorySnapshot.sku,
             InventorySnapshot.asin,
             InventorySnapshot.account,
@@ -1189,7 +1208,10 @@ def refresh_inventory(
             InventorySnapshot.tenant_id == tenant_id,
             InventorySnapshot.snapshot_date == latest_date,
             InventorySnapshot.deleted_at.is_(None),
-        ).all()
+        )
+        if managed_stores is not None:
+            snap_item_query = snap_item_query.filter(InventorySnapshot.account.in_(managed_stores))
+        snapshots = snap_item_query.all()
 
         inv_map = {}  # (sku, store) -> {"asin": str, "product_name": str}
         for s in snapshots:
@@ -1211,10 +1233,13 @@ def refresh_inventory(
         if not inv_map:
             return {"success": False, "message": f"库存快照（{latest_date}）无有效SKU数据"}
 
-        # 3. 读取页面优化机器人现有记录，比对补全
-        existing_items = db.query(ProductPageInfo).filter(
+        # 3. 读取页面优化机器人现有记录（非管理员仅限其可管理店铺），比对补全
+        existing_query = db.query(ProductPageInfo).filter(
             ProductPageInfo.tenant_id == tenant_id
-        ).all()
+        )
+        if managed_stores is not None:
+            existing_query = existing_query.filter(ProductPageInfo.store.in_(managed_stores))
+        existing_items = existing_query.all()
         existing_map = {(item.sku, item.store): item for item in existing_items}
 
         updated_count = 0
@@ -1251,36 +1276,52 @@ def refresh_inventory(
                 "rating_status": 0,
             })
         added_count = len(new_rows)
-        if new_rows:
-            # 用底层DBAPI executemany批量插入（一批一次网络往返；
-            # SQLAlchemy insertmanyvalues在此环境逐行发送，数万行需几十分钟）
+
+        # 5. 表中存在但库存最新快照已不存在的(SKU,店铺)：物理删除
+        #    （inv_map为空时已在前面直接返回，不会走到这里，防止快照异常导致全表误删）
+        ids_to_delete = [
+            item.id for item in existing_items
+            if (item.sku, item.store) not in inv_map
+        ]
+        deleted_count = len(ids_to_delete)
+
+        # 统一走底层DBAPI executemany批量执行（一批一次网络往返；
+        # SQLAlchemy insertmanyvalues在此环境逐行发送，数万行需几十分钟）
+        if new_rows or ids_to_delete:
             raw_conn = db.connection().connection
             raw_cur = raw_conn.cursor()
             try:
-                sql = (
-                    "INSERT INTO product_page_info (tenant_id, sku, asin, product_name, store, "
-                    "image_count, has_ad, has_aplus, has_video, rating_status) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                )
-                batch_size = 2000
-                for i in range(0, len(new_rows), batch_size):
-                    batch = [
-                        (r["tenant_id"], r["sku"], r["asin"], r["product_name"], r["store"],
-                         r["image_count"], r["has_ad"], r["has_aplus"],
-                         1 if r["has_video"] else 0, r["rating_status"])
-                        for r in new_rows[i:i + batch_size]
-                    ]
-                    raw_cur.executemany(sql, batch)
+                if new_rows:
+                    insert_sql = (
+                        "INSERT INTO product_page_info (tenant_id, sku, asin, product_name, store, "
+                        "image_count, has_ad, has_aplus, has_video, rating_status) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    )
+                    batch_size = 2000
+                    for i in range(0, len(new_rows), batch_size):
+                        batch = [
+                            (r["tenant_id"], r["sku"], r["asin"], r["product_name"], r["store"],
+                             r["image_count"], r["has_ad"], r["has_aplus"],
+                             1 if r["has_video"] else 0, r["rating_status"])
+                            for r in new_rows[i:i + batch_size]
+                        ]
+                        raw_cur.executemany(insert_sql, batch)
+                if ids_to_delete:
+                    # 物理删除（product_page_info不支持软删除），按id分批
+                    delete_sql = "DELETE FROM product_page_info WHERE id = %s"
+                    batch_size = 2000
+                    for i in range(0, len(ids_to_delete), batch_size):
+                        raw_cur.executemany(delete_sql, [(rid,) for rid in ids_to_delete[i:i + batch_size]])
             finally:
                 raw_cur.close()
 
         db.commit()
 
-        msg = f"刷新库存完成：新增 {added_count} 条，补全ASIN/品名 {updated_count} 条"
+        msg = f"刷新库存完成：新增 {added_count} 条，补全ASIN/品名 {updated_count} 条，移除库存已不存在的 {deleted_count} 条"
         return {
             "success": True,
             "message": msg,
-            "data": {"added": added_count, "updated": updated_count, "snapshot_date": str(latest_date)}
+            "data": {"added": added_count, "updated": updated_count, "deleted": deleted_count, "snapshot_date": str(latest_date)}
         }
     except Exception as e:
         db.rollback()
