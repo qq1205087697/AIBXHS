@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete } from 'antd'
+import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete, Empty } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined, VideoCameraOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
-import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi } from '../api'
+import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi, videoBindingApi, AmazonSkuEntry } from '../api'
 import apiClient from '../api'
 import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
 import { useTheme } from '../contexts/ThemeContext'
@@ -12,6 +12,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { VideosUpload } from '../components/TosUpload'
 import ImagesUpload from '../components/ImagesUpload'
 import ImageGallery from '../components/ImageGallery'
+import VideoGallery from '../components/VideoGallery'
 import { useResponsive } from '../hooks/useResponsive'
 
 interface Product {
@@ -253,6 +254,7 @@ const filterFieldOptions = [
   { label: '平台数', value: 'platform_count' },
   { label: '状态', value: 'status' },
   { label: '配件绑定情况', value: 'accessory_binding' },
+  { label: '视频', value: 'video_binding' },
 ]
 
 // 操作符选项
@@ -282,6 +284,10 @@ const fieldValueOptions: Record<string, { label: string; value: string }[]> = {
     { label: '未绑定', value: 'unbound' },
     { label: '已绑定', value: 'bound' },
     { label: '无配件', value: 'no_accessory' },
+  ],
+  video_binding: [
+    { label: '有视频', value: 'has_video' },
+    { label: '无视频', value: 'no_video' },
   ],
 }
 
@@ -405,6 +411,14 @@ const ProductManagement: React.FC = () => {
   const [detailModalProduct, setDetailModalProduct] = useState<Product | null>(null)
   const [detailActiveTab, setDetailActiveTab] = useState<'basic' | 'platform' | 'accessory' | 'logs'>('basic')
   const [detailEditMode, setDetailEditMode] = useState(false)
+  // 视频上传弹窗（两步向导：勾选产品已有视频 → 勾选 AMAZON SKU → 写入飞书多维表）
+  const [videoUploadOpen, setVideoUploadOpen] = useState(false)
+  const [videoUploadStep, setVideoUploadStep] = useState<1 | 2>(1)
+  const [vuSelectedVideos, setVuSelectedVideos] = useState<string[]>([])
+  const [vuSkuLoading, setVuSkuLoading] = useState(false)
+  const [vuSkuItems, setVuSkuItems] = useState<AmazonSkuEntry[]>([])
+  const [vuSkuSelected, setVuSkuSelected] = useState<string[]>([])
+  const [vuSubmitting, setVuSubmitting] = useState(false)
   const [detailLogs, setDetailLogs] = useState<any[]>([])
   const [detailLogsLoading, setDetailLogsLoading] = useState(false)
   const [detailLogsTotal, setDetailLogsTotal] = useState(0)
@@ -716,6 +730,86 @@ const productAttributeLabelMap: Record<string, string> = {
     setDetailActiveTab('basic')
     setDetailEditMode(true)
     setDetailModalOpen(true)
+  }
+
+  // ===== 视频上传向导（勾选产品已有视频 → 勾选 AMAZON SKU → 写入飞书多维表） =====
+  const openVideoUploadModal = () => {
+    if (!detailModalProduct) return
+    const videos = detailModalProduct.videos || []
+    if (videos.length === 0) {
+      message.warning('该产品暂无视频，请先在编辑中上传或通过AI视频绑定')
+      return
+    }
+    setVuSelectedVideos([])
+    setVuSkuItems([])
+    setVuSkuSelected([])
+    setVideoUploadStep(1)
+    setVideoUploadOpen(true)
+  }
+
+  const handleVuNext = async () => {
+    if (!detailModalProduct) return
+    if (vuSelectedVideos.length === 0) {
+      message.warning('请至少勾选一个视频')
+      return
+    }
+    setVideoUploadStep(2)
+    setVuSkuLoading(true)
+    try {
+      const res = await videoBindingApi.getAmazonSkus(detailModalProduct.id)
+      const list = res.data.data?.items || []
+      setVuSkuItems(list)
+      setVuSkuSelected(list.filter(e => e.has_asin).map(e => `${e.pp_id}_${e.store_id}`))
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '获取产品 SKU 列表失败')
+      setVideoUploadStep(1)
+    } finally {
+      setVuSkuLoading(false)
+    }
+  }
+
+  const handleVuSubmit = async () => {
+    if (!detailModalProduct) return
+    if (vuSkuSelected.length === 0) {
+      message.warning('请至少勾选一个 SKU')
+      return
+    }
+    const selected = vuSkuItems.filter(e => vuSkuSelected.includes(`${e.pp_id}_${e.store_id}`))
+    const noAsin = selected.filter(e => !e.has_asin)
+    if (noAsin.length > 0) {
+      message.error(`以下 SKU 未绑定 ASIN，无法上传：${noAsin.map(e => e.sku || `#${e.pp_id}`).join('、')}，请取消勾选后重试`)
+      return
+    }
+    setVuSubmitting(true)
+    try {
+      const res = await videoBindingApi.uploadSkuToFeishu({
+        product_id: detailModalProduct.id,
+        video_urls: vuSelectedVideos,
+        items: selected.map(e => ({ pp_id: e.pp_id, store_id: e.store_id })),
+      })
+      if (res.data.success) {
+        message.success(res.data.message || '视频已上传飞书')
+        const failed = res.data.data?.failed || 0
+        const errors = res.data.data?.errors || []
+        if (failed > 0) {
+          Modal.warning({
+            title: `有 ${failed} 条记录上传失败`,
+            content: (
+              <div>
+                {errors.slice(0, 5).map((t, i) => (
+                  <div key={i}>{t}</div>
+                ))}
+              </div>
+            ),
+          })
+        }
+        setVideoUploadOpen(false)
+      }
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '上传失败')
+    } finally {
+      setVuSubmitting(false)
+    }
   }
 
   const handleSubmit = async () => {
@@ -2280,10 +2374,10 @@ const productAttributeLabelMap: Record<string, string> = {
                               value={condition.field}
                               onChange={(v) => {
                                 updateFilterCondition(condition.id, 'field', v)
-                                // 切换到有固定候选值的字段时，重置操作符为"等于"并清空已填的值
+                                // 切换到有固定候选值的字段时，重置操作符为"等于"并清空已填的值；视频字段默认选"有视频"
                                 if (fieldValueOptions[v as string]) {
                                   updateFilterCondition(condition.id, 'operator', 'eq')
-                                  updateFilterCondition(condition.id, 'value', '')
+                                  updateFilterCondition(condition.id, 'value', v === 'video_binding' ? 'has_video' : '')
                                 }
                               }}
                               options={filterFieldOptions}
@@ -2375,6 +2469,16 @@ const productAttributeLabelMap: Record<string, string> = {
                           style={{ padding: 0 }}
                         >
                           添加条件
+                        </Button>
+                        <Button
+                          type="link"
+                          danger
+                          icon={<DeleteOutlined />}
+                          onClick={() => setFilterConditions([])}
+                          disabled={filterConditions.length === 0}
+                          style={{ marginLeft: 'auto', padding: 0 }}
+                        >
+                          清空筛选
                         </Button>
                       </div>
                     </div>
@@ -3493,7 +3597,11 @@ const productAttributeLabelMap: Record<string, string> = {
               </>
             ) : (
               <>
-                <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
+                {hasPermission('product:edit') && detailModalProduct && (
+                  <Button icon={<VideoCameraOutlined />} onClick={openVideoUploadModal}>
+                    视频上传
+                  </Button>
+                )}
                 {hasPermission('product:edit') && detailModalProduct && (
                   <Button
                     type="primary"
@@ -3518,6 +3626,7 @@ const productAttributeLabelMap: Record<string, string> = {
                     编辑
                   </Button>
                 )}
+                <Button onClick={() => setDetailModalOpen(false)}>关闭</Button>
               </>
             )}
           </div>
@@ -3525,6 +3634,7 @@ const productAttributeLabelMap: Record<string, string> = {
         width={1280}
         styles={{ body: { padding: 0, overflow: 'hidden', height: 'calc(100vh - 200px)' } }}
         style={{ top: 24 }}
+        zIndex={1000}
         centered
       >
         {detailModalProduct && (
@@ -3722,19 +3832,11 @@ const productAttributeLabelMap: Record<string, string> = {
                         : detailModalProduct.video_url
                           ? [detailModalProduct.video_url]
                           : []
-                      return galleryVideos.length > 0 ? (
+                      return (
                         <Card size="small" title={`产品视频（${galleryVideos.length}）`}>
-                          {galleryVideos.map((v, i) => (
-                            <video
-                              key={i}
-                              src={v}
-                              controls
-                              preload="metadata"
-                              style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 0, background: '#000', display: 'block', margin: '0 auto 8px' }}
-                            />
-                          ))}
+                          <VideoGallery videos={galleryVideos} />
                         </Card>
-                      ) : null
+                      )
                     })()}
                   </div>
                 )
@@ -3943,6 +4045,103 @@ const productAttributeLabelMap: Record<string, string> = {
               )}
             </div>
           </div>
+        )}
+      </Modal>
+
+      {/* 视频上传向导：第一步勾选产品已有视频，第二步勾选 AMAZON SKU（显示逻辑同首绑），确定后写入飞书多维表 */}
+      <Modal
+        open={videoUploadOpen}
+        title={`视频上传 - ${detailModalProduct?.name || ''}`}
+        width={560}
+        zIndex={1010}
+        okText={videoUploadStep === 1 ? '下一步' : '确定上传'}
+        cancelText={videoUploadStep === 1 ? '取消' : '上一步'}
+        confirmLoading={vuSubmitting}
+        onOk={videoUploadStep === 1 ? handleVuNext : handleVuSubmit}
+        onCancel={() => {
+          if (videoUploadStep === 2) {
+            setVideoUploadStep(1)
+            return
+          }
+          setVideoUploadOpen(false)
+        }}
+      >
+        {videoUploadStep === 1 ? (
+          <>
+            <div style={{ marginBottom: 12 }}>勾选要上传至飞书SKU的视频（可多选）：</div>
+            {(detailModalProduct?.videos?.length || 0) === 0 ? (
+              <Empty description="该产品暂无视频" />
+            ) : (
+              <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+                <Checkbox.Group
+                  value={vuSelectedVideos}
+                  onChange={(vals) => setVuSelectedVideos(vals as string[])}
+                  style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}
+                >
+                  {(detailModalProduct?.videos || []).map((v, i) => (
+                    <Checkbox key={v} value={v}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <video
+                          src={v}
+                          controls
+                          preload="metadata"
+                          style={{ width: 200, maxHeight: 120, borderRadius: 4, background: '#000' }}
+                        />
+                        <span>视频 {i + 1}</span>
+                      </div>
+                    </Checkbox>
+                  ))}
+                </Checkbox.Group>
+              </div>
+            )}
+            <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
+              共 {(detailModalProduct?.videos || []).length} 个视频，已选 {vuSelectedVideos.length} 个
+            </div>
+          </>
+        ) : vuSkuLoading ? (
+          <div style={{ textAlign: 'center', padding: '24px 0' }}>
+            <Spin />
+          </div>
+        ) : vuSkuItems.length === 0 ? (
+          <Empty description="该产品暂无 AMAZON 平台 SKU" />
+        ) : (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <span>勾选上传的SKU：</span>
+              <Checkbox
+                checked={vuSkuSelected.length > 0 && vuSkuSelected.length === vuSkuItems.length}
+                indeterminate={vuSkuSelected.length > 0 && vuSkuSelected.length < vuSkuItems.length}
+                onChange={(e) => setVuSkuSelected(e.target.checked ? vuSkuItems.map(e => `${e.pp_id}_${e.store_id}`) : [])}
+              >
+                全选/取消全选
+              </Checkbox>
+            </div>
+            <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 12px' }}>
+              <Checkbox.Group
+                value={vuSkuSelected}
+                onChange={(vals) => setVuSkuSelected(vals as string[])}
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}
+              >
+                {vuSkuItems.map(e => {
+                  const key = `${e.pp_id}_${e.store_id}`
+                  return (
+                    <Checkbox key={key} value={key}>
+                      <span>
+                        {e.sku || `#${e.pp_id}`}
+                        {!e.has_asin && <span style={{ color: '#999' }}>（未绑定ASIN）</span>}
+                        {(e.site || e.store_name) && (
+                          <span style={{ color: '#999', marginLeft: 8 }}>{e.site || e.store_name}</span>
+                        )}
+                      </span>
+                    </Checkbox>
+                  )
+                })}
+              </Checkbox.Group>
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
+              已选 {vuSelectedVideos.length} 个视频 × {vuSkuSelected.length} 个 SKU，确定后将写入 {vuSelectedVideos.length * vuSkuSelected.length} 条飞书记录
+            </div>
+          </>
         )}
       </Modal>
 

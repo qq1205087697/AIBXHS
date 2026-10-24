@@ -29,8 +29,11 @@ import TenantManagement from "./pages/TenantManagement";
 import PermissionManagement from "./pages/PermissionManagement";
 import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
+import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
+import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
+import VideoBindingReview from './pages/VideoBindingReview';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -291,6 +294,26 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/development/new"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ProductDevelopmentCreate />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/development"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <ProductDevelopmentBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/permissions"
         element={
           <ProtectedRoute>
@@ -326,6 +349,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <UpscaleCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/video-binding-review"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <VideoBindingReview />
             </MainLayout>
           </ProtectedRoute>
         }

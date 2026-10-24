@@ -152,10 +152,10 @@ def init_scheduler():
         replace_existing=True
     )
 
-    # 选品评分：抓取是SQL直写数据库，后端无法被动感知，改为5分钟轮询新记录（算分+高分自动AI分析）
+    # 选品评分：抓取是SQL直写数据库，后端无法被动感知，改为2小时轮询新记录（算分+高分自动AI分析）
     scheduler.add_job(
         recalc_product_selection_scores_job,
-        trigger=IntervalTrigger(minutes=5),
+        trigger=IntervalTrigger(hours=2),
         id="product_selection_recalc_polling",
         name="选品评分轮询计算（新抓取自动算分+高分自动AI分析）",
         replace_existing=True

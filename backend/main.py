@@ -51,8 +51,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
- 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation
+
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings
 from config import get_settings
 
 settings = get_settings()
@@ -111,6 +111,7 @@ app.include_router(shipments.router)
 app.include_router(suppliers.router)
 app.include_router(upload.router)
 app.include_router(ai_creation.router)
+app.include_router(video_bindings.router)
 app.include_router(base_table.router)
 
 app.include_router(ads.router, prefix="/api")
@@ -121,6 +122,7 @@ app.include_router(product_aging.router, prefix="/api")
 app.include_router(product_buybox.router, prefix="/api")
 app.include_router(product_shipment_notice.router, prefix="/api")
 app.include_router(group_messages.router, prefix="/api")
+app.include_router(product_development.router, prefix="/api")
 
 @app.get("/api/health")
 async def health_check():
@@ -187,6 +189,15 @@ async def startup_event():
     """应用启动事件"""
     logger.info("宝鑫华盛AI助手后端服务启动中...")
     try:
+        from config import get_settings
+        if not get_settings().H3_BASE_URL:
+            logger.warning(
+                "H3_BASE_URL 未配置（为空），AI视频/高清处理的 ComfyUI 任务将无法执行或查询，"
+                "请检查 backend/.env 的 H3_BASE_URL/H3_AUTH_USER/H3_AUTH_PASSWORD 配置"
+            )
+    except Exception:
+        pass
+    try:
         from database.database import init_db
         init_db()
         logger.info("数据库初始化完成")
@@ -203,15 +214,21 @@ async def startup_event():
 
     try:
         from services.h3_video_service import resume_pending_tasks
-        resume_pending_tasks()
-        logger.info("H3 视频未完成任务已恢复监听")
+        resumed = resume_pending_tasks()
+        if resumed is None:
+            logger.error("H3 视频未完成任务恢复已跳过（H3_BASE_URL 未配置）")
+        else:
+            logger.info(f"H3 视频未完成任务已恢复监听（{resumed} 条）")
     except Exception as e:
         logger.error(f"H3 视频任务恢复失败: {e}")
 
     try:
         from services.upscale_service import resume_pending_tasks as resume_upscale_tasks
-        resume_upscale_tasks()
-        logger.info("超分未完成任务已恢复监听")
+        resumed_upscale = resume_upscale_tasks()
+        if resumed_upscale is None:
+            logger.error("超分未完成任务恢复已跳过（H3_BASE_URL 未配置）")
+        else:
+            logger.info(f"超分未完成任务已恢复监听（{resumed_upscale} 条）")
     except Exception as e:
         logger.error(f"超分任务恢复失败: {e}")
 
@@ -298,8 +315,9 @@ if __name__ == "__main__":
     from config import get_settings
     settings = get_settings()
     
-    # Windows 不支持多 worker 的 multiprocessing spawn 模式，强制使用 1
-    workers = 1 if platform.system() == 'Windows' else 4
+    # 强制单进程模式（项目约定）：多 worker 会并发执行建表/列补丁、定时任务×N 重复运行、
+    # 视频任务 resume 竞态（同一成片被多进程重复上传 TOS）、日志成对出现等问题
+    workers = 1
     
     uvicorn.run(
         "main:app",

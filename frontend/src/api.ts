@@ -450,6 +450,8 @@ export const storesApi = {
     name_search?: string;
     site_search?: string;
     search?: string;
+    platform?: string;
+    site?: string;
     assignment_fallback?: boolean;
   }) => apiClient.get("/stores/", { params }),
   getAll: () => apiClient.get("/stores/all"),
@@ -726,6 +728,7 @@ export const inventoryCountApi = {
 // ========== Store Groups API ==========
 export const storeGroupsApi = {
   getList: () => apiClient.get("/store-groups/"),
+  getTree: () => apiClient.get("/store-groups/tree"),
   getMyGroup: () => apiClient.get("/store-groups/my-group"),
   getGroupStores: (groupId: number) =>
     apiClient.get(`/store-groups/${groupId}/stores`),
@@ -1553,6 +1556,165 @@ export const suppliersApi = {
   delete: (id: number) => apiClient.delete(`/suppliers/${id}`),
 };
 
+// ========== Product Development Bot API ==========
+// 后端表 ad_product_info 字段映射：
+//   title            -> 标题（只填英文）
+//   product_title + keywords（合并） -> 关键词（只填英文）
+//   product_name_zh  -> 产品名提取
+//   reference_images -> 采购图片（逗号分隔URL/文件名）
+//   category/developer/urgency/seasonality/competitors/purchase_price
+//   de_title/de_keywords/development_date 对应表中的同名中文列
+export interface ProductDevelopmentPayload {
+  title?: string;
+  product_title?: string;
+  keywords?: string;
+  product_name_zh?: string;
+  category?: string;
+  developer?: string;
+  urgency?: string;
+  seasonality?: string;
+  competitors?: string;
+  purchase_price?: number;
+  de_keywords?: string;
+  en_keywords?: string;
+  au_keywords?: string;
+  development_date?: string;
+  reference_images?: string[];
+  warehouse_note?: string;
+  site_owners?: string;
+  related_store?: string;
+  purchase_links?: string[];
+  purchase_info?: string;
+  // 采购分组对应：[{link, images[], info}]
+  purchase_items?: { link?: string; images?: string[]; info?: string }[];
+  // 关联店铺采购数量对应：[{store, quantity}]
+  store_quantities?: { store: string; quantity: number }[];
+}
+
+export interface DevelopmentProject
+  extends Omit<ProductDevelopmentPayload, "warehouse_note" | "site_owners"> {
+  record_id: string;
+  purchase_images: string[];
+  // 产品库平台商品对应（店铺/SKU/ASIN 列表）
+  platform_items?: { store?: string; sku?: string; asin?: string }[];
+  purchased?: string;
+  purchase_note?: string | null;
+  product_code?: string | null;
+  site_owners?: string | null;
+  warehouse_note?: string | null;
+  six_face_images?: string[];
+  designer_images?: string[];
+  designer_complete_date?: string | null;
+  image_review?: string | null;
+  doc_name?: string | null;
+  doc_link?: string | null;
+}
+
+export interface DevPendingCounts {
+  purchase: number;
+  six_face: number;
+  designer: number;
+  review: number;
+}
+
+export interface DevMyRoles {
+  departments: string[];
+  is_admin: boolean;
+  can_view_all: boolean;
+  can_purchase: boolean;
+  can_warehouse: boolean;
+  can_design: boolean;
+  can_review: boolean;
+  can_replenish: boolean;
+}
+
+export interface ProjectDocElement {
+  type: "text" | "image";
+  content?: string;
+  file_token?: string;
+}
+
+export interface ProjectDocInfo {
+  doc_name?: string | null;
+  doc_link?: string | null;
+  elements?: ProjectDocElement[];
+  content?: string | null;
+  message?: string;
+  /** 被屏蔽的采购链接数量（非采购部用户） */
+  links_hidden?: number;
+}
+
+export const developmentBotApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    search?: string;
+    category?: string;
+    urgency?: string;
+    seasonality?: string;
+    developer?: string;
+    date?: string;
+    date_start?: string;
+    date_end?: string;
+    status?: string;
+    missing?: string;
+  }) => apiClient.get("/product-development/projects", { params }),
+  getFilters: () => apiClient.get("/product-development/projects/filters"),
+  getDetail: (record_id: string) =>
+    apiClient.get(`/product-development/projects/${record_id}`),
+  create: (data: ProductDevelopmentPayload) =>
+    apiClient.post("/product-development/projects", data),
+  createBatch: (data: ProductDevelopmentPayload[]) =>
+    apiClient.post("/product-development/projects/batch", { projects: data }),
+  update: (record_id: string, data: Partial<ProductDevelopmentPayload>) =>
+    apiClient.put(`/product-development/projects/${record_id}`, data),
+  remove: (record_id: string) =>
+    apiClient.delete(`/product-development/projects/${record_id}`),
+  getDoc: (record_id: string) =>
+    apiClient.get(`/product-development/projects/${record_id}/doc`),
+  getCategories: () => apiClient.get("/product-development/categories"),
+  addCategory: (name: string) =>
+    apiClient.post("/product-development/categories", { name }),
+  downloadImportTemplate: () =>
+    apiClient.get("/product-development/import-template", { responseType: "blob" }),
+  importProjects: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.post("/product-development/import-projects", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  parseImportProjects: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.post("/product-development/import-projects/parse", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  getPendingCounts: () =>
+    apiClient.get("/product-development/pending-counts"),
+  getMyRoles: () => apiClient.get("/product-development/my-roles"),
+  updatePurchase: (record_id: string, data: { purchase_price: number; purchased?: string; purchase_note?: string }) =>
+    apiClient.put(`/product-development/projects/${record_id}/purchase`, data),
+  updateWarehouse: (record_id: string, data: { six_face_images?: string[]; warehouse_note?: string }) =>
+    apiClient.put(`/product-development/projects/${record_id}/warehouse`, data),
+  uploadDesignerImage: (record_id: string, images: string[]) =>
+    apiClient.put(`/product-development/projects/${record_id}/designer-image`, { images }),
+  reviewImage: (record_id: string, approved: boolean) =>
+    apiClient.put(`/product-development/projects/${record_id}/review`, { approved }),
+  createReplenishment: (data: {
+    store_group_id?: number;
+    notes?: string;
+    items: { record_id: string; quantity: number; notes?: string }[];
+  }) => apiClient.post("/product-development/projects/replenishment", data),
+  // 按店铺分组采购数量生成进销存采购单
+  createPurchaseOrder: (record_id: string) =>
+    apiClient.post(`/product-development/projects/${record_id}/purchase-order`),
+  // 回传飞书多维表（存在则修改，不存在则新增并回传记录ID）
+  pushToFeishu: (record_id: string) =>
+    apiClient.post(`/product-development/projects/${record_id}/push-to-feishu`),
+};
+
 // ========== AI 创作中心 API ==========
 export interface AmazonProductAnalysisResult {
   product_name_cn: string;
@@ -1697,6 +1859,8 @@ export interface AIVideoTask {
   product_name?: string;
   /** 已完成的超分结果（后端按源视频地址匹配附加），用于并排对比展示 */
   upscale_video_url?: string;
+  /** 绑定状态：成片已通过审核绑定至产品（后端附加） */
+  bound?: boolean;
   /** ComfyUI 任务 ID */
   h3_prompt_id: string;
   /** 生成总耗时（秒），未完成为 null */
@@ -1735,9 +1899,90 @@ export interface VideoUpscaleTask {
   status: string;
   error_message?: string;
   video_url?: string;
+  /** 绑定状态：成片或源视频已通过审核绑定至产品（后端附加） */
+  bound?: boolean;
   created_at: string;
   cost_seconds?: number | null;
 }
+
+/** 视频绑定审核申请（AI视频 / 高清处理「绑定至产品」先审后绑） */
+export interface VideoBindingRequest {
+  id: number;
+  video_url: string;
+  product_id: number;
+  product_code?: string;
+  product_name?: string;
+  source: "ai_video" | "upscale";
+  source_label?: string;
+  task_title?: string;
+  status: "pending" | "approved" | "rejected";
+  requester_name?: string;
+  reject_reason?: string;
+  reviewer_name?: string;
+  reviewed_at?: string;
+  created_at?: string;
+}
+
+/** AMAZON 平台 SKU×店铺组合（首条视频绑定弹窗数据源） */
+export interface AmazonSkuEntry {
+  pp_id: number;
+  store_id: number;
+  sku: string;
+  asin: string;
+  has_asin: boolean;
+  store_name: string;
+  site: string;
+  ziniao_account: string;
+  ziniao_start_name: string;
+}
+
+export const videoBindingApi = {
+  /** 提交绑定申请（ai_video:use） */
+  submit: (data: { product_id: number; video_url: string; source?: string; task_title?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>("/video-bindings", data),
+  /** 申请列表（ai_video:approve），status 不传查全部；status_counts 为各状态计数（页签括号展示） */
+  getList: (params: { status?: string; search?: string; page?: number; page_size?: number }) =>
+    apiClient.get<{
+      success: boolean;
+      data: {
+        items: VideoBindingRequest[];
+        total: number;
+        status_counts?: { pending: number; approved: number; rejected: number; all: number };
+      };
+    }>(
+      "/video-bindings",
+      { params },
+    ),
+  /** 待审核数量（首页视频机器人KPI卡片，ai_video:approve） */
+  getPendingCount: () =>
+    apiClient.get<{ success: boolean; pending_count: number }>("/video-bindings/pending-count"),
+  /** 通过申请并真正绑定视频；data.is_first_video=true 表示该产品首条视频且飞书视频表已配置 */
+  approve: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data?: { videos?: string[]; is_first_video?: boolean } }>(
+      `/video-bindings/${id}/approve`,
+    ),
+  /** 拒绝申请（可带原因） */
+  reject: (id: number, reason?: string) =>
+    apiClient.post<{ success: boolean; message: string }>(`/video-bindings/${id}/reject`, { reason }),
+  /** 产品 AMAZON 平台 SKU×店铺列表（首条视频直传弹窗） */
+  getAmazonSkus: (productId: number) =>
+    apiClient.get<{ success: boolean; data: { items: AmazonSkuEntry[] } }>(
+      "/video-bindings/amazon-skus",
+      { params: { product_id: productId } },
+    ),
+  /** 视频直传飞书多维表 SKU 记录（记录数=视频数×SKU数；video_urls 多视频或 video_url 单视频） */
+  uploadSkuToFeishu: (data: {
+    product_id: number;
+    video_url?: string;
+    video_urls?: string[];
+    items: { pp_id: number; store_id: number }[];
+  }) =>
+    apiClient.post<{
+      success: boolean;
+      message: string;
+      data?: { success: number; failed: number; errors: string[] };
+    }>("/video-bindings/feishu-sku-upload", data),
+};
 
 export const aiCreationApi = {
   /** 新方案：一次生成产品信息卡 + 3 套口播视频提示词方案。
@@ -1868,15 +2113,31 @@ export const aiCreationApi = {
       },
     );
   },
-  /** 视频生成任务列表（分页 + 关键词搜索，含状态与成片地址） */
-  listVideoTasks: (page = 1, pageSize = 20, keyword = "") =>
+  /** 视频生成任务列表（分页 + 关键词搜索 + 绑定状态筛选，含状态与成片地址） */
+  listVideoTasks: (
+    page = 1,
+    pageSize = 20,
+    keyword = "",
+    bindStatus: "all" | "bound" | "unbound" = "all",
+  ) =>
     apiClient.get<{ success: boolean; data: { items: AIVideoTask[]; total: number } }>(
       "/ai-creation/video-tasks",
-      { params: { page, page_size: pageSize, keyword } },
+      { params: { page, page_size: pageSize, keyword, bind_status: bindStatus } },
     ),
   /** 删除视频生成任务记录 */
   deleteVideoTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-creation/video-tasks/${taskId}`),
+  /** 取消排队中/生成中的视频生成任务（同步移除/中断 ComfyUI 任务） */
+  cancelVideoTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/cancel`,
+    ),
+  /** 智能重试失败的视频任务（原记录重试）：能接续 ComfyUI 就接续收片，
+   *  否则服务端直接取历史参考图原位重新提交，无需前端取图 */
+  recoverVideoTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; action: "resumed" | "resubmitted"; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/recover`,
+    ),
   /** 提交视频超分任务（Topaz 星光 2.6，后台下载/上传/入队/轮询） */
   createUpscaleTask: (params: {
     title: string;
@@ -1890,15 +2151,30 @@ export const aiCreationApi = {
       params,
       { timeout: 300000 },
     ),
-  /** 超分任务列表（分页 + 标题搜索） */
-  listUpscaleTasks: (page = 1, pageSize = 20, keyword = "") =>
+  /** 超分任务列表（分页 + 标题搜索 + 绑定状态筛选） */
+  listUpscaleTasks: (
+    page = 1,
+    pageSize = 20,
+    keyword = "",
+    bindStatus: "all" | "bound" | "unbound" = "all",
+  ) =>
     apiClient.get<{ success: boolean; data: { items: VideoUpscaleTask[]; total: number } }>(
       "/ai-creation/upscale-tasks",
-      { params: { page, page_size: pageSize, keyword } },
+      { params: { page, page_size: pageSize, keyword, bind_status: bindStatus } },
     ),
   /** 删除超分任务 */
   deleteUpscaleTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-creation/upscale-tasks/${taskId}`),
+  /** 取消排队中/处理中的超分任务（同步移除/中断 ComfyUI 任务） */
+  cancelUpscaleTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message: string }>(
+      `/ai-creation/upscale-tasks/${taskId}/cancel`,
+    ),
+  /** 重试失败的超分任务：在原记录上重置状态并重新入队 */
+  retryUpscaleTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message: string; data: VideoUpscaleTask }>(
+      `/ai-creation/upscale-tasks/${taskId}/retry`,
+    ),
   /** 下载超分任务视频（target: result=超分结果 / source=源视频），blob 流式下载 */
   downloadUpscaleVideo: (taskId: number, target: "result" | "source") =>
     apiClient.get(`/ai-creation/upscale-tasks/${taskId}/download`, {
