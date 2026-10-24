@@ -8,6 +8,7 @@ from models.product_page_info import ProductPageInfo
 from models.store import Store
 from models.restock import InventorySnapshot
 from dependencies import get_current_user
+from services.tos_service import build_thumbnail_url
 from models.user import User
 from services.operation_log import write_log
 from config import get_settings
@@ -237,6 +238,7 @@ async def get_product_page_info_list(
     store_filter: Optional[str] = Query(None),
     rating_status: Optional[int] = Query(None, description="评分状态筛选：0=未评分，1=已评分"),
     low_score: Optional[bool] = Query(None, description="低分筛选：已评分且总分<60"),
+    rated_no_video: Optional[bool] = Query(None, description="已评分但无视频筛选：rating_status=1 且 has_video 为 0/NULL"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -256,6 +258,13 @@ async def get_product_page_info_list(
 
     if rating_status is not None:
         query = query.filter(ProductPageInfo.rating_status == rating_status)
+
+    if rated_no_video:
+        # 已评分但无视频筛选：已评分 且 视频字段为 0 或 NULL
+        query = query.filter(
+            ProductPageInfo.rating_status == 1,
+            (ProductPageInfo.has_video == 0) | (ProductPageInfo.has_video.is_(None)),
+        )
 
     if asin_search:
         query = query.filter(ProductPageInfo.asin.ilike(f"%{asin_search}%"))
@@ -353,6 +362,7 @@ async def get_product_page_info_list(
                 "rating_status": item.rating_status or 0,
                 "total_score": total_score,
                 "main_image_url": main_image_map.get(item.asin, ""),
+                "main_image_thumb_url": build_thumbnail_url(main_image_map.get(item.asin, ""), 128),
             })
 
         return {"success": True, "data": result, "total": total}
@@ -380,6 +390,11 @@ async def get_product_page_info_list(
     if rating_status is not None:
         raw_where.append("rating_status = :rating_status")
         raw_params["rating_status"] = rating_status
+
+    if rated_no_video:
+        # 已评分但无视频筛选（与ORM query保持一致）
+        raw_where.append("rating_status = 1")
+        raw_where.append("(has_video = 0 OR has_video IS NULL)")
 
     if asin_search:
         raw_where.append("asin LIKE :asin_search")
@@ -492,6 +507,7 @@ async def get_product_page_info_list(
             "rating_status": item.rating_status or 0,
             "total_score": total_score,
             "main_image_url": main_image_map.get(item.asin, ""),
+            "main_image_thumb_url": build_thumbnail_url(main_image_map.get(item.asin, ""), 128),
         })
 
     return {"success": True, "data": result, "total": total}
@@ -1155,22 +1171,36 @@ def refresh_inventory(
     与页面优化机器人数据比对：
     - SKU和店铺都相同的记录：补全ASIN和品名
     - 库存中存在但表中不存在的：新增SKU、ASIN、店铺、品名
+    - 表中存在但库存最新快照已不存在的：物理删除
+    权限范围：管理员刷新全部店铺；非管理员仅刷新其所属店铺分组下的店铺（快照查询、
+    比对、新增、删除均限定在这些店铺内）
     注意：使用def而非async def，快照数据量大（数万行），走线程池避免阻塞事件循环
     """
     try:
         tenant_id = current_user.tenant_id
 
+        # 0. 当前用户可管理的店铺范围（None表示管理员不限店铺）
+        if is_admin_user(current_user, db):
+            managed_stores = None
+        else:
+            managed_stores = get_user_store_names(current_user, db)
+            if not managed_stores:
+                return {"success": False, "message": "你没有被分配任何店铺分组，无法刷新库存"}
+
         # 1. 取库存快照最新日期（与库存机器人显示逻辑一致）
-        latest_snap = db.query(InventorySnapshot.snapshot_date).filter(
+        snap_query = db.query(InventorySnapshot.snapshot_date).filter(
             InventorySnapshot.tenant_id == tenant_id,
             InventorySnapshot.deleted_at.is_(None),
-        ).order_by(InventorySnapshot.snapshot_date.desc()).first()
+        )
+        if managed_stores is not None:
+            snap_query = snap_query.filter(InventorySnapshot.account.in_(managed_stores))
+        latest_snap = snap_query.order_by(InventorySnapshot.snapshot_date.desc()).first()
         if not latest_snap or not latest_snap[0]:
             return {"success": False, "message": "库存快照暂无数据，无法刷新"}
         latest_date = latest_snap[0]
 
         # 2. 读取最新日期的全部快照行（含汇总行），按(SKU,店铺)去重
-        snapshots = db.query(
+        snap_item_query = db.query(
             InventorySnapshot.sku,
             InventorySnapshot.asin,
             InventorySnapshot.account,
@@ -1179,7 +1209,10 @@ def refresh_inventory(
             InventorySnapshot.tenant_id == tenant_id,
             InventorySnapshot.snapshot_date == latest_date,
             InventorySnapshot.deleted_at.is_(None),
-        ).all()
+        )
+        if managed_stores is not None:
+            snap_item_query = snap_item_query.filter(InventorySnapshot.account.in_(managed_stores))
+        snapshots = snap_item_query.all()
 
         inv_map = {}  # (sku, store) -> {"asin": str, "product_name": str}
         for s in snapshots:
@@ -1201,10 +1234,13 @@ def refresh_inventory(
         if not inv_map:
             return {"success": False, "message": f"库存快照（{latest_date}）无有效SKU数据"}
 
-        # 3. 读取页面优化机器人现有记录，比对补全
-        existing_items = db.query(ProductPageInfo).filter(
+        # 3. 读取页面优化机器人现有记录（非管理员仅限其可管理店铺），比对补全
+        existing_query = db.query(ProductPageInfo).filter(
             ProductPageInfo.tenant_id == tenant_id
-        ).all()
+        )
+        if managed_stores is not None:
+            existing_query = existing_query.filter(ProductPageInfo.store.in_(managed_stores))
+        existing_items = existing_query.all()
         existing_map = {(item.sku, item.store): item for item in existing_items}
 
         updated_count = 0
@@ -1241,36 +1277,52 @@ def refresh_inventory(
                 "rating_status": 0,
             })
         added_count = len(new_rows)
-        if new_rows:
-            # 用底层DBAPI executemany批量插入（一批一次网络往返；
-            # SQLAlchemy insertmanyvalues在此环境逐行发送，数万行需几十分钟）
+
+        # 5. 表中存在但库存最新快照已不存在的(SKU,店铺)：物理删除
+        #    （inv_map为空时已在前面直接返回，不会走到这里，防止快照异常导致全表误删）
+        ids_to_delete = [
+            item.id for item in existing_items
+            if (item.sku, item.store) not in inv_map
+        ]
+        deleted_count = len(ids_to_delete)
+
+        # 统一走底层DBAPI executemany批量执行（一批一次网络往返；
+        # SQLAlchemy insertmanyvalues在此环境逐行发送，数万行需几十分钟）
+        if new_rows or ids_to_delete:
             raw_conn = db.connection().connection
             raw_cur = raw_conn.cursor()
             try:
-                sql = (
-                    "INSERT INTO product_page_info (tenant_id, sku, asin, product_name, store, "
-                    "image_count, has_ad, has_aplus, has_video, rating_status) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                )
-                batch_size = 2000
-                for i in range(0, len(new_rows), batch_size):
-                    batch = [
-                        (r["tenant_id"], r["sku"], r["asin"], r["product_name"], r["store"],
-                         r["image_count"], r["has_ad"], r["has_aplus"],
-                         1 if r["has_video"] else 0, r["rating_status"])
-                        for r in new_rows[i:i + batch_size]
-                    ]
-                    raw_cur.executemany(sql, batch)
+                if new_rows:
+                    insert_sql = (
+                        "INSERT INTO product_page_info (tenant_id, sku, asin, product_name, store, "
+                        "image_count, has_ad, has_aplus, has_video, rating_status) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    )
+                    batch_size = 2000
+                    for i in range(0, len(new_rows), batch_size):
+                        batch = [
+                            (r["tenant_id"], r["sku"], r["asin"], r["product_name"], r["store"],
+                             r["image_count"], r["has_ad"], r["has_aplus"],
+                             1 if r["has_video"] else 0, r["rating_status"])
+                            for r in new_rows[i:i + batch_size]
+                        ]
+                        raw_cur.executemany(insert_sql, batch)
+                if ids_to_delete:
+                    # 物理删除（product_page_info不支持软删除），按id分批
+                    delete_sql = "DELETE FROM product_page_info WHERE id = %s"
+                    batch_size = 2000
+                    for i in range(0, len(ids_to_delete), batch_size):
+                        raw_cur.executemany(delete_sql, [(rid,) for rid in ids_to_delete[i:i + batch_size]])
             finally:
                 raw_cur.close()
 
         db.commit()
 
-        msg = f"刷新库存完成：新增 {added_count} 条，补全ASIN/品名 {updated_count} 条"
+        msg = f"刷新库存完成：新增 {added_count} 条，补全ASIN/品名 {updated_count} 条，移除库存已不存在的 {deleted_count} 条"
         return {
             "success": True,
             "message": msg,
-            "data": {"added": added_count, "updated": updated_count, "snapshot_date": str(latest_date)}
+            "data": {"added": added_count, "updated": updated_count, "deleted": deleted_count, "snapshot_date": str(latest_date)}
         }
     except Exception as e:
         db.rollback()
@@ -1441,6 +1493,26 @@ def extract_text_content(raw: str) -> str:
     return "\n".join(parts) if parts else text
 
 
+def _flatten_forbidden_terms(forbidden_dict: dict) -> list:
+    """展平 global_constraints.forbidden_terms 分类字典为禁用词列表"""
+    terms = []
+    for _, words in (forbidden_dict or {}).items():
+        if isinstance(words, list):
+            terms.extend([str(w).strip() for w in words if str(w).strip()])
+    return terms
+
+
+def _check_forbidden_terms(text: str, forbidden_list: list) -> list:
+    """检查生成内容中的禁用词命中（词边界匹配，忽略大小写）"""
+    hits = []
+    lower = (text or "").lower()
+    for w in forbidden_list:
+        pattern = r"(?<![a-z0-9])" + re.escape(str(w).lower()) + r"(?![a-z0-9])"
+        if re.search(pattern, lower):
+            hits.append(str(w))
+    return hits
+
+
 @router.post("/ai-write")
 async def ai_write_content(
     request: Request,
@@ -1457,7 +1529,10 @@ async def ai_write_content(
       {{original_listing}} - 原Listing内容(JSON)
       {{original_title}}/{{original_bullets}}/{{original_description}}/{{original_search_terms}}/{{original_qa}} - 各位置原始内容
       {{traffic_keywords}} - 流量关键词(JSON数组)
+      {{constraint_prompt}} - 全局禁用词约束(optimizer_config.json global_constraints)
       {{localization_requirements}} - 区域本地化要求
+    生成后按 global_constraints.forbidden_terms 做代码层禁用词校验，
+    命中词记录日志并随响应 data.forbidden_hits 返回。
     """
     body = await request.json()
     item_id = body.get("item_id")
@@ -1532,6 +1607,10 @@ async def ai_write_content(
     prompt_templates = config.get("prompt_templates", {})
     analysis_config = config.get("analysis_config", {})
     constraints = analysis_config.get("constraints", {})
+    # 全局禁用词约束：注入prompt + 生成后代码层校验
+    global_constraints = config.get("global_constraints", {})
+    constraint_prompt = (global_constraints.get("constraint_prompt") or "").strip()
+    forbidden_terms_list = _flatten_forbidden_terms(global_constraints.get("forbidden_terms", {}))
 
     # 店铺未匹配到市场时回退配置文件的默认 market_profile_key
     if not market_key:
@@ -1633,6 +1712,7 @@ async def ai_write_content(
             "{{original_search_terms}}": original_parts["search_terms"] or "（未提供）",
             "{{original_qa}}": original_parts["qa"] or "（未提供）",
             "{{traffic_keywords}}": json.dumps(traffic_kw_list, ensure_ascii=False),
+            "{{constraint_prompt}}": constraint_prompt,
             "{{localization_requirements}}": localization_requirements,
         }
         system_prompt = custom_template
@@ -1675,6 +1755,9 @@ async def ai_write_content(
             + length_constraint
         )
         user_prompt = f"字段类型：{field_label}\n参考流量词：{traffic_keywords}\n原始内容：\n{content}"
+        # 无模板回退时同样注入禁用词约束
+        if constraint_prompt:
+            system_prompt += "\n\n" + constraint_prompt
         if suggestion_block:
             system_prompt += suggestion_block
 
@@ -1695,7 +1778,11 @@ async def ai_write_content(
         generated = extract_text_content(generated)
         if not generated:
             return {"success": False, "message": "AI生成内容为空"}
-        return {"success": True, "data": {"content": generated}}
+        # 代码层禁用词校验：命中时记录日志并随响应返回，供前端提示
+        forbidden_hits = _check_forbidden_terms(generated, forbidden_terms_list)
+        if forbidden_hits:
+            logger.warning(f"[AI编写] {field_label} 命中禁用词: {forbidden_hits} (item_id={item_id}, sku={item.sku})")
+        return {"success": True, "data": {"content": generated, "forbidden_hits": forbidden_hits}}
     except Exception as e:
         logger.error(f"AI编写失败: {e}")
         return {"success": False, "message": f"AI生成失败: {str(e)}"}

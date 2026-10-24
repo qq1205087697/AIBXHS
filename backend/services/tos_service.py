@@ -90,6 +90,36 @@ def _build_public_url(object_key: str) -> str:
     return f"https://{bucket}.{endpoint}/{object_key}"
 
 
+def build_thumbnail_url(url: str, width: int = 128) -> str:
+    """为 TOS 图片 URL 追加缩略图处理参数（x-tos-process=img/resize），非本桶 URL 原样返回。
+
+    :param url: 原图公网 URL
+    :param width: 缩略图宽度（像素）
+    :return: 缩略图 URL；Bucket 未开通图片处理能力时该 URL 会加载失败，调用方需回退原图
+    """
+    if not url or width <= 0:
+        return url or ""
+    settings = get_settings()
+    bucket = (settings.TOS_BUCKET or "").strip().lower()
+    endpoint = (settings.TOS_ENDPOINT or "").strip("/").lower()
+    custom_domain = (settings.TOS_CUSTOM_DOMAIN or "").strip("/").lower()
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return url
+    tos_hosts = set()
+    if bucket and endpoint:
+        tos_hosts.add(f"{bucket}.{endpoint}")
+    if custom_domain:
+        tos_hosts.add(custom_domain)
+    if not host or host not in tos_hosts:
+        return url
+    sep = "&" if parsed.query else "?"
+    return f"{url}{sep}x-tos-process=img/resize,w_{width}"
+
+
 def upload_file(file_bytes: bytes, file_name: str,
                 content_type: Optional[str] = None,
                 subdir: str = "",
