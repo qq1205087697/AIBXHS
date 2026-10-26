@@ -3009,8 +3009,8 @@ const productAttributeLabelMap: Record<string, string> = {
           </Form.Item>
           <Divider orientation="left" plain>尺寸/重量</Divider>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
-            <Form.Item name="weight" label="重量(kg)">
-              <InputNumber style={{ width: '100%' }} min={0} precision={3} />
+            <Form.Item name="weight" label="重量(g)">
+              <InputNumber style={{ width: '100%' }} min={0} precision={2} />
             </Form.Item>
             <Form.Item name="length" label="长(cm)">
               <InputNumber style={{ width: '100%' }} min={0} precision={1} />
@@ -3757,8 +3757,8 @@ const productAttributeLabelMap: Record<string, string> = {
                     </Form.Item>
                     <Divider orientation="left" plain>尺寸/重量</Divider>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
-                      <Form.Item name="weight" label="重量(kg)">
-                        <InputNumber style={{ width: '100%' }} min={0} precision={3} />
+                      <Form.Item name="weight" label="重量(g)">
+                        <InputNumber style={{ width: '100%' }} min={0} precision={2} />
                       </Form.Item>
                       <Form.Item name="length" label="长(cm)">
                         <InputNumber style={{ width: '100%' }} min={0} precision={1} />
@@ -3803,7 +3803,7 @@ const productAttributeLabelMap: Record<string, string> = {
                         <div><strong>采购价:</strong> {detailModalProduct.purchase_price != null ? `¥${detailModalProduct.purchase_price.toFixed(2)}` : '-'}</div>
                         <div><strong>建议售价:</strong> {detailModalProduct.sale_price != null ? `¥${detailModalProduct.sale_price.toFixed(2)}` : '-'}</div>
                         <div><strong>货值:</strong> {detailModalProduct.local_value != null ? `¥${detailModalProduct.local_value.toFixed(2)}` : '-'}</div>
-                        <div><strong>重量:</strong> {detailModalProduct.weight != null ? `${detailModalProduct.weight} kg` : '-'}</div>
+                        <div><strong>重量:</strong> {detailModalProduct.weight != null ? `${detailModalProduct.weight} g` : '-'}</div>
                         <div><strong>长:</strong> {detailModalProduct.length != null ? `${detailModalProduct.length} cm` : '-'}</div>
                         <div><strong>宽:</strong> {detailModalProduct.width != null ? `${detailModalProduct.width} cm` : '-'}</div>
                         <div><strong>高:</strong> {detailModalProduct.height != null ? `${detailModalProduct.height} cm` : '-'}</div>
