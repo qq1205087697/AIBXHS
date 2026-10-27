@@ -103,7 +103,15 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
-    model_config = {"env_file": os.path.join(os.path.dirname(__file__), ".env")}
+    # extra="ignore"：.env 中存在一些由其他模块直接 os.getenv 读取的键
+    # （image_relay_* / feishu_sync_* / ziniao_account_map 等），
+    # 它们不在本 Settings 中定义。pydantic-settings v2 的 BaseSettings
+    # 默认 extra="forbid"，一旦 .env 新增这类键就会在启动时抛
+    # ValidationError（13 项 extra_forbidden）导致服务起不来。
+    model_config = {
+        "env_file": os.path.join(os.path.dirname(__file__), ".env"),
+        "extra": "ignore",
+    }
 
 
 def get_settings() -> Settings:
