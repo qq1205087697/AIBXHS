@@ -50,7 +50,6 @@ import {
   Search,
   Star,
   AlertTriangle,
-  Tags,
   Sparkles,
   Table2,
   Video,
@@ -269,12 +268,6 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             icon: <Package size={20} />,
             label: "库存机器人",
             shortLabel: "库存",
-          },
-          {
-            key: "/tags",
-            icon: <Tags size={20} />,
-            label: "标签管理",
-            shortLabel: "标签",
           },
         ]
       : []),

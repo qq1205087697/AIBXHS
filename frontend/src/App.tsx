@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import MainLayout from "./components/Layout/MainLayout";
@@ -6,7 +6,6 @@ import Home from "./pages/Home";
 import ChatBot from "./pages/ChatBot";
 import Dashboard from "./pages/Dashboard";
 import InventoryBot from "./pages/InventoryBot";
-import TagManagement from "./pages/TagManagement";
 import BusinessSettings from "./pages/BusinessSettings";
 import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
@@ -90,16 +89,8 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      <Route
-        path="/tags"
-        element={
-          <ProtectedRoute>
-            <MainLayout>
-              <TagManagement />
-            </MainLayout>
-          </ProtectedRoute>
-        }
-      />
+      {/* 标签管理页已下线（后端 /api/tags/* 逻辑保留）；旧链接回落到库存机器人 */}
+      <Route path="/tags" element={<Navigate to="/inventory" replace />} />
       <Route
         path="/business-settings"
         element={
