@@ -96,6 +96,7 @@ def init_db():
         from models import ad_report
         from models import ad_daily
         from models import group_message
+        from models import memo
 
         # 导入所有模型类
         from models.tenant import Tenant
@@ -117,6 +118,8 @@ def init_db():
         from models.inventory_management import PurchaseOrder, PurchaseOrderItem, InboundOrder, InboundOrderItem, OutboundOrder, OutboundOrderItem, InventoryBatch, OperationLog, StockTransferOrder, StockTransferOrderItem, Warehouse, ReplenishmentOrder, ReplenishmentItem, ShipmentOrder, ShipmentOrderItem
         from models.ad_campaign import AdCampaign, AdGroup, AdKeyword, AdTarget, AdProductAd, AdNegativeKeyword
         from models.ad_report import AdReportSnapshot, AdOptimizationRule, AdOptimizationLog
+        from models.group_message import GroupMessage, GroupsFs, GroupUserPermission
+        from models.memo import Memo
         from models.ad_daily import (
             AdCampaignDaily, AdKeywordDaily, AdSearchTermDaily,
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog

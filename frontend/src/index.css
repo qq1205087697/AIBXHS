@@ -233,6 +233,21 @@ code {
 
 /* ========== 响应式设计 ========== */
 
+/* 首页消息行 hover 高亮（纯 CSS，避免 React setState 全页重渲染卡顿） */
+.notice-row:hover {
+  background: #fafafa;
+}
+
+/* 首页日历格 hover：明亮暖橙底（用 inset box-shadow 叠色，不被格子的内联背景色覆盖） */
+.cal-cell:hover {
+  box-shadow: inset 0 0 0 999px rgba(255, 178, 82, 0.38);
+}
+
+/* 首页倒计日行 hover */
+.countdown-row:hover {
+  background: #fff7e6;
+}
+
 /* 小屏幕：仅弹窗适配，页面内容保持桌面宽度通过横向滚动查看 */
 @media (max-width: 767px) {
   .ant-modal {
