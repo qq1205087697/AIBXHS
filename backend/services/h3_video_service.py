@@ -297,6 +297,14 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                 _update_task(task_id, status=status)
             last_status = status
 
+    # 配置缺失守卫：H3_BASE_URL 为空时 _api() 会拼出无 scheme 的 URL，
+    # 每次查询必然失败 → 轮询线程最多空转 240 分钟刷屏。直接终止并落失败态。
+    if not (settings.H3_BASE_URL or "").strip():
+        _update_task(task_id, status="失败",
+                     error_message="H3_BASE_URL 未配置（.env 需配置 ComfyUI 服务地址/账号密码）")
+        logger.error(f"[H3视频] 任务 {task_id} 终止: H3_BASE_URL 未配置，请在 .env 配置 H3_BASE_URL / H3_AUTH_USER / H3_AUTH_PASSWORD")
+        return
+
     try:
         consecutive_failures = 0  # 连续查询失败：配置缺失/服务不可达等确定性错误，快速失败
         timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久

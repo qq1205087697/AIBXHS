@@ -55,16 +55,17 @@ import {
   Rocket,
   Video,
   Film,
+  Image as ImageIcon,
   ClipboardCheck,
-} from 'lucide-react'
-import { useAuth } from '../../contexts/AuthContext'
-import { useTheme } from '../../contexts/ThemeContext'
-import ThemeSwitcher from '../ThemeSwitcher'
-import ChangePasswordModal from '../ChangePasswordModal'
-import ErrorBoundary from '../ErrorBoundary'
-import KeepAliveHost from '../KeepAliveHost'
-import { notificationsApi } from '../../api'
-import dayjs from 'dayjs'
+} from "lucide-react";
+import { useAuth } from "../../contexts/AuthContext";
+import { useTheme } from "../../contexts/ThemeContext";
+import ThemeSwitcher from "../ThemeSwitcher";
+import ChangePasswordModal from "../ChangePasswordModal";
+import ErrorBoundary from "../ErrorBoundary";
+import KeepAliveHost from "../KeepAliveHost";
+import { notificationsApi } from "../../api";
+import dayjs from "dayjs";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -213,7 +214,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/tenants",
     "/stores",
   ];
-  const mediaPaths = ["/ai-creation"];
+  const mediaPaths = ["/ai-creation", "/ai-image"];
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
@@ -334,6 +335,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               label: 'AI视频',
             },
             {
+              key: '/ai-image',
+              icon: <ImageIcon size={18} />,
+              label: 'AI生图',
+            },
+            {
               key: '/upscale-center',
               icon: <Film size={18} />,
               label: '高清处理',
@@ -342,7 +348,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               ? [{
                   key: '/video-binding-review',
                   icon: <ClipboardCheck size={18} />,
-                  label: '视频绑定审核',
+                  label: '媒体绑定审核',
                 }]
               : []),
           ],
@@ -549,8 +555,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/development": "开发机器人",
       "/development/new": "添加新品",
       '/ai-creation': 'AI视频',
+      '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
-      '/video-binding-review': '视频绑定审核',
+      '/video-binding-review': '媒体绑定审核',
     };
     return pathMap[location.pathname] || "未知页面";
   };

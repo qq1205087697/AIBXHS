@@ -147,17 +147,30 @@ async def get_calculation_status(
 
 @router.get("/overview")
 async def get_inventory_overview(
+    keyword: Optional[str] = Query(None, description="搜索关键词（与 /search 同口径）"),
+    account: Optional[List[str]] = Query(None, description="店铺账号（与 /search 同口径）"),
+    country: Optional[List[str]] = Query(None, description="国家/站点（与 /search 同口径）"),
+    holiday_filter: Optional[str] = Query(None, description="节日筛选: all/only_holiday/only_non_holiday"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     获取库存概览统计
+
+    **与列表同口径**：接受与 /search 相同的筛选参数，面板数字随筛选变化，
+    保证「总SKU数」= 表格该筛选下的条数。
+
     包含各风险等级数量、快照日期、断货TOP10、冗余库存TOP10
     """
     try:
         from services.inventory_service import get_inventory_overview
 
-        result = get_inventory_overview(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=get_user_role_code(current_user, db))
+        result = get_inventory_overview(
+            db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+            user_role=get_user_role_code(current_user, db),
+            keyword=keyword, holiday_filter=holiday_filter,
+            account=account, country=country,
+        )
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -713,10 +726,42 @@ async def mark_product_status(
     }, synchronize_session=False)
 
     db.commit()
+
+    # 标签系统：人工标记变更后刷新决策行展示口径（filter_status/force_replenish，K2/K3）
+    # **只重算本次被标记的行**（all_ids_list 已含汇总行展开出的共享库存子行）——
+    # 全量重算在 5.9 万决策行上约 2000ms，是「点标记很慢」的主因。
+    try:
+        from services.tag_service import apply_tags_to_decisions
+        apply_tags_to_decisions(db, current_user.tenant_id, snapshot_ids=all_ids_list)
+    except Exception as e:
+        logger.warning(f"人工标记后刷新过滤口径失败（不影响标记本身）: {e}")
+
+    # 取消标记还必须清 **product_tags 里的节日标签**：快照列与标签表是两处数据源，
+    # 自动打标写入的节日只存在于 product_tags —— 只清快照列时界面仍显示节日，
+    # 表现为「取消标记去不掉」。按每行 (asin, account) 调 suppress（通配 ∪ 本行）。
+    suppressed = 0
+    if action == "clear":
+        try:
+            from services.tag_service import suppress_holiday_tags
+            rows = db.query(InventorySnapshot.asin, InventorySnapshot.account).filter(
+                InventorySnapshot.id.in_(all_ids_list),
+                InventorySnapshot.tenant_id == current_user.tenant_id,
+            ).all()
+            for _asin, _acct in {(r[0], r[1] or "") for r in rows}:
+                res = suppress_holiday_tags(
+                    db, current_user.tenant_id, _asin, _acct,
+                    operator=current_user.username or f"user_{current_user.id}",
+                    reason="界面取消标记",
+                )
+                suppressed += int(res.get("suppressed") or 0)
+        except Exception as e:
+            logger.warning(f"取消标记时清除节日标签失败（不影响快照标记）: {e}")
+
     return {
         "success": True,
         "data": {
-            "updated_count": len(all_ids_list)
+            "updated_count": len(all_ids_list),
+            "suppressed_tags": suppressed,
         }
     }
 
