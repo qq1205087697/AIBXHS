@@ -2542,14 +2542,17 @@ const InventoryBot: React.FC = () => {
         };
         return (
           <Space size={4} style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
-            <Button
-              type="link"
-              size="small"
-              icon={<Truck size={14} />}
-              onClick={() => handleViewInbound(record.asin, record.account)}
-            >
-              在途详情
-            </Button>
+            <Tooltip title={(record.fba_inbound || 0) <= 0 ? "无在途货件" : ""}>
+              <Button
+                type="link"
+                size="small"
+                icon={<Truck size={14} />}
+                disabled={(record.fba_inbound || 0) <= 0}
+                onClick={() => handleViewInbound(record.asin, record.account)}
+              >
+                在途详情
+              </Button>
+            </Tooltip>
             {record.force_replenish === 1 ? (
               // 与「强制补货」按钮同结构（icon + 4 字），保证两态等宽 —— 否则第 3 槽
               // 「标记」的 X 位置随行漂移（实测 22px，操作列横向不对齐的根因）。

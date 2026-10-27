@@ -355,7 +355,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               ? [{
                   key: '/video-binding-review',
                   icon: <ClipboardCheck size={18} />,
-                  label: '视频绑定审核',
+                  label: '媒体绑定审核',
                 }]
               : []),
           ],
@@ -564,7 +564,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/ai-creation': 'AI视频',
       '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
-      '/video-binding-review': '视频绑定审核',
+      '/video-binding-review': '媒体绑定审核',
     };
     return pathMap[location.pathname] || "未知页面";
   };

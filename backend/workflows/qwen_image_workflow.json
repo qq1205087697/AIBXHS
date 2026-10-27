@@ -12,7 +12,7 @@
   },
   "475": {
     "inputs": {
-      "image": "2.jpg"
+      "image": "UK-B-1317-1.jpg"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -88,7 +88,7 @@
         "502",
         0
       ],
-      "steps": 30,
+      "steps": 36,
       "cfg": 1,
       "sampler_name": "euler",
       "scheduler": "simple",
@@ -137,7 +137,7 @@
       "device": "auto",
       "dtype": "default",
       "model": [
-        "476",
+        "649",
         0
       ]
     },
@@ -148,7 +148,7 @@
   },
   "487": {
     "inputs": {
-      "filename_prefix": "QW21-20261015110113",
+      "filename_prefix": "QW21-20261026164617",
       "images": [
         "480",
         0
@@ -201,12 +201,12 @@
           {
             "name": "A",
             "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_ffhli_00013_.png&type=temp&subfolder=&rand=0.07228660698734479"
+            "url": "/api/view?filename=rgthree.compare._temp_iuyyv_00053_.png&type=temp&subfolder=&rand=0.8516744674329435"
           },
           {
             "name": "B",
             "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_ffhli_00014_.png&type=temp&subfolder=&rand=0.31888087080683425"
+            "url": "/api/view?filename=rgthree.compare._temp_iuyyv_00054_.png&type=temp&subfolder=&rand=0.413547598085942"
           }
         ]
       },
@@ -286,11 +286,30 @@
   },
   "571": {
     "inputs": {
-      "value": "根据图中的三个蝴蝶结，生成圣诞居家主题场景。要求：蝴蝶结挂在壁炉上或者扶梯上。以及蝴蝶结大小款式与图中一致。不要带社媒标识，logo，手机等。"
+      "value": "根据图分析品名\n类型\n材质\n颜色\n核心卖点\n使用场景\n目标人群\nUS 美国 · 英语 · 亚马逊\n将商品放置与卖点相匹配的使用场景中\n不要带社媒标识，logo，手机等。生成图片"
     },
     "class_type": "PrimitiveStringMultiline",
     "_meta": {
       "title": "提示词"
+    }
+  },
+  "649": {
+    "inputs": {
+      "attention": "kitchen_int8",
+      "step_cache": "te_predictor",
+      "reuse_threshold": 0.06,
+      "start_percent": 0,
+      "end_percent": 0,
+      "predictor_error_limit": 0.08,
+      "verbose": true,
+      "model": [
+        "476",
+        0
+      ]
+    },
+    "class_type": "TESpeedQwenImage21",
+    "_meta": {
+      "title": "TE-Speed Qwen Image 2.1"
     }
   }
 }

@@ -10,6 +10,7 @@ import time
 
 from fastapi.responses import Response, StreamingResponse
 from dependencies import get_current_user
+from config import get_settings
 from models.user import User
 from services.ai_creation_service import (
     analyze_product_images,
@@ -67,14 +68,25 @@ class GeneratePromptsRequest(BaseModel):
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
-# 代理取图域名白名单（后缀匹配）：TOS 桶未配置 CORS，浏览器 fetch 会被拦截，
-# 由后端代取字节；顺带覆盖亚马逊图片 CDN 以兜底其偶发跨域限制
+# 代理取图域名白名单（后缀匹配）：TOS 桶 / 自有 CDN 未配置 CORS，浏览器 fetch 会被拦截，
+# 由后端代取字节；顺带覆盖亚马逊图片 CDN 以兜底其偶发跨域限制。
+# 新增域名走 .env 的 PROXY_IMAGE_HOST_SUFFIXES（逗号分隔）追加，避免再改代码。
 PROXY_IMAGE_HOST_SUFFIXES = (
     "volces.com",             # 火山引擎 TOS
+    "bxhsrpa.com",            # 自有 CDN（产品图/生成图）
     "media-amazon.com",       # 亚马逊图片 CDN
     "ssl-images-amazon.com",  # 亚马逊图片 CDN（旧域名）
 )
 PROXY_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _proxy_suffixes() -> tuple:
+    """默认白名单 + .env 追加项"""
+    extra = (get_settings().PROXY_IMAGE_HOST_SUFFIXES or "").strip()
+    if not extra:
+        return PROXY_IMAGE_HOST_SUFFIXES
+    parts = tuple(p.strip().lower().lstrip(".") for p in extra.split(",") if p.strip())
+    return PROXY_IMAGE_HOST_SUFFIXES + parts
 
 
 @router.get("/proxy-image")
@@ -89,11 +101,15 @@ async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise HTTPException(status_code=400, detail="无效的图片地址")
     host = parsed.hostname.lower()
-    if not any(host == s or host.endswith("." + s) for s in PROXY_IMAGE_HOST_SUFFIXES):
-        raise HTTPException(status_code=400, detail="该图片域名不在代理白名单内")
+    if not any(host == s or host.endswith("." + s) for s in _proxy_suffixes()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"该图片域名不在代理白名单内（{host}），可在 .env 的 PROXY_IMAGE_HOST_SUFFIXES 追加",
+        )
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # trust_env=False：绕过系统/沙箱 HTTP 代理，避免隧道 502 把取图拖到超时
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "").split(";")[0].strip()

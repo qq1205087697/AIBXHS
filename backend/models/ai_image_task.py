@@ -18,7 +18,9 @@ class AIImageTask(BaseModel):
     product_code = Column(String(50), nullable=True, index=True, comment="产品编码（从产品管理选图时记录）")
     product_name = Column(String(200), nullable=True, comment="产品品名")
     status = Column(String(20), nullable=False, default="排队中", index=True,
-                    comment="状态：排队中/生成中/已完成/部分完成/失败")
+                    comment="状态：排队中/生成中/已完成/部分完成/失败/已取消")
+    provider = Column(String(20), nullable=False, default="local",
+                      comment="生成通道：local=本地Qwen Image 2.1 / relay=中转站 Nano Banana 2")
 
     # 生成参数
     generation_types = Column(Text, nullable=True,

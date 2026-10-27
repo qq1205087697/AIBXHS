@@ -22,6 +22,7 @@ import {
   Pagination,
   Checkbox,
   Switch,
+  theme,
 } from 'antd'
 import {
   UploadOutlined,
@@ -36,8 +37,14 @@ import {
   SearchOutlined,
   MinusOutlined,
   PlusOutlined,
+  LeftOutlined,
+  RightOutlined,
+  RedoOutlined,
+  StopOutlined,
+  LinkOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
+import BindProductModal from '../components/BindProductModal'
 import {
   aiImageApi,
   aiCreationApi,
@@ -50,8 +57,12 @@ import {
 const { Text } = Typography
 const { TextArea } = Input
 
-const MAX_IMAGES = 5
+const DEFAULT_MAX_IMAGES = 8      // 受 PE 节点通道数约束，服务端 /options 会覆盖
+const DEFAULT_MAX_SHEETS = 12     // 单任务生成张数上限，服务端 /options 会覆盖
 const PRODUCT_PAGE_SIZE = 8
+
+/** 比例卡片顺序（实际展示以 /options 返回的可用项为准） */
+const ALL_RATIO_KEYS = ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9']
 
 interface ProductOptionItem {
   id: number
@@ -67,7 +78,7 @@ const APLUS_OPTIONS = [
   { value: 'aplus_mobile', label: '手机A+', size: '600×450', desc: '移动端 A+ 图，小屏浏览' },
 ] as const
 
-/** 主副图类型（多选） */
+/** 主副图类型（多选）。场景图是父项，勾选后展开「带人物 / 不带人物」两条子路径。 */
 const MAIN_TYPE_LABELS: Record<string, string> = {
   selling_point: '卖点图',
   white_background: '白底图',
@@ -75,17 +86,28 @@ const MAIN_TYPE_LABELS: Record<string, string> = {
   closeup: '特写图',
   closeup_white: '特写白底图',
 }
+/** 场景图的两条子路径（key 与后端一致；scene 保留 = 不带人物，scene_person = 带人物） */
+const SCENE_VARIANTS: { key: string; label: string; hint: string }[] = [
+  { key: 'scene', label: '场景图（不带人物）', hint: '商品置于真实使用场景，画面中不出现任何人物' },
+  { key: 'scene_person', label: '场景图（带人物）', hint: '成年模特按使用方式佩戴/使用商品；严禁儿童' },
+]
+const SCENE_VARIANT_KEYS = SCENE_VARIANTS.map((v) => v.key)
+/** 含子项的完整标签表：历史 Tag、旧记录回填过滤都走它 */
+const TYPE_LABEL_ALL: Record<string, string> = {
+  ...MAIN_TYPE_LABELS,
+  scene_person: '场景图（带人物）',
+}
 const MAIN_TYPE_DESCRIPTIONS: Record<string, string> = {
   selling_point: '商品置于卖点匹配的场景，配文字排版展示卖点',
   white_background: '商品精修后放置于纯白色背景',
-  scene: '商品置于卖点匹配的使用场景中',
+  scene: '商品置于真实使用场景，可展开选择带人物 / 不带人物',
   closeup: '与卖点匹配的局部特写细节',
   closeup_white: '白底局部特写细节',
 }
 
 /** 兼容 v1 旧记录的类型标签 */
 const LEGACY_TYPE_LABELS: Record<string, string> = {
-  ...MAIN_TYPE_LABELS,
+  ...TYPE_LABEL_ALL,
   aplus: 'A+图',
 }
 
@@ -95,6 +117,7 @@ const STATUS_COLORS: Record<string, string> = {
   已完成: 'success',
   部分完成: 'warning',
   失败: 'error',
+  已取消: 'default',
 }
 
 const BRAND_DEFAULTS = {
@@ -105,19 +128,34 @@ const BRAND_DEFAULTS = {
 
 type BrandSettings = typeof BRAND_DEFAULTS
 
-/** AI 分析结构化结果 → 商品信息文本（供提示词模板拼接） */
-const analysisToText = (r: AmazonProductAnalysisResult): string =>
-  [
-    `品名：${r.product_name_cn || r.product_name_en || ''}`,
-    r.product_type ? `类型：${r.product_type}` : '',
-    r.material?.length ? `材质：${r.material.join('、')}` : '',
-    r.colors?.length ? `颜色：${r.colors.join('、')}` : '',
-    r.selling_points?.length ? `核心卖点：${r.selling_points.join('；')}` : '',
-    r.usage_scenarios?.length ? `使用场景：${r.usage_scenarios.join('、')}` : '',
-    r.target_audience?.length ? `目标人群：${r.target_audience.join('、')}` : '',
+/** AI 分析结果里的"模型自述不确定性"句子，喂进提示词会污染画面描述，直接丢弃 */
+const UNCERTAIN_FACT = /无法(确认|判断|识别)|不能确定|不确定|无法看清|看不清|图片中(未|没有)/
+
+/** 事实条目清洗：按分号拆分 → 去首尾标点 → 丢弃空项与元话语（避免出现「白色、、红色」） */
+const cleanFacts = (arr?: (string | undefined | null)[]): string[] =>
+  (arr || [])
+    .flatMap((s) => String(s ?? '').split(/[；;]/))
+    .map((s) => s.trim().replace(/^[、，,。\s]+|[、，,。\s]+$/g, ''))
+    .filter((s) => s.length >= 2 && !UNCERTAIN_FACT.test(s))
+
+/** AI 分析结构化结果 → 商品事实文本（供提示词模板的【商品事实】段使用） */
+const analysisToText = (r: AmazonProductAnalysisResult): string => {
+  const name = (r.product_name_cn || r.product_name_en || '').trim()
+  const groups: [string, (string | undefined | null)[] | undefined][] = [
+    ['类型', [r.product_type]],
+    ['材质', r.material],
+    ['颜色', r.colors],
+    ['核心卖点', r.selling_points],
+    ['使用场景', r.usage_scenarios],
+    ['目标人群', r.target_audience],
   ]
-    .filter(Boolean)
-    .join('\n')
+  const lines = [name ? `品名：${name}` : '']
+  for (const [label, values] of groups) {
+    const list = cleanFacts(values)
+    if (list.length) lines.push(`${label}：${list.join('、')}`)
+  }
+  return lines.filter(Boolean).join('\n')
+}
 
 const formatCost = (sec: number | null): string => {
   if (!sec) return '-'
@@ -125,9 +163,26 @@ const formatCost = (sec: number | null): string => {
   return `${Math.floor(sec / 60)}分${sec % 60}秒`
 }
 
+/** 从 URL 推断扩展名（回传图可能是 png 或 jpg，下载时保持真实后缀） */
+const fileExt = (url?: string | null): string => {
+  const m = (url || '').split('?')[0].match(/\.([a-z0-9]{2,5})$/i)
+  return (m?.[1] || 'png').toLowerCase()
+}
+
 const AIImageStudio: React.FC = () => {
+  // 主题色：上传区/类型卡片等自绘边框必须跟 antd token 走，不能写死紫色
+  const { token } = theme.useToken()
   // ===== 左栏表单状态 =====
   const [fileList, setFileList] = useState<UploadFile[]>([])
+  const [maxImages, setMaxImages] = useState(DEFAULT_MAX_IMAGES)
+  const [maxSheets, setMaxSheets] = useState(DEFAULT_MAX_SHEETS)
+  /** 生成通道：local=本地 Qwen Image 2.1 / relay=中转站 Nano Banana 2 */
+  const [provider, setProvider] = useState<'local' | 'relay'>('local')
+  const [providers, setProviders] = useState<
+    { value: string; label: string; desc?: string; configured?: string }[]
+  >([])
+  const [dragging, setDragging] = useState(false)
+  const [availableRatios, setAvailableRatios] = useState<string[]>(ALL_RATIO_KEYS)
   const [analyzing, setAnalyzing] = useState(false)
   const [productInfo, setProductInfo] = useState('')
   // v2 分组：A+（单选，空=不生成）与主副图（多选）独立设置
@@ -141,12 +196,19 @@ const AIImageStudio: React.FC = () => {
   const [mainCounts, setMainCounts] = useState<Record<string, number>>({
     white_background: 1,
     scene: 1,
+    scene_person: 1,
   })
   const [mainAspectRatio, setMainAspectRatio] = useState('1:1')
   const [brand, setBrand] = useState<BrandSettings>({ ...BRAND_DEFAULTS })
   const [extraPrompt, setExtraPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [previewTask, setPreviewTask] = useState<AIImageTask | null>(null)
+  const [resultDetail, setResultDetail] = useState<{ task: AIImageTask; index: number } | null>(null)
+  /** 待绑定至产品的图片（打开 BindProductModal） */
+  const [bindTarget, setBindTarget] = useState<{ url: string; title?: string } | null>(null)
+  const [h3BaseUrl, setH3BaseUrl] = useState('')
+  const [comfyPrompt, setComfyPrompt] = useState<{ original: string; enhanced: string } | null>(null)
+  const [comfyLoading, setComfyLoading] = useState(false)
+  const comfyCacheRef = useRef<Map<string, { original: string; enhanced: string }>>(new Map())
   const [hoverId, setHoverId] = useState<number | null>(null)
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null)
 
@@ -171,16 +233,22 @@ const AIImageStudio: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('')
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 进行中的任务 id（轮询用 ref，避免定时器闭包读到旧列表） */
+  const activeIdsRef = useRef<number[]>([])
 
   const pageSize = 10
 
   const fetchTasks = useCallback(
-    async (silent = false) => {
+    async (silent = false, override?: { page?: number; keyword?: string; status?: string }) => {
       if (!silent) setLoading(true)
       try {
-        const { data } = await aiImageApi.listTasks(page, pageSize, keyword)
+        const { data } = await aiImageApi.listTasks(
+          override?.page ?? page,
+          pageSize,
+          override?.keyword !== undefined ? override.keyword : keyword,
+          override?.status !== undefined ? override.status : statusFilter,
+        )
         setTasks(data.items || [])
         setTotal(data.total || 0)
       } catch (e: any) {
@@ -189,33 +257,135 @@ const AIImageStudio: React.FC = () => {
         if (!silent) setLoading(false)
       }
     },
-    [page, keyword],
+    [page, keyword, statusFilter],
   )
 
   useEffect(() => {
     fetchTasks()
   }, [fetchTasks])
 
-  // 有进行中任务时 5 秒轮询
+  // 一次性拉取服务端能力：ComfyUI 地址、参考图/张数上限、真实可用比例
   useEffect(() => {
-    const active = tasks.filter(
-      (t) =>
-        (t.status === '排队中' || t.status === '生成中') &&
-        (!statusFilter || t.status === statusFilter),
-    )
-    if (active.length && !timerRef.current) {
-      timerRef.current = setInterval(() => fetchTasks(true), 5000)
-    } else if (!active.length && timerRef.current) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
+    aiImageApi
+      .getOptions()
+      .then(({ data }) => {
+        setH3BaseUrl(data?.h3_base_url || '')
+        if (data?.max_ref_images) setMaxImages(data.max_ref_images)
+        if (data?.max_sheets_per_task) setMaxSheets(data.max_sheets_per_task)
+        if (data?.providers?.length) setProviders(data.providers)
+        const keys = Object.keys(data?.aspect_ratios || {})
+        if (keys.length) {
+          const ordered = ALL_RATIO_KEYS.filter((k) => keys.includes(k))
+          setAvailableRatios(ordered.length ? ordered : keys)
+        }
+      })
+      .catch(() => setH3BaseUrl(''))
+  }, [])
+
+  // 当前选中比例若不在服务端可用列表内，回落到第一个可用项（避免提交必失败）
+  useEffect(() => {
+    if (availableRatios.length && !availableRatios.includes(mainAspectRatio)) {
+      setMainAspectRatio(availableRatios[0])
     }
+  }, [availableRatios, mainAspectRatio])
+
+  // 当前详情子项的 ComfyUI prompt_id（新记录取子项字段，旧记录回退任务级列表按下标取）
+  const currentPromptId = resultDetail
+    ? resultDetail.task.result_images?.[resultDetail.index]?.prompt_id ||
+      resultDetail.task.comfy_prompt_ids?.[resultDetail.index] ||
+      ''
+    : ''
+
+  // 打开详情时优先用库里落的提示词（ComfyUI /history 会过期，过期后查不到）；
+  // 老记录没有落库字段时才回退到 /comfy-history，按 prompt_id 缓存避免翻张重复请求
+  useEffect(() => {
+    if (!resultDetail) {
+      setComfyPrompt(null)
+      return
+    }
+    const it = resultDetail.task.result_images?.[resultDetail.index]
+    const dbOriginal = (it?.final_prompt || '').trim()
+    const dbEnhanced = (it?.enhanced_prompt || '').trim()
+
+    // 库里两条都有 → 完全不打扰 ComfyUI
+    if (dbOriginal && dbEnhanced) {
+      setComfyPrompt({ original: dbOriginal, enhanced: dbEnhanced })
+      setComfyLoading(false)
+      return
+    }
+    const dbPartial = dbOriginal || dbEnhanced
+    setComfyPrompt(dbPartial ? { original: dbOriginal, enhanced: dbEnhanced } : null)
+
+    if (!currentPromptId) {
+      setComfyLoading(false)
+      return
+    }
+    const cached = comfyCacheRef.current.get(currentPromptId)
+    if (cached) {
+      setComfyPrompt({
+        original: dbOriginal || cached.original,
+        enhanced: dbEnhanced || cached.enhanced,
+      })
+      setComfyLoading(false)
+      return
+    }
+    let cancelled = false
+    setComfyLoading(true)
+    aiImageApi
+      .getComfyHistory(currentPromptId)
+      .then(({ data }) => {
+        const info = {
+          original: dbOriginal || data?.original_prompt || '',
+          enhanced: dbEnhanced || data?.enhanced_prompt || '',
+        }
+        comfyCacheRef.current.set(currentPromptId, info)
+        if (!cancelled) setComfyPrompt(info)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setComfyPrompt(dbPartial ? { original: dbOriginal, enhanced: dbEnhanced } : { original: '', enhanced: '' })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setComfyLoading(false)
+      })
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-        timerRef.current = null
-      }
+      cancelled = true
     }
-  }, [tasks, fetchTasks, statusFilter])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPromptId, resultDetail?.task.id, resultDetail?.index])
+
+  const handleCopyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success('已复制')
+    } catch {
+      message.error('复制失败，请手动选择复制')
+    }
+  }
+
+  // 维护「进行中任务」id 列表（轮询只拉这几条，降流量）
+  useEffect(() => {
+    activeIdsRef.current = tasks
+      .filter((t) => t.status === '排队中' || t.status === '生成中')
+      .map((t) => t.id)
+  }, [tasks])
+
+  // 有进行中任务时 5 秒轮询单任务：只替换变化的那几条，不再整页重拉
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      const ids = activeIdsRef.current
+      if (!ids.length) return
+      try {
+        const res = await Promise.all(ids.map((id) => aiImageApi.getTask(id)))
+        const fresh = new Map(res.map((r) => [r.data.id, r.data]))
+        setTasks((prev) => prev.map((t) => fresh.get(t.id) ?? t))
+      } catch {
+        // 单次失败静默，下一轮继续；避免网络抖动反复弹错
+      }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [])
 
   // ===== 上传辅助（对齐 AI 生视频） =====
   const appendFiles = (files: File[]) => {
@@ -224,9 +394,9 @@ const AIImageStudio: React.FC = () => {
       message.error('存在非图片文件，已自动忽略')
     }
     setFileList((prev) => {
-      const remain = MAX_IMAGES - prev.length
+      const remain = maxImages - prev.length
       if (images.length > remain) {
-        message.warning(`最多上传 ${MAX_IMAGES} 张图片`)
+        message.warning(`最多上传 ${maxImages} 张图片`)
       }
       const accepted = images.slice(0, Math.max(0, remain))
       const items: UploadFile[] = accepted.map((f, i) => ({
@@ -312,9 +482,9 @@ const AIImageStudio: React.FC = () => {
     setFileList((prev) => {
       const existUrls = new Set(prev.map((f) => f.url || f.thumbUrl).filter(Boolean))
       const freshUrls = selectedImageUrls.filter((url) => !existUrls.has(url))
-      const remain = MAX_IMAGES - prev.length
+      const remain = maxImages - prev.length
       if (freshUrls.length > remain) {
-        message.warning(`最多上传 ${MAX_IMAGES} 张图片`)
+        message.warning(`最多上传 ${maxImages} 张图片`)
       }
       const urls = freshUrls.slice(0, Math.max(0, remain))
       const items: UploadFile[] = urls.map((url, i) => ({
@@ -339,44 +509,80 @@ const AIImageStudio: React.FC = () => {
     message.success('已添加所选产品图片')
   }
 
-  const fetchImageBlob = async (url: string): Promise<Blob | null> => {
+  /** 从 blob 响应里抠出后端 detail（responseType=blob 时错误体也是 Blob） */
+  const readBlobError = async (data: any): Promise<string> => {
+    if (!data) return ''
+    if (typeof data === 'string') return data
+    if (data instanceof Blob) {
+      try {
+        const text = await data.text()
+        try {
+          const j = JSON.parse(text)
+          return j?.detail || ''
+        } catch {
+          return text.slice(0, 120)
+        }
+      } catch {
+        return ''
+      }
+    }
+    return data?.detail || ''
+  }
+
+  const fetchImageBlob = async (
+    url: string,
+  ): Promise<{ blob?: Blob; error?: string }> => {
     try {
       const resp = await fetch(url)
-      if (resp.ok) return await resp.blob()
+      if (resp.ok) return { blob: await resp.blob() }
     } catch {
       // 直连失败（跨域等），尝试后端代理
     }
     try {
       const resp = await aiCreationApi.proxyImage(url)
-      return resp.data
-    } catch {
-      return null
+      return { blob: resp.data }
+    } catch (e: any) {
+      const detail = await readBlobError(e?.response?.data)
+      return { error: detail || e?.message || '图片下载失败' }
     }
   }
 
   // 收集所有图片为 File：本地文件直接用，产品图片 URL 需下载转 File
-  const collectFiles = async (): Promise<File[]> => {
+  // 失败项单独带出原因 —— 否则用户只会看到「请至少上传一张参考图」，真实原因被吞掉
+  const collectFiles = async (): Promise<{
+    files: File[]
+    failed: { name: string; reason: string }[]
+  }> => {
     const files: File[] = []
+    const failed: { name: string; reason: string }[] = []
     for (const f of fileList) {
       if (f.originFileObj instanceof File) {
         files.push(f.originFileObj)
       } else if (f.url || f.thumbUrl) {
-        const blob = await fetchImageBlob(f.url || f.thumbUrl!)
+        const name = f.name || `image-${f.uid}.jpg`
+        const { blob, error } = await fetchImageBlob(f.url || f.thumbUrl!)
         if (blob) {
-          files.push(new File([blob], f.name || `image-${f.uid}.jpg`, { type: blob.type || 'image/jpeg' }))
+          files.push(new File([blob], name, { type: blob.type || 'image/jpeg' }))
+        } else {
+          failed.push({ name, reason: error || '图片下载失败' })
         }
       }
     }
-    return files
+    return { files, failed }
   }
 
   // ===== AI 分析商品信息 =====
   const handleAnalyze = async () => {
-    const files = await collectFiles()
+    const { files, failed } = await collectFiles()
     if (!files.length) {
-      message.warning('请先上传参考图')
+      if (failed.length) {
+        message.error(`参考图读取失败：${failed[0].reason}`)
+      } else {
+        message.warning('请先上传参考图')
+      }
       return
     }
+    if (failed.length) message.warning(`${failed.length} 张参考图读取失败，已跳过`)
     setAnalyzing(true)
     try {
       const { data } = await aiCreationApi.analyzeProduct(files)
@@ -394,43 +600,89 @@ const AIImageStudio: React.FC = () => {
   }
 
   // ===== 提交生成任务（v2 分组参数）=====
+  const activeMainTypeCount = mainEnabled ? selectedMainTypes.length : 0
+  const totalSheets =
+    (aplusType ? aplusCount : 0) +
+    (mainEnabled ? selectedMainTypes.reduce((a, t) => a + (mainCounts[t] || 1), 0) : 0)
+
+  /** 张数加减控件（父项与场景图子路径共用，1~4 张/类型） */
+  const renderCountStepper = (key: string) => (
+    <Space size={2} onClick={(e) => e.stopPropagation()}>
+      <Button
+        size="small"
+        type="text"
+        icon={<MinusOutlined />}
+        disabled={(mainCounts[key] || 1) <= 1}
+        onClick={() => setMainCounts((m) => ({ ...m, [key]: Math.max(1, (m[key] || 1) - 1) }))}
+      />
+      <Text strong style={{ minWidth: 18, textAlign: 'center' }}>
+        {mainCounts[key] || 1}
+      </Text>
+      <Button
+        size="small"
+        type="text"
+        icon={<PlusOutlined />}
+        disabled={(mainCounts[key] || 1) >= 4}
+        onClick={() => setMainCounts((m) => ({ ...m, [key]: Math.min(4, (m[key] || 1) + 1) }))}
+      />
+    </Space>
+  )
+
   const handleSubmit = async () => {
-    const files = await collectFiles()
-    if (!files.length) {
-      message.warning('请至少上传一张参考图')
-      return
-    }
-    const activeMainTypes = mainEnabled ? selectedMainTypes : []
-    if (!aplusType && !activeMainTypes.length) {
-      message.warning('请在「A+图设置」或「主副图设置」中至少选择一种类型')
-      return
-    }
-    setSubmitting(true)
+    if (submitting) return          // 双保险：loading 生效前也挡住连点
+    setSubmitting(true)             // 必须最先置位：collectFiles 可能耗时数秒
     try {
+      const { files, failed } = await collectFiles()
+      if (!files.length) {
+        if (failed.length) {
+          message.error(`参考图读取失败：${failed[0].reason}`)
+        } else {
+          message.warning('请至少上传一张参考图')
+        }
+        return
+      }
+      if (failed.length) message.warning(`${failed.length} 张参考图读取失败，已跳过`)
+      const activeMainTypes = mainEnabled ? selectedMainTypes : []
+      if (!aplusType && !activeMainTypes.length) {
+        message.warning('请在「A+图设置」或「主副图设置」中至少选择一种类型')
+        return
+      }
+      if (totalSheets > maxSheets) {
+        message.warning(`单个任务最多生成 ${maxSheets} 张（当前 ${totalSheets} 张），请减少类型或张数`)
+        return
+      }
       const firstFile = files[0]
       const baseName = firstFile.name.replace(/\.[^.]+$/, '')
-      await aiImageApi.createTask(files, {
-        title: baseName,
-        aplus_type: aplusType || undefined,
-        product_code: selectedProducts[0]?.product_code || '',
-        product_name: selectedProducts[0]?.name || '',
-        main_types: activeMainTypes.length
-          ? Object.fromEntries(activeMainTypes.map((t) => [t, mainCounts[t] || 1]))
-          : undefined,
-        main_aspect_ratio: activeMainTypes.length ? mainAspectRatio : undefined,
-        image_count: aplusType ? aplusCount : 1,
-        product_info: productInfo,
-        prompt: extraPrompt,
-        brand_settings: {
-          ...Object.fromEntries(
-            Object.entries(brand).filter(([, v]) => v !== ''),
-          ),
+      // 标题优先用产品名（从产品库选图时文件名是 URL 末段，不可读）
+      const taskTitle = selectedProducts[0]?.name || baseName || '商品套图'
+      const idemKey = `aiimg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+      await aiImageApi.createTask(
+        files,
+        {
+          title: taskTitle,
+          aplus_type: aplusType || undefined,
+          product_code: selectedProducts[0]?.product_code || '',
+          product_name: selectedProducts[0]?.name || '',
+          main_types: activeMainTypes.length
+            ? Object.fromEntries(activeMainTypes.map((t) => [t, mainCounts[t] || 1]))
+            : undefined,
+          main_aspect_ratio: activeMainTypes.length ? mainAspectRatio : undefined,
+          image_count: aplusType ? aplusCount : 1,
+          product_info: productInfo,
+          prompt: extraPrompt,
+          brand_settings: {
+            ...Object.fromEntries(
+              Object.entries(brand).filter(([, v]) => v !== ''),
+            ),
+          },
+          provider,
         },
-      })
-      message.success('任务已提交，正在后台生成')
+        idemKey,
+      )
+      message.success(`任务已提交（共 ${totalSheets} 张），正在后台生成`)
       setFileList([])
       setPage(1)
-      fetchTasks()
+      fetchTasks(false, { page: 1, keyword, status: statusFilter })
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '提交任务失败')
     } finally {
@@ -442,9 +694,61 @@ const AIImageStudio: React.FC = () => {
     try {
       await aiImageApi.deleteTask(taskId)
       message.success('已删除')
-      fetchTasks(true)
+      fetchTasks(true, { page, keyword, status: statusFilter })
     } catch {
       message.error('删除失败')
+    }
+  }
+
+  /** 取消进行中的任务（已完成的图保留） */
+  const handleCancelTask = (taskId: number) => {
+    Modal.confirm({
+      title: '取消该任务？',
+      content: '仍在排队/执行中的图片会停止生成，已完成的图片保留在记录中。',
+      okText: '取消任务',
+      okButtonProps: { danger: true },
+      cancelText: '继续生成',
+      onOk: async () => {
+        try {
+          await aiImageApi.cancelTask(taskId)
+          message.success('已取消')
+          fetchTasks(true, { page, keyword, status: statusFilter })
+        } catch (e: any) {
+          message.error(e?.response?.data?.detail || '取消失败')
+        }
+      },
+    })
+  }
+
+  /** 重试失败子项（复用已上传参考图，不要求重新上传） */
+  const handleRetry = async (taskId: number, indices?: number[]) => {
+    try {
+      const { data } = await aiImageApi.retryTask(taskId, indices)
+      message.success(
+        data?.retried ? `已重新提交 ${data.retried} 张，正在生成` : '已提交重试',
+      )
+      fetchTasks(true, { page, keyword, status: statusFilter })
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '重试失败')
+    }
+  }
+
+  /** 打包下载全部已生成图片 */
+  const handleDownloadAll = async (task: AIImageTask) => {
+    const hide = message.loading('正在打包图片…', 0)
+    try {
+      const { data } = await aiImageApi.downloadZip(task.id)
+      const url = URL.createObjectURL(data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${task.title || `任务${task.id}`}.zip`
+      a.click()
+      URL.revokeObjectURL(url)
+      message.success('已开始下载')
+    } catch {
+      message.error('打包下载失败，请稍后重试')
+    } finally {
+      hide()
     }
   }
 
@@ -468,10 +772,11 @@ const AIImageStudio: React.FC = () => {
     else setAplusType('')
     setAplusCount(task.image_count || 1)
     if (Array.isArray(task.main_types)) {
-      setSelectedMainTypes(task.main_types)
+      const typeList = task.main_types
+      setSelectedMainTypes(typeList)
       setMainCounts((m) => {
         const next = { ...m }
-        for (const t of task.main_types!) if (next[t] == null) next[t] = 1
+        for (const t of typeList) if (next[t] == null) next[t] = 1
         return next
       })
     } else if (task.main_types && typeof task.main_types === 'object') {
@@ -486,7 +791,7 @@ const AIImageStudio: React.FC = () => {
     }
     else if (!task.aplus_type) {
       // v1 旧记录：从 generation_types 里取主副图类型
-      const legacy = (task.generation_types || []).filter((t) => MAIN_TYPE_LABELS[t])
+      const legacy = (task.generation_types || []).filter((t) => TYPE_LABEL_ALL[t])
       setSelectedMainTypes(legacy.length ? legacy : ['white_background', 'scene'])
     }
     setMainAspectRatio(task.main_aspect_ratio || task.aspect_ratio || '1:1')
@@ -530,23 +835,40 @@ const AIImageStudio: React.FC = () => {
   }
 
 
-  // ===== 渲染：结果图（大图预览画廊）=====
-  const renderResultItem = (item: AIImageResultItem, task: AIImageTask) => {
+  // ===== 渲染：结果图（大图网格，点击图片开单张详情）=====
+  const renderResultItem = (item: AIImageResultItem, task: AIImageTask, index: number) => {
     const name = `${task.title || '套图'}-${item.label}${item.seq > 0 ? `-${item.seq + 1}` : ''}`
     if (item.status === '已完成' && item.url) {
       return (
         <div key={`${item.type}-${item.seq}`} style={{ position: 'relative' }}>
-          <Image
+          <img
             src={item.url}
             alt={name}
-            style={{ borderRadius: 6, objectFit: 'cover', width: '100%', maxHeight: 220 }}
+            loading="lazy"
+            onClick={() => setResultDetail({ task, index })}
+            style={{
+              borderRadius: 6,
+              objectFit: 'cover',
+              width: '100%',
+              height: 150,
+              display: 'block',
+              cursor: 'zoom-in',
+              background: token.colorFillQuaternary,
+            }}
           />
           <Space style={{ position: 'absolute', top: 6, right: 6 }} size={4}>
+            <Tooltip title="绑定到产品（提交审核）">
+              <Button
+                size="small"
+                icon={<LinkOutlined />}
+                onClick={() => setBindTarget({ url: item.url!, title: task.title })}
+              />
+            </Tooltip>
             <Tooltip title="下载">
               <Button
                 size="small"
                 icon={<DownloadOutlined />}
-                onClick={() => handleDownload(item.url!, `${name}.png`)}
+                onClick={() => handleDownload(item.url!, `${name}.${fileExt(item.url)}`)}
               />
             </Tooltip>
           </Space>
@@ -567,16 +889,54 @@ const AIImageStudio: React.FC = () => {
             padding: 16,
             textAlign: 'center',
             background: '#fff1f0',
-            minHeight: 120,
+            minHeight: 150,
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'center',
+            alignItems: 'center',
+            gap: 6,
           }}
         >
           <Tag color="error">失败</Tag>
-          <Text type="secondary" style={{ fontSize: 12, marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
             {item.error || '生成失败'}
           </Text>
+          <Button size="small" icon={<RedoOutlined />} onClick={() => handleRetry(task.id, [index])}>
+            重试此张
+          </Button>
+        </div>
+      )
+    }
+    if (item.status === '已取消') {
+      return (
+        <div
+          key={`${item.type}-${item.seq}`}
+          style={{
+            border: `1px dashed ${token.colorBorder}`,
+            borderRadius: 6,
+            padding: 16,
+            textAlign: 'center',
+            background: token.colorFillQuaternary,
+            minHeight: 150,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          <Tag>已取消</Tag>
+          <Text type="secondary" style={{ fontSize: 12, marginTop: 8 }}>
+            {item.label}
+            {item.seq > 0 ? ` #${item.seq + 1}` : ''}
+          </Text>
+          <Button
+            size="small"
+            icon={<RedoOutlined />}
+            onClick={() => handleRetry(task.id, [index])}
+          >
+            重试此张
+          </Button>
         </div>
       )
     }
@@ -584,11 +944,11 @@ const AIImageStudio: React.FC = () => {
       <div
         key={`${item.type}-${item.seq}`}
         style={{
-          border: '1px dashed #d9d9d9',
+          border: `1px dashed ${token.colorBorder}`,
           borderRadius: 6,
           padding: 16,
           textAlign: 'center',
-          minHeight: 120,
+          minHeight: 150,
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'center',
@@ -604,6 +964,12 @@ const AIImageStudio: React.FC = () => {
     )
   }
 
+  /** 是否存在可重试子项（失败 / 已取消）——按钮口径与后端一致 */
+  const hasRetryable = (task: AIImageTask) =>
+    (task.result_images || []).some(
+      (i) => i.status === '失败' || i.status === '已取消',
+    )
+
   /** 历史卡片的类型标签（v2 分组 + v1 兼容） */
   const renderTypeTags = (task: AIImageTask) => {
     const tags: string[] = []
@@ -612,10 +978,10 @@ const AIImageStudio: React.FC = () => {
       tags.push(a ? a.label : task.aplus_type)
     }
     if (Array.isArray(task.main_types) && task.main_types.length) {
-      tags.push(...task.main_types.map((t) => MAIN_TYPE_LABELS[t] || t))
+      tags.push(...task.main_types.map((t) => TYPE_LABEL_ALL[t] || t))
     } else if (task.main_types && typeof task.main_types === 'object') {
       tags.push(
-        ...Object.keys(task.main_types).map((t) => MAIN_TYPE_LABELS[t] || t),
+        ...Object.keys(task.main_types).map((t) => TYPE_LABEL_ALL[t] || t),
       )
     }
     if (!tags.length) {
@@ -629,14 +995,35 @@ const AIImageStudio: React.FC = () => {
     <>
     <style>
       {`
-        /* 生成按钮已移至滚动区外（左栏容器底部固定），无需 sticky */
+        /* 左栏固定宽度：切换生成通道时（描述文案长短不同）栏宽必须不变。
+           Col 默认 min-width:auto，长文案会把 flex item 撑开，故四项一起锁死。
+           388 → 416：按实测内容区偏窄 28px 追加。 */
+        .aiimg-left-col {
+          flex: 0 0 416px !important;
+          width: 416px !important;
+          min-width: 416px !important;
+          max-width: 416px !important;
+        }
+        @media (max-width: 900px) {
+          .aiimg-left-col {
+            flex: 1 1 100% !important;
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+          }
+        }
       `}
     </style>
-    <div style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
+    <div className="ai-thin-scrollbar" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
       <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
         {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
-        <Col xs={24} lg={9} style={{ height: '100%', flex: '0 0 400px', maxWidth: '100%', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 4 }}>
+        <Col
+          xs={24}
+          lg={9}
+          className="aiimg-left-col"
+          style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+        >
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', paddingBottom: 4 }}>
           <Card
             title={
               <Space>
@@ -648,29 +1035,77 @@ const AIImageStudio: React.FC = () => {
           >
             <Space direction="vertical" className="aiimg-form-space" style={{ width: '100%' }} size={14}>
               <div>
+                <Text strong style={{ display: 'block', marginBottom: 8 }}>生成模型</Text>
+                <Select<string>
+                  value={provider}
+                  onChange={(v) => setProvider(v as 'local' | 'relay')}
+                  style={{ width: '100%' }}
+                  disabled={submitting}
+                  options={(providers.length
+                    ? providers
+                    : [
+                        { value: 'local', label: 'Qwen Image 2.1（本地）', desc: '细节保真高，串行排队', configured: '1' },
+                        { value: 'relay', label: 'Nano Banana 2（中转站）', desc: '看图理解强，可并行', configured: '0' },
+                      ]
+                  ).map((p) => ({
+                    value: p.value,
+                    disabled: p.configured === '0',
+                    // 选中态只显示模型名：388 宽度下把说明拼进来会被截断成一串省略号
+                    label: p.value === 'relay' ? `🍌 ${p.label}` : p.label,
+                    desc: p.desc || '',
+                  }))}
+                  optionRender={(opt) => {
+                    const d = opt.data as unknown as { label: string; desc?: string }
+                    return (
+                      <div style={{ lineHeight: 1.4 }}>
+                        <div>{d.label}</div>
+                        {d.desc && (
+                          <div style={{ color: token.colorTextTertiary, fontSize: 12 }}>{d.desc}</div>
+                        )}
+                      </div>
+                    )
+                  }}
+                />
+              </div>
+              <div>
                 <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                  <Text strong>参考图（1~{MAX_IMAGES} 张，首张为主参考）</Text>
+                  <Text strong>参考图（1~{maxImages} 张）</Text>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    已上传 {fileList.length}/{MAX_IMAGES}
+                    已上传 {fileList.length}/{maxImages}
                   </Text>
                 </Space>
                 <div
                   onMouseEnter={() => setUploadAreaHover(true)}
                   onMouseLeave={() => setUploadAreaHover(false)}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    if (fileList.length < maxImages) setDragging(true)
+                  }}
+                  onDragLeave={() => setDragging(false)}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    setDragging(false)
+                    if (fileList.length >= maxImages) {
+                      message.warning(`最多上传 ${maxImages} 张图片`)
+                      return
+                    }
+                    appendFiles(Array.from(e.dataTransfer.files || []))
+                  }}
                   style={{
                     marginTop: 8,
-                    border: `1px dashed ${uploadAreaHover ? '#722ed1' : '#d9d9d9'}`,
+                    border: `1px dashed ${dragging ? token.colorPrimary : uploadAreaHover ? token.colorPrimaryHover : token.colorPrimaryBorder}`,
                     borderRadius: 8,
                     padding: 16,
                     textAlign: 'center',
                     cursor: 'pointer',
                     minHeight: 120,
+                    background: dragging ? token.colorPrimaryBg : undefined,
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'center',
                   }}
                   onClick={() => {
-                    if (fileList.length < MAX_IMAGES) localInputRef.current?.click()
+                    if (fileList.length < maxImages) localInputRef.current?.click()
                   }}
                 >
                   {fileList.length === 0 ? (
@@ -680,28 +1115,47 @@ const AIImageStudio: React.FC = () => {
                           width: 48,
                           height: 48,
                           borderRadius: 10,
-                          background: '#f9f0ff',
+                          background: token.colorPrimaryBg,
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
                           margin: '0 auto',
                         }}
                       >
-                        <PictureOutlined style={{ fontSize: 22, color: '#722ed1' }} />
+                        <PictureOutlined style={{ fontSize: 22, color: token.colorPrimary }} />
                       </div>
-                      <div style={{ marginTop: 8, color: '#666', fontSize: 13 }}>
+                      <div style={{ marginTop: 8, color: token.colorTextSecondary, fontSize: 13 }}>
                         上传商品图片（点击或拖拽）
+                      </div>
+                      <div style={{ marginTop: 2, color: token.colorTextTertiary, fontSize: 12 }}>
+                        第 1 张为主图（决定商品主体形态），后续图片作为细节/材质/场景的辅助参考
                       </div>
                     </>
                   ) : (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
-                      {fileList.map((f) => (
+                      {fileList.map((f, idx) => (
                         <div key={f.uid} style={{ position: 'relative', width: 80, height: 80 }}>
                           <img
                             alt={f.name}
                             src={f.thumbUrl || f.url}
-                            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6, border: `1px solid ${token.colorBorderSecondary}` }}
                           />
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 2,
+                              bottom: 2,
+                              padding: '0 5px',
+                              height: 16,
+                              lineHeight: '16px',
+                              borderRadius: 8,
+                              fontSize: 10,
+                              color: '#fff',
+                              background: idx === 0 ? token.colorPrimary : 'rgba(0,0,0,0.45)',
+                            }}
+                          >
+                            {idx === 0 ? '主图' : `参考${idx}`}
+                          </div>
                           <Button
                             danger
                             size="small"
@@ -718,7 +1172,7 @@ const AIImageStudio: React.FC = () => {
                     </div>
                   )}
                   <div style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                    {uploadAreaHover && fileList.length < MAX_IMAGES && (
+                    {fileList.length < maxImages && (
                       <Space size={12}>
                         <Button
                           type="primary"
@@ -890,7 +1344,26 @@ const AIImageStudio: React.FC = () => {
                     <Text type="secondary" style={{ fontSize: 12 }}>生成类型（多选）</Text>
                     <div style={{ marginTop: 8 }}>
                       {Object.entries(MAIN_TYPE_LABELS).map(([key, label]) => {
-                        const checked = selectedMainTypes.includes(key)
+                        const isScene = key === 'scene'
+                        // 场景图：父项是否"开启"取决于两个子路径里有没有选中的
+                        const sceneSubs = isScene
+                          ? SCENE_VARIANTS.filter((v) => selectedMainTypes.includes(v.key))
+                          : []
+                        const checked = isScene ? sceneSubs.length > 0 : selectedMainTypes.includes(key)
+                        const toggleRow = () => {
+                          if (isScene) {
+                            // 未开启 → 默认勾「不带人物」；已开启 → 收起并清空两条子路径
+                            setSelectedMainTypes((prev) =>
+                              checked
+                                ? prev.filter((t) => !SCENE_VARIANT_KEYS.includes(t))
+                                : [...prev.filter((t) => !SCENE_VARIANT_KEYS.includes(t)), 'scene'],
+                            )
+                            return
+                          }
+                          setSelectedMainTypes((prev) =>
+                            checked ? prev.filter((t) => t !== key) : [...prev, key],
+                          )
+                        }
                         return (
                           <div key={key} style={{ marginBottom: 4 }}>
                             <div
@@ -900,54 +1373,79 @@ const AIImageStudio: React.FC = () => {
                                 justifyContent: 'space-between',
                                 padding: '6px 10px',
                                 borderRadius: 6,
-                                background: checked ? '#f6f0ff' : 'transparent',
-                                border: checked ? '1px solid #d3adf7' : '1px solid transparent',
+                                background: checked ? token.colorPrimaryBg : 'transparent',
+                                border: checked ? `1px solid ${token.colorPrimaryBorder}` : '1px solid transparent',
                                 cursor: 'pointer',
                               }}
-                              onClick={() =>
-                                setSelectedMainTypes((prev) =>
-                                  checked ? prev.filter((t) => t !== key) : [...prev, key],
-                                )
-                              }
+                              onClick={toggleRow}
                             >
                               <Space size={8}>
                                 <Checkbox checked={checked} />
                                 <Tooltip title={MAIN_TYPE_DESCRIPTIONS[key]}>
                                   <Text strong={checked}>{label}</Text>
                                 </Tooltip>
-                              </Space>
-                              {checked && (
-                                <Space size={2} onClick={(e) => e.stopPropagation()}>
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    icon={<MinusOutlined />}
-                                    disabled={(mainCounts[key] || 1) <= 1}
-                                    onClick={() =>
-                                      setMainCounts((m) => ({
-                                        ...m,
-                                        [key]: Math.max(1, (m[key] || 1) - 1),
-                                      }))
-                                    }
-                                  />
-                                  <Text strong style={{ minWidth: 18, textAlign: 'center' }}>
-                                    {mainCounts[key] || 1}
+                                {isScene && (
+                                  <Text type="secondary" style={{ fontSize: 11 }}>
+                                    （展开选带/不带人物）
                                   </Text>
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    icon={<PlusOutlined />}
-                                    disabled={(mainCounts[key] || 1) >= 4}
-                                    onClick={() =>
-                                      setMainCounts((m) => ({
-                                        ...m,
-                                        [key]: Math.min(4, (m[key] || 1) + 1),
-                                      }))
-                                    }
-                                  />
-                                </Space>
-                              )}
+                                )}
+                              </Space>
+                              {checked &&
+                                (isScene ? (
+                                  <Text type="secondary" style={{ fontSize: 12 }}>
+                                    共 {sceneSubs.reduce((a, v) => a + (mainCounts[v.key] || 1), 0)} 张
+                                  </Text>
+                                ) : (
+                                  renderCountStepper(key)
+                                ))}
                             </div>
+
+                            {/* 场景图的两条子路径：各自独立勾选与张数 */}
+                            {isScene && checked && (
+                              <div
+                                style={{
+                                  marginLeft: 22,
+                                  marginTop: 4,
+                                  paddingLeft: 10,
+                                  borderLeft: `2px solid ${token.colorPrimaryBorder}`,
+                                }}
+                              >
+                                {SCENE_VARIANTS.map((v) => {
+                                  const sub = selectedMainTypes.includes(v.key)
+                                  return (
+                                    <div
+                                      key={v.key}
+                                      style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        padding: '4px 8px',
+                                        borderRadius: 6,
+                                        marginBottom: 3,
+                                        background: sub ? token.colorPrimaryBg : 'transparent',
+                                        cursor: 'pointer',
+                                      }}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setSelectedMainTypes((prev) =>
+                                          sub ? prev.filter((t) => t !== v.key) : [...prev, v.key],
+                                        )
+                                      }}
+                                    >
+                                      <Space size={6}>
+                                        <Checkbox checked={sub} />
+                                        <Tooltip title={v.hint}>
+                                          <Text style={{ fontSize: 12 }} strong={sub}>
+                                            {v.label}
+                                          </Text>
+                                        </Tooltip>
+                                      </Space>
+                                      {sub && renderCountStepper(v.key)}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
                           </div>
                         )
                       })}
@@ -963,15 +1461,11 @@ const AIImageStudio: React.FC = () => {
                         }}
                       >
                         {[
-                          { value: '1:1', label: '1:1', shape: '1:1' },
-                          { value: '2:3', label: '2:3', shape: '2:3' },
-                          { value: '3:2', label: '3:2', shape: '3:2' },
-                          { value: '3:4', label: '3:4', shape: '3:4' },
-                          { value: '4:3', label: '4:3', shape: '4:3' },
-                          { value: '9:16', label: '9:16', shape: '9:16' },
-                          { value: '16:9', label: '16:9', shape: '16:9' },
-                          { value: '21:9', label: '21:9', shape: '21:9' },
-                        ].map((o) => {
+                          '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9',
+                        ]
+                          .filter((r) => availableRatios.includes(r))
+                          .map((value) => {
+                          const o = { value, label: value, shape: value }
                           const checked = mainAspectRatio === o.value
                           // 形状图标：按比例绘制的小矩形（36x28 内）
                           const shapeMap: Record<string, [number, number]> = {
@@ -994,8 +1488,8 @@ const AIImageStudio: React.FC = () => {
                                 textAlign: 'center',
                                 padding: '8px 0 6px',
                                 borderRadius: 8,
-                                border: checked ? '1.5px solid #722ed1' : '1px solid #f0f0f0',
-                                background: checked ? '#f9f0ff' : '#fff',
+                                border: checked ? `1.5px solid ${token.colorPrimary}` : `1px solid ${token.colorBorderSecondary}`,
+                                background: checked ? token.colorPrimaryBg : token.colorBgContainer,
                               }}
                             >
                               <div
@@ -1021,10 +1515,10 @@ const AIImageStudio: React.FC = () => {
                                       width: w,
                                       height: h,
                                       border: checked
-                                        ? '1.5px solid #722ed1'
+                                        ? `1.5px solid ${token.colorPrimary}`
                                         : '1.5px solid #8c8c8c',
                                       borderRadius: 3,
-                                      background: checked ? '#efdbff' : '#fafafa',
+                                      background: checked ? token.colorPrimaryBgHover : token.colorFillQuaternary,
                                     }}
                                   />
                                 )}
@@ -1060,33 +1554,42 @@ const AIImageStudio: React.FC = () => {
             </Space>
           </Card>
         </div>
-        <Button
-          type="primary"
-          icon={<ThunderboltOutlined />}
-          loading={submitting}
-          onClick={handleSubmit}
-          block
-          size="large"
-          style={{ marginTop: 8, flexShrink: 0 }}
-        >
-          立即生成（
-          {[
-            aplusType && `A+×${aplusCount}`,
-            mainEnabled &&
-              selectedMainTypes.length &&
-              `主副图×${selectedMainTypes.reduce((a, t) => a + (mainCounts[t] || 1), 0)}`,
-          ]
-            .filter(Boolean)
-            .join(' + ') || '未选择类型'}
-          ）
-        </Button>
+        <div style={{ marginTop: 8, flexShrink: 0 }}>
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={submitting}
+            onClick={handleSubmit}
+            block
+            size="large"
+            disabled={totalSheets === 0}
+          >
+            {totalSheets > 0
+              ? `立即生成（共 ${totalSheets} 张：${
+                  [
+                    aplusType && `A+×${aplusCount}`,
+                    mainEnabled && activeMainTypeCount > 0 && `主副图×${totalSheets - (aplusType ? aplusCount : 0)}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' + ')
+                }）`
+              : '立即生成（请先选择生成类型）'}
+          </Button>
+          {totalSheets > maxSheets && (
+            <div style={{ marginTop: 4 }}>
+              <Text type="danger" style={{ fontSize: 12 }}>
+                单个任务最多 {maxSheets} 张（当前 {totalSheets} 张），请减少类型或张数
+              </Text>
+            </div>
+          )}
+        </div>
         </Col>
 
-        {/* 右栏：生成记录 */}
-        <Col xs={24} lg={15} style={{ height: '100%', flex: 1, minWidth: 0 }}>
+        {/* 右栏：生成记录（maxWidth:none 抵消 antd lg 栅格的 62.5% 上限，填满剩余宽度） */}
+        <Col xs={24} lg={15} style={{ height: '100%', flex: 1, minWidth: 0, maxWidth: 'none' }}>
           <Card
             style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-            styles={{ body: { flex: 1, minHeight: 0, overflowY: 'auto' } }}
+            styles={{ body: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
             title={
               <Space>
                 <span>生成记录</span>
@@ -1103,11 +1606,13 @@ const AIImageStudio: React.FC = () => {
                   style={{ width: 180 }}
                   value={keyword}
                   onChange={(e) => {
-                    setKeyword(e.target.value)
+                    const v = e.target.value
+                    setKeyword(v)
                     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
                     searchTimerRef.current = setTimeout(() => {
                       setPage(1)
-                      fetchTasks(true)
+                      // 显式传 keyword：定时器闭包里的 fetchTasks 仍持有旧 keyword
+                      fetchTasks(true, { page: 1, keyword: v, status: statusFilter })
                     }, 300)
                   }}
                 />
@@ -1116,18 +1621,32 @@ const AIImageStudio: React.FC = () => {
                   style={{ width: 110 }}
                   value={statusFilter || 'all'}
                   onChange={(v) => {
-                    setStatusFilter(v === 'all' ? '' : v)
+                    const next = v === 'all' ? '' : v
+                    setStatusFilter(next)
                     setPage(1)
+                    fetchTasks(true, { page: 1, keyword, status: next })
                   }}
                   options={[
                     { value: 'all', label: '全部状态' },
                     ...Object.keys(STATUS_COLORS).map((s) => ({ value: s, label: s })),
                   ]}
                 />
-                <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()} size="small" />
+                <Tooltip title="刷新（回到第 1 页拉取最新记录）">
+                  <Button
+                    icon={<ReloadOutlined />}
+                    loading={loading}
+                    onClick={() => {
+                      setPage(1)
+                      fetchTasks(false, { page: 1, keyword, status: statusFilter })
+                    }}
+                    size="small"
+                  />
+                </Tooltip>
               </Space>
             }
           >
+            {/* 列表滚动区：分页固定在卡片底部，对齐 AI 生视频布局 */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {loading && !tasks.length ? (
               <div style={{ textAlign: 'center', padding: 48 }}>
                 <Spin />
@@ -1136,17 +1655,15 @@ const AIImageStudio: React.FC = () => {
               <Empty description="暂无生成记录，先在左侧提交一个任务吧" />
             ) : (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                {tasks
-                  .filter((t) => !statusFilter || t.status === statusFilter)
-                  .map((task) => (
+                {tasks.map((task) => (
                     <Card
                       key={task.id}
                       size="small"
                       onMouseEnter={() => setHoverId(task.id)}
                       onMouseLeave={() => setHoverId(null)}
                       style={{
-                        background: hoverId === task.id ? '#fafafa' : undefined,
-                        border: activeHistoryId === task.id ? '1px solid #722ed1' : undefined,
+                        background: hoverId === task.id ? token.colorFillQuaternary : undefined,
+                        border: activeHistoryId === task.id ? `1px solid ${token.colorPrimary}` : undefined,
                       }}
                       title={
                         <Space wrap>
@@ -1158,12 +1675,18 @@ const AIImageStudio: React.FC = () => {
                                   ? 'error'
                                   : task.status === '部分完成'
                                     ? 'warning'
-                                    : 'processing'
+                                    : task.status === '已取消'
+                                      ? 'default'
+                                      : 'processing'
                             }
                             text={<Text strong>{task.title || `任务 #${task.id}`}</Text>}
                           />
                           <Tag color={STATUS_COLORS[task.status] || 'default'}>
                             {task.status}
+                          </Tag>
+                          <Tag color={task.provider === 'relay' ? 'gold' : 'default'}>
+                            {task.provider_label
+                              || (task.provider === 'relay' ? 'Nano Banana 2' : 'Qwen Image 2.1')}
                           </Tag>
                           <Text type="secondary" style={{ fontSize: 12 }}>
                             {task.aplus_type || task.main_types?.length
@@ -1175,7 +1698,41 @@ const AIImageStudio: React.FC = () => {
                         </Space>
                       }
                       extra={
-                        <Space>
+                        <Space size={4}>
+                          {(task.status === '排队中' || task.status === '生成中') && (
+                            <Tooltip title="取消任务（已完成的图保留）">
+                              <Button
+                                size="small"
+                                danger
+                                icon={<StopOutlined />}
+                                onClick={() => handleCancelTask(task.id)}
+                              >
+                                取消
+                              </Button>
+                            </Tooltip>
+                          )}
+                          {hasRetryable(task) && (
+                            <Tooltip title="重新生成失败或已取消的图片（复用已上传参考图，无需重传）">
+                              <Button
+                                size="small"
+                                icon={<RedoOutlined />}
+                                onClick={() => handleRetry(task.id)}
+                              >
+                                重试未完成
+                              </Button>
+                            </Tooltip>
+                          )}
+                          {(task.result_images || []).some(
+                            (i) => i.status === '已完成' && i.url,
+                          ) && (
+                            <Tooltip title="打包下载全部图片（zip）">
+                              <Button
+                                size="small"
+                                icon={<DownloadOutlined />}
+                                onClick={() => handleDownloadAll(task)}
+                              />
+                            </Tooltip>
+                          )}
                           <Tooltip title="编辑：已填入该历史的参考图、提示词与参数">
                             <Button
                               size="small"
@@ -1195,16 +1752,19 @@ const AIImageStudio: React.FC = () => {
                       }
                     >
                       <div style={{ display: 'flex', gap: 10 }}>
-                        {/* 左：原始参考图缩略条（前 3 张，点击预览） */}
+                        {/* 左：原始参考图缩略条（前 3 张，点击放大预览） */}
                         {(task.images || []).length > 0 && (
                           <Image.PreviewGroup>
                             <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
                               {task.images.slice(0, 3).map((url, i) => (
-                                <img
+                                <Image
                                   key={`${task.id}-ref-${i}`}
                                   alt={`参考图${i + 1}`}
                                   src={url}
-                                  style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0', cursor: 'zoom-in' }}
+                                  width={44}
+                                  height={44}
+                                  style={{ objectFit: 'cover', borderRadius: 4, border: `1px solid ${token.colorBorderSecondary}`, cursor: 'zoom-in' }}
+                                  preview={{ mask: false }}
                                 />
                               ))}
                             </div>
@@ -1217,7 +1777,11 @@ const AIImageStudio: React.FC = () => {
                           </Space>
                           {task.status === '排队中' || task.status === '生成中' ? (
                             <div style={{ marginTop: 2 }}>
-                              <Text type="secondary" style={{ fontSize: 12 }}>{task.status}…</Text>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {task.status} ·{' '}
+                                {(task.result_images || []).filter((i) => i.status === '已完成').length}
+                                /{(task.result_images || []).length} 已完成…
+                              </Text>
                             </div>
                           ) : task.status === '失败' ? (
                             <div style={{ marginTop: 2 }}>
@@ -1239,15 +1803,17 @@ const AIImageStudio: React.FC = () => {
                                 ? `${task.product_info ? `商品信息：${task.product_info}` : ''}${task.prompt ? `${task.product_info ? '\n' : ''}附加要求：${task.prompt}` : ''}`
                                 : undefined
                             }
-                            overlayStyle={{ maxWidth: 560 }}
-                            overlayInnerStyle={{
-                              maxWidth: 560,
-                              width: 560,
-                              maxHeight: 380,
-                              overflowY: 'auto',
-                              whiteSpace: 'pre-wrap',
-                              fontSize: 12,
-                              lineHeight: 1.7,
+                            styles={{
+                              root: { maxWidth: 560 },
+                              body: {
+                                maxWidth: 560,
+                                width: 560,
+                                maxHeight: 380,
+                                overflowY: 'auto',
+                                whiteSpace: 'pre-wrap',
+                                fontSize: 12,
+                                lineHeight: 1.7,
+                              },
                             }}
                           >
                             <Text
@@ -1277,37 +1843,30 @@ const AIImageStudio: React.FC = () => {
                           </Tooltip>
                         </div>
                       </div>
-                      {/* 结果缩略条：已完成的前 3 张，点击「查看全部结果」进详情 */}
-                      {(task.result_images || []).some((x) => x.status === '已完成' && x.url) && (
-                        <div style={{ display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' }}>
-                          {(task.result_images || [])
-                            .filter((x) => x.status === '已完成' && x.url)
-                            .slice(0, 3)
-                            .map((x) => (
-                              <img
-                                key={`${x.type}-${x.seq}`}
-                                alt={x.label}
-                                src={x.url!}
-                                style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
-                              />
-                            ))}
-                          {(task.result_images || []).filter((x) => x.status === '已完成' && x.url).length > 3 && (
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              +{(task.result_images || []).filter((x) => x.status === '已完成' && x.url).length - 3}
-                            </Text>
+                      {/* 结果大图网格：逐张 label+seq+下载，点击图片开单张详情 */}
+                      {(task.result_images || []).length > 0 && (
+                        <div
+                          style={{
+                            marginTop: 10,
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
+                            gap: 12,
+                          }}
+                        >
+                          {(task.result_images || []).map((item, idx) =>
+                            renderResultItem(item, task, idx),
                           )}
-                          <Button size="small" type="link" onClick={() => setPreviewTask(task)}>
-                            查看全部结果
-                          </Button>
                         </div>
                       )}
                     </Card>
                   ))}
               </Space>
             )}
+            </div>
             {total > pageSize && (
-              <div style={{ textAlign: 'center', marginTop: 16 }}>
+              <div style={{ flexShrink: 0, marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
                 <Pagination
+                  size="small"
                   current={page}
                   pageSize={pageSize}
                   total={total}
@@ -1324,6 +1883,7 @@ const AIImageStudio: React.FC = () => {
       <Modal
         title="从产品管理选择图片"
         open={productModalOpen}
+        wrapClassName="ai-thin-scrollbar"
         onCancel={() => setProductModalOpen(false)}
         width={860}
         footer={[
@@ -1362,7 +1922,7 @@ const AIImageStudio: React.FC = () => {
           <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '52vh', overflowY: 'auto' }}>
               {productOptions.map((prod) => (
-                <div key={prod.id} style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 12 }}>
+                <div key={prod.id} style={{ border: `1px solid ${token.colorBorderSecondary}`, borderRadius: 8, padding: 12 }}>
                   <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                     <Text strong style={{ fontSize: 13, flexShrink: 0 }}>{prod.product_code}</Text>
                     <Text style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1384,7 +1944,7 @@ const AIImageStudio: React.FC = () => {
                               width: 64,
                               height: 64,
                               cursor: 'pointer',
-                              border: `2px solid ${checked ? '#722ed1' : '#f0f0f0'}`,
+                              border: `2px solid ${checked ? token.colorPrimary : token.colorBorderSecondary}`,
                               borderRadius: 6,
                               overflow: 'hidden',
                             }}
@@ -1398,7 +1958,7 @@ const AIImageStudio: React.FC = () => {
                                   right: 0,
                                   width: 18,
                                   height: 18,
-                                  background: '#722ed1',
+                                  background: token.colorPrimary,
                                   color: '#fff',
                                   fontSize: 11,
                                   display: 'flex',
@@ -1430,105 +1990,320 @@ const AIImageStudio: React.FC = () => {
           </>
         )}
       </Modal>
-      {/* ===== 任务详情：字段清单 + 结果网格 ===== */}
+      {/* ===== 结果图单张详情（对齐 AI 生视频详情：左大图 + 右参数面板）===== */}
       <Modal
-        title={previewTask ? previewTask.title || `任务 #${previewTask.id}` : ''}
-        open={!!previewTask}
-        onCancel={() => setPreviewTask(null)}
-        footer={[
-          <Button key="close" onClick={() => setPreviewTask(null)}>
-            关闭
-          </Button>,
-        ]}
-        width={860}
+        title={
+          resultDetail
+            ? `${resultDetail.task.title || `任务 #${resultDetail.task.id}`}（${resultDetail.index + 1}/${(resultDetail.task.result_images || []).length}）`
+            : ''
+        }
+        open={!!resultDetail}
+        wrapClassName="ai-thin-scrollbar"
+        onCancel={() => setResultDetail(null)}
+        footer={null}
+        width="90vw"
+        centered
+        destroyOnHidden
+        styles={{ body: { padding: 0 } }}
       >
-        {previewTask && (
-          <div>
-            <Text strong style={{ fontSize: 15 }}>
-              {previewTask.title || `任务 #${previewTask.id}`}
-            </Text>
-            <div style={{ marginTop: 10 }}>
-              {[
-                ['任务ID', String(previewTask.id)],
-                ['生成状态', previewTask.status],
-                ['生成者', previewTask.creator_name || '-'],
-                [
-                  '生成类型',
-                  [
-                    previewTask.aplus_type
-                      ? { aplus_advanced: '高级A+', aplus_normal: '普通A+', aplus_mobile: '手机A+' }[
-                          previewTask.aplus_type
-                        ] || previewTask.aplus_type
-                      : '',
-                    ...(Array.isArray(previewTask.main_types)
-                      ? previewTask.main_types.map((t) => MAIN_TYPE_LABELS[t] || t)
-                      : previewTask.main_types && typeof previewTask.main_types === 'object'
-                        ? Object.keys(previewTask.main_types).map((t) => MAIN_TYPE_LABELS[t] || t)
-                        : (previewTask.generation_types || []).map((t) => LEGACY_TYPE_LABELS[t] || t)),
-                  ]
-                    .filter(Boolean)
-                    .join(' + '),
-                ],
-                ['生成比例', previewTask.main_aspect_ratio || previewTask.aspect_ratio || '-'],
-                ['销售国家/地区', previewTask.brand_settings?.country || '-'],
-                ['生成图片语言', previewTask.brand_settings?.language || '-'],
-                ['发布平台', previewTask.brand_settings?.platform || '-'],
-                ['商品信息', previewTask.product_info || '-'],
-              ].map(([k, v]) => (
-                <div key={k} style={{ display: 'flex', marginBottom: 4 }}>
-                  <Text type="secondary" style={{ fontSize: 13, width: 120, flexShrink: 0 }}>
-                    {k}：
-                  </Text>
-                  <Text style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{v}</Text>
-                </div>
-              ))}
-              {previewTask.prompt && (
-                <div style={{ display: 'flex', marginBottom: 4 }}>
-                  <Text type="secondary" style={{ fontSize: 13, width: 120, flexShrink: 0 }}>
-                    提示词描述：
-                  </Text>
-                  <Text style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                    {previewTask.prompt}
-                  </Text>
-                </div>
-              )}
-              {previewTask.error_message && (
-                <div style={{ display: 'flex', marginBottom: 4 }}>
-                  <Text type="secondary" style={{ fontSize: 13, width: 120, flexShrink: 0 }}>
-                    失败原因：
-                  </Text>
-                  <Text type="danger" style={{ fontSize: 13 }}>
-                    {previewTask.error_message}
-                  </Text>
-                </div>
-              )}
-            </div>
-
-            {(previewTask.images || []).length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <Text type="secondary" style={{ fontSize: 13 }}>原始参考图：</Text>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-                  {previewTask.images.map((url, i) => (
+        {resultDetail &&
+          (() => {
+            const { task, index } = resultDetail
+            const item: AIImageResultItem | undefined = (task.result_images || [])[index]
+            if (!item) return null
+            const name = `${task.title || '套图'}-${item.label}${item.seq > 0 ? `-${item.seq + 1}` : ''}`
+            const promptId = item.prompt_id || task.comfy_prompt_ids?.[index] || ''
+            const isRelay = (task.provider || 'local') === 'relay'
+            const sizeText =
+              Array.isArray(item.target_size) && item.target_size.length === 2
+                ? `${item.target_size[0]}×${item.target_size[1]}`
+                : ''
+            return (
+              <div style={{ display: 'flex', height: '78vh' }}>
+                {/* 左：结果大图（黑底 contain，对齐生视频播放区） */}
+                <div
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    background: '#000',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    position: 'relative',
+                    padding: 16,
+                  }}
+                >
+                  {item.status === '已完成' && item.url ? (
                     <img
-                      key={`ref-${i}`}
-                      alt={`参考图${i + 1}`}
-                      src={url}
-                      style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
+                      src={item.url}
+                      alt={name}
+                      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
                     />
+                  ) : item.status === '失败' ? (
+                    <div style={{ textAlign: 'center' }}>
+                      <Tag color="error">生成失败</Tag>
+                      {item.error && (
+                        <Text
+                          type="secondary"
+                          style={{ display: 'block', marginTop: 8, padding: '0 24px', wordBreak: 'break-all' }}
+                        >
+                          {item.error}
+                        </Text>
+                      )}
+                    </div>
+                  ) : item.status === '已取消' ? (
+                    <div style={{ textAlign: 'center' }}>
+                      <Tag>已取消</Tag>
+                      <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                        点击卡片上的「重试」可重新生成这张
+                      </Text>
+                    </div>
+                  ) : (
+                    <div style={{ textAlign: 'center' }}>
+                      <Spin />
+                      <Tag style={{ marginLeft: 8 }}>{item.status}</Tag>
+                    </div>
+                  )}
+                  {item.status === '已完成' && item.url && (
+                    <Button
+                      icon={<DownloadOutlined />}
+                      style={{ position: 'absolute', left: 16, bottom: 16 }}
+                      onClick={() => handleDownload(item.url!, `${name}.${fileExt(item.url)}`)}
+                    >
+                      下载
+                    </Button>
+                  )}
+                  {item.status === '已完成' && item.url && (
+                    <Button
+                      icon={<LinkOutlined />}
+                      style={{ position: 'absolute', left: 108, bottom: 16 }}
+                      onClick={() => setBindTarget({ url: item.url!, title: task.title })}
+                    >
+                      绑定到产品
+                    </Button>
+                  )}
+                </div>
+                {/* 右：参数面板（字段与提示词双源，对齐生视频详情） */}
+                <div
+                  style={{
+                    width: 360,
+                    flexShrink: 0,
+                    overflowY: 'auto',
+                    padding: '20px 24px',
+                    borderLeft: `1px solid ${token.colorBorderSecondary}`,
+                    background: token.colorBgContainer,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: 16,
+                    }}
+                  >
+                    {promptId && h3BaseUrl ? (
+                      <Button
+                        size="small"
+                        type="link"
+                        style={{ padding: 0 }}
+                        href={`${h3BaseUrl}/history/${promptId}`}
+                        target="_blank"
+                        title="ComfyUI 执行历史会被定期清理，链接可能已失效；提示词已存本地"
+                      >
+                        在 ComfyUI 中查看
+                      </Button>
+                    ) : (
+                      <span />
+                    )}
+                    <Space size={4}>
+                      <Button
+                        size="small"
+                        icon={<LeftOutlined />}
+                        disabled={index <= 0}
+                        onClick={() => setResultDetail({ task, index: index - 1 })}
+                      />
+                      <Button
+                        size="small"
+                        icon={<RightOutlined />}
+                        disabled={index >= (task.result_images || []).length - 1}
+                        onClick={() => setResultDetail({ task, index: index + 1 })}
+                      />
+                    </Space>
+                  </div>
+
+                  {[
+                    { label: '任务ID：', value: promptId || `#${task.id}` },
+                    {
+                      label: '生成通道：',
+                      value:
+                        task.provider_label ||
+                        (isRelay ? 'Nano Banana 2（中转站）' : 'Qwen Image 2.1（本地）'),
+                    },
+                    { label: '生成状态：', value: item.status },
+                    { label: '生成者：', value: task.creator_name || '-' },
+                    { label: '生成类型：', value: item.label || '-' },
+                    {
+                      label: '生成比例：',
+                      value: sizeText || task.main_aspect_ratio || task.aspect_ratio || '-',
+                    },
+                    { label: '销售国家/地区：', value: task.brand_settings?.country || '未设置' },
+                    { label: '生成图片语言：', value: task.brand_settings?.language || '未设置' },
+                    { label: '发布平台：', value: task.brand_settings?.platform || '未设置' },
+                    { label: '商品信息：', value: task.product_info || '-' },
+                  ].map((row) => (
+                    <div key={row.label} style={{ marginBottom: 16 }}>
+                      <Text strong style={{ fontSize: 13, display: 'block' }}>
+                        {row.label}
+                      </Text>
+                      <Text style={{ fontSize: 13, wordBreak: 'break-all', whiteSpace: 'pre-wrap' }}>
+                        {row.value}
+                      </Text>
+                    </div>
                   ))}
+
+                  {(task.images || []).length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <Text strong style={{ fontSize: 13, display: 'block' }}>原始参考图：</Text>
+                      <Image.PreviewGroup>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                          {task.images.map((url, i) => (
+                            <Image
+                              key={`ref-${task.id}-${i}`}
+                              alt={`参考图${i + 1}`}
+                              src={url}
+                              width={40}
+                              height={40}
+                              style={{ objectFit: 'cover', borderRadius: 4, border: `1px solid ${token.colorBorderSecondary}` }}
+                              preview={{ mask: false }}
+                            />
+                          ))}
+                        </div>
+                      </Image.PreviewGroup>
+                    </div>
+                  )}
+
+                  {(item.inventory || []).length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <Space size={6}>
+                        <Text strong style={{ fontSize: 13 }}>件数清单：</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          AI 从参考图清点，出图须与之逐项一致
+                        </Text>
+                      </Space>
+                      <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.8 }}>
+                        {(item.inventory || []).map((x, i) => (
+                          <div key={`inv-${i}`} style={{ color: token.colorTextSecondary }}>
+                            · {x}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ marginBottom: 16 }}>
+                    <Text strong style={{ fontSize: 13, display: 'block' }}>
+                      {isRelay ? '提示词（实际提交 · 英文）：' : '提示词描述（原始）：'}
+                    </Text>
+                    {isRelay && (
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        视觉模型按该产品与图类型即时设计，无本地 PE 二次优化
+                      </Text>
+                    )}
+                    <div
+                      style={{
+                        marginTop: 6,
+                        fontSize: 12,
+                        lineHeight: 1.7,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-all',
+                        maxHeight: '26vh',
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {comfyLoading ? (
+                        <Spin size="small" />
+                      ) : (
+                        comfyPrompt?.original ||
+                        task.prompt ||
+                        (isRelay
+                          ? '—（该记录未保存提示词，仅早期任务会这样）'
+                          : '—（该记录未保存提示词；ComfyUI 历史已过期后无法再取回）')
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <Space size={6}>
+                        <Text strong style={{ fontSize: 13 }}>
+                          {isRelay ? '中文对照（仅供阅读）：' : 'Qwen 提示词（优化后）：'}
+                        </Text>
+                        {isRelay && item.prompt_cn && (
+                          <Tag color={item.prompt_designed ? 'purple' : 'default'}>
+                            {item.prompt_designed ? 'AI 定制' : '模板回退'}
+                          </Tag>
+                        )}
+                      </Space>
+                      {(isRelay ? item.prompt_cn : comfyPrompt?.enhanced) && (
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0 }}
+                          onClick={() =>
+                            handleCopyText(
+                              (isRelay ? item.prompt_cn : comfyPrompt?.enhanced) || '',
+                            )
+                          }
+                        >
+                          复制
+                        </Button>
+                      )}
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {isRelay
+                        ? '中文翻译仅供参考，不参与出图；实际提交的是上方英文提示词'
+                        : '本地官方 PE 按原始提示词二次优化，实际提交给 Qwen Image 2.1'}
+                    </Text>
+                    <div
+                      style={{
+                        marginTop: 6,
+                        fontSize: 12,
+                        lineHeight: 1.7,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        maxHeight: '30vh',
+                        overflowY: 'auto',
+                        background: token.colorFillQuaternary,
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                        borderRadius: 4,
+                        padding: 8,
+                      }}
+                    >
+                      {isRelay ? (
+                        item.prompt_cn || '—（该记录未保存中文对照，早期任务会这样）'
+                      ) : comfyLoading ? (
+                        <Spin size="small" />
+                      ) : (
+                        comfyPrompt?.enhanced || '-'
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
-            )}
-
-            <div style={{ marginTop: 12 }}>
-              <Text type="secondary" style={{ fontSize: 13 }}>生成结果：</Text>
-              <Row gutter={[12, 12]} style={{ marginTop: 6 }}>
-                {(previewTask.result_images || []).map((item) => renderResultItem(item, previewTask))}
-              </Row>
-            </div>
-          </div>
-        )}
+            )
+          })()}
       </Modal>
+
+      {/* 绑定至产品：复用生视频的审核流程，影像类型为 image（审核通过后写入产品 images） */}
+      <BindProductModal
+        open={!!bindTarget}
+        mediaUrl={bindTarget?.url}
+        mediaType="image"
+        source="ai_image"
+        taskTitle={bindTarget?.title}
+        onClose={() => setBindTarget(null)}
+      />
     </div>
     </>
   )
