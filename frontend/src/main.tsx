@@ -2,6 +2,11 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { ConfigProvider, App as AntdApp } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
+
+// 日期选择器面板（月份/星期/今天按钮）中文化依赖 dayjs 语言包
+dayjs.locale('zh-cn')
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { AuthProvider } from './contexts/AuthContext'
 import { setupImagePreviewSwitch } from './utils/previewSwitch'

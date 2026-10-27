@@ -73,6 +73,55 @@ async def get_store_groups(
         raise HTTPException(status_code=500, detail=f"获取分组列表失败: {str(e)}")
 
 
+@router.get("/tree")
+async def get_store_group_tree(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """一次性返回：分组→店铺树（含站点）+ 站点负责人→站点映射（用于店铺选项按负责人筛选）"""
+    try:
+        g_rows = db.execute(text("""
+            SELECT sg.id, sg.name, s.id, s.name, s.site
+            FROM store_groups sg
+            LEFT JOIN stores s ON s.group_id = sg.id AND s.deleted_at IS NULL
+            WHERE sg.tenant_id = :tenant_id AND sg.deleted_at IS NULL
+            ORDER BY sg.created_at DESC, s.name ASC, s.site ASC
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+
+        groups: dict = {}
+        for gid, gname, sid, sname, site in g_rows:
+            entry = groups.setdefault(gid, {"id": gid, "name": gname, "stores": []})
+            if sid:
+                entry["stores"].append({"id": sid, "name": sname, "site": site})
+
+        # 站点负责人映射：用户 → 其名下店铺的站点集合（user_stores -> stores）
+        owner_rows = db.execute(text("""
+            SELECT DISTINCT COALESCE(NULLIF(u.nickname, ''), u.username) AS uname, s.site
+            FROM users u
+            INNER JOIN user_stores us ON us.user_id = u.id AND us.tenant_id = :tenant_id
+            INNER JOIN stores s ON s.id = us.store_id AND s.deleted_at IS NULL
+            WHERE u.tenant_id = :tenant_id AND u.deleted_at IS NULL
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+        owner_sites: dict = {}
+        for uname, site in owner_rows:
+            if not uname or not site:
+                continue
+            owner_sites.setdefault(uname, set()).add(site)
+
+        return {
+            "success": True,
+            "data": {
+                "groups": [
+                    {"id": g["id"], "name": g["name"], "stores": g["stores"]}
+                    for g in groups.values()
+                ],
+                "owner_sites": {k: sorted(v) for k, v in owner_sites.items()},
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取店铺分组树失败: {str(e)}")
+
+
 @router.get("/my-group")
 async def get_my_store_group(
     db: Session = Depends(get_db),

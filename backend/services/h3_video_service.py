@@ -230,23 +230,41 @@ def _extract_output_file(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _download_video(finfo: Dict[str, Any]) -> Tuple[bytes, str]:
-    """下载成片，返回 (字节内容, 文件名)"""
-    resp = _api("GET", "/view", timeout=1800, params=finfo, stream=True)
-    buf = io.BytesIO()
-    for chunk in resp.iter_content(1 << 20):
-        buf.write(chunk)
-    return buf.getvalue(), finfo.get("filename") or "output.mp4"
+    """下载成片，返回 (字节内容, 文件名)；网络中断（IncompleteRead 等）自动重试 3 次"""
+    last_err: Optional[Exception] = None
+    for attempt in range(1, 4):
+        try:
+            resp = _api("GET", "/view", timeout=1800, params=finfo, stream=True)
+            buf = io.BytesIO()
+            for chunk in resp.iter_content(1 << 20):
+                buf.write(chunk)
+            return buf.getvalue(), finfo.get("filename") or "output.mp4"
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                logger.warning(f"[H3视频] 成片下载中断（第 {attempt} 次），5 秒后重试: {e}")
+                threading.Event().wait(5)
+    raise last_err
 
 
-def _update_task(task_id: int, **fields) -> None:
-    """独立会话更新任务记录（后台线程中使用）"""
+def _update_task(task_id: int, only_active: bool = False, **fields) -> None:
+    """独立会话更新任务记录（后台线程中使用）
+
+    only_active=True 时仅在任务仍处于「排队中/生成中」才写入，
+    防止双后端同库场景下，本进程的迟到结果覆盖另一进程已写入的「已完成」。
+    """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
 
     db = SessionLocal()
     try:
-        db.query(AIVideoTask).filter(AIVideoTask.id == task_id).update(fields)
+        q = db.query(AIVideoTask).filter(AIVideoTask.id == task_id)
+        if only_active:
+            q = q.filter(AIVideoTask.status.in_(["排队中", "生成中"]))
+        updated = q.update(fields, synchronize_session=False)
         db.commit()
+        if only_active and not updated:
+            logger.info(f"[H3视频] 任务 {task_id} 状态已被其他进程更新，跳过写入 {fields.get('status')}")
     except Exception as e:
         logger.error(f"[H3视频] 更新任务 {task_id} 状态失败: {e}")
         db.rollback()
@@ -288,13 +306,50 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
         return
 
     try:
+        consecutive_failures = 0  # 连续查询失败：配置缺失/服务不可达等确定性错误，快速失败
+        timeout_failures = 0      # 连续查询超时：ComfyUI 串行执行重任务时响应慢属正常现象，容忍更久
+        last_query_error = ""     # 最近一次查询异常（写入失败原因，便于直接定位配置/网络问题）
         for _ in range(max_polls):
             threading.Event().wait(interval)
+            # 取消/状态变更检查：任务已不在进行中（如被用户取消）时退出轮询
+            if _get_h3_task_status(task_id) not in ("排队中", "生成中"):
+                logger.info(f"[H3视频] 任务 {task_id} 状态已变更，轮询退出")
+                return
             try:
                 history = _api("GET", f"/history/{h3_prompt_id}").json()
-            except Exception as e:
-                logger.warning(f"[H3视频] 任务 {task_id} 查询失败，稍后重试: {e}")
+            except requests.exceptions.Timeout as e:
+                # 超时不算服务故障：ComfyUI 忙时 HTTP 响应可能超过请求超时，任务本身仍在正常运行
+                timeout_failures += 1
+                if timeout_failures % 40 == 1:
+                    logger.warning(
+                        f"[H3视频] 任务 {task_id} 查询超时（连续 {timeout_failures} 次，ComfyUI 可能正忙）: {e}"
+                    )
+                if timeout_failures >= 240:
+                    _update_task(
+                        task_id, only_active=True, status="失败",
+                        error_message="ComfyUI 长时间无响应（连续 1 小时查询超时），请检查 ComfyUI 服务后重新提交",
+                        finished_at=datetime.now(),
+                    )
+                    logger.error(f"[H3视频] 任务 {task_id} 连续查询超时，终止轮询")
+                    return
                 continue
+            except Exception as e:
+                consecutive_failures += 1
+                last_query_error = str(e)
+                logger.warning(
+                    f"[H3视频] 任务 {task_id} 查询失败（连续 {consecutive_failures} 次）: {e}"
+                )
+                if consecutive_failures >= 20:
+                    _update_task(
+                        task_id, only_active=True, status="失败",
+                        error_message=f"ComfyUI 服务连接失败（连续 {consecutive_failures} 次查询异常，轮询间隔 {interval} 秒）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
+                        finished_at=datetime.now(),
+                    )
+                    logger.error(f"[H3视频] 任务 {task_id} 连续查询失败，终止轮询")
+                    return
+                continue
+            consecutive_failures = 0
+            timeout_failures = 0
 
             item = history.get(h3_prompt_id)
             if item is None:
@@ -318,10 +373,15 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                 finfo = _extract_output_file(item)
                 if not finfo:
                     _update_task(
-                        task_id, status="失败", error_message="生成完成但未找到成片文件",
+                        task_id, only_active=True, status="失败", error_message="生成完成但未找到成片文件",
                         finished_at=datetime.now(),
                     )
                     logger.error(f"[H3视频] 任务 {task_id} 找不到输出文件: {item.get('outputs')}")
+                    return
+
+                # 防重复收片：双进程同库场景下其他进程可能已完成本任务（下载+上传耗时长，竞态窗口大）
+                if _get_h3_task_status(task_id) == "已完成":
+                    logger.info(f"[H3视频] 任务 {task_id} 已被其他进程完成，跳过重复收片")
                     return
 
                 content, filename = _download_video(finfo)
@@ -330,7 +390,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                     content, filename, content_type="video/mp4", subdir="ai-video",
                 )
                 _update_task(
-                    task_id, status="已完成", video_url=video_url,
+                    task_id, only_active=True, status="已完成", video_url=video_url,
                     finished_at=datetime.now(), error_message=None,
                 )
                 logger.info(f"[H3视频] 任务 {task_id} 完成: {video_url}")
@@ -341,7 +401,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                     (item.get("status") or {}).get("messages", []), ensure_ascii=False
                 )[:800]
                 _update_task(
-                    task_id, status="失败", error_message=msgs or "生成失败",
+                    task_id, only_active=True, status="失败", error_message=msgs or "生成失败",
                     finished_at=datetime.now(),
                 )
                 logger.error(f"[H3视频] 任务 {task_id} 生成失败: {msgs}")
@@ -351,14 +411,16 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
             set_status("生成中")
 
         _update_task(
-            task_id, status="失败",
+            task_id, only_active=True, status="失败",
             error_message=f"生成超时（超过 {settings.H3_MAX_WAIT_MINUTES} 分钟）",
             finished_at=datetime.now(),
         )
         logger.error(f"[H3视频] 任务 {task_id} 等待超时")
     except Exception as e:
+        # only_active：本异常多发生在收片阶段（下载/上传），此时其他进程可能已把任务置为已完成，不得覆盖
         logger.error(f"[H3视频] 任务 {task_id} 处理异常: {e}")
-        _update_task(task_id, status="失败", error_message=str(e)[:900],
+        _update_task(task_id, only_active=True, status="失败",
+                     error_message=f"收片阶段异常（ComfyUI 生成结果不受影响，可点重试收片）：{str(e)[:600]}",
                      finished_at=datetime.now())
     finally:
         with _lock:
@@ -553,7 +615,7 @@ def _prepare_and_run(
         _run_task(task_id, h3_prompt_id)
     except Exception as e:
         logger.error(f"[H3视频] 任务 {task_id} 准备阶段异常: {e}")
-        _update_task(task_id, status="失败", error_message=str(e)[:900],
+        _update_task(task_id, only_active=True, status="失败", error_message=str(e)[:900],
                      finished_at=datetime.now())
         with _lock:
             _running.discard(task_id)
@@ -602,16 +664,18 @@ def _serialize(task) -> Dict[str, Any]:
 
 
 def list_video_tasks(
-    tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = ""
+    tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = "", bind_status: str = "all"
 ) -> Dict[str, Any]:
     """租户的视频生成任务列表（按时间倒序，不做账号隔离）。含失败任务及其失败原因。
 
     keyword 模糊匹配产品编码 / 产品品名 / 任务标题。
-    返回 {"items": [...], "total": 总条数}，供前端分页。
+    bind_status: all=全部 / bound=已绑定 / unbound=未绑定（按审核通过的绑定申请判定成片地址）。
+    返回 {"items": [...], "total": 总条数}，供前端分页，items 内含 bound 绑定状态。
     """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
-    from sqlalchemy import or_
+    from models.video_binding_request import VideoBindingRequest
+    from sqlalchemy import or_, text
 
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
@@ -631,6 +695,54 @@ def list_video_tasks(
                     AIVideoTask.title.ilike(like),
                 )
             )
+        # 绑定状态筛选：预计算"已绑定 URL 集合"，避免逐行相关子查询 + 全表 LIKE（切换标签慢的根因）
+        # 绑定判定口径：审核通过的绑定申请，或产品视频列表已包含该地址（旧直绑数据无申请记录）。
+        # products 里有视频的只有几百行，单列拉取远快于在 SQL 里对每行任务做相关子查询。
+        approved_urls = {
+            u
+            for (u,) in db.query(VideoBindingRequest.video_url)
+            .filter(
+                VideoBindingRequest.tenant_id == tenant_id,
+                VideoBindingRequest.status == "approved",
+                VideoBindingRequest.deleted_at.is_(None),
+            )
+            .all()
+            if u
+        }
+        bound_urls: set = set(approved_urls)
+        prod_single = [
+            u
+            for (u,) in db.execute(
+                text("SELECT video_url FROM products WHERE tenant_id = :tid AND deleted_at IS NULL "
+                     "AND video_url IS NOT NULL AND video_url != ''"),
+                {"tid": tenant_id},
+            ).fetchall()
+        ]
+        bound_urls.update(prod_single)
+        for (vids,) in db.execute(
+            text("SELECT videos FROM products WHERE tenant_id = :tid AND deleted_at IS NULL "
+                 "AND videos IS NOT NULL AND videos != ''"),
+            {"tid": tenant_id},
+        ).fetchall():
+            try:
+                parsed = json.loads(vids)
+                if isinstance(parsed, list):
+                    bound_urls.update(u for u in parsed if u)
+                else:
+                    bound_urls.add(parsed)
+            except Exception:
+                bound_urls.add(vids)
+        # 该租户全部任务的 (id, video_url)，在 Python 里算出已绑定任务 id 集合
+        task_url_pairs = (
+            db.query(AIVideoTask.id, AIVideoTask.video_url)
+            .filter(AIVideoTask.tenant_id == tenant_id, AIVideoTask.deleted_at.is_(None))
+            .all()
+        )
+        bound_task_ids = {tid for tid, u in task_url_pairs if u and u in bound_urls}
+        if bind_status == "bound":
+            query = query.filter(AIVideoTask.id.in_(bound_task_ids)) if bound_task_ids else query.filter(False)
+        elif bind_status == "unbound":
+            query = query.filter(~AIVideoTask.id.in_(bound_task_ids)) if bound_task_ids else query
         total = query.count()
         rows = (
             query.order_by(AIVideoTask.id.desc())
@@ -639,6 +751,9 @@ def list_video_tasks(
             .all()
         )
         items = [_serialize(r) for r in rows]
+        # 附加绑定状态：直接用预计算的 bound_urls 集合判断，无需再查库
+        for r, item in zip(rows, items):
+            item["bound"] = bool(r.video_url) and r.video_url in bound_urls
         # 附加已完成的超分结果（按源视频地址匹配，取最新一条），供前端并排对比展示
         try:
             from models.video_upscale_task import VideoUpscaleTask
@@ -670,6 +785,218 @@ def list_video_tasks(
         db.close()
 
 
+def _get_h3_task_status(task_id: int) -> Optional[str]:
+    """读取任务当前状态（轮询循环内用于感知取消等状态变更）"""
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    db = SessionLocal()
+    try:
+        r = db.query(AIVideoTask.status).filter(AIVideoTask.id == task_id).first()
+        return r[0] if r else None
+    finally:
+        db.close()
+
+
+def cancel_video_task(tenant_id: int, task_id: int) -> None:
+    """取消排队中/生成中的任务：移出 ComfyUI 队列或中断执行，并标记为失败"""
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    db = SessionLocal()
+    try:
+        task = db.query(AIVideoTask).filter(
+            AIVideoTask.id == task_id,
+            AIVideoTask.tenant_id == tenant_id,
+            AIVideoTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise H3VideoError("任务不存在或已删除")
+        if task.status not in ("排队中", "生成中"):
+            raise H3VideoError("任务已结束，无需取消")
+        prompt_id = task.h3_prompt_id
+    finally:
+        db.close()
+
+    # 同步 ComfyUI：执行中的中断，排队中的移出队列
+    cancelled_via = "任务不在 ComfyUI 队列中（直接标记取消）"
+    if prompt_id:
+        try:
+            queue = _api("GET", "/queue", timeout=30).json()
+            running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+            pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+            if prompt_id in running_ids:
+                _api("POST", "/interrupt", timeout=30)
+                cancelled_via = "已中断 ComfyUI 执行中的任务"
+            elif prompt_id in pending_ids:
+                _api("POST", "/queue", timeout=30, json={"delete": [prompt_id]})
+                cancelled_via = "已从 ComfyUI 队列移除"
+        except Exception as e:
+            logger.warning(f"[H3视频] 取消任务 {task_id} 时操作 ComfyUI 失败: {e}")
+            cancelled_via = "ComfyUI 操作失败（任务仍将标记为取消）"
+
+    db = SessionLocal()
+    try:
+        db.query(AIVideoTask).filter(
+            AIVideoTask.id == task_id,
+            AIVideoTask.status.in_(["排队中", "生成中"]),
+        ).update({
+            "status": "失败", "error_message": "任务已手动取消",
+            "finished_at": datetime.now(),
+        }, synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    logger.info(f"[H3视频] 任务 {task_id} 已取消: {cancelled_via}")
+
+
+def _download_reference_images(urls: List[str]) -> List[Tuple[str, bytes]]:
+    """服务端并行下载历史参考图字节（同区域 TOS/CDN，不走浏览器，避开 CORS 与前端代理）。
+
+    任一张失败即抛错：静默少图会改变生成内容，宁可明确失败。
+    """
+    import requests as _requests
+
+    def _fetch(idx_url: Tuple[int, str]) -> Tuple[str, bytes]:
+        idx, url = idx_url
+        resp = _requests.get(url, timeout=60)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
+        if not content_type.startswith("image/"):
+            raise H3VideoError(f"参考图 {idx + 1} 地址不是图片")
+        return (f"ref-{idx + 1}.jpg", resp.content)
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        return list(ex.map(_fetch, enumerate(urls)))
+
+
+def _resubmit_failed_task(task) -> Tuple[str, str]:
+    """失败任务原位重试：服务端下载历史参考图，重置原记录并后台重跑准备+轮询。
+
+    复用原任务记录（id 不变），提示词与全部生成参数沿用原任务；
+    重置后由 _prepare_and_run 重新上传参考图/优化提示词/提交工作流。
+    """
+    import json as _json
+
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    try:
+        urls = _json.loads(task.images) if task.images else []
+    except Exception:
+        urls = []
+    urls = [u for u in urls if u]
+    if not urls:
+        raise H3VideoError("任务没有参考图地址，无法重试，请使用「编辑」重新上传")
+
+    try:
+        images = _download_reference_images(urls)
+    except H3VideoError:
+        raise
+    except Exception as e:
+        raise H3VideoError(f"参考图下载失败，请稍后重试: {str(e)[:200]}")
+
+    db = SessionLocal()
+    try:
+        row = db.query(AIVideoTask).filter(AIVideoTask.id == task.id).first()
+        if not row:
+            raise H3VideoError("任务不存在或已删除")
+        row.status = "排队中"
+        row.error_message = None
+        row.video_url = None
+        row.h3_prompt_id = None
+        row.started_at = None
+        row.finished_at = None
+        db.commit()
+    finally:
+        db.close()
+
+    _ensure_worker(
+        task.id,
+        prep_kwargs={
+            "title": task.title or "视频生成任务",
+            "prompt": task.prompt or "",
+            "images": images,
+            "duration": task.duration,
+            "resolution": task.resolution,
+            "ratio": task.ratio,
+            "voiceover_language": task.voiceover_language or "自动",
+            "video_type": task.video_type or "口播带货",
+        },
+    )
+    logger.info(f"[H3视频] 任务 {task.id} 原位重试：{len(images)} 张参考图已重新提交")
+    return "resubmitted", "已重新提交生成，排队中"
+
+
+def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], str]:
+    """智能重试失败的视频任务：先查 ComfyUI history/queue，能接续就接续原任务；
+    无法接续（无提交记录/已无踪迹）时服务端直接取历史参考图原位重新提交。
+
+    返回 (action, message)：action="resumed" 表示已接续原 ComfyUI 任务（后台轮询收片），
+    action="resubmitted" 表示已复用原记录重新提交生成。
+    """
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    db = SessionLocal()
+    try:
+        task = db.query(AIVideoTask).filter(
+            AIVideoTask.id == task_id,
+            AIVideoTask.tenant_id == tenant_id,
+            AIVideoTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise H3VideoError("任务不存在或已删除")
+        if task.status != "失败":
+            raise H3VideoError("仅失败的任务可以重试")
+        prompt_id = task.h3_prompt_id
+    finally:
+        db.close()
+
+    if not prompt_id:
+        # 从未成功提交到 ComfyUI（上传/优化阶段失败）：服务端取历史参考图原位重试
+        return _resubmit_failed_task(task)
+
+    # 查 ComfyUI history/queue 判断原提交的执行情况
+    resume = False   # 保留 prompt_id 接续（已有成片或仍在生成）
+    running = False  # 原任务仍在 ComfyUI 执行中/排队
+    try:
+        item = _api("GET", f"/history/{prompt_id}", timeout=30).json().get(prompt_id)
+        if item and (item.get("status") or {}).get("status_str") == "success" \
+                and _extract_output_file(item):
+            resume = True
+        elif not item:
+            queue = _api("GET", "/queue", timeout=30).json()
+            running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+            pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+            if prompt_id in running_ids or prompt_id in pending_ids:
+                resume = True
+                running = True
+    except Exception as e:
+        # 查询失败（网络抖动等）：保守接续，由后台轮询线程继续判断
+        logger.warning(f"[H3视频] 重试任务 {task_id} 查询 ComfyUI 失败，保守接续轮询: {e}")
+        resume = True
+
+    if not resume:
+        return _resubmit_failed_task(task)
+
+    db = SessionLocal()
+    try:
+        task = db.query(AIVideoTask).filter(AIVideoTask.id == task_id).first()
+        task.status = "生成中"
+        task.error_message = None
+        task.finished_at = None
+        db.commit()
+    finally:
+        db.close()
+
+    message = "检测到 ComfyUI 仍在生成中，继续等待原任务完成" if running \
+        else "检测到 ComfyUI 已有成片，正在收片回填"
+    logger.info(f"[H3视频] 重试任务 {task_id}：{message}（prompt_id={prompt_id}）")
+    _ensure_worker(task_id, prompt_id)
+    return "resumed", message
+
+
 def delete_video_task(tenant_id: int, task_id: int) -> None:
     """删除任务记录（软删除，不影响已生成的成片）"""
     from database.database import SessionLocal
@@ -685,8 +1012,21 @@ def delete_video_task(tenant_id: int, task_id: int) -> None:
         db.close()
 
 
-def resume_pending_tasks() -> None:
-    """服务启动时恢复未完成的任务：重新挂上后台轮询线程"""
+def resume_pending_tasks() -> Optional[int]:
+    """服务启动时恢复未完成的任务：重新挂上后台轮询线程
+
+    返回值：恢复的任务数；H3_BASE_URL 未配置时返回 None（跳过恢复）。
+    配置为空的进程接手任务会因无法查询 ComfyUI 而把任务误标失败，
+    因此守卫必须读取本进程启动时冻结的 settings，与轮询逻辑口径一致。
+    """
+    if not settings.H3_BASE_URL:
+        logger.error(
+            "[H3视频] H3_BASE_URL 未配置，跳过未完成任务恢复："
+            "本进程无法查询 ComfyUI，接手任务会误标失败。"
+            "请检查 backend/.env 的 H3_BASE_URL/H3_AUTH_USER/H3_AUTH_PASSWORD 后重启"
+        )
+        return None
+
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
 
@@ -723,3 +1063,5 @@ def resume_pending_tasks() -> None:
     for task_id, h3_prompt_id in pending:
         logger.info(f"[H3视频] 恢复未完成任务 {task_id}（ComfyUI {h3_prompt_id}）")
         _ensure_worker(task_id, h3_prompt_id)
+
+    return len(pending)

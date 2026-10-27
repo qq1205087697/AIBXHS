@@ -113,7 +113,7 @@ const ReviewBot: React.FC = () => {
   const [total, setTotal] = useState(0)
   const [batchModalVisible, setBatchModalVisible] = useState(false)
   const [batchAction, setBatchAction] = useState<'analyze' | 'status' | null>(null)
-  const [batchStatus, setBatchStatus] = useState<'new' | 'processing' | 'resolved'>('processing')
+  const [batchStatus, setBatchStatus] = useState<'new' | 'read' | 'processing' | 'resolved'>('processing')
 
   // 搜索和排序状态（综合搜索，300ms防抖）
   const [searchText, setSearchText] = useState('')

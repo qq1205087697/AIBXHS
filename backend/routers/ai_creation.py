@@ -22,6 +22,7 @@ from services.h3_video_service import (
     submit_video_task,
     list_video_tasks,
     delete_video_task,
+    cancel_video_task,
     H3VideoError,
 )
 from pydantic import BaseModel
@@ -66,29 +67,46 @@ class GeneratePromptsRequest(BaseModel):
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
-# 代理取图域名白名单（后缀匹配）：TOS 桶未配置 CORS，浏览器 fetch 会被拦截，
-# 由后端代取字节；顺带覆盖亚马逊图片 CDN 以兜底其偶发跨域限制
+# 代理取图静态白名单后缀（后缀匹配）：亚马逊图片 CDN + 历史 volces.com 直连地址。
+# TOS 侧域名（自定义 CDN 域名 / 桶域名）由 _proxy_image_hosts 动态拼装，
+# 避免 .env 换域名后白名单失效导致代理取图被拒。
 PROXY_IMAGE_HOST_SUFFIXES = (
-    "volces.com",             # 火山引擎 TOS
+    "volces.com",             # 火山引擎 TOS（历史直连地址）
     "media-amazon.com",       # 亚马逊图片 CDN
     "ssl-images-amazon.com",  # 亚马逊图片 CDN（旧域名）
 )
 PROXY_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 
+def _proxy_image_hosts() -> set:
+    """代理白名单完整主机集合：静态后缀 + 当前 TOS 配置的自定义域名 / 桶域名"""
+    from config import get_settings
+
+    hosts = set(PROXY_IMAGE_HOST_SUFFIXES)
+    settings = get_settings()
+    if settings.TOS_CUSTOM_DOMAIN:
+        host = urlparse(f"https://{settings.TOS_CUSTOM_DOMAIN.strip('/')}").hostname
+        if host:
+            hosts.add(host.lower())
+    if settings.TOS_BUCKET and settings.TOS_ENDPOINT:
+        hosts.add(f"{settings.TOS_BUCKET}.{settings.TOS_ENDPOINT.strip('/')}".lower())
+    return hosts
+
+
 @router.get("/proxy-image")
 async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
     """服务端代取图片字节。
 
-    历史记录编辑回填、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
-    TOS 桶未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
+    历史记录编辑回填/重试、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
+    TOS / CDN 未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
     此时前端改走本接口由后端下载并回传图片字节。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise HTTPException(status_code=400, detail="无效的图片地址")
     host = parsed.hostname.lower()
-    if not any(host == s or host.endswith("." + s) for s in PROXY_IMAGE_HOST_SUFFIXES):
+    allowed = _proxy_image_hosts()
+    if not any(host == h or host.endswith("." + h) for h in allowed):
         raise HTTPException(status_code=400, detail="该图片域名不在代理白名单内")
 
     try:
@@ -281,13 +299,18 @@ async def list_video_tasks_endpoint(
     page: int = 1,
     page_size: int = 10,
     keyword: str = "",
+    bind_status: str = "all",
     current_user: User = Depends(get_current_user),
 ):
-    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询"""
+    """视频生成任务列表（租户内共享，含状态与成片地址），用于生成历史与进度轮询；bind_status: all/bound/unbound"""
     return {
         "success": True,
         "data": list_video_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+            current_user.tenant_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            bind_status=bind_status,
         ),
     }
 
@@ -339,17 +362,52 @@ async def list_upscale_tasks_endpoint(
     page: int = 1,
     page_size: int = 20,
     keyword: str = "",
+    bind_status: str = "all",
     current_user: User = Depends(get_current_user),
 ):
-    """超分任务列表（分页 + 标题搜索），用于高清处理页面与进度轮询"""
+    """超分任务列表（分页 + 标题搜索 + 绑定状态筛选），用于高清处理页面与进度轮询"""
     from services.upscale_service import list_upscale_tasks
 
     return {
         "success": True,
         "data": list_upscale_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword
+            current_user.tenant_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            bind_status=bind_status,
         ),
     }
+
+
+@router.post("/upscale-tasks/{task_id}/cancel")
+async def cancel_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """取消排队中/处理中的超分任务（同步移除/中断 ComfyUI 任务）"""
+    from services.upscale_service import cancel_upscale_task, UpscaleError
+
+    try:
+        cancel_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "任务已取消"}
+
+
+@router.post("/upscale-tasks/{task_id}/retry")
+async def retry_upscale_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """重试失败的超分任务：先查 ComfyUI history，有成片直接接续收片，无成片重新入队"""
+    from services.upscale_service import retry_upscale_task, UpscaleError
+
+    try:
+        task, message = retry_upscale_task(current_user.tenant_id, task_id)
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": message, "data": task}
 
 
 @router.delete("/upscale-tasks/{task_id}")
@@ -417,6 +475,41 @@ async def download_upscale_video(
 
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     return StreamingResponse(_stream(), media_type="video/mp4", headers=headers)
+
+
+@router.post("/video-tasks/{task_id}/cancel")
+async def cancel_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """取消排队中/生成中的视频生成任务（同步移除/中断 ComfyUI 任务）"""
+    try:
+        cancel_video_task(current_user.tenant_id, task_id)
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "任务已取消"}
+
+
+@router.post("/video-tasks/{task_id}/recover")
+async def recover_video_task_endpoint(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """智能重试失败的视频任务（原记录重试）。
+
+    action="resumed"：已接续原 ComfyUI 任务（后台轮询收片回填原记录）；
+    action="resubmitted"：服务端已下载历史参考图并复用原记录重新提交生成。
+    含 ComfyUI 查询与参考图下载（秒级），放到线程池执行避免阻塞事件循环。
+    """
+    from services.h3_video_service import recover_failed_task, H3VideoError
+
+    try:
+        action, message = await asyncio.to_thread(
+            recover_failed_task, current_user.tenant_id, task_id
+        )
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
 
 
 @router.delete("/video-tasks/{task_id}")

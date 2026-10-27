@@ -694,8 +694,11 @@ async def init_default_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        {"name": "刷新库存", "code": "robot:rating:import", "type": "function", "module": "页面优化机器人", "sort_order": 71},
+        {"name": "开广告", "code": "robot:rating:ad", "type": "function", "module": "页面优化机器人", "sort_order": 72},
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
+        {"name": "审批视频绑定", "code": "ai_video:approve", "type": "function", "module": "媒体创作中心", "sort_order": 72},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -729,6 +732,24 @@ async def init_default_permissions(
         {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
         {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
         {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
+        # 开发机器人 KPI卡片
+        {"name": "新品采购KPI卡片", "code": "development:purchase_kpi", "type": "function", "module": "开发机器人", "sort_order": 80},
+        {"name": "新品仓库KPI卡片", "code": "development:warehouse_kpi", "type": "function", "module": "开发机器人", "sort_order": 81},
+        {"name": "新品美工KPI卡片", "code": "development:designer_kpi", "type": "function", "module": "开发机器人", "sort_order": 82},
+        {"name": "新品审核KPI卡片", "code": "development:review_kpi", "type": "function", "module": "开发机器人", "sort_order": 83},
+        # 开发机器人 功能权限
+        {"name": "查看开发机器人", "code": "development:view", "type": "function", "module": "开发机器人", "sort_order": 84},
+        {"name": "新增新品", "code": "development:create", "type": "function", "module": "开发机器人", "sort_order": 85},
+        {"name": "编辑新品", "code": "development:edit", "type": "function", "module": "开发机器人", "sort_order": 86},
+        {"name": "删除新品", "code": "development:delete", "type": "function", "module": "开发机器人", "sort_order": 87},
+        {"name": "导入新品", "code": "development:import", "type": "function", "module": "开发机器人", "sort_order": 88},
+        {"name": "复制新品", "code": "development:copy", "type": "function", "module": "开发机器人", "sort_order": 89},
+        {"name": "采购填写", "code": "development:purchase_fill", "type": "function", "module": "开发机器人", "sort_order": 90},
+        {"name": "生成采购单", "code": "development:create_order", "type": "function", "module": "开发机器人", "sort_order": 91},
+        {"name": "上传六面图", "code": "development:warehouse", "type": "function", "module": "开发机器人", "sort_order": 92},
+        {"name": "上传产品图", "code": "development:designer_upload", "type": "function", "module": "开发机器人", "sort_order": 93},
+        {"name": "审核产品图", "code": "development:review", "type": "function", "module": "开发机器人", "sort_order": 94},
+        {"name": "回传飞书", "code": "development:push_feishu", "type": "function", "module": "开发机器人", "sort_order": 95},
     ]
 
     for perm in default_permissions:
@@ -797,8 +818,11 @@ async def add_missing_permissions(
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        {"name": "刷新库存", "code": "robot:rating:import", "type": "function", "module": "页面优化机器人", "sort_order": 71},
+        {"name": "开广告", "code": "robot:rating:ad", "type": "function", "module": "页面优化机器人", "sort_order": 72},
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
+        {"name": "审批视频绑定", "code": "ai_video:approve", "type": "function", "module": "媒体创作中心", "sort_order": 72},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -832,6 +856,24 @@ async def add_missing_permissions(
         {"name": "新增供应商", "code": "supplier:create", "type": "function", "module": "供应商管理", "sort_order": 77},
         {"name": "编辑供应商", "code": "supplier:edit", "type": "function", "module": "供应商管理", "sort_order": 78},
         {"name": "删除供应商", "code": "supplier:delete", "type": "function", "module": "供应商管理", "sort_order": 79},
+        # 开发机器人 KPI卡片
+        {"name": "新品采购KPI卡片", "code": "development:purchase_kpi", "type": "function", "module": "开发机器人", "sort_order": 80},
+        {"name": "新品仓库KPI卡片", "code": "development:warehouse_kpi", "type": "function", "module": "开发机器人", "sort_order": 81},
+        {"name": "新品美工KPI卡片", "code": "development:designer_kpi", "type": "function", "module": "开发机器人", "sort_order": 82},
+        {"name": "新品审核KPI卡片", "code": "development:review_kpi", "type": "function", "module": "开发机器人", "sort_order": 83},
+        # 开发机器人 功能权限
+        {"name": "查看开发机器人", "code": "development:view", "type": "function", "module": "开发机器人", "sort_order": 84},
+        {"name": "新增新品", "code": "development:create", "type": "function", "module": "开发机器人", "sort_order": 85},
+        {"name": "编辑新品", "code": "development:edit", "type": "function", "module": "开发机器人", "sort_order": 86},
+        {"name": "删除新品", "code": "development:delete", "type": "function", "module": "开发机器人", "sort_order": 87},
+        {"name": "导入新品", "code": "development:import", "type": "function", "module": "开发机器人", "sort_order": 88},
+        {"name": "复制新品", "code": "development:copy", "type": "function", "module": "开发机器人", "sort_order": 89},
+        {"name": "采购填写", "code": "development:purchase_fill", "type": "function", "module": "开发机器人", "sort_order": 90},
+        {"name": "生成采购单", "code": "development:create_order", "type": "function", "module": "开发机器人", "sort_order": 91},
+        {"name": "上传六面图", "code": "development:warehouse", "type": "function", "module": "开发机器人", "sort_order": 92},
+        {"name": "上传产品图", "code": "development:designer_upload", "type": "function", "module": "开发机器人", "sort_order": 93},
+        {"name": "审核产品图", "code": "development:review", "type": "function", "module": "开发机器人", "sort_order": 94},
+        {"name": "回传飞书", "code": "development:push_feishu", "type": "function", "module": "开发机器人", "sort_order": 95},
     ]
 
     # 先清理无用的旧权限码
@@ -934,6 +976,8 @@ async def add_missing_permissions(
         {"code": "robot:review:analyze", "name": "AI分析差评", "module": "差评机器人"},
         {"code": "robot:review:manage", "name": "管理差评状态", "module": "差评机器人"},
         {"code": "robot:rating:view", "name": "查看页面优化", "module": "页面优化机器人"},
+        {"code": "robot:rating:import", "name": "刷新库存", "module": "页面优化机器人"},
+        {"code": "robot:rating:ad", "name": "开广告", "module": "页面优化机器人"},
     ]
     fixed_count = 0
     for fm in fix_map:

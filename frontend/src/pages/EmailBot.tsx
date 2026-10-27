@@ -667,7 +667,7 @@ const EmailBot: React.FC = () => {
 
             {selectedEmail.ai_reply_content ? (
               <div>
-                <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>🤖 AI回复内容</h3>
+                <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>🤖 AI回复内容（已回复）</h3>
                 <Card type="inner" style={{ padding: '12px', backgroundColor: '#f6ffed', whiteSpace: 'pre-wrap' }}>
                   {selectedEmail.ai_reply_content}
                 </Card>
@@ -698,7 +698,7 @@ const EmailBot: React.FC = () => {
             name="replyText"
             label={
               <Space>
-                <span>回复备注</span>
+                {/* <span>回复备注</span> */}
                 {hasPermission('robot:email:reply') && (
                   <Button
                     type="link"
@@ -712,11 +712,11 @@ const EmailBot: React.FC = () => {
                 )}
               </Space>
             }
-            rules={[{ required: true, message: '请填写回复备注' }]}
+            rules={[{ required: true, message: '请填写回复内容' }]}
           >
             <Input.TextArea
               rows={4}
-              placeholder="请填写需要回复的内容或备注..."
+              placeholder="请填写需要回复的内容..."
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
             />

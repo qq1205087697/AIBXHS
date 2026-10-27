@@ -90,6 +90,7 @@ def init_db():
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
         )
         from models.ai_video_task import AIVideoTask
+        from models.video_binding_request import VideoBindingRequest
         
         # 创建所有表
         Base.metadata.create_all(bind=engine)
@@ -117,7 +118,8 @@ def init_db():
         print("数据库表结构创建成功")
         
         # 手动创建 scheduler_locks 和 product_selections 表
-        from sqlalchemy import text
+        # 注意：text 已在模块顶部导入；函数内再 import 会使 text 变成本地变量，
+        # 导致上方列补丁在执行时抛 UnboundLocalError 而静默失效
         with engine.connect() as conn:
             # 视频生成任务表新增视频类型字段（口播带货/产品展示，如果不存在）
             try:
@@ -300,6 +302,13 @@ def init_db():
             # products 表新增无配件标记字段（如果不存在）
             try:
                 conn.execute(text("ALTER TABLE products ADD COLUMN no_accessory TINYINT(1) NOT NULL DEFAULT 0 COMMENT '无配件标记(是:数据补齐不再提示未绑配件)'"))
+                conn.commit()
+            except Exception:
+                pass
+
+            # 页面优化机器人表品名字段（与库存快照表品名长度一致，每次启动幂等执行）
+            try:
+                conn.execute(text("ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'"))
                 conn.commit()
             except Exception:
                 pass
