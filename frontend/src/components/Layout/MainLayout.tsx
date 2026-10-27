@@ -52,15 +52,20 @@ import {
   AlertTriangle,
   Sparkles,
   Table2,
+  Rocket,
   Video,
   Film,
-} from 'lucide-react'
-import { useAuth } from '../../contexts/AuthContext'
-import { useTheme } from '../../contexts/ThemeContext'
-import ThemeSwitcher from '../ThemeSwitcher'
-import ChangePasswordModal from '../ChangePasswordModal'
-import { notificationsApi } from '../../api'
-import dayjs from 'dayjs'
+  Image as ImageIcon,
+  ClipboardCheck,
+} from "lucide-react";
+import { useAuth } from "../../contexts/AuthContext";
+import { useTheme } from "../../contexts/ThemeContext";
+import ThemeSwitcher from "../ThemeSwitcher";
+import ChangePasswordModal from "../ChangePasswordModal";
+import ErrorBoundary from "../ErrorBoundary";
+import KeepAliveHost from "../KeepAliveHost";
+import { notificationsApi } from "../../api";
+import dayjs from "dayjs";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -209,7 +214,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/tenants",
     "/stores",
   ];
-  const mediaPaths = ["/ai-creation"];
+  const mediaPaths = ["/ai-creation", "/ai-image"];
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
@@ -330,12 +335,32 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               label: 'AI视频',
             },
             {
+              key: '/ai-image',
+              icon: <ImageIcon size={18} />,
+              label: 'AI生图',
+            },
+            {
               key: '/upscale-center',
               icon: <Film size={18} />,
               label: '高清处理',
             },
+            ...(hasPermission('ai_video:approve')
+              ? [{
+                  key: '/video-binding-review',
+                  icon: <ClipboardCheck size={18} />,
+                  label: '媒体绑定审核',
+                }]
+              : []),
           ],
         }] : []),
+    ...(hasPermission("development:view")
+      ? [{
+          key: "/development",
+          icon: <Rocket size={20} />,
+          label: "开发机器人",
+          shortLabel: "开发",
+        }]
+      : []),
     {
       key: "/data-alert",
       icon: <AlertTriangle size={20} />,
@@ -526,9 +551,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/base-table': '底表管理',
       "/operation-logs": "操作日志",
       "/tenants": "公司设置",
-      '/product-selection': '选品机器人',
+      "/product-selection": "选品机器人",
+      "/development": "开发机器人",
+      "/development/new": "添加新品",
       '/ai-creation': 'AI视频',
+      '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
+      '/video-binding-review': '媒体绑定审核',
     };
     return pathMap[location.pathname] || "未知页面";
   };
@@ -752,7 +781,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             icon={item.icon}
             label={item.label}
             shortLabel={item.shortLabel}
-            active={location.pathname === item.key}
+            active={location.pathname.startsWith("/development") ? item.key === "/development" : location.pathname === item.key}
             onClick={() => navigate(item.key as string)}
           />
         );
@@ -855,7 +884,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             ) : (
               <Menu
                 mode="inline"
-                selectedKeys={[location.pathname]}
+                selectedKeys={[location.pathname.startsWith("/development") ? "/development" : location.pathname]}
                 openKeys={isMenuSearching ? searchedOpenKeys : openKeys}
                 onOpenChange={(keys) => setOpenKeys(keys)}
                 items={filteredMenuItems.map(
@@ -996,7 +1025,14 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               minWidth: 1280,
             }}
           >
-            {children}
+            {/* 页面级错误边界：单个页面崩溃不影响侧边栏/顶栏，切换路由自动重置 */}
+            <ErrorBoundary resetKey={location.pathname}>
+              {children}
+            </ErrorBoundary>
+            {/* keep-alive宿主：常驻缓存页面，切换路由仅隐藏不卸载；独立错误边界避免被页面崩溃波及 */}
+            <ErrorBoundary>
+              <KeepAliveHost />
+            </ErrorBoundary>
           </Content>
         </Layout>
         <ChangePasswordModal

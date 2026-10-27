@@ -14,11 +14,14 @@ import threading
 import time
 import concurrent.futures
 
-# 飞书应用配置
-FEISHU_APP_ID = "cli_a88206945560500c"
-FEISHU_APP_SECRET = "zwTlhqW5d1dDkVZVEsGTxfOuUbpfBZVg"
-FEISHU_APP_TOKEN = "N4DoblLB6a3nbKsmngrcQxc6nMh"
-FEISHU_TABLE_ID = "tblDHtSEjlu5eK6l"
+# 飞书应用配置（从 .env 读取，避免在业务代码中暴露）
+from config import get_settings
+
+_settings = get_settings()
+FEISHU_APP_ID = _settings.FEISHU_SYNC_APP_ID
+FEISHU_APP_SECRET = _settings.FEISHU_SYNC_APP_SECRET
+FEISHU_APP_TOKEN = _settings.FEISHU_SYNC_BASE_TOKEN
+FEISHU_TABLE_ID = _settings.FEISHU_SYNC_TABLE_ID
 
 # 内存状态（仅当前进程有效）
 _sync_status = {
@@ -46,16 +49,32 @@ def get_feishu_token() -> Optional[str]:
 
 
 def fetch_single_page(token: str, page_token: Optional[str] = None) -> dict:
-    """获取单页数据"""
+    """获取单页数据（网络抖动时自动重试）"""
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_APP_TOKEN}/tables/{FEISHU_TABLE_ID}/records"
-    
+
     params = {"page_size": 500}
     if page_token:
         params["page_token"] = page_token
-    
-    resp = requests.get(url, headers=headers, params=params, timeout=30)
-    return resp.json()
+
+    last_error = None
+    for attempt in range(4):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            result = resp.json()
+        except Exception as e:
+            last_error = e
+            time.sleep(2 * (attempt + 1))
+            continue
+
+        # 飞书限流/临时错误码时重试，其余情况直接返回
+        if result.get("code") in (99991400, 99991401, 1254290):
+            last_error = Exception(f"飞书接口临时错误: {result.get('code')} {result.get('msg')}")
+            time.sleep(2 * (attempt + 1))
+            continue
+        return result
+
+    raise last_error if last_error else Exception("获取飞书数据失败")
 
 
 def fetch_feishu_inbound_data_fast(days: int = 90) -> list:
@@ -89,23 +108,19 @@ def fetch_feishu_inbound_data_fast(days: int = 90) -> list:
         if not temp_result["data"].get("has_more"):
             break
         page_token = temp_result["data"].get("page_token")
-        if len(page_tokens) >= 10:
-            break
     
     # 并发获取剩余页面
     def fetch_page(pt):
-        try:
-            r = fetch_single_page(token, pt)
-            if r.get("code") == 0:
-                records = []
-                for item in r["data"]["items"]:
-                    rec = parse_record(item, cutoff_timestamp)
-                    if rec:
-                        records.append(rec)
-                return records
-        except Exception as e:
-            print(f"获取页面失败: {e}")
-        return []
+        r = fetch_single_page(token, pt)
+        if r.get("code") != 0:
+            # 不再静默返回空列表，避免部分分页丢失却当作同步成功
+            raise Exception(f"获取飞书分页失败: {r.get('code')} {r.get('msg')}")
+        records = []
+        for item in r["data"]["items"]:
+            rec = parse_record(item, cutoff_timestamp)
+            if rec:
+                records.append(rec)
+        return records
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(fetch_page, pt) for pt in page_tokens]

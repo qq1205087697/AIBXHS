@@ -13,9 +13,19 @@
     "class_type": "VHS_LoadVideo",
     "_meta": { "title": "加载视频" }
   },
+  "26": {
+    "inputs": {
+      "image_pass": ["27", 0],
+      "unload_all_models": true,
+      "empty_cache": true,
+      "gc_collect": true
+    },
+    "class_type": "VRAM_Debug",
+    "_meta": { "title": "VRAM Debug（超分前清理显存，卸载 H3 驻留模型）" }
+  },
   "24": {
     "inputs": {
-      "图像": ["27", 0],
+      "图像": ["26", 1],
       "模型": "星光 2.6",
       "显存上限": 16,
       "放大倍数": 2,

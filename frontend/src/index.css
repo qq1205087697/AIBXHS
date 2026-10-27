@@ -4,6 +4,18 @@
   box-sizing: border-box;
 }
 
+/* 隐藏页面空白处的文本插入光标（点击空白处不显示输入指示），输入框内光标保持正常 */
+body {
+  caret-color: transparent;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.ant-input {
+  caret-color: auto;
+}
+
 html {
   height: 100%;
   width: 100%;
@@ -262,6 +274,28 @@ code {
   min-width: 180px !important;
 }
 
+/* 页面优化机器人：数据卡片列表区域填满剩余高度（穿透Card body和Spin包装层传递flex高度） */
+.rating-list-card > .ant-card-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rating-list-card .ant-spin-nested-loading {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rating-list-card .ant-spin-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* AI 视频页：左右区域独立滚动 */
 .ai-creation-tabs {
   height: 100%;
@@ -297,6 +331,26 @@ code {
   scrollbar-color: #d9d9d9 transparent;
 }
 
+/* AI 生图页：细滚动条（与 ai-creation-tabs 同参数；另用于 Modal 的 wrapClassName） */
+.ai-thin-scrollbar *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.ai-thin-scrollbar *::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-thin-scrollbar *::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 3px;
+}
+.ai-thin-scrollbar *::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+.ai-thin-scrollbar * {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9d9 transparent;
+}
+
 /* 图片预览层：左右切换按钮紧贴图片左右外侧（antd 默认贴屏幕最边缘，不显眼）。
    按钮位置由 utils/previewSwitch.ts 实测预览图片包围盒后写入
    --preview-switch-left/right（距视口左/右边缘 px），JS 未测量前用兜底值。 */
@@ -308,4 +362,527 @@ code {
 .ant-image-preview-switch-right {
   right: var(--preview-switch-right, 8px) !important;
   inset-inline-end: var(--preview-switch-right, 8px) !important;
+}
+
+/* 视频对比弹窗：音量滑杆隐藏拖动圆头（antd 圆点画在 handle 的 ::after 伪元素上，内联样式盖不掉） */
+.volume-slider .ant-slider-handle {
+  display: none;
+}
+
+/* ===== 页面优化机器人卡片（参考产品评分列表设计稿） ===== */
+/* 常态：浅灰边框 + 轻阴影；hover：阴影加深、边框轻微变化、上浮1px；红色只留给低分预警 */
+.rating-card.ant-card {
+  border: 1px solid #ebeef3;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s ease;
+  position: relative;
+}
+
+/* 左侧细指示线：常态透明，选中态显示品牌蓝 */
+.rating-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  border-radius: 2px;
+  background-color: transparent;
+  transition: background-color 0.2s ease;
+  z-index: 1;
+}
+
+.rating-card.ant-card:hover {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+  border-color: #e1e6ee;
+  transform: translateY(-1px);
+}
+
+/* 选中态：左侧指示线、底色跟随右上角调色盘主题色 */
+.rating-card.ant-card.is-selected {
+  border-color: var(--theme-primary-light);
+  background-color: var(--theme-primary-bg);
+}
+
+.rating-card.is-selected::before {
+  background-color: var(--theme-primary);
+}
+
+/* 复制图标：默认浅灰，hover 高亮为主题色 */
+.rating-card .rating-copy-btn {
+  color: #9ca3af;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.rating-card .rating-copy-btn:hover {
+  color: var(--theme-primary);
+  background-color: var(--theme-primary-bg);
+}
+
+/* 店铺标签：常态中性灰，勾选后跟随主题色 */
+.rating-site-tag {
+  padding: 3px 8px;
+  background-color: #f3f4f6;
+  color: #6b7280;
+  font-size: 12px;
+  border-radius: 6px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease;
+}
+
+.rating-card.is-selected .rating-site-tag {
+  background-color: var(--theme-primary-bg);
+  color: var(--theme-primary);
+}
+
+/* 进度条：细轨道 + 低饱和渐变填充 */
+.rating-progress-track {
+  height: 5px;
+  background-color: #eef1f5;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.rating-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition:
+    width 0.3s ease,
+    background 0.3s ease;
+}
+
+/* 评分分级：0-30 红（预警） / 30-60 琥珀 / 60+ 绿 */
+.rating-fill-low {
+  background: linear-gradient(90deg, #ff8787, #e5484d);
+}
+
+.rating-fill-medium {
+  background: linear-gradient(90deg, #ffc078, #d97706);
+}
+
+.rating-fill-high {
+  background: linear-gradient(90deg, #6ee7b7, #059669);
+}
+
+/* ===== 页面优化机器人 评分详情（与卡片设计语言统一） ===== */
+/* 1. 数据总览：总分 + 毛利率 */
+.rating-overview-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.rating-overview-card {
+  padding: 16px 20px;
+  border-radius: 10px;
+  background-color: #f9fafb;
+  border: 1px solid #f0f2f5;
+}
+
+.rating-overview-label {
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.rating-overview-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rating-overview-unit {
+  font-size: 14px;
+  font-weight: 400;
+  color: #9ca3af;
+  margin-left: 2px;
+}
+
+/* 2. 细分评分网格：2列独立块 + 圆角徽章 */
+.rating-score-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 24px;
+}
+
+.rating-score-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background-color: #fafbfc;
+}
+
+.rating-score-item-label {
+  font-size: 14px;
+  color: #4b5563;
+}
+
+.rating-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 56px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+/* 评分分级徽章色（低分红 / 中分橙 / 高分绿），与卡片对应 */
+.rating-badge-low {
+  background-color: #fef2f2;
+  color: #dc2626;
+}
+
+.rating-badge-medium {
+  background-color: #fff7ed;
+  color: #d97706;
+}
+
+.rating-badge-high {
+  background-color: #ecfdf5;
+  color: #059669;
+}
+
+.rating-badge-text {
+  background: transparent;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+/* 3. 信息区块（参考关键词 / 竞品价格） */
+.rating-info-block {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 10px;
+  background-color: #fafbfc;
+  border: 1px solid #f0f2f5;
+}
+
+.rating-block-label {
+  flex-shrink: 0;
+  width: 90px;
+  font-size: 14px;
+  color: #6b7280;
+  padding-top: 2px;
+}
+
+.rating-block-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.rating-block-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rating-block-tip {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+/* 关键词标签 */
+.rating-keyword-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  line-height: 1.6;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.rating-keyword-tag {
+  padding: 2px 8px;
+  background-color: #eef2ff;
+  color: #1890ff;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+/* 竞品价格行式列表 */
+.rating-competitor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rating-competitor-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.rating-competitor-asin {
+  color: #1890ff;
+  cursor: pointer;
+}
+
+.rating-competitor-asin:hover {
+  text-decoration: underline;
+}
+
+.rating-competitor-price {
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.rating-del-btn {
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.rating-del-btn:hover {
+  color: #e5484d;
+}
+
+.rating-competitor-rank {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rating-rank-badge {
+  padding: 2px 8px;
+  background-color: #eef2ff;
+  color: #1890ff;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* 4. 产品建议区：极浅蓝底 + 圆点列表 */
+.rating-suggest-block {
+  padding: 16px 20px;
+  border-radius: 10px;
+  background-color: #f5f8ff;
+  border: 1px solid #e0eaff;
+}
+
+.rating-suggest-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1e40af;
+  margin-bottom: 12px;
+}
+
+.rating-suggest-subtitle {
+  font-size: 14px;
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.rating-suggest-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rating-suggest-list li {
+  position: relative;
+  padding-left: 16px;
+  font-size: 13px;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+.rating-suggest-list li::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #1890ff;
+}
+
+/* ===== 页面优化机器人 产品信息详情（与卡片/评分详情设计语言统一） ===== */
+/* 1. 基础信息网格：左侧字段 + 右侧主图 */
+.product-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: 20px;
+  padding: 16px 20px;
+  border-radius: 10px;
+  background-color: #fafbfc;
+  border: 1px solid #f0f2f5;
+}
+
+.product-info-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 24px;
+}
+
+.product-field-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.product-field-label {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.product-field-value {
+  font-size: 14px;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.product-asin-link {
+  color: #1890ff;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.product-asin-link:hover {
+  text-decoration: underline;
+}
+
+.product-main-img-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+
+.product-main-img {
+  width: 100px;
+  height: 100px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid #ebeef3;
+  background-color: #fff;
+  cursor: pointer;
+}
+
+.product-img-count {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+/* 2. 通用内容区块 */
+.product-content-block {
+  border-radius: 10px;
+  background-color: #fafbfc;
+  border: 1px solid #f0f2f5;
+  overflow: hidden;
+}
+
+.product-block-header {
+  padding: 12px 20px;
+  border-bottom: 1px solid #f0f2f5;
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+  background-color: #fff;
+}
+
+.product-block-body {
+  padding: 16px 20px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #4b5563;
+}
+
+.product-title-text {
+  font-size: 15px;
+  font-weight: 500;
+  color: #1f2937;
+  line-height: 1.6;
+}
+
+/* 3. 五点描述圆点列表 */
+.product-bullet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.product-bullet-list li {
+  position: relative;
+  padding-left: 20px;
+  line-height: 1.7;
+}
+
+.product-bullet-list li::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 10px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #1890ff;
+}
+
+/* 4. 操作日志 / AI建议：带右侧操作区的区块头 */
+.product-block-header-flex {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-bottom: 1px solid #f0f2f5;
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+  background-color: #fff;
+}
+
+/* 日志变更内容框 */
+.log-detail-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background-color: #f5f7fa;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* AI建议视图列标题 */
+.ai-column-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 8px;
 }

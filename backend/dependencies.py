@@ -30,7 +30,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         detail="无法验证凭据",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         token = credentials.credentials
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -41,7 +41,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    
+
     from services.auth_service import get_user_by_identity
     user = get_user_by_identity(
         db,
@@ -126,11 +126,12 @@ async def get_current_user_department_ids(current_user: User = Depends(get_curre
 
 
 class PermissionChecker:
-    """权限检查工厂"""
-    
-    def __init__(self, required_permission: str):
-        self.required_permission = required_permission
-    
+    """权限检查工厂（传多个权限码时任一满足即通过）"""
+
+    def __init__(self, *required_permissions: str):
+        self.required_permissions = [p for p in required_permissions if p]
+        self.required_permission = self.required_permissions[0] if self.required_permissions else ""
+
     async def __call__(
         self,
         current_user: User = Depends(get_current_user),
@@ -144,20 +145,24 @@ class PermissionChecker:
             """), {"role_id": current_user.role_id}).fetchone()
             if role and role[0] == "admin":
                 is_admin = True
-        
+
         if is_admin:
             return current_user
-        
-        # 2. 检查RBAC权限
+
+        # 2. 检查RBAC权限（任一权限码命中即通过）
         has_perm = False
-        if current_user.role_id:
-            has_perm = db.execute(text("""
+        if current_user.role_id and self.required_permissions:
+            placeholders = ",".join([f":p{i}" for i in range(len(self.required_permissions))])
+            params = {"role_id": current_user.role_id}
+            for i, code in enumerate(self.required_permissions):
+                params[f"p{i}"] = code
+            has_perm = db.execute(text(f"""
                 SELECT 1
                 FROM role_permissions rp
                 JOIN permissions p ON rp.permission_id = p.id AND p.deleted_at IS NULL
-                WHERE rp.role_id = :role_id AND rp.deleted_at IS NULL AND p.code = :perm_code
+                WHERE rp.role_id = :role_id AND rp.deleted_at IS NULL AND p.code IN ({placeholders})
                 LIMIT 1
-            """), {"role_id": current_user.role_id, "perm_code": self.required_permission}).fetchone()
+            """), params).fetchone()
         
         if not has_perm:
             raise HTTPException(

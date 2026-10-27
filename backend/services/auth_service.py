@@ -242,8 +242,11 @@ def _init_tenant_permissions_and_admin_role(db: Session, tenant_id: int):
         {"name": "邮件机器人KPI卡片", "code": "robot:email:kpi", "type": "function", "module": "邮件机器人", "sort_order": 51},
         # 页面优化机器人
         {"name": "查看页面优化", "code": "robot:rating:view", "type": "function", "module": "页面优化机器人", "sort_order": 70},
+        {"name": "刷新库存", "code": "robot:rating:import", "type": "function", "module": "页面优化机器人", "sort_order": 71},
+        {"name": "开广告", "code": "robot:rating:ad", "type": "function", "module": "页面优化机器人", "sort_order": 72},
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
+        {"name": "审批视频绑定", "code": "ai_video:approve", "type": "function", "module": "媒体创作中心", "sort_order": 72},
         # 挪货管理
         {"name": "查看挪货", "code": "stock_transfer:view", "type": "function", "module": "挪货管理", "sort_order": 55},
         {"name": "新增挪货", "code": "stock_transfer:create", "type": "function", "module": "挪货管理", "sort_order": 56},

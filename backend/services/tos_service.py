@@ -90,6 +90,36 @@ def _build_public_url(object_key: str) -> str:
     return f"https://{bucket}.{endpoint}/{object_key}"
 
 
+def build_thumbnail_url(url: str, width: int = 128) -> str:
+    """为 TOS 图片 URL 追加缩略图处理参数（x-tos-process=img/resize），非本桶 URL 原样返回。
+
+    :param url: 原图公网 URL
+    :param width: 缩略图宽度（像素）
+    :return: 缩略图 URL；Bucket 未开通图片处理能力时该 URL 会加载失败，调用方需回退原图
+    """
+    if not url or width <= 0:
+        return url or ""
+    settings = get_settings()
+    bucket = (settings.TOS_BUCKET or "").strip().lower()
+    endpoint = (settings.TOS_ENDPOINT or "").strip("/").lower()
+    custom_domain = (settings.TOS_CUSTOM_DOMAIN or "").strip("/").lower()
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return url
+    tos_hosts = set()
+    if bucket and endpoint:
+        tos_hosts.add(f"{bucket}.{endpoint}")
+    if custom_domain:
+        tos_hosts.add(custom_domain)
+    if not host or host not in tos_hosts:
+        return url
+    sep = "&" if parsed.query else "?"
+    return f"{url}{sep}x-tos-process=img/resize,w_{width}"
+
+
 def upload_file(file_bytes: bytes, file_name: str,
                 content_type: Optional[str] = None,
                 subdir: str = "",
@@ -179,12 +209,23 @@ def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
     return upload_file(file_bytes, file_name, content_type=content_type, subdir="videos", custom_name=custom_name)
 
 
-def rename_file(src_url: str, new_name: str) -> str:
+def bound_video_target_name(product_code: str, seq: int) -> str:
+    """绑定视频的 TOS 目标名「产品编码_序号_时间戳」。
+
+    时间戳成分保证删除视频后重新绑定时 URL 不与历史重复，
+    避免 CDN/浏览器缓存按同名 URL 返回旧视频内容。
+    """
+    return f"{product_code}_{seq}_{int(datetime.now().timestamp())}"
+
+
+def rename_file(src_url: str, new_name: str, subdir: str = "videos") -> str:
     """服务端复制对象为新名称（保留原对象），返回新公网 URL。
 
-    用于 AI视频/高清处理结果绑定产品时改名为「产品编码_序号」：
+    用于 AI视频/高清处理/AI生图 结果绑定产品时改名为「产品编码_序号」：
     仅在桶内复制（CopyObject），不下载上传大文件，也不删除源对象
-    （AI视频/高清处理任务历史仍引用源地址）。复制失败抛异常，由调用方决定回退。
+    （AI 任务历史仍引用源地址）。复制失败抛异常，由调用方决定回退。
+
+    :param subdir: 目标目录，video 用 "videos"、image 用 "images"（与产品直传命名保持一致）
     """
     from urllib.parse import urlparse, unquote
 
@@ -193,10 +234,10 @@ def rename_file(src_url: str, new_name: str) -> str:
 
     src_key = unquote(urlparse(src_url).path.lstrip("/"))
     _, ext = os.path.splitext(src_key)
-    ext = ext.lower() or ".mp4"
+    ext = ext.lower() or (".jpg" if subdir == "images" else ".mp4")
 
     prefix = (settings.TOS_PREFIX or "").strip("/")
-    new_key = f"{prefix}/videos/{new_name}{ext}" if prefix else f"videos/{new_name}{ext}"
+    new_key = f"{prefix}/{subdir}/{new_name}{ext}" if prefix else f"{subdir}/{new_name}{ext}"
 
     try:
         import tos

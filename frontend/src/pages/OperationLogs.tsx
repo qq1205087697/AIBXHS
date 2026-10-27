@@ -484,6 +484,12 @@ const OperationLogs: React.FC = () => {
           order: '订单',
           inventory: '库存',
           user: '用户',
+          basic_info: '基础信息',
+          traffic_keywords: '参考关键词',
+          competitor_price: '竞品价格',
+          ad_submit: '开广告',
+          optimize_submit: '一键优化',
+          ai_suggest: 'AI建议',
         }
         return (
           <Space size={4}>
