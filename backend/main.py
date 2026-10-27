@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import os
 
 from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings, ai_image, tags
@@ -216,15 +216,21 @@ async def startup_event():
 
     try:
         from services.h3_video_service import resume_pending_tasks
-        resume_pending_tasks()
-        logger.info("H3 视频未完成任务已恢复监听")
+        resumed = resume_pending_tasks()
+        if resumed is None:
+            logger.error("H3 视频未完成任务恢复已跳过（H3_BASE_URL 未配置）")
+        else:
+            logger.info(f"H3 视频未完成任务已恢复监听（{resumed} 条）")
     except Exception as e:
         logger.error(f"H3 视频任务恢复失败: {e}")
 
     try:
         from services.upscale_service import resume_pending_tasks as resume_upscale_tasks
-        resume_upscale_tasks()
-        logger.info("超分未完成任务已恢复监听")
+        resumed_upscale = resume_upscale_tasks()
+        if resumed_upscale is None:
+            logger.error("超分未完成任务恢复已跳过（H3_BASE_URL 未配置）")
+        else:
+            logger.info(f"超分未完成任务已恢复监听（{resumed_upscale} 条）")
     except Exception as e:
         logger.error(f"超分任务恢复失败: {e}")
 
@@ -252,6 +258,15 @@ static_dir = os.path.join(os.path.dirname(__file__), "static")
 
 # SPA 不需要缓存的入口文件
 _NO_CACHE_EXTS = {".html", ".htm"}
+
+# 静态资源扩展名：未命中时返回 404，不回退 index.html（见下方 SPA fallback 注释）
+_STATIC_EXTS = {
+    ".js", ".mjs", ".cjs", ".css", ".map",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp4", ".webm", ".mp3", ".wav",
+    ".json", ".txt", ".xml", ".pdf",
+}
 
 @app.middleware("http")
 async def serve_static_middleware(request: Request, call_next):
@@ -286,6 +301,19 @@ async def serve_static_middleware(request: Request, call_next):
             return FileResponse(file_path)
     
     index_path = os.path.join(static_dir, "index.html")
+
+    # 静态资源未命中必须返回 404，绝不能回退 index.html：
+    # 浏览器对 <script type="module"> 强制校验 MIME，拿到 HTML 会报
+    # "Failed to load module script ... MIME type of text/html" 并整页白屏
+    # （典型场景：浏览器缓存了旧 index.html，引用了已删除的旧 hash 产物）。
+    ext = os.path.splitext(path)[1].lower()
+    if path.startswith("/assets/") or ext in _STATIC_EXTS:
+        return JSONResponse(
+            {"detail": "Not Found", "path": path},
+            status_code=404,
+            headers={"Cache-Control": "no-store"},
+        )
+
     if os.path.isfile(index_path):
         # SPA fallback 也强制 no-cache
         response = FileResponse(index_path)
@@ -329,8 +357,9 @@ if __name__ == "__main__":
     from config import get_settings
     settings = get_settings()
     
-    # Windows 不支持多 worker 的 multiprocessing spawn 模式，强制使用 1
-    workers = 1 if platform.system() == 'Windows' else 4
+    # 强制单进程模式（项目约定）：多 worker 会并发执行建表/列补丁、定时任务×N 重复运行、
+    # 视频任务 resume 竞态（同一成片被多进程重复上传 TOS）、日志成对出现等问题
+    workers = 1
     
     uvicorn.run(
         "main:app",

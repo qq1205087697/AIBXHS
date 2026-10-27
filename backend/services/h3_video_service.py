@@ -230,12 +230,21 @@ def _extract_output_file(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _download_video(finfo: Dict[str, Any]) -> Tuple[bytes, str]:
-    """下载成片，返回 (字节内容, 文件名)"""
-    resp = _api("GET", "/view", timeout=1800, params=finfo, stream=True)
-    buf = io.BytesIO()
-    for chunk in resp.iter_content(1 << 20):
-        buf.write(chunk)
-    return buf.getvalue(), finfo.get("filename") or "output.mp4"
+    """下载成片，返回 (字节内容, 文件名)；网络中断（IncompleteRead 等）自动重试 3 次"""
+    last_err: Optional[Exception] = None
+    for attempt in range(1, 4):
+        try:
+            resp = _api("GET", "/view", timeout=1800, params=finfo, stream=True)
+            buf = io.BytesIO()
+            for chunk in resp.iter_content(1 << 20):
+                buf.write(chunk)
+            return buf.getvalue(), finfo.get("filename") or "output.mp4"
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                logger.warning(f"[H3视频] 成片下载中断（第 {attempt} 次），5 秒后重试: {e}")
+                threading.Event().wait(5)
+    raise last_err
 
 
 def _update_task(task_id: int, only_active: bool = False, **fields) -> None:
@@ -333,7 +342,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                 if consecutive_failures >= 20:
                     _update_task(
                         task_id, only_active=True, status="失败",
-                        error_message=f"ComfyUI 服务连接失败（连续 5 分钟查询异常）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
+                        error_message=f"ComfyUI 服务连接失败（连续 {consecutive_failures} 次查询异常，轮询间隔 {interval} 秒）：{last_query_error[:200]}；请检查服务器 H3_BASE_URL 等配置与网络后重试",
                         finished_at=datetime.now(),
                     )
                     logger.error(f"[H3视频] 任务 {task_id} 连续查询失败，终止轮询")
@@ -364,10 +373,15 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                 finfo = _extract_output_file(item)
                 if not finfo:
                     _update_task(
-                        task_id, status="失败", error_message="生成完成但未找到成片文件",
+                        task_id, only_active=True, status="失败", error_message="生成完成但未找到成片文件",
                         finished_at=datetime.now(),
                     )
                     logger.error(f"[H3视频] 任务 {task_id} 找不到输出文件: {item.get('outputs')}")
+                    return
+
+                # 防重复收片：双进程同库场景下其他进程可能已完成本任务（下载+上传耗时长，竞态窗口大）
+                if _get_h3_task_status(task_id) == "已完成":
+                    logger.info(f"[H3视频] 任务 {task_id} 已被其他进程完成，跳过重复收片")
                     return
 
                 content, filename = _download_video(finfo)
@@ -376,7 +390,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                     content, filename, content_type="video/mp4", subdir="ai-video",
                 )
                 _update_task(
-                    task_id, status="已完成", video_url=video_url,
+                    task_id, only_active=True, status="已完成", video_url=video_url,
                     finished_at=datetime.now(), error_message=None,
                 )
                 logger.info(f"[H3视频] 任务 {task_id} 完成: {video_url}")
@@ -387,7 +401,7 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
                     (item.get("status") or {}).get("messages", []), ensure_ascii=False
                 )[:800]
                 _update_task(
-                    task_id, status="失败", error_message=msgs or "生成失败",
+                    task_id, only_active=True, status="失败", error_message=msgs or "生成失败",
                     finished_at=datetime.now(),
                 )
                 logger.error(f"[H3视频] 任务 {task_id} 生成失败: {msgs}")
@@ -403,8 +417,10 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
         )
         logger.error(f"[H3视频] 任务 {task_id} 等待超时")
     except Exception as e:
+        # only_active：本异常多发生在收片阶段（下载/上传），此时其他进程可能已把任务置为已完成，不得覆盖
         logger.error(f"[H3视频] 任务 {task_id} 处理异常: {e}")
-        _update_task(task_id, status="失败", error_message=str(e)[:900],
+        _update_task(task_id, only_active=True, status="失败",
+                     error_message=f"收片阶段异常（ComfyUI 生成结果不受影响，可点重试收片）：{str(e)[:600]}",
                      finished_at=datetime.now())
     finally:
         with _lock:
@@ -599,7 +615,7 @@ def _prepare_and_run(
         _run_task(task_id, h3_prompt_id)
     except Exception as e:
         logger.error(f"[H3视频] 任务 {task_id} 准备阶段异常: {e}")
-        _update_task(task_id, status="失败", error_message=str(e)[:900],
+        _update_task(task_id, only_active=True, status="失败", error_message=str(e)[:900],
                      finished_at=datetime.now())
         with _lock:
             _running.discard(task_id)
@@ -834,11 +850,90 @@ def cancel_video_task(tenant_id: int, task_id: int) -> None:
     logger.info(f"[H3视频] 任务 {task_id} 已取消: {cancelled_via}")
 
 
+def _download_reference_images(urls: List[str]) -> List[Tuple[str, bytes]]:
+    """服务端并行下载历史参考图字节（同区域 TOS/CDN，不走浏览器，避开 CORS 与前端代理）。
+
+    任一张失败即抛错：静默少图会改变生成内容，宁可明确失败。
+    """
+    import requests as _requests
+
+    def _fetch(idx_url: Tuple[int, str]) -> Tuple[str, bytes]:
+        idx, url = idx_url
+        resp = _requests.get(url, timeout=60)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
+        if not content_type.startswith("image/"):
+            raise H3VideoError(f"参考图 {idx + 1} 地址不是图片")
+        return (f"ref-{idx + 1}.jpg", resp.content)
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        return list(ex.map(_fetch, enumerate(urls)))
+
+
+def _resubmit_failed_task(task) -> Tuple[str, str]:
+    """失败任务原位重试：服务端下载历史参考图，重置原记录并后台重跑准备+轮询。
+
+    复用原任务记录（id 不变），提示词与全部生成参数沿用原任务；
+    重置后由 _prepare_and_run 重新上传参考图/优化提示词/提交工作流。
+    """
+    import json as _json
+
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    try:
+        urls = _json.loads(task.images) if task.images else []
+    except Exception:
+        urls = []
+    urls = [u for u in urls if u]
+    if not urls:
+        raise H3VideoError("任务没有参考图地址，无法重试，请使用「编辑」重新上传")
+
+    try:
+        images = _download_reference_images(urls)
+    except H3VideoError:
+        raise
+    except Exception as e:
+        raise H3VideoError(f"参考图下载失败，请稍后重试: {str(e)[:200]}")
+
+    db = SessionLocal()
+    try:
+        row = db.query(AIVideoTask).filter(AIVideoTask.id == task.id).first()
+        if not row:
+            raise H3VideoError("任务不存在或已删除")
+        row.status = "排队中"
+        row.error_message = None
+        row.video_url = None
+        row.h3_prompt_id = None
+        row.started_at = None
+        row.finished_at = None
+        db.commit()
+    finally:
+        db.close()
+
+    _ensure_worker(
+        task.id,
+        prep_kwargs={
+            "title": task.title or "视频生成任务",
+            "prompt": task.prompt or "",
+            "images": images,
+            "duration": task.duration,
+            "resolution": task.resolution,
+            "ratio": task.ratio,
+            "voiceover_language": task.voiceover_language or "自动",
+            "video_type": task.video_type or "口播带货",
+        },
+    )
+    logger.info(f"[H3视频] 任务 {task.id} 原位重试：{len(images)} 张参考图已重新提交")
+    return "resubmitted", "已重新提交生成，排队中"
+
+
 def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], str]:
-    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+    """智能重试失败的视频任务：先查 ComfyUI history/queue，能接续就接续原任务；
+    无法接续（无提交记录/已无踪迹）时服务端直接取历史参考图原位重新提交。
 
     返回 (action, message)：action="resumed" 表示已接续原 ComfyUI 任务（后台轮询收片），
-    action="resubmit" 表示原任务在 ComfyUI 上已无踪迹，需要走重新提交。
+    action="resubmitted" 表示已复用原记录重新提交生成。
     """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
@@ -859,8 +954,8 @@ def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], st
         db.close()
 
     if not prompt_id:
-        # 从未成功提交到 ComfyUI（上传/优化阶段失败）：只能重新提交
-        return "resubmit", "原任务未提交到 ComfyUI，将重新提交"
+        # 从未成功提交到 ComfyUI（上传/优化阶段失败）：服务端取历史参考图原位重试
+        return _resubmit_failed_task(task)
 
     # 查 ComfyUI history/queue 判断原提交的执行情况
     resume = False   # 保留 prompt_id 接续（已有成片或仍在生成）
@@ -883,7 +978,7 @@ def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], st
         resume = True
 
     if not resume:
-        return "resubmit", "原任务在 ComfyUI 上已无记录，将重新提交"
+        return _resubmit_failed_task(task)
 
     db = SessionLocal()
     try:
@@ -917,8 +1012,21 @@ def delete_video_task(tenant_id: int, task_id: int) -> None:
         db.close()
 
 
-def resume_pending_tasks() -> None:
-    """服务启动时恢复未完成的任务：重新挂上后台轮询线程"""
+def resume_pending_tasks() -> Optional[int]:
+    """服务启动时恢复未完成的任务：重新挂上后台轮询线程
+
+    返回值：恢复的任务数；H3_BASE_URL 未配置时返回 None（跳过恢复）。
+    配置为空的进程接手任务会因无法查询 ComfyUI 而把任务误标失败，
+    因此守卫必须读取本进程启动时冻结的 settings，与轮询逻辑口径一致。
+    """
+    if not settings.H3_BASE_URL:
+        logger.error(
+            "[H3视频] H3_BASE_URL 未配置，跳过未完成任务恢复："
+            "本进程无法查询 ComfyUI，接手任务会误标失败。"
+            "请检查 backend/.env 的 H3_BASE_URL/H3_AUTH_USER/H3_AUTH_PASSWORD 后重启"
+        )
+        return None
+
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
 
@@ -955,3 +1063,5 @@ def resume_pending_tasks() -> None:
     for task_id, h3_prompt_id in pending:
         logger.info(f"[H3视频] 恢复未完成任务 {task_id}（ComfyUI {h3_prompt_id}）")
         _ensure_worker(task_id, h3_prompt_id)
+
+    return len(pending)

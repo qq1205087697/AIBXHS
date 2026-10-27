@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Card, Button, Input, Select, Space, Tag, message, Modal, Drawer, Descriptions, Spin, Row, Col, Pagination, Radio, Checkbox, Dropdown, Tooltip } from 'antd'
+import { Card, Button, Input, Select, Space, Tag, message, Modal, Drawer, Spin, Row, Col, Pagination, Radio, Checkbox, Dropdown, Tooltip } from 'antd'
 import {
   Search,
   RefreshCw,
@@ -44,6 +44,7 @@ interface RatingItem {
   updated_at?: string | null
   gross_margin?: number | null
   main_image_url?: string | null
+  main_image_thumb_url?: string | null
 }
 
 interface RatingDetail extends RatingItem {
@@ -94,6 +95,8 @@ const RatingOptimizationBot: React.FC = () => {
   const [aiSuggestLoading, setAiSuggestLoading] = useState(false)
   const [aiSuggestData, setAiSuggestData] = useState<Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>> | null>(null)
   const [aiCheckedFields, setAiCheckedFields] = useState<string[]>([])
+  // 旧AI建议内容（从最近一次AI建议操作日志读取；null=日志中无旧建议，不显示导入按钮）
+  const [aiOldSuggestData, setAiOldSuggestData] = useState<Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>> | null>(null)
   const [aiCheckAd, setAiCheckAd] = useState(true)
   // 已提交应用的基础信息字段和广告区（应用后从视图中隐藏，页面不关闭）
   const [submittedFields, setSubmittedFields] = useState<string[]>([])
@@ -189,6 +192,7 @@ const RatingOptimizationBot: React.FC = () => {
         store_filter: storeFilter || undefined,
         rating_status: ratingStatusValue,
         low_score: ratingStatusFilter === 'low_score' ? true : undefined,
+        rated_no_video: ratingStatusFilter === 'rated_no_video' ? true : undefined,
       }
       console.log('[DEBUG] fetchData 请求参数:', JSON.stringify(params))
       const res = await productPageInfoApi.getList(params)
@@ -465,9 +469,12 @@ const RatingOptimizationBot: React.FC = () => {
           content: contentMap[f.key],
           ...(listingSuggestion ? { suggestion: listingSuggestion } : {}),
         })
-          .then(res => [f.key, res.data?.success ? (res.data.data?.content || '') : ''] as const)
+          .then(res => [f.key, {
+            content: res.data?.success ? (res.data.data?.content || '') : '',
+            hits: (res.data?.data?.forbidden_hits || []) as string[],
+          }] as const)
       ))
-      const data = Object.fromEntries(results) as Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>>
+      const data = Object.fromEntries(results.map(([k, v]) => [k, v.content])) as Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>>
       setAiSuggestData(data)
       // 生成完成后默认全选所有字段
       setAiCheckedFields(AI_BASIC_FIELDS.map(f => f.key))
@@ -478,6 +485,15 @@ const RatingOptimizationBot: React.FC = () => {
         console.error('记录AI建议日志失败:', e)
       }
       message.success('AI建议生成完成')
+      // 禁用词命中提示（代码层校验结果）
+      const hitMap = results.filter(([, v]) => v.hits.length > 0)
+      if (hitMap.length > 0) {
+        const labelOf = (k: string) => AI_BASIC_FIELDS.find(f => f.key === k)?.label || k
+        message.warning(
+          `以下生成内容命中禁用词，请检查后再应用：${hitMap.map(([k, v]) => `${labelOf(k)}（${v.hits.join('、')}）`).join('；')}`,
+          6,
+        )
+      }
     } catch (error) {
       console.error('AI建议生成失败:', error)
       message.error('AI建议生成失败')
@@ -486,13 +502,16 @@ const RatingOptimizationBot: React.FC = () => {
     }
   }
 
-  // 打开AI建议视图：先获取完整详情（列表数据缺少产品描述/五点描述字段），再读取操作日志判断近两天是否生成过
+  // 打开AI建议视图：先获取完整详情（列表数据缺少产品描述/五点描述字段），再读取最近一次AI建议日志提取旧建议内容（不自动生成，由按钮触发）
   const handleOpenAiSuggest = async () => {
     if (!selectedRecord) return
     setDetailView('ai')
-    // 重置应用状态
+    // 重置应用状态和AI建议内容（每次打开为全新视图，避免残留上一个产品的生成结果）
     setSubmittedFields([])
     setAdSubmitted(false)
+    setAiSuggestData(null)
+    setAiCheckedFields([])
+    setAiOldSuggestData(null)
     // 广告区表单不做预填，仅SKU预填当前产品
     setAdForm({
       ad_type: [],
@@ -521,7 +540,8 @@ const RatingOptimizationBot: React.FC = () => {
     } catch (error) {
       console.error('获取产品详情失败:', error)
     }
-    let recentLog: any = null
+    // 读取最近一次AI建议日志，提取旧建议内容：有内容才显示"导入旧Listing内容"按钮
+    let oldData: Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>> | null = null
     try {
       const res = await operationLogsApi.getList({
         page: 1,
@@ -532,53 +552,31 @@ const RatingOptimizationBot: React.FC = () => {
       })
       if (res.data.success) {
         const logs = Array.isArray(res.data.data) ? res.data.data : []
-        recentLog = logs.length > 0 ? logs[0] : null
-      }
-    } catch (error) {
-      console.error('读取AI建议日志失败:', error)
-    }
-    // 判断最近的AI建议日志是否在近两天内
-    let isRecent = false
-    if (recentLog?.created_at) {
-      const t = new Date(String(recentLog.created_at).replace(' ', 'T')).getTime()
-      isRecent = !isNaN(t) && (Date.now() - t < 2 * 24 * 3600 * 1000)
-    }
-    if (!isRecent) {
-      // 近两天没点击过，直接运行新建议
-      runAiSuggest(record)
-      return
-    }
-    Modal.confirm({
-      title: '近期点击过AI建议',
-      content: `该产品在近两天内已生成过AI建议（${recentLog.created_at}），请选择使用旧建议或运行新AI建议。`,
-      okText: '运行新AI建议',
-      cancelText: '使用旧建议',
-      onOk: () => {
-        runAiSuggest(record)
-      },
-      onCancel: () => {
-        // 使用旧建议：根据操作日志补全旧内容
-        let after = recentLog?.after_data
+        let after = logs.length > 0 ? logs[0]?.after_data : null
         if (typeof after === 'string') {
           try { after = JSON.parse(after) } catch { after = null }
         }
-        if (after && typeof after === 'object' && Object.keys(after).length > 0) {
+        if (after && typeof after === 'object') {
           const restored: Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>> = {}
           AI_BASIC_FIELDS.forEach(f => {
             const v = (after as any)[f.key]
             if (typeof v === 'string' && v) restored[f.key] = v
           })
-          if (Object.keys(restored).length > 0) {
-            setAiSuggestData(restored)
-            setAiCheckedFields(Object.keys(restored))
-            message.success('已载入旧建议')
-            return
-          }
+          if (Object.keys(restored).length > 0) oldData = restored
         }
-        // 操作日志没有旧内容，直接运行新建议
-        runAiSuggest(record)
-      },
-    })
+      }
+    } catch (error) {
+      console.error('读取AI建议日志失败:', error)
+    }
+    setAiOldSuggestData(oldData)
+  }
+
+  // 导入旧Listing内容：把最近一次AI建议日志中的旧建议内容载入AI生成内容区
+  const handleImportOldSuggest = () => {
+    if (!aiOldSuggestData || aiSuggestLoading) return
+    setAiSuggestData(aiOldSuggestData)
+    setAiCheckedFields(AI_BASIC_FIELDS.filter(f => !!aiOldSuggestData[f.key]).map(f => f.key))
+    message.success('已载入旧建议')
   }
 
   // 应用AI建议：勾选的基础信息字段AI内容逐字段提交到编辑基础信息地址；勾选广告→提交到开广告地址
@@ -943,48 +941,8 @@ const RatingOptimizationBot: React.FC = () => {
         </Button>
       </Card>
 
-      {/* 操作栏：全选 + 操作下拉 */}
-      <Card size="small" style={{ marginBottom: 8 }} bodyStyle={{ padding: '8px 16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <Checkbox
-              checked={isAllSelected}
-              indeterminate={currentPageSelectedCount > 0 && currentPageSelectedCount < currentPageIds.length}
-              onChange={(e) => handleSelectAll(e.target.checked)}
-            >
-              全选当前页 ({currentPageSelectedCount}/{currentPageIds.length})
-            </Checkbox>
-            <span style={{ marginLeft: 16, color: '#666' }}>
-              已选择 <span style={{ color: '#1890ff', fontWeight: 600 }}>{selectedIds.length}</span> 条
-            </span>
-          </div>
-          <Dropdown
-            disabled={selectedIds.length === 0}
-            menu={{
-              items: [
-                {
-                  key: 'submit',
-                  label: '提交评分',
-                  onClick: handleSubmitRating,
-                },
-                {
-                  key: 'delete',
-                  label: '删除记录',
-                  danger: true,
-                  onClick: handleDeleteRecords,
-                },
-              ],
-            }}
-          >
-            <Button type="primary" disabled={selectedIds.length === 0}>
-              操作
-            </Button>
-          </Dropdown>
-        </div>
-      </Card>
-
       {/* 搜索栏 */}
-      <Card size="small" style={{ marginBottom: 16 }} bodyStyle={{ padding: '12px 16px' }}>
+      <Card size="small" style={{ marginBottom: 8 }} bodyStyle={{ padding: '12px 16px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Space wrap>
             <Input
@@ -1025,6 +983,7 @@ const RatingOptimizationBot: React.FC = () => {
               <Radio.Button value="all">全部</Radio.Button>
               <Radio.Button value="rated">已评分</Radio.Button>
               <Radio.Button value="low_score"><Tooltip title="低于60分记录">低分</Tooltip></Radio.Button>
+              <Radio.Button value="rated_no_video"><Tooltip title="已评分但无视频记录">无视频</Tooltip></Radio.Button>
               <Radio.Button value="unrated">未评分</Radio.Button>
             </Radio.Group>
             <Button type="primary" icon={<Search size={14} />} onClick={handleSearch}>
@@ -1048,6 +1007,46 @@ const RatingOptimizationBot: React.FC = () => {
         </div>
       </Card>
 
+      {/* 操作栏：全选 + 操作下拉（位于搜索栏下方） */}
+      <Card size="small" style={{ marginBottom: 16 }} bodyStyle={{ padding: '8px 16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <Checkbox
+              checked={isAllSelected}
+              indeterminate={currentPageSelectedCount > 0 && currentPageSelectedCount < currentPageIds.length}
+              onChange={(e) => handleSelectAll(e.target.checked)}
+            >
+              全选当前页 ({currentPageSelectedCount}/{currentPageIds.length})
+            </Checkbox>
+            <span style={{ marginLeft: 16, color: '#666' }}>
+              已选择 <span style={{ color: '#1890ff', fontWeight: 600 }}>{selectedIds.length}</span> 条
+            </span>
+          </div>
+          <Dropdown
+            disabled={selectedIds.length === 0}
+            menu={{
+              items: [
+                {
+                  key: 'submit',
+                  label: '提交评分',
+                  onClick: handleSubmitRating,
+                },
+                {
+                  key: 'delete',
+                  label: '删除记录',
+                  danger: true,
+                  onClick: handleDeleteRecords,
+                },
+              ],
+            }}
+          >
+            <Button type="primary" disabled={selectedIds.length === 0}>
+              操作
+            </Button>
+          </Dropdown>
+        </div>
+      </Card>
+
       {/* 数据卡片列表 */}
       <Card
         className="rating-list-card"
@@ -1058,75 +1057,107 @@ const RatingOptimizationBot: React.FC = () => {
           {/* 列表区域自适应填满剩余高度，条数多时内部滚动 */}
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', paddingRight: 4 }}>
             <Row gutter={[16, 16]}>
-              {data.map((item) => (
-                <Col key={item.id} span={getColSpan()}>
-                  <Card
-                    hoverable
-                    style={{
-                      borderRadius: 12,
-                      border: selectedIds.includes(item.id) ? '2px solid #1890ff' : '1px solid #e8e8e8',
-                      borderLeft: `4px solid ${item.total_score >= 80 ? '#52c41a' : item.total_score >= 60 ? '#faad14' : '#f5222d'}`,
-                      cursor: 'pointer',
-                      minHeight: 96,
-                      width: '100%',
-                      position: 'relative',
-                    }}
-                    bodyStyle={{ padding: 12 }}
-                    onClick={() => handleViewDetail(item)}
-                  >
-                    {/* 复选框 */}
-                    <Checkbox
-                      checked={selectedIds.includes(item.id)}
-                      onChange={(e) => {
-                        e.stopPropagation()
-                        handleSelectItem(item.id, e.target.checked)
-                      }}
-                      style={{
-                        position: 'absolute',
-                        top: 10,
-                        left: 10,
-                        zIndex: 10,
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    {/* 第一行：SKU（粗体） + 店铺（右上角灰色小字） */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, marginLeft: 24 }}>
-                      <span style={{ fontSize: 14, fontWeight: 600, color: '#333' }}>SKU: {item.sku || '-'}</span>
-                      <span style={{ fontSize: 12, color: '#555', fontWeight: 500 }}>{item.store || '-'}</span>
-                    </div>
-                    {/* 第二行：ASIN + 复制图标 + 大号分数 */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginLeft: 24, marginBottom: 10 }}>
-                      <span style={{ color: '#1890ff', fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                        {item.asin || '-'}
-                        <CopyOutlined
-                          style={{ color: '#999', fontSize: 12, cursor: 'pointer' }}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            navigator.clipboard?.writeText(item.asin || '')
-                            message.success('已复制ASIN')
-                          }}
-                        />
-                      </span>
-                      <span style={{ color: item.total_score >= 80 ? '#52c41a' : item.total_score >= 60 ? '#faad14' : '#f5222d' }}>
-                        <span style={{ fontSize: 22, fontWeight: 700 }}>{item.total_score}</span>
-                        <span style={{ fontSize: 12, marginLeft: 2 }}>分</span>
-                      </span>
-                    </div>
-                    {/* 底部进度条：颜色随分数 */}
-                    <div style={{ height: 6, background: '#f0f0f0', borderRadius: 3, marginLeft: 24, overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          height: '100%',
-                          width: `${Math.min(item.total_score, 100)}%`,
-                          background: item.total_score >= 80 ? '#52c41a' : item.total_score >= 60 ? '#faad14' : '#f5222d',
-                          borderRadius: 3,
-                          transition: 'width 0.3s',
+              {data.map((item) => {
+                // 评分分级：0-30 红（仅低分预警用红）/ 30-60 琥珀 / 60+ 绿
+                const scoreLevel = item.total_score <= 30 ? 'low' : item.total_score <= 60 ? 'medium' : 'high'
+                const scoreColor = scoreLevel === 'low' ? '#e5484d' : scoreLevel === 'medium' ? '#d97706' : '#059669'
+                const scoreText = scoreLevel === 'low' ? '低于均值' : scoreLevel === 'medium' ? '表现一般' : '表现良好'
+                return (
+                  <Col key={item.id} span={getColSpan()}>
+                    <Card
+                      className={`rating-card${selectedIds.includes(item.id) ? ' is-selected' : ''}`}
+                      style={{ cursor: 'pointer', width: '100%' }}
+                      bodyStyle={{ padding: '13px 16px' }}
+                      onClick={() => handleViewDetail(item)}
+                    >
+                      {/* 复选框 */}
+                      <Checkbox
+                        checked={selectedIds.includes(item.id)}
+                        onChange={(e) => {
+                          e.stopPropagation()
+                          handleSelectItem(item.id, e.target.checked)
                         }}
+                        style={{
+                          position: 'absolute',
+                          top: 14,
+                          left: 12,
+                          zIndex: 10,
+                        }}
+                        onClick={(e) => e.stopPropagation()}
                       />
-                    </div>
-                  </Card>
-                </Col>
-              ))}
+                      {/* 主体区：主图 + 信息区（店铺标签在SKU行右侧，分数在ASIN行右侧） */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 22 }}>
+                        {/* 主图：缩略图+懒加载，失败回退原图 */}
+                        {item.main_image_url ? (
+                          <img
+                            src={item.main_image_thumb_url || item.main_image_url}
+                            alt="主图"
+                            loading="lazy"
+                            onError={(e) => {
+                              const img = e.currentTarget
+                              const original = item.main_image_url || ''
+                              if (item.main_image_thumb_url && img.src !== original) {
+                                img.dataset.fallback = '1'
+                                img.src = original
+                              }
+                            }}
+                            style={{ width: 56, height: 56, borderRadius: 8, objectFit: 'cover', flexShrink: 0, background: '#f5f7fa', border: '1px solid #ebeef3' }}
+                          />
+                        ) : (
+                          <div style={{ width: 56, height: 56, borderRadius: 8, background: '#f5f7fa', border: '1px solid #ebeef3', color: '#bbb', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            无图
+                          </div>
+                        )}
+                        {/* 中间信息区：SKU 深灰主信息 / ASIN 中灰次信息，各带复制图标 */}
+                        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {/* 行1：SKU + 复制图标 | 店铺标签 */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, minWidth: 0 }}>
+                            <span style={{ color: '#64748b', fontWeight: 500, flexShrink: 0 }}>SKU:</span>
+                            <span style={{ color: '#1f2937', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{item.sku || '-'}</span>
+                            <CopyOutlined
+                              className="rating-copy-btn"
+                              style={{ flexShrink: 0 }}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigator.clipboard?.writeText(item.sku || '')
+                                message.success('已复制SKU')
+                              }}
+                            />
+                            <span style={{ flex: 1 }} />
+                            <span className="rating-site-tag">{item.store || '-'}</span>
+                          </div>
+                          {/* 行2：ASIN + 复制图标 | 评分数字 */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, minWidth: 0 }}>
+                            <span style={{ color: '#64748b', fontWeight: 500, flexShrink: 0 }}>ASIN:</span>
+                            <span style={{ color: '#6b7280', letterSpacing: 0.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{item.asin || '-'}</span>
+                            <CopyOutlined
+                              className="rating-copy-btn"
+                              style={{ flexShrink: 0 }}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigator.clipboard?.writeText(item.asin || '')
+                                message.success('已复制ASIN')
+                              }}
+                            />
+                            <span style={{ flex: 1 }} />
+                            <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 2, flexShrink: 0 }}>
+                              <span style={{ fontSize: 22, fontWeight: 700, lineHeight: 1, color: scoreColor, fontVariantNumeric: 'tabular-nums' }}>{item.total_score}</span>
+                              <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>分</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      {/* 底部：细进度条（4px、最宽200px）+ 评级小字 */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 22, marginTop: 8 }}>
+                        <div className="rating-progress-track" style={{ flex: 1, maxWidth: 200, height: 4 }}>
+                          <div className={`rating-progress-fill rating-fill-${scoreLevel}`} style={{ width: `${Math.min(item.total_score, 100)}%` }} />
+                        </div>
+                        <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>{scoreText}</span>
+                      </div>
+                    </Card>
+                  </Col>
+                )
+              })}
             </Row>
           </div>
         </Spin>
@@ -1163,26 +1194,14 @@ const RatingOptimizationBot: React.FC = () => {
       {/* 查看详情抽屉（从右侧滑出） */}
       <Drawer
         title={
-          detailView === 'detail' ? (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 40 }}>
-              <span>产品页面详情</span>
-              {selectedRecord?.updated_at && (
-                <span style={{ fontSize: 12, color: '#999', fontWeight: 'normal' }}>
-                  最近更新：{new Date(selectedRecord.updated_at).toLocaleString('zh-CN')}
-                </span>
-              )}
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Button
-                size="small"
-                onClick={() => setDetailView('detail')}
-              >
-                返回
-              </Button>
-              <span>{detailView === 'ai' ? 'AI建议' : '操作日志'}</span>
-            </div>
-          )
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 40 }}>
+            <span>产品页面详情</span>
+            {selectedRecord?.updated_at && (
+              <span style={{ fontSize: 12, color: '#999', fontWeight: 'normal' }}>
+                最近更新：{new Date(selectedRecord.updated_at).toLocaleString('zh-CN')}
+              </span>
+            )}
+          </div>
         }
         open={detailVisible}
         onClose={() => {
@@ -1218,26 +1237,32 @@ const RatingOptimizationBot: React.FC = () => {
           </div>
         ) : (
         <>
-        {selectedRecord && detailView === 'detail' && (
+        {selectedRecord && (
           <>
-            {/* 切换按钮 */}
+            {/* 切换按钮：四个视图平级切换（无返回键） */}
             <Space style={{ marginBottom: 16 }}>
               <Button
-                type={detailTab === 'product' ? 'primary' : 'default'}
-                onClick={() => setDetailTab('product')}
+                type={detailView === 'detail' && detailTab === 'product' ? 'primary' : 'default'}
+                onClick={() => { setDetailView('detail'); setDetailTab('product') }}
               >
                 产品信息详情
               </Button>
               <Button
-                type={detailTab === 'score' ? 'primary' : 'default'}
-                onClick={() => setDetailTab('score')}
+                type={detailView === 'detail' && detailTab === 'score' ? 'primary' : 'default'}
+                onClick={() => { setDetailView('detail'); setDetailTab('score') }}
               >
                 评分详情
               </Button>
-              <Button onClick={handleOpenLog}>操作日志</Button>
+              <Button
+                type={detailView === 'log' ? 'primary' : 'default'}
+                onClick={handleOpenLog}
+              >
+                操作日志
+              </Button>
               <Tooltip title={selectedRecord?.rating_status === 1 ? undefined : '请先给产品提交评分'}>
                 <span style={{ display: 'inline-flex' }}>
                   <Button
+                    type={detailView === 'ai' ? 'primary' : 'default'}
                     icon={<Sparkles size={14} />}
                     disabled={aiSuggestLoading || selectedRecord?.rating_status !== 1}
                     onClick={handleOpenAiSuggest}
@@ -1247,83 +1272,122 @@ const RatingOptimizationBot: React.FC = () => {
                 </span>
               </Tooltip>
             </Space>
-
+          </>
+        )}
+        {selectedRecord && detailView === 'detail' && (
+          <>
             {/* 产品信息详情 */}
             {detailTab === 'product' && (
-              <Descriptions bordered column={2} size="small">
-                <Descriptions.Item label="ASIN" span={1}>
-                  {(() => {
-                    const store = selectedRecord.store_original || ''
-                    let urlPrefix = ''
-                    if (store.includes('US') || store.includes('USA')) {
-                      urlPrefix = 'https://www.amazon.com/dp/'
-                    } else if (store.includes('DE')) {
-                      urlPrefix = 'https://www.amazon.de/dp/'
-                    } else if (store.includes('UK')) {
-                      urlPrefix = 'https://www.amazon.co.uk/dp/'
-                    } else if (store.includes('CA')) {
-                      urlPrefix = 'https://www.amazon.ca/dp/'
-                    }
-                    const asinUrl = selectedRecord.asin && urlPrefix ? `${urlPrefix}${selectedRecord.asin}` : ''
-                    return asinUrl ? (
-                      <a href={asinUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#1890ff' }}>
-                        {selectedRecord.asin}
-                      </a>
-                    ) : (
-                      selectedRecord.asin || '字段为空'
-                    )
-                  })()}
-                </Descriptions.Item>
-                <Descriptions.Item label="SKU" span={1}>{selectedRecord.sku || '字段为空'}</Descriptions.Item>
-                <Descriptions.Item label="店铺" span={1}>{selectedRecord.store || '字段为空'}</Descriptions.Item>
-                <Descriptions.Item label="价格" span={1}>{selectedRecord.price || '字段为空'}</Descriptions.Item>
-                <Descriptions.Item label="图片数" span={1}>{selectedRecord.image_count ?? '字段为空'}</Descriptions.Item>
-                <Descriptions.Item label="主图" span={1}>
-                  {selectedRecord.main_image_url ? (
-                    <img
-                      src={selectedRecord.main_image_url}
-                      alt="主图"
-                      style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4, cursor: 'pointer' }}
-                      onClick={() => {
-                        setPreviewImage(selectedRecord.main_image_url || '')
-                        setPreviewOpen(true)
-                      }}
-                    />
-                  ) : (
-                    <span style={{ color: '#999' }}>未在产品库中找到</span>
-                  )}
-                </Descriptions.Item>
-
-                <Descriptions.Item label="标题" span={2}>
-                  <div style={{ whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto' }}>
-                    {selectedRecord.title || '字段为空'}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* 1. 基础信息网格：左侧字段 + 右侧主图 */}
+                <div className="product-info-grid">
+                  <div className="product-info-fields">
+                    <div className="product-field-item">
+                      <span className="product-field-label">ASIN</span>
+                      {(() => {
+                        const store = selectedRecord.store_original || ''
+                        let urlPrefix = ''
+                        if (store.includes('US') || store.includes('USA')) {
+                          urlPrefix = 'https://www.amazon.com/dp/'
+                        } else if (store.includes('DE')) {
+                          urlPrefix = 'https://www.amazon.de/dp/'
+                        } else if (store.includes('UK')) {
+                          urlPrefix = 'https://www.amazon.co.uk/dp/'
+                        } else if (store.includes('CA')) {
+                          urlPrefix = 'https://www.amazon.ca/dp/'
+                        }
+                        const asinUrl = selectedRecord.asin && urlPrefix ? `${urlPrefix}${selectedRecord.asin}` : ''
+                        return asinUrl ? (
+                          <a href={asinUrl} target="_blank" rel="noopener noreferrer" className="product-field-value product-asin-link">
+                            {selectedRecord.asin}
+                          </a>
+                        ) : (
+                          <span className="product-field-value">{selectedRecord.asin || '字段为空'}</span>
+                        )
+                      })()}
+                    </div>
+                    <div className="product-field-item">
+                      <span className="product-field-label">SKU</span>
+                      <span className="product-field-value">{selectedRecord.sku || '字段为空'}</span>
+                    </div>
+                    <div className="product-field-item">
+                      <span className="product-field-label">店铺</span>
+                      <span className="product-field-value">{selectedRecord.store || '字段为空'}</span>
+                    </div>
+                    <div className="product-field-item">
+                      <span className="product-field-label">价格</span>
+                      <span className="product-field-value">{selectedRecord.price || '字段为空'}</span>
+                    </div>
                   </div>
-                </Descriptions.Item>
-                <Descriptions.Item label="产品描述" span={2}>
-                  <div style={{ whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>
+                  <div className="product-main-img-wrap">
+                    {selectedRecord.main_image_url ? (
+                      <img
+                        src={selectedRecord.main_image_url}
+                        alt="主图"
+                        className="product-main-img"
+                        onClick={() => {
+                          setPreviewImage(selectedRecord.main_image_url || '')
+                          setPreviewOpen(true)
+                        }}
+                      />
+                    ) : (
+                      <div
+                        className="product-main-img"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', fontSize: 12, cursor: 'default' }}
+                      >
+                        未找到
+                      </div>
+                    )}
+                    <span className="product-img-count">
+                      {selectedRecord.main_image_url
+                        ? (selectedRecord.image_count !== null && selectedRecord.image_count !== undefined ? `共 ${selectedRecord.image_count} 张图片` : '')
+                        : '未在产品库中找到'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 2. 标题 */}
+                <div className="product-content-block">
+                  <div className="product-block-header">标题</div>
+                  <div className="product-block-body">
+                    <div className="product-title-text" style={{ whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto' }}>
+                      {selectedRecord.title || '字段为空'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. 产品描述 */}
+                <div className="product-content-block">
+                  <div className="product-block-header">产品描述</div>
+                  <div className="product-block-body" style={{ whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' }}>
                     {selectedRecord.product_description || '字段为空'}
                   </div>
-                </Descriptions.Item>
-                <Descriptions.Item label="关键词" span={2}>
-                  <div style={{ whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>
+                </div>
+
+                {/* 4. 关键词（保持原样式：纯文本，不拆分、不着色） */}
+                <div className="product-content-block">
+                  <div className="product-block-header">关键词</div>
+                  <div className="product-block-body" style={{ whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto' }}>
                     {selectedRecord.keywords || '字段为空'}
                   </div>
-                </Descriptions.Item>
-                <Descriptions.Item label="五点描述" span={2}>
-                  <div style={{ maxHeight: 200, overflow: 'auto' }}>
+                </div>
+
+                {/* 5. 五点描述：圆点列表 */}
+                <div className="product-content-block">
+                  <div className="product-block-header">五点描述</div>
+                  <div className="product-block-body" style={{ maxHeight: 200, overflow: 'auto' }}>
                     {selectedRecord.bullet_points ? (
-                      selectedRecord.bullet_points.split('\n').map((line, idx) => (
-                        <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', marginBottom: 4 }}>
-                          <span style={{ color: '#000', marginRight: 6, fontSize: 14, lineHeight: '20px' }}>●</span>
-                          <span style={{ whiteSpace: 'pre-wrap' }}>{line}</span>
-                        </div>
-                      ))
+                      <ul className="product-bullet-list">
+                        {selectedRecord.bullet_points.split('\n').filter(l => l.trim()).map((line, idx) => (
+                          <li key={idx} style={{ whiteSpace: 'pre-wrap' }}>{line}</li>
+                        ))}
+                      </ul>
                     ) : (
-                      <span>字段为空</span>
+                      <span style={{ color: '#9ca3af' }}>字段为空</span>
                     )}
                   </div>
-                </Descriptions.Item>
-              </Descriptions>
+                </div>
+              </div>
             )}
 
             {/* 评分详情 */}
@@ -1355,173 +1419,176 @@ const RatingOptimizationBot: React.FC = () => {
                   return null
                 })()}
 
-                <Descriptions bordered column={2} size="small">
-                <Descriptions.Item label="总分" span={1} style={{ background: '#fafafa', whiteSpace: 'nowrap' }}>
-                  <Tag
-                    color={selectedRecord.total_score >= 80 ? 'green' : selectedRecord.total_score >= 60 ? 'orange' : 'red'}
-                    style={{ fontSize: 18, padding: '4px 16px', fontWeight: 600 }}
-                  >
-                    {selectedRecord.total_score}/100
-                  </Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="毛利率" span={1} style={{ whiteSpace: 'nowrap' }}>
-                  {selectedRecord.gross_margin !== null && selectedRecord.gross_margin !== undefined ? (
-                    <Tag color={selectedRecord.gross_margin >= 30 ? 'green' : selectedRecord.gross_margin >= 15 ? 'blue' : 'red'}>
-                      {selectedRecord.gross_margin.toFixed(2)}%
-                    </Tag>
-                  ) : (
-                    <span style={{ color: '#999' }}>暂无毛利率</span>
-                  )}
-                </Descriptions.Item>
-                <Descriptions.Item label="参考关键词" span={2}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                    <div style={{ whiteSpace: 'pre-wrap', maxHeight: 150, overflow: 'auto', flex: 1 }}>
-                      {selectedRecord.traffic_keywords || '暂无'}
-                    </div>
-                    <Button
-                      type="link"
-                      size="small"
-                      icon={<Edit2 size={14} />}
-                      onClick={handleOpenKeywordEdit}
-                      style={{ flexShrink: 0, padding: '0 4px' }}
-                    >
-                      编辑
-                    </Button>
-                  </div>
-                </Descriptions.Item>
+                {/* 评分详情主体：总览 → 细分评分网格 → 参考关键词 → 竞品价格（与卡片设计语言统一） */}
+                {(() => {
+                  const r = selectedRecord
+                  // /10 分制分级：<=3 低分红 / <=6 中分橙 / >6 高分绿；空值用中性文本样式
+                  const badgeCls = (val: unknown) => {
+                    const n = typeof val === 'number' ? val : parseFloat(String(val ?? ''))
+                    if (Number.isNaN(n)) return 'rating-badge-text'
+                    return n <= 3 ? 'rating-badge-low' : n <= 6 ? 'rating-badge-medium' : 'rating-badge-high'
+                  }
+                  const badge = (val: string | number | null | undefined, unit = '/10') =>
+                    val === null || val === undefined || val === '' ? (
+                      <span className="rating-badge rating-badge-text">字段为空</span>
+                    ) : (
+                      <span className={`rating-badge ${badgeCls(val)}`}>{val}{unit}</span>
+                    )
+                  // 参考关键词拆分为独立标签
+                  const keywordList = (r.traffic_keywords || '').split(/[\n,，;；]+/).map(s => s.trim()).filter(Boolean)
+                  // 竞品价格按行解析（ASIN: 价格），根据店铺生成 Amazon 链接
+                  const store = r.store_original || ''
+                  let urlPrefix = ''
+                  if (store.includes('US') || store.includes('USA')) {
+                    urlPrefix = 'https://www.amazon.com/dp/'
+                  } else if (store.includes('DE')) {
+                    urlPrefix = 'https://www.amazon.de/dp/'
+                  } else if (store.includes('UK')) {
+                    urlPrefix = 'https://www.amazon.co.uk/dp/'
+                  } else if (store.includes('CA')) {
+                    urlPrefix = 'https://www.amazon.ca/dp/'
+                  }
+                  const competitorRows = (r.competitor_price ? r.competitor_price.split('\n') : [])
+                    .map(line => line.trim())
+                    .filter(Boolean)
+                    .map(line => {
+                      const sepIdx = Math.max(line.indexOf(':'), line.indexOf('：'))
+                      const asin = sepIdx > 0 ? line.substring(0, sepIdx).trim() : ''
+                      const price = sepIdx > 0 ? line.substring(sepIdx + 1).trim() : ''
+                      return { line, asin, price, url: asin && urlPrefix ? `${urlPrefix}${asin}` : '' }
+                    })
 
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>标题评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}><Tag color="blue">{selectedRecord.title_rating ?? '字段为空'}/10</Tag></div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>五点描述评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}><Tag color="blue">{selectedRecord.description_rating ?? '字段为空'}/10</Tag></div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>产品描述评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}><Tag color="blue">{selectedRecord.product_description_rating ?? '字段为空'}/10</Tag></div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>关键词评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}><Tag color="blue">{selectedRecord.keywords_rating ?? '字段为空'}/10</Tag></div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>图片评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}><Tag color="blue">{selectedRecord.image_rating ?? '字段为空'}/10</Tag></div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>星级评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}>
-                    <Space>
-                      <span>{selectedRecord.star ?? '字段为空'}</span>
-                      <Tag color="blue">{selectedRecord.star_rating ?? '字段为空'}/10</Tag>
-                    </Space>
-                  </div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>广告评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}>
-                    <Tag color="blue">{selectedRecord.ad_rating ?? '字段为空'}/10</Tag>
-                  </div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>A+评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}>
-                    <Tag color="blue">{selectedRecord.aplus_rating ?? '字段为空'}/10</Tag>
-                  </div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>视频评分</span>} span={1}>
-                  <div style={{ whiteSpace: 'nowrap' }}>
-                    <Tag color="blue">{selectedRecord.video_rating ?? '字段为空'}/10</Tag>
-                  </div>
-                </Descriptions.Item>
-                <Descriptions.Item label={<span style={{ whiteSpace: 'nowrap' }}>竞品价格</span>} span={2}>
-                  <Space direction="vertical" style={{ width: '100%' }}>
-                    <span style={{ color: '#999', fontSize: 12 }}>
-                      如该产品不是竞品则可点击删除，重新排名计算得分
-                    </span>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0, flex: 1, minWidth: 0 }}>
-                        {selectedRecord.competitor_price ? (
-                          <>
-                            {selectedRecord.competitor_price.split('\n').map((line, idx) => {
-                              const trimmedLine = line.trim()
-                              if (!trimmedLine) return null
-                              // 解析ASIN部分，用于生成链接
-                              const sepIdx = Math.max(trimmedLine.indexOf(':'), trimmedLine.indexOf('：'))
-                              const asinPart = sepIdx > 0 ? trimmedLine.substring(0, sepIdx).trim() : ''
-                              const pricePart = sepIdx > 0 ? trimmedLine.substring(sepIdx + 1).trim() : ''
-                              // 根据店铺生成Amazon链接（用store_original，即原始店铺名）
-                              const store = selectedRecord.store_original || ''
-                              let urlPrefix = ''
-                              if (store.includes('US') || store.includes('USA')) {
-                                urlPrefix = 'https://www.amazon.com/dp/'
-                              } else if (store.includes('DE')) {
-                                urlPrefix = 'https://www.amazon.de/dp/'
-                              } else if (store.includes('UK')) {
-                                urlPrefix = 'https://www.amazon.co.uk/dp/'
-                              } else if (store.includes('CA')) {
-                                urlPrefix = 'https://www.amazon.ca/dp/'
-                              }
-                              const asinUrl = asinPart && urlPrefix ? `${urlPrefix}${asinPart}` : ''
-                              return (
-                                <Tag
-                                  key={idx}
-                                  closable
-                                  onClose={(e) => {
-                                    e.preventDefault()
-                                    handleDeleteCompetitor(trimmedLine)
-                                  }}
-                                  style={{ marginBottom: 4 }}
-                                >
-                                  {asinUrl ? (
-                                    <a href={asinUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#1890ff', textDecoration: 'underline' }}>{asinPart}</a>
-                                  ) : (
-                                    asinPart || trimmedLine
-                                  )}
-                                  {pricePart && sepIdx > 0 ? `：${pricePart}` : (!asinPart ? '' : '')}
-                                </Tag>
-                              )
-                            })}
-                          </>
-                        ) : (
-                          <span style={{ color: '#999' }}>无竞品价格</span>
-                        )}
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      {/* 1. 数据总览：总分（按分值配色）+ 毛利率（蓝色强调） */}
+                      <div className="rating-overview-row">
+                        <div className="rating-overview-card">
+                          <div className="rating-overview-label">总分</div>
+                          <div className="rating-overview-value" style={{ color: r.total_score <= 30 ? '#e5484d' : r.total_score <= 60 ? '#d97706' : '#059669' }}>
+                            {r.total_score}
+                            <span className="rating-overview-unit">/100</span>
+                          </div>
+                        </div>
+                        <div className="rating-overview-card">
+                          <div className="rating-overview-label">毛利率</div>
+                          {r.gross_margin !== null && r.gross_margin !== undefined ? (
+                            <div className="rating-overview-value" style={{ color: '#1890ff' }}>
+                              {r.gross_margin.toFixed(2)}
+                              <span className="rating-overview-unit">%</span>
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 14, color: '#9ca3af', padding: '7px 0' }}>暂无毛利率</div>
+                          )}
+                        </div>
                       </div>
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<Edit2 size={14} />}
-                        onClick={handleOpenCompetitorAdd}
-                        style={{ flexShrink: 0, padding: '0 4px' }}
-                      >
-                        编辑
-                      </Button>
-                    </div>
-                    {selectedRecord.competitor_price_rank > 0 && (
-                      <Tag color={selectedRecord.competitor_price_rank === 1 ? 'green' : selectedRecord.competitor_price_rank <= 3 ? 'blue' : 'default'}>
-                        第{selectedRecord.competitor_price_rank}名 {selectedRecord.competitor_price_score}/10
-                      </Tag>
-                    )}
-                  </Space>
-                </Descriptions.Item>
-              </Descriptions>
 
-                {/* 产品建议 */}
+                      {/* 2. 细分评分网格：圆角小徽章自动匹配分值颜色 */}
+                      <div className="rating-score-grid">
+                        <div className="rating-score-item"><span className="rating-score-item-label">标题评分</span>{badge(r.title_rating)}</div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">五点描述评分</span>{badge(r.description_rating)}</div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">产品描述评分</span>{badge(r.product_description_rating)}</div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">关键词评分</span>{badge(r.keywords_rating)}</div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">图片评分</span>{badge(r.image_rating)}</div>
+                        <div className="rating-score-item">
+                          <span className="rating-score-item-label">星级评分</span>
+                          {r.star !== null && r.star !== undefined && r.star !== '' ? (
+                            <span className="rating-badge rating-badge-text">
+                              {r.star} <span style={{ color: '#9ca3af', fontWeight: 400 }}>({r.star_rating ?? '-'}/10)</span>
+                            </span>
+                          ) : (
+                            <span className="rating-badge rating-badge-text">字段为空</span>
+                          )}
+                        </div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">广告评分</span>{badge(r.ad_rating)}</div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">A+评分</span>{badge(r.aplus_rating)}</div>
+                        <div className="rating-score-item"><span className="rating-score-item-label">视频评分</span>{badge(r.video_rating)}</div>
+                      </div>
+
+                      {/* 3. 参考关键词：圆角小标签 + 弱化编辑按钮 */}
+                      <div className="rating-info-block">
+                        <div className="rating-block-label">参考关键词</div>
+                        <div className="rating-block-content">
+                          <div className="rating-block-row">
+                            <div className="rating-keyword-tags" style={{ flex: 1, minWidth: 0 }}>
+                              {keywordList.length > 0 ? (
+                                keywordList.map((k, i) => <span key={i} className="rating-keyword-tag">{k}</span>)
+                              ) : (
+                                <span style={{ color: '#9ca3af' }}>暂无</span>
+                              )}
+                            </div>
+                            <Button type="text" size="small" icon={<Edit2 size={13} />} onClick={handleOpenKeywordEdit} style={{ color: '#1890ff', flexShrink: 0 }}>
+                              编辑
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 4. 竞品价格：行式列表 + 删除按钮，排名信息沉淀到底部 */}
+                      <div className="rating-info-block">
+                        <div className="rating-block-label">竞品价格</div>
+                        <div className="rating-block-content">
+                          <div className="rating-block-tip">如该产品不是竞品则可点击删除，重新排名计算得分</div>
+                          <div className="rating-block-row">
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              {competitorRows.length > 0 ? (
+                                <div className="rating-competitor-list">
+                                  {competitorRows.map((row, idx) => (
+                                    <div key={idx} className="rating-competitor-item">
+                                      {row.url ? (
+                                        <a className="rating-competitor-asin" href={row.url} target="_blank" rel="noopener noreferrer">{row.asin}</a>
+                                      ) : (
+                                        <span style={{ color: row.asin ? '#1f2937' : '#6b7280' }}>{row.asin || row.line}</span>
+                                      )}
+                                      {row.price && <span className="rating-competitor-price">：{row.price}</span>}
+                                      <button className="rating-del-btn" title="删除该竞品" onClick={() => handleDeleteCompetitor(row.line)}>×</button>
+                                    </div>
+                                  ))}
+                                  {r.competitor_price_rank > 0 && (
+                                    <div className="rating-competitor-rank">
+                                      <span>第{r.competitor_price_rank}名</span>
+                                      <span className="rating-rank-badge">{r.competitor_price_score}/10</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span style={{ color: '#9ca3af' }}>无竞品价格</span>
+                              )}
+                            </div>
+                            <Button type="text" size="small" icon={<Edit2 size={13} />} onClick={handleOpenCompetitorAdd} style={{ color: '#1890ff', flexShrink: 0 }}>
+                              编辑
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* 产品建议：极浅蓝底 + 圆点列表（与整体冷调风格统一） */}
                 {(() => {
                   const listingText = (selectedRecord?.listing_suggestions || '').trim()
                   const others = getOtherSuggestions(selectedRecord)
+                  const listingItems = listingText ? listingText.split('\n').map(s => s.trim()).filter(Boolean) : []
 
                   if (!listingText && others.length === 0) return null
                   return (
-                    <div style={{ marginTop: 12, padding: '12px 14px', background: '#fff7e6', borderRadius: 6, border: '1px solid #ffd591' }}>
-                      <div style={{ fontWeight: 600, color: '#d46b08', fontSize: 14, marginBottom: 8 }}>产品建议</div>
-                      {listingText && (
-                        <div style={{ marginBottom: others.length > 0 ? 10 : 0 }}>
-                          <div style={{ fontWeight: 600, color: '#262626', fontSize: 13, marginBottom: 4 }}>Listing建议：</div>
-                          <div style={{ color: '#595959', fontSize: 13, lineHeight: '22px', whiteSpace: 'pre-wrap' }}>{listingText}</div>
-                        </div>
+                    <div className="rating-suggest-block">
+                      <div className="rating-suggest-title">产品建议</div>
+                      {listingItems.length > 0 && (
+                        <>
+                          <div className="rating-suggest-subtitle">Listing建议：</div>
+                          <ul className="rating-suggest-list">
+                            {listingItems.map((s, i) => <li key={i}>{s}</li>)}
+                          </ul>
+                        </>
                       )}
                       {others.length > 0 && (
-                        <div>
-                          <div style={{ fontWeight: 600, color: '#262626', fontSize: 13, marginBottom: 4 }}>其他建议：</div>
-                          {others.map((s, i) => (
-                            <div key={i} style={{ color: '#595959', fontSize: 13, lineHeight: '22px' }}>· {s}</div>
-                          ))}
-                        </div>
+                        <>
+                          <div className="rating-suggest-subtitle" style={{ marginTop: listingItems.length > 0 ? 12 : 0 }}>其他建议：</div>
+                          <ul className="rating-suggest-list">
+                            {others.map((s, i) => <li key={i}>{s}</li>)}
+                          </ul>
+                        </>
                       )}
                     </div>
                   )
@@ -1531,51 +1598,55 @@ const RatingOptimizationBot: React.FC = () => {
           </>
         )}
 
-        {/* 操作日志视图 */}
+        {/* 操作日志视图（与详情页设计语言统一的区块结构） */}
         {selectedRecord && detailView === 'log' && (
           <Spin spinning={logLoading}>
             {logList.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 24, color: '#999' }}>暂无操作记录</div>
+              <div style={{ textAlign: 'center', padding: 48, color: '#9ca3af' }}>暂无操作记录</div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {logList.map((log) => (
-                  <Card key={log.id} size="small" style={{ borderRadius: 6 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                      <Space>
-                        <Tag color="gold">页面优化</Tag>
-                        <Tag color={log.action === 'create' ? 'green' : log.action === 'update' ? 'blue' : 'red'}>
+                  <div key={log.id} className="product-content-block">
+                    {/* 区块头：操作类型标签 + 目标 + 时间 */}
+                    <div className="product-block-header-flex">
+                      <Space size={6}>
+                        <Tag color="gold" style={{ marginInlineEnd: 0 }}>页面优化</Tag>
+                        <Tag color={log.action === 'create' ? 'green' : log.action === 'update' ? 'blue' : 'red'} style={{ marginInlineEnd: 0 }}>
                           {log.action === 'create' ? '创建' : log.action === 'update' ? '更新' : '删除'}
                         </Tag>
-                        <span style={{ fontSize: 13, color: '#595959' }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: '#374151' }}>
                           {({ basic_info: '基础信息', traffic_keywords: '参考关键词', competitor_price: '竞品价格', ad_submit: '开广告', optimize_submit: '一键优化', ai_suggest: 'AI建议' } as Record<string, string>)[log.target_type] || log.target_type || ''}
                         </span>
                       </Space>
-                      <span style={{ fontSize: 12, color: '#999' }}>{log.created_at}</span>
+                      <span style={{ fontSize: 12, color: '#9ca3af', fontWeight: 400 }}>{log.created_at}</span>
                     </div>
-                    <div style={{ fontSize: 13, color: '#333', marginBottom: 4 }}>{log.summary || ''}</div>
-                    <div style={{ fontSize: 12, color: '#999' }}>操作人：{log.username || '-'}</div>
-                    {(() => {
-                      let afterData = log.after_data
-                      if (typeof afterData === 'string') {
-                        try { afterData = JSON.parse(afterData) } catch { /* keep */ }
-                      }
-                      if (afterData && typeof afterData === 'object' && Object.keys(afterData).length > 0) {
-                        return (
-                          <div style={{ marginTop: 6, padding: 8, background: '#fafafa', borderRadius: 4, fontSize: 12 }}>
-                            {Object.entries(afterData).map(([k, v]) => (
-                              <div key={k} style={{ display: 'flex', gap: 4 }}>
-                                <span style={{ color: '#999', flexShrink: 0 }}>{k}：</span>
-                                <span style={{ color: '#595959', wordBreak: 'break-all' }}>
-                                  {Array.isArray(v) ? v.join('、') : String(v)}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )
-                      }
-                      return null
-                    })()}
-                  </Card>
+                    {/* 区块体：摘要 + 操作人 + 变更内容 */}
+                    <div className="product-block-body">
+                      <div style={{ fontSize: 13, color: '#1f2937', marginBottom: 4 }}>{log.summary || ''}</div>
+                      <div style={{ fontSize: 12, color: '#9ca3af' }}>操作人：{log.username || '-'}</div>
+                      {(() => {
+                        let afterData = log.after_data
+                        if (typeof afterData === 'string') {
+                          try { afterData = JSON.parse(afterData) } catch { /* keep */ }
+                        }
+                        if (afterData && typeof afterData === 'object' && Object.keys(afterData).length > 0) {
+                          return (
+                            <div className="log-detail-box">
+                              {Object.entries(afterData).map(([k, v]) => (
+                                <div key={k} style={{ display: 'flex', gap: 4 }}>
+                                  <span style={{ color: '#9ca3af', flexShrink: 0 }}>{k}：</span>
+                                  <span style={{ color: '#4b5563', wordBreak: 'break-all' }}>
+                                    {Array.isArray(v) ? v.join('、') : String(v)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        }
+                        return null
+                      })()}
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
@@ -1609,10 +1680,8 @@ const RatingOptimizationBot: React.FC = () => {
               const allChecked = visibleBasicFields.every(f => aiCheckedFields.includes(f.key))
               const someChecked = aiCheckedFields.some(k => visibleBasicFields.some(f => f.key === k)) && !allChecked
               return (
-                <Card
-                  size="small"
-                  style={{ marginBottom: 12 }}
-                  title={
+                <div className="product-content-block" style={{ marginBottom: 12 }}>
+                  <div className="product-block-header-flex">
                     <Checkbox
                       checked={allChecked}
                       indeterminate={someChecked}
@@ -1620,11 +1689,26 @@ const RatingOptimizationBot: React.FC = () => {
                     >
                       基础信息
                     </Checkbox>
-                  }
-                >
+                    <Space size={8}>
+                      {aiOldSuggestData && (
+                        <Button size="small" disabled={aiSuggestLoading} onClick={handleImportOldSuggest}>
+                          导入旧Listing内容
+                        </Button>
+                      )}
+                      <Button
+                        size="small"
+                        type="primary"
+                        loading={aiSuggestLoading}
+                        onClick={() => selectedRecord && runAiSuggest(selectedRecord)}
+                      >
+                        生成新Listing内容
+                      </Button>
+                    </Space>
+                  </div>
+                  <div className="product-block-body">
                   <Row gutter={16}>
                     <Col span={12}>
-                      <div style={{ fontWeight: 600, marginBottom: 8 }}>AI生成内容（可勾选可编辑）</div>
+                      <div className="ai-column-title">AI生成内容（可勾选可编辑）</div>
                       {aiSuggestLoading ? (
                         <div style={{ textAlign: 'center', padding: 32 }}>
                           <Spin />
@@ -1662,12 +1746,12 @@ const RatingOptimizationBot: React.FC = () => {
                       )}
                     </Col>
                     <Col span={12}>
-                      <div style={{ fontWeight: 600, marginBottom: 8 }}>原始内容</div>
+                      <div className="ai-column-title">原始内容</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         {visibleBasicFields.map(f => (
                           <div key={f.key}>
-                            <div style={{ fontSize: 12, color: '#999', marginBottom: 2 }}>{f.label}</div>
-                            <div style={{ background: '#fafafa', padding: 8, borderRadius: 4, fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 120, overflow: 'auto' }}>
+                            <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 2 }}>{f.label}</div>
+                            <div style={{ background: '#f5f7fa', padding: 8, borderRadius: 6, fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 120, overflow: 'auto' }}>
                               {originalMap[f.key] || '字段为空'}
                             </div>
                           </div>
@@ -1675,20 +1759,19 @@ const RatingOptimizationBot: React.FC = () => {
                       </div>
                     </Col>
                   </Row>
-                </Card>
+                  </div>
+                </div>
               )
             })()}
 
             {/* 区域二：广告区（仅当出现"新开广告"建议且未应用提交时显示） */}
             {hasAdSuggest && !adSubmitted && (
-              <Card
-                size="small"
-                title={
+              <div className="product-content-block">
+                <div className="product-block-header-flex">
                   <Checkbox checked={aiCheckAd} onChange={(e) => setAiCheckAd(e.target.checked)}>广告</Checkbox>
-                }
-              >
-                {renderAdForm()}
-              </Card>
+                </div>
+                <div className="product-block-body">{renderAdForm()}</div>
+              </div>
             )}
 
             {/* 两个区域都无可显示项时提示 */}

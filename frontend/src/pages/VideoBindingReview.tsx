@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Card, Table, Button, Tag, Input, Radio, Space, Modal, message, Empty, Tooltip, Pagination } from 'antd'
+import { Card, Table, Button, Tag, Input, Radio, Space, Modal, message, Empty, Tooltip, Pagination, Checkbox, Spin } from 'antd'
 import { ReloadOutlined, SearchOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
-import { videoBindingApi, VideoBindingRequest } from '../api'
+import { videoBindingApi, VideoBindingRequest, AmazonSkuEntry } from '../api'
 import { useAuth } from '../contexts/AuthContext'
 
 const PAGE_SIZE_OPTIONS = ['10', '20', '50', '100']
@@ -33,6 +33,13 @@ const VideoBindingReview: React.FC = () => {
   const [rejectTarget, setRejectTarget] = useState<VideoBindingRequest | null>(null)
   const [rejectReason, setRejectReason] = useState('')
   const [rejectSubmitting, setRejectSubmitting] = useState(false)
+  // 首条视频直传飞书 SKU 弹窗（审核通过且产品此前无视频时触发）
+  const [skuModalOpen, setSkuModalOpen] = useState(false)
+  const [skuLoading, setSkuLoading] = useState(false)
+  const [skuItems, setSkuItems] = useState<AmazonSkuEntry[]>([])
+  const [skuSelected, setSkuSelected] = useState<string[]>([])
+  const [skuSubmitting, setSkuSubmitting] = useState(false)
+  const skuTargetRef = useRef<{ productId: number; videoUrl: string } | null>(null)
   const keywordTimerRef = useRef<number | null>(null)
 
   const loadRequests = useCallback(async (page = pagination.current, pageSize = pagination.pageSize) => {
@@ -83,6 +90,69 @@ const VideoBindingReview: React.FC = () => {
     setSearchText(searchInput.trim())
   }
 
+  // 首绑 SKU 弹窗：拉取 AMAZON 平台 SKU×店铺列表，默认只勾选有 ASIN 的项
+  const openSkuModal = async (productId: number, videoUrl: string) => {
+    skuTargetRef.current = { productId, videoUrl }
+    setSkuModalOpen(true)
+    setSkuLoading(true)
+    try {
+      const res = await videoBindingApi.getAmazonSkus(productId)
+      const list = res.data.data?.items || []
+      setSkuItems(list)
+      setSkuSelected(list.filter(e => e.has_asin).map(e => `${e.pp_id}_${e.store_id}`))
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '获取产品 SKU 列表失败')
+      setSkuModalOpen(false)
+    } finally {
+      setSkuLoading(false)
+    }
+  }
+
+  const handleSkuUploadSubmit = async () => {
+    const target = skuTargetRef.current
+    if (!target) return
+    if (skuSelected.length === 0) {
+      message.warning('请至少勾选一个 SKU')
+      return
+    }
+    const selected = skuItems.filter(e => skuSelected.includes(`${e.pp_id}_${e.store_id}`))
+    const noAsin = selected.filter(e => !e.has_asin)
+    if (noAsin.length > 0) {
+      message.error(`以下 SKU 未绑定 ASIN，无法上传：${noAsin.map(e => e.sku || `#${e.pp_id}`).join('、')}，请取消勾选后重试`)
+      return
+    }
+    setSkuSubmitting(true)
+    try {
+      const res = await videoBindingApi.uploadSkuToFeishu({
+        product_id: target.productId,
+        video_url: target.videoUrl,
+        items: selected.map(e => ({ pp_id: e.pp_id, store_id: e.store_id })),
+      })
+      if (res.data.success) {
+        message.success(res.data.message || 'SKU 视频已上传飞书')
+        const failed = res.data.data?.failed || 0
+        const errors = res.data.data?.errors || []
+        if (failed > 0) {
+          Modal.warning({
+            title: `有 ${failed} 条记录上传失败`,
+            content: (
+              <div>
+                {errors.slice(0, 5).map((t, i) => (
+                  <div key={i}>{t}</div>
+                ))}
+              </div>
+            ),
+          })
+        }
+        setSkuModalOpen(false)
+      }
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '上传失败')
+    } finally {
+      setSkuSubmitting(false)
+    }
+  }
+
   const handleApprove = async (record: VideoBindingRequest) => {
     setActingId(record.id)
     try {
@@ -90,6 +160,11 @@ const VideoBindingReview: React.FC = () => {
       if (res.data.success) {
         message.success(res.data.message || '已通过并绑定至产品详情')
         loadRequests()
+        // 首条视频（此前产品无任何视频）：弹出 SKU 直传确认弹窗
+        const videos = res.data.data?.videos
+        if (res.data.data?.is_first_video && videos && videos.length > 0) {
+          openSkuModal(record.product_id, videos[videos.length - 1])
+        }
       }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '操作失败')
@@ -384,6 +459,66 @@ const VideoBindingReview: React.FC = () => {
           value={rejectReason}
           onChange={(e) => setRejectReason(e.target.value)}
         />
+      </Modal>
+
+      {/* 首条视频直传飞书 SKU：默认只勾选有 ASIN 的项，勾选未绑定 ASIN 的项确定时报错 */}
+      <Modal
+        open={skuModalOpen}
+        title="首条视频上传 SKU"
+        okText="确定上传"
+        cancelText="取消"
+        confirmLoading={skuSubmitting}
+        onOk={handleSkuUploadSubmit}
+        onCancel={() => setSkuModalOpen(false)}
+        width={560}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <span>该视频为该产品的首条视频，是否直接上传至以下SKU：</span>
+          {!skuLoading && skuItems.length > 0 && (
+            <Checkbox
+              checked={skuSelected.length > 0 && skuSelected.length === skuItems.length}
+              indeterminate={skuSelected.length > 0 && skuSelected.length < skuItems.length}
+              onChange={(e) => setSkuSelected(e.target.checked ? skuItems.map(e => `${e.pp_id}_${e.store_id}`) : [])}
+            >
+              全选
+            </Checkbox>
+          )}
+        </div>
+        {skuLoading ? (
+          <div style={{ textAlign: 'center', padding: '24px 0' }}>
+            <Spin />
+          </div>
+        ) : skuItems.length === 0 ? (
+          <Empty description="该产品暂无 AMAZON 平台 SKU" />
+        ) : (
+          <>
+            <div style={{ maxHeight: 360, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 12px' }}>
+              <Checkbox.Group
+                value={skuSelected}
+                onChange={(vals) => setSkuSelected(vals as string[])}
+                style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}
+              >
+                {skuItems.map(e => {
+                  const key = `${e.pp_id}_${e.store_id}`
+                  return (
+                    <Checkbox key={key} value={key}>
+                      <span>
+                        {e.sku || `#${e.pp_id}`}
+                        {!e.has_asin && <span style={{ color: '#999' }}>（未绑定ASIN）</span>}
+                        {(e.site || e.store_name) && (
+                          <span style={{ color: '#999', marginLeft: 8 }}>{e.site || e.store_name}</span>
+                        )}
+                      </span>
+                    </Checkbox>
+                  )
+                })}
+              </Checkbox.Group>
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
+              共 {skuItems.length} 个 SKU，已选 {skuSelected.length} 个；确定后视频将写入飞书多维表
+            </div>
+          </>
+        )}
       </Modal>
     </div>
   )

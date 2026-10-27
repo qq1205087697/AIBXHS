@@ -408,12 +408,8 @@ const MODEL_OPTIONS: { label: string; desc: string; value: VideoModel }[] = [
   { label: 'MiniMax H3', desc: '适合批量测款与日常上新', value: 'minimax-h3' },
 ]
 
-// 视频分辨率档位：0.3 / 0.5 为 megapixels 档位，768P 即 0.98 满画幅
-const RESOLUTION_OPTIONS: { label: string; value: VideoResolution; desc: string }[] = [
-  { label: '0.3（测试/多任务）', value: '0.3', desc: '草稿档，生成最快' },
-  { label: '0.5', value: '0.5', desc: '标准档' },
-  { label: '768P', value: '768P', desc: '满画幅，画质最好' },
-]
+// 分辨率档位已从页面移除选择，统一固定草稿档（0.3，生成最快）
+const H3_FIXED_RESOLUTION: VideoResolution = '0.3'
 
 // MiniMax H3 仅支持 5 / 10 / 15 秒三档时长
 const DURATION_MARKS: Record<number, React.ReactNode> = {
@@ -453,7 +449,6 @@ const AICreationCenter: React.FC = () => {
   const [duration, setDuration] = useState<VideoDuration>(15)
   const [ratio, setRatio] = useState<VideoRatio>('9:16')
   const [model, setModel] = useState<VideoModel>('minimax-h3')
-  const [resolution, setResolution] = useState<VideoResolution>('0.3')
   const [promptText, setPromptText] = useState('')
   const [planModalOpen, setPlanModalOpen] = useState(false)
   const [planRefreshLeft, setPlanRefreshLeft] = useState(2)
@@ -530,11 +525,17 @@ const AICreationCenter: React.FC = () => {
 
   const handleRemoveImage = (uid: string) => {
     invalidatePlans()
-    setFileList((prev) => {
-      const target = prev.find((f) => f.uid === uid)
-      if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
-      return prev.filter((f) => f.uid !== uid)
-    })
+    const target = fileList.find((f) => f.uid === uid)
+    if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
+    const next = fileList.filter((f) => f.uid !== uid)
+    setFileList(next)
+    // 产品图片被移除后同步取消该产品标记，防止下个任务误挂上一个产品编码
+    const remainUrls = new Set(
+      next.map((f) => f.url || f.thumbUrl).filter((u): u is string => !!u),
+    )
+    setSelectedProducts((prev) =>
+      prev.filter((p) => (p.images || []).some((u) => remainUrls.has(u))),
+    )
   }
 
   const handleClear = () => {
@@ -905,7 +906,7 @@ const AICreationCenter: React.FC = () => {
       const resp = await aiCreationApi.generateVideo(files, {
         prompt: promptText,
         duration,
-        resolution,
+        resolution: H3_FIXED_RESOLUTION,
         ratio,
         model,
         market,
@@ -946,7 +947,6 @@ const AICreationCenter: React.FC = () => {
     )
     setMarket(item.market)
     setModel(item.model)
-    setResolution(item.resolution)
     setDuration(item.duration)
     setRatio(item.ratio)
     setVideoType(item.video_type === '产品展示' ? '产品展示' : '口播带货')
@@ -1039,54 +1039,12 @@ const AICreationCenter: React.FC = () => {
     if (retryingId != null) return
     setRetryingId(item.id)
     try {
-      // 先尝试智能恢复：ComfyUI 上已有成片/仍在生成时接续原任务，不重新提交
-      let needResubmit = true
-      try {
-        const rec = await aiCreationApi.recoverVideoTask(item.id)
-        if (rec.data.action === 'resumed') {
-          message.success(rec.data.message || '已接续原任务，等待收片回填')
-          loadTasks(1)
-          needResubmit = false
-        }
-      } catch {
-        // 恢复检查失败（接口异常等）：回退到原重新提交流程
-      }
-      if (!needResubmit) return
-
-      if (!item.images.length) {
-        message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
-        return
-      }
-      const files: File[] = []
-      for (let i = 0; i < item.images.length; i++) {
-        const blob = await fetchImageBlob(item.images[i])
-        if (blob) {
-          files.push(new File([blob], `ref-${i + 1}.jpg`, { type: blob.type || 'image/jpeg' }))
-        }
-      }
-      if (files.length === 0) {
-        message.error('参考图片读取失败，请使用「编辑」重新上传')
-        return
-      }
-      const storedLang = item.voiceover_language || '自动'
-      const resp = await aiCreationApi.generateVideo(files, {
-        prompt: item.prompt,
-        duration: item.duration,
-        resolution: item.resolution,
-        ratio: item.ratio,
-        model: item.model,
-        market: item.market,
-        voiceover_language: storedLang === '自动' ? 'auto' : (storedLang as VoiceoverLanguage),
-        title: item.title,
-        product_code: item.product_code || '',
-        product_name: item.product_name || '',
-      })
-      const task = resp.data.data
-      // 新任务在最前：跳回第 1 页刷新
-      setHistoryPage(1)
-      loadTasks(1)
-      setActiveHistoryId(task.id)
-      message.success('已重新提交生成任务，排队中')
+      // 原位重试：后端智能恢复（ComfyUI 可接续则接续收片），
+      // 否则服务端直接下载历史参考图并复用原记录重新提交，无需前端取图
+      const resp = await aiCreationApi.recoverVideoTask(item.id)
+      message.success(resp.data.message || '已重新提交生成，排队中')
+      setActiveHistoryId(item.id)
+      loadTasks()
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '重试失败，请稍后再试')
     } finally {
@@ -2254,22 +2212,6 @@ const AICreationCenter: React.FC = () => {
             }))}
           />
 
-          <Text strong style={{ display: 'block', margin: '16px 0 8px' }}>视频分辨率</Text>
-          <Segmented
-            block
-            value={resolution}
-            onChange={(v) => setResolution(v as VideoResolution)}
-            disabled={loading}
-            options={RESOLUTION_OPTIONS.map((opt) => ({
-              value: opt.value,
-              label: (
-                <Tooltip title={opt.desc}>
-                  <span>{opt.label}</span>
-                </Tooltip>
-              ),
-            }))}
-          />
-
           <Text strong style={{ display: 'block', margin: '16px 0 4px' }}>生成设置</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>视频时长（5 / 10 / 15 秒）</Text>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -2313,7 +2255,7 @@ const AICreationCenter: React.FC = () => {
           >
             立即生成
             <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.85 }}>
-              （预计耗时约 {Math.round(estimateH3CostMinutes(resolution, duration))} 分钟）
+              （预计耗时约 {Math.round(estimateH3CostMinutes(H3_FIXED_RESOLUTION, duration))} 分钟）
             </span>
           </Button>
         </div>

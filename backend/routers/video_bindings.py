@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
+import json
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -8,6 +9,10 @@ from database.database import get_db
 from dependencies import PermissionChecker
 from models.user import User
 from routers.products import _parse_json_images, _serialize_images
+from services.feishu_video_sku_service import (
+    is_configured as feishu_video_configured,
+    resolve_start_name,
+)
 
 router = APIRouter(prefix="/api/video-bindings", tags=["video_bindings"])
 
@@ -17,6 +22,86 @@ MEDIA_LABELS = {"video": "视频", "image": "图片"}
 # 与产品详情页的限制保持一致
 MAX_PRODUCT_VIDEOS = 6
 MAX_PRODUCT_IMAGES = 9
+
+
+def _parse_store_ids(raw) -> List[int]:
+    """platform_products.store_id 兼容解析：JSON 数组 / 单个数字 / 数字字符串"""
+    if not raw:
+        return []
+    try:
+        if isinstance(raw, (int, float)):
+            return [int(raw)]
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return []
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, (int, float)):
+                    return [int(parsed)]
+                if isinstance(parsed, list):
+                    return [int(x) for x in parsed if x is not None]
+            except Exception:
+                return [int(s)]
+        if isinstance(raw, (list, tuple)):
+            return [int(x) for x in raw if x is not None]
+    except Exception:
+        return []
+    return []
+
+
+def _load_amazon_sku_entries(db: Session, tenant_id: int, product_id: int, id_filter: Optional[List[dict]] = None):
+    """查产品 AMAZON 平台 SKU×店铺组合条目（含紫鸟登录账号/启动名），id_filter 限定 (pp_id, store_id) 对"""
+    product = db.execute(text("""
+        SELECT id, product_code, name FROM products
+        WHERE id = :pid AND tenant_id = :tid AND deleted_at IS NULL
+    """), {"pid": product_id, "tid": tenant_id}).fetchone()
+    if not product:
+        raise HTTPException(status_code=404, detail="商品不存在")
+
+    pp_rows = db.execute(text("""
+        SELECT pp.id, pp.sku, pp.asin, pp.store_id FROM platform_products pp
+        WHERE pp.product_id = :pid AND pp.tenant_id = :tid
+          AND pp.platform = 'amazon' AND pp.deleted_at IS NULL
+        ORDER BY pp.id
+    """), {"pid": product_id, "tid": tenant_id}).fetchall()
+
+    # 汇总店铺 ID 批量查店铺信息
+    all_store_ids = sorted({sid for row in pp_rows for sid in _parse_store_ids(row[3])})
+    store_map = {}
+    if all_store_ids:
+        placeholders = ",".join([f":sid_{i}" for i in range(len(all_store_ids))])
+        sid_params = {f"sid_{i}": sid for i, sid in enumerate(all_store_ids)}
+        store_rows = db.execute(
+            text(f"SELECT id, name, ziniao_account, site FROM stores WHERE id IN ({placeholders}) AND deleted_at IS NULL"),
+            sid_params,
+        ).fetchall()
+        store_map = {r[0]: {"name": r[1] or "", "ziniao_account": r[2] or "", "site": r[3] or ""} for r in store_rows}
+
+    allowed = None
+    if id_filter is not None:
+        allowed = {(int(x["pp_id"]), int(x["store_id"])) for x in id_filter}
+
+    entries = []
+    for row in pp_rows:
+        for sid in _parse_store_ids(row[3]):
+            if allowed is not None and (int(row[0]), int(sid)) not in allowed:
+                continue
+            store = store_map.get(sid, {"name": "", "ziniao_account": "", "site": ""})
+            asin = (row[2] or "").strip()
+            account = store["ziniao_account"]
+            entries.append({
+                "pp_id": int(row[0]),
+                "store_id": int(sid),
+                "sku": row[1] or "",
+                "asin": asin,
+                "has_asin": bool(asin),
+                "store_name": store["name"],
+                "site": store["site"],
+                "ziniao_account": account,
+                "ziniao_start_name": resolve_start_name(account),
+            })
+    return product, entries
 
 
 class VideoBindingSubmit(BaseModel):
@@ -218,11 +303,14 @@ def _do_bind_media(db: Session, tenant_id: int, product_id: int, media_url: str,
     if len(items) >= limit:
         raise HTTPException(status_code=400, detail=f"产品已达到{kind}上限")
 
-    # TOS 复制改名为「产品编码_序号」，失败回退原地址不阻断绑定
+    # TOS 复制改名为「产品编码_序号_时间戳」（时间戳防删除重绑后 URL 复用命中缓存旧内容），
+    # 失败回退原地址不阻断绑定
     final_url = media_url
     try:
-        from services.tos_service import rename_file
-        final_url = rename_file(media_url, f"{row[3]}_{len(items) + 1}", subdir=subdir)
+        from services.tos_service import bound_video_target_name, rename_file
+        final_url = rename_file(
+            media_url, bound_video_target_name(row[3], len(items) + 1), subdir=subdir
+        )
     except Exception as rename_err:
         import logging
         logging.getLogger(__name__).warning(
@@ -265,7 +353,12 @@ async def approve_video_binding(
     """), {"uid": current_user.id, "uname": current_user.username,
            "id": request_id, "tid": current_user.tenant_id})
     db.commit()
-    return {"success": True, "message": "已通过并绑定至产品详情", "data": {"videos": videos}}
+    # 首条视频标记（len==1 即绑定前产品无任何视频）；飞书视频表未配置时不出弹窗
+    return {
+        "success": True,
+        "message": "已通过并绑定至产品详情",
+        "data": {"videos": videos, "is_first_video": len(videos) == 1 and feishu_video_configured()},
+    }
 
 
 @router.post("/{request_id}/reject")
@@ -295,3 +388,75 @@ async def reject_video_binding(
            "id": request_id, "tid": current_user.tenant_id})
     db.commit()
     return {"success": True, "message": "已拒绝该绑定申请"}
+
+
+# ==================== 首条视频直传飞书 SKU（审核通过后弹窗触发） ====================
+
+class FeishuSkuUploadItem(BaseModel):
+    pp_id: int
+    store_id: int
+
+
+@router.get("/amazon-skus")
+async def list_amazon_skus(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("ai_video:approve", "product:edit")),
+):
+    """产品 AMAZON 平台 SKU×店铺组合列表（首条视频/详情页视频上传弹窗数据源）"""
+    if not feishu_video_configured():
+        raise HTTPException(status_code=400, detail="飞书视频上传表未配置，功能未启用")
+    _, entries = _load_amazon_sku_entries(db, current_user.tenant_id, product_id)
+    return {"success": True, "data": {"items": entries}}
+
+
+class FeishuSkuUploadBody(BaseModel):
+    product_id: int
+    video_url: Optional[str] = None
+    # 多视频（产品详情页「视频上传」勾选已有视频场景），与 video_url 二选一
+    video_urls: Optional[List[str]] = None
+    items: List[FeishuSkuUploadItem]
+
+
+@router.post("/feishu-sku-upload")
+async def upload_sku_video_to_feishu(
+    body: FeishuSkuUploadBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("ai_video:approve", "product:edit")),
+):
+    """把视频写入飞书多维表 SKU 记录（ASIN/紫鸟登录账号/紫鸟启动名/站点/视频附件/填报人/填报日期）
+
+    记录数 = 视频数 × 勾选 SKU 数
+    """
+    if not feishu_video_configured():
+        raise HTTPException(status_code=400, detail="飞书视频上传表未配置（FEISHU_VIDEO_BASE_TOKEN / FEISHU_VIDEO_TABLE_ID）")
+    video_urls = [u.strip() for u in (body.video_urls or []) if u and u.strip()]
+    if not video_urls and body.video_url and body.video_url.strip():
+        video_urls = [body.video_url.strip()]
+    if not video_urls:
+        raise HTTPException(status_code=400, detail="视频地址不能为空")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="请至少勾选一个 SKU")
+
+    # 服务端按 (pp_id, store_id) 重查条目，不信任前端回传的 ASIN/紫鸟信息
+    product, entries = _load_amazon_sku_entries(
+        db, current_user.tenant_id, body.product_id,
+        id_filter=[{"pp_id": it.pp_id, "store_id": it.store_id} for it in body.items],
+    )
+    if not entries:
+        raise HTTPException(status_code=400, detail="所选 SKU 不存在或已删除")
+    no_asin = [e["sku"] or f"#{e['pp_id']}" for e in entries if not e["has_asin"]]
+    if no_asin:
+        raise HTTPException(status_code=400, detail=f"以下 SKU 未绑定 ASIN，无法上传：{'、'.join(no_asin)}")
+
+    from services.feishu_video_sku_service import create_sku_video_records as _create
+    result = await _create(video_urls, product[1] or "", entries)
+    if result["failed"]:
+        import logging
+        logging.getLogger(__name__).warning(
+            "SKU视频上传飞书部分失败 product=%s: %s", product[1], "; ".join(result["errors"])
+        )
+    message = f"已上传 {result['success']} 条 SKU 记录"
+    if result["failed"]:
+        message += f"，失败 {result['failed']} 条"
+    return {"success": True, "message": message, "data": result}

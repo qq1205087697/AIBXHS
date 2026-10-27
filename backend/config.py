@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     FEISHU_SYNC_APP_SECRET: str = ""
     FEISHU_SYNC_BASE_TOKEN: str = ""
     FEISHU_SYNC_TABLE_ID: str = ""
+    # 飞书多维表 - AI视频首绑SKU上传表（产品首条视频绑定后可选直传SKU）
+    FEISHU_VIDEO_BASE_TOKEN: str = ""
+    FEISHU_VIDEO_TABLE_ID: str = ""
+    # 填报人（人员字段）飞书 open_id，留空自动尝试取应用机器人自身身份
+    FEISHU_VIDEO_REPORTER_OPEN_ID: str = ""
+    # 紫鸟启动名→紫鸟登录账号映射（JSON 字符串，按顺序取登录账号命中的第一个启动名）
+    ZINIAO_ACCOUNT_MAP: str = ""
     # 飞书 webhook - 邮件机器人自动化
     FEISHU_EMAIL_WEBHOOK_URL: str = ""
     # 飞书 webhook - 产品页信息自动化
@@ -44,10 +51,14 @@ class Settings(BaseSettings):
     FEISHU_AD_WEBHOOK_URL: str = ""
     # 美工图片 TOS 自动迁移开关（false 关闭启动时自动迁移）
     DESIGNER_IMAGE_AUTO_MIGRATE: str = "true"
+    # 六面图 TOS 自动迁移开关（false 关闭启动时自动迁移）
+    SIXFACE_IMAGE_AUTO_MIGRATE: str = "true"
     # 飞书 webhook - 编辑基础信息提交地址
     FEISHU_EDIT_WEBHOOK_URL: str = ""
     # 飞书 webhook - 一键优化提交地址
     FEISHU_OPTIMIZE_WEBHOOK_URL: str = ""
+    # 飞书 webhook - 邮件回复通知地址
+    FEISHU_EMAIL_WEBHOOK_URL: str = ""
     
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://yunwu.ai/v1"
@@ -166,12 +177,18 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
+    # extra="ignore"：.env 中存在一些由其他模块直接 os.getenv 读取的键
+    # （image_relay_* / feishu_sync_* / ziniao_account_map 等），
+    # 它们不在本 Settings 中定义。pydantic-settings v2 的 BaseSettings
+    # 默认 extra="forbid"，一旦 .env 新增这类键就会在启动时抛
+    # ValidationError（13 项 extra_forbidden）导致服务起不来。
     model_config = {
         "env_file": [
             os.path.join(os.path.dirname(__file__), ".env"),
             os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
         ],
         "env_file_encoding": "utf-8",
+        "extra": "ignore",
     }
 
 

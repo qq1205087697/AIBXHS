@@ -143,6 +143,41 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
     await handleFiles(files)
   }
 
+  // 剪贴板粘贴上传：支持直接粘贴截图/复制的图片文件，或粘贴图片 URL 文本
+  const handlePaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
+    if (disabled) return
+    const dt = e.clipboardData
+    if (!dt) return
+    const files = Array.from(dt.files || []).filter((f) => f.type.startsWith('image/'))
+    if (files.length > 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      await handleFiles(files)
+      return
+    }
+    // 粘贴的是图片链接（纯文本或网页复制的 <img>）
+    const text = dt.getData('text/plain') || dt.getData('text/html') || ''
+    const m = text.match(/https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|gif|webp|bmp)/i)
+    if (m) {
+      e.preventDefault()
+      e.stopPropagation()
+      let targetIndex = activeIndexRef.current ?? previewImages.length
+      if (targetIndex < 0) targetIndex = 0
+      if (targetIndex > previewImages.length) targetIndex = previewImages.length
+      if (previewImages.length >= maxCount && targetIndex >= previewImages.length) {
+        message.warning(`最多上传 ${maxCount} 张图片`)
+        return
+      }
+      const newImages = [...previewImages]
+      if (targetIndex < newImages.length) newImages[targetIndex] = m[0]
+      else newImages.push(m[0])
+      setPreviewImages(newImages)
+      onChange?.(newImages)
+      message.success('已添加粘贴的图片链接')
+      activeIndexRef.current = null
+    }
+  }
+
   const handleRemove = (index: number) => {
     const newImages = previewImages.filter((_, i) => i !== index)
     setPreviewImages(newImages)
@@ -169,6 +204,8 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
 
   return (
     <div
+      tabIndex={0}
+      onPaste={handlePaste}
       onDrop={handleDrop}
       onDragOver={(e) => {
         if (disabled) return
@@ -186,6 +223,7 @@ const ImagesUpload: React.FC<ImagesUploadProps> = ({
         padding: dragOver ? 10 : 12,
         background: dragOver ? '#f0f7ff' : undefined,
         transition: 'all 0.2s',
+        outline: 'none',
       }}
     >
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>

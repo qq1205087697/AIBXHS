@@ -48,7 +48,7 @@ const StoreManagement: React.FC = () => {
   const [editingStore, setEditingStore] = useState<Store | null>(null)
   const [form] = Form.useForm()
   const [searchText, setSearchText] = useState('')
-  const [filters, setFilters] = useState<Record<string, any>>({ search: '' })
+  const [filters, setFilters] = useState<Record<string, any>>({ search: '', platform: '', site: '' })
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const searchTimeoutRef = useRef<number | null>(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
@@ -137,6 +137,30 @@ const StoreManagement: React.FC = () => {
     { label: 'Inactive', value: 'inactive' },
     { label: 'Error', value: 'error' },
   ]
+
+  // 筛选用平台选项：真实平台（排除表单里用于自定义平台的 'other' 占位项）
+  const filterPlatformOptions = useMemo(
+    () => dynamicPlatformOptions.filter((o) => o.value !== 'other'),
+    [dynamicPlatformOptions]
+  )
+
+  // 筛选用站点选项：取全部店铺中的去重站点
+  const siteOptions = useMemo(() => {
+    const set = new Set<string>()
+    allStores.forEach((s) => { if (s.site) set.add(s.site) })
+    return Array.from(set).sort().map((s) => ({ label: s, value: s }))
+  }, [allStores])
+
+  const handleFilterChange = (key: string, value?: string) => {
+    setFilters((prev) => ({ ...prev, [key]: value || '' }))
+    setPagination((prev) => ({ ...prev, current: 1 }))
+  }
+
+  const handleResetFilters = () => {
+    setSearchText('')
+    setFilters({ search: '', platform: '', site: '' })
+    setPagination((prev) => ({ ...prev, current: 1 }))
+  }
 
   useEffect(() => {
     fetchStores()
@@ -702,14 +726,37 @@ const StoreManagement: React.FC = () => {
                 <Card
                   loading={loading}
                   title={
-                    <Input
-                      placeholder="搜索紫鸟账号、店铺名、站点..."
-                      prefix={<SearchOutlined />}
-                      allowClear
-                      style={{ width: resp.isMobile ? '100%' : 400 }}
-                      value={searchText}
-                      onChange={(e) => handleSearch(e.target.value)}
-                    />
+                    <Space wrap size={8}>
+                      <Input
+                        placeholder="搜索紫鸟账号、店铺名、站点..."
+                        prefix={<SearchOutlined />}
+                        allowClear
+                        style={{ width: resp.isMobile ? '100%' : 280 }}
+                        value={searchText}
+                        onChange={(e) => handleSearch(e.target.value)}
+                      />
+                      <Select
+                        placeholder="平台"
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        style={{ width: resp.isMobile ? '48%' : 150 }}
+                        options={filterPlatformOptions}
+                        value={filters.platform || undefined}
+                        onChange={(v) => handleFilterChange('platform', v)}
+                      />
+                      <Select
+                        placeholder="站点"
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        style={{ width: resp.isMobile ? '48%' : 110 }}
+                        options={siteOptions}
+                        value={filters.site || undefined}
+                        onChange={(v) => handleFilterChange('site', v)}
+                      />
+                      <Button onClick={handleResetFilters}>重置</Button>
+                    </Space>
                   }
                   extra={
                     <Space>

@@ -196,6 +196,8 @@ async def get_stores(
     # name_search: Optional[str] = None,
     # site_search: Optional[str] = None,
     search: Optional[str] = None,
+    platform: Optional[str] = None,
+    site: Optional[str] = None,
     assignment_fallback: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -231,6 +233,14 @@ async def get_stores(
         if search:
             where_conditions.append("(s.name LIKE :search OR s.inventory_name LIKE :search OR s.site LIKE :search)")
             params["search"] = f"%{search}%"
+
+        if platform:
+            where_conditions.append("s.platform = :platform")
+            params["platform"] = platform
+
+        if site:
+            where_conditions.append("s.site = :site")
+            params["site"] = site
 
         where_clause = " AND ".join(where_conditions)
         

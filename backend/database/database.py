@@ -119,7 +119,8 @@ def init_db():
         print("数据库表结构创建成功")
         
         # 手动创建 scheduler_locks 和 product_selections 表
-        from sqlalchemy import text
+        # 注意：text 已在模块顶部导入；函数内再 import 会使 text 变成本地变量，
+        # 导致上方列补丁在执行时抛 UnboundLocalError 而静默失效
         with engine.connect() as conn:
             # 视频生成任务表新增视频类型字段（口播带货/产品展示，如果不存在）
             try:
