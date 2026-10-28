@@ -51,4 +51,8 @@ docs/
 # 前端构建产物（backend/static 是 frontend/dist 的部署拷贝，由 npm run build 生成，
 # 不入库；部署时执行：cd frontend && npm run build && cp -r dist/* ../backend/static/）
 backend/static/
+
+# 库存导入子进程的运行时状态文件（跨进程进度同步用，不入库）
+backend/.import_status.json
+backend/.import_status.json.*.tmp
 delivery/

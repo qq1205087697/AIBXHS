@@ -233,6 +233,21 @@ code {
 
 /* ========== 响应式设计 ========== */
 
+/* 首页消息行 hover 高亮（纯 CSS，避免 React setState 全页重渲染卡顿） */
+.notice-row:hover {
+  background: #fafafa;
+}
+
+/* 首页日历格 hover：明亮暖橙底（用 inset box-shadow 叠色，不被格子的内联背景色覆盖） */
+.cal-cell:hover {
+  box-shadow: inset 0 0 0 999px rgba(255, 178, 82, 0.38);
+}
+
+/* 首页倒计日行 hover */
+.countdown-row:hover {
+  background: #fff7e6;
+}
+
 /* 小屏幕：仅弹窗适配，页面内容保持桌面宽度通过横向滚动查看 */
 @media (max-width: 767px) {
   .ant-modal {
@@ -312,6 +327,26 @@ code {
   background: #bfbfbf;
 }
 .ai-creation-tabs * {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9d9 transparent;
+}
+
+/* AI 生图页：细滚动条（与 ai-creation-tabs 同参数；另用于 Modal 的 wrapClassName） */
+.ai-thin-scrollbar *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.ai-thin-scrollbar *::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-thin-scrollbar *::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 3px;
+}
+.ai-thin-scrollbar *::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
+}
+.ai-thin-scrollbar * {
   scrollbar-width: thin;
   scrollbar-color: #d9d9d9 transparent;
 }

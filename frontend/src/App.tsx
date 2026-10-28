@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, useLocation } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import MainLayout from "./components/Layout/MainLayout";
@@ -33,6 +33,7 @@ import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
 import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
+import AIImageStudio from './pages/AIImageStudio';
 import VideoBindingReview from './pages/VideoBindingReview';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -92,6 +93,8 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      {/* 标签管理页已下线（后端 /api/tags/* 逻辑保留）；旧链接回落到库存机器人 */}
+      <Route path="/tags" element={<Navigate to="/inventory" replace />} />
       <Route
         path="/business-settings"
         element={
@@ -349,6 +352,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <UpscaleCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/ai-image"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <AIImageStudio />
             </MainLayout>
           </ProtectedRoute>
         }

@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     OPENAI_TIMEOUT: int = 60
     OPENAI_VISION_MODEL: str = ""
     OPENAI_VISION_RESPONSE_FORMAT: str = ""
+    # 图片代理白名单追加项（逗号分隔，后缀匹配）。默认已含 volces.com / bxhsrpa.com /
+    # media-amazon.com，换 CDN 或新增图源时在此追加，无需改代码
+    PROXY_IMAGE_HOST_SUFFIXES: str = ""
 
     # MiniMax H3 本地视频生成（ComfyUI API，需 Basic Auth 账号密码）
     
@@ -93,6 +96,43 @@ class Settings(BaseSettings):
         os.path.dirname(os.path.abspath(__file__)), "prompts"
     )
 
+    # AI 商品套图（Qwen-Image-2.1 图生图，与 H3 共用同一台 ComfyUI，Basic Auth 复用 H3_*）
+    IMAGE_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "qwen_image_workflow.json"
+    )
+    IMAGE_PROMPT_TEMPLATES_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "prompts", "image_prompt_templates.json"
+    )
+    IMAGE_POLL_INTERVAL: int = 2        # 轮询生成进度间隔（秒）：首轮立即查，之后按此间隔
+    IMAGE_MAX_WAIT_MINUTES: int = 30    # 单任务最长等待时间（分钟），PE 首载 GGUF 可能 1~3 分钟
+    IMAGE_MAX_CONCURRENT_TASKS: int = 2 # 单实例同时轮询的最大任务数（ComfyUI 串行队列，与生视频互让）
+
+    # 生图中转站：Nano Banana 2（gemini-3.1-flash-image，OpenAI 兼容 /chat/completions）
+    IMAGE_RELAY_API_BASE: str = ""
+    IMAGE_RELAY_API_KEY: str = ""
+    IMAGE_RELAY_MODEL: str = "gemini-3.1-flash-image"
+    IMAGE_RELAY_LABEL: str = "Nano Banana 2"
+    IMAGE_RELAY_CONCURRENCY: int = 4    # 并行生成数（中转站无排队）
+    IMAGE_RELAY_TIMEOUT: int = 240
+    # 提示词设计单次调用的超时（输出较长，但 240s 会拖垮整单；失败会自动重试一次再降级模板）
+    IMAGE_RELAY_DESIGN_TIMEOUT: int = 180
+    # 设计输出的 token 上限。1600 在多组件商品（气球套装、餐具套装）上会截断：
+    # JSON 不完整 → 解析失败 → 静默降级模板。重试时会自动放大到 1.5 倍。
+    IMAGE_RELAY_DESIGN_MAX_TOKENS: int = 2600
+    # ===== 本地 ComfyUI 提示词硬化（2026-10-26）=====
+    # True = 用 prompts/image_prompt_templates.json（约束写死版，业务红线交给 PE 保留）
+    # False = 回退 v3 轻量版 prompts/image_prompt_templates_v3.json（画面语言完全交给 PE）
+    IMAGE_LOCAL_HARDENED_PROMPT: bool = True
+    # PE 节点输出语言：本地链路由 PE 二次优化，中文全链路一致（与已验证的工作流一致）
+    IMAGE_LOCAL_PE_LANGUAGE: str = "中文"
+    # PE 生成后是否卸载模型：False 常驻可省每次冷加载几秒，代价是占显存
+    IMAGE_LOCAL_PE_UNLOAD: bool = True
+    IMAGE_RELAY_ANALYZE: bool = True    # 生成前是否先看图补充商品事实（同一张图只分析一次）
+    # 看图分析模型：留空 = 与生视频（AI 创作中心）完全一致，
+    # 走 OPENAI_API_BASE / OPENAI_API_KEY / OPENAI_VISION_MODEL 这一套通道。
+    # （出图模型 *-image 做纯文本分析会超时，所以分析与出图必须分开两个模型）
+    IMAGE_RELAY_ANALYZE_MODEL: str = ""
+
     # 火山引擎 TOS 对象存储配置
     # 获取方式：
     # 1. AK/SK: 在火山引擎控制台「访问密钥」中创建
@@ -112,6 +152,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+
+    # 星拓 MCP Server（标签系统 R2 数据源；密钥资产，不入代码库）
+    STARTOP_MCP_URL: str = "https://openmcp.startop.com/mcp-servers/startop-mcp"
+    STARTOP_MCP_KEY: str = ""         # X-Mcp-Key，星拓后台申请
+    STARTOP_PULL_HOUR: int = 2        # 每日定时拉取时刻（Q-3 裁决：每日定时独立拉取，可配置）
+    STARTOP_PAGE_SIZE: int = 100      # 搜索词报表分页大小
     
     @property
     def DATABASE_URL(self) -> str:
@@ -131,12 +177,18 @@ class Settings(BaseSettings):
         encoded_password = urllib.parse.quote_plus(pwd)
         return f"mysql+pymysql://{user}:{encoded_password}@{host}:{port}/{db}?charset=utf8mb4"
     
+    # extra="ignore"：.env 中存在一些由其他模块直接 os.getenv 读取的键
+    # （image_relay_* / feishu_sync_* / ziniao_account_map 等），
+    # 它们不在本 Settings 中定义。pydantic-settings v2 的 BaseSettings
+    # 默认 extra="forbid"，一旦 .env 新增这类键就会在启动时抛
+    # ValidationError（13 项 extra_forbidden）导致服务起不来。
     model_config = {
         "env_file": [
             os.path.join(os.path.dirname(__file__), ".env"),
             os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
         ],
         "env_file_encoding": "utf-8",
+        "extra": "ignore",
     }
 
 

@@ -90,6 +90,16 @@ class InventorySnapshot(BaseModel):
     age_12_plus = Column(Float, comment="12个月以上库龄")
     gross_margin = Column(Float, comment="毛利率参考")
 
+    # 退货率（小数，如 0.0712 表示 7.12%）
+    # 导入策略与 gross_margin 完全一致：不在 NUMERIC_FIELDS 中，不做 fillna(0) 强转，
+    # UPDATE 时跳过空值（保留库中原值），INSERT 时空值写 NULL
+    return_rate_3d = Column(Float, comment="3天退货率")
+    return_rate_7d = Column(Float, comment="7天退货率")
+    return_rate_14d = Column(Float, comment="14天退货率")
+    return_rate_30d = Column(Float, comment="30天退货率")
+    return_rate_60d = Column(Float, comment="60天退货率")
+    return_rate_90d = Column(Float, comment="90天退货率")
+
     # 节日产品标记（存储节日类型：""/"圣诞"/"万圣"/"跨年"/"其他"）
     is_holiday = Column(String(20), default="", comment="节日类型")
     # 停售产品标记
@@ -147,3 +157,8 @@ class ReplenishmentDecision(BaseModel):
     # 产品状态标记（与 inventory_snapshots 同步）
     is_holiday = Column(String(20), default="", comment="节日类型")
     is_discontinued = Column(Boolean, default=False, comment="停售产品标记")
+
+    # 标签系统（M4 过滤引擎产出；真源在 product_tags，此处为决策行冗余口径）
+    # 快照表显式不加列（避免 Excel 导入 UPSERT 覆盖标签口径）
+    force_replenish = Column(Integer, default=0, comment="强制补货标识（override 生效）")
+    filter_status = Column(String(30), default="KEEP", comment="展示口径：KEEP/DISCONTINUED/NEG_MARGIN_EXCLUDED/HOLIDAY_EXCLUDED")

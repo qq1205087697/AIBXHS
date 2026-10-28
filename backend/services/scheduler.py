@@ -181,8 +181,55 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 星拓 MCP 每日定时独立拉取（Q-3 经中间确认：与快照导入解耦，默认凌晨 2 点可配置）
+    from config import get_settings
+    _pull_hour = get_settings().STARTOP_PULL_HOUR
+    scheduler.add_job(
+        startop_pull_job,
+        trigger="cron",
+        hour=_pull_hour,
+        minute=0,
+        id="startop_word_pull",
+        name="星拓搜索词拉取与自动打标",
+        replace_existing=True
+    )
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
+
+
+def startop_pull_job():
+    """每日定时：星拓 MCP 拉取搜索词 → 自动打标（拉取完成后触发重算，与导入互不阻塞）"""
+    from database.database import SessionLocal
+    from services.startop_client import pull_words_to_db, StartopMCPError
+    from services.tag_service import run_auto_tagging
+
+    LOCK_KEY = "startop_word_pull"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=60):
+            db.close()
+            return
+        logger.info("========== 开始星拓搜索词拉取任务 ==========")
+        try:
+            result = pull_words_to_db(db)
+            logger.info(f"星拓拉取完成: {result}")
+        except StartopMCPError as e:
+            # 拉取失败：流水已记录 FAILED_FALLBACK_READY，等待兜底报告导入；不抛出阻断
+            logger.error(f"星拓拉取失败（兜底通道就绪标记已写入流水）: {e}")
+            db.rollback()
+            return
+        # 拉取完成后触发自动打标重算（US-5 §5.5.4⑤）
+        try:
+            tag_result = run_auto_tagging(db, tenant_id=1)
+            logger.info(f"自动打标完成: {tag_result}")
+        except Exception as e:
+            logger.error(f"自动打标失败: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"星拓拉取任务异常: {e}", exc_info=True)
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def check_inventory_job():
