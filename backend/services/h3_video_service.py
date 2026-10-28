@@ -10,6 +10,7 @@
 import io
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -535,10 +536,23 @@ def _prepare_and_run(
             _running.add(task_id)
 
         # 1. 参考图存 TOS（并行上传），供前端「参考图片」展示
+        _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+        _CT_MAP = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                   ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+
         def _to_tos(item: Tuple[str, bytes]) -> Optional[str]:
             name, content = item
             try:
-                return tos_service.upload_file(content, name, subdir="ai-video")
+                # 无图像扩展名的文件按魔数补全，否则 TOS 兜底存 .bin、CDN 返回 octet-stream，
+                # 历史编辑回填走 proxy-image 会被 image/* 校验拒绝
+                if os.path.splitext(name)[1].lower() not in _IMG_EXTS:
+                    ct = tos_service.sniff_image_content_type(content[:16])
+                    if ct:
+                        ext = ct.split("/")[-1]
+                        ext = "jpg" if ext == "jpeg" else ext
+                        name = (name or "image") + "." + ext
+                ct2 = _CT_MAP.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+                return tos_service.upload_file(content, name, subdir="ai-video", content_type=ct2)
             except Exception as e:
                 logger.warning(f"[H3视频] 参考图上传 TOS 失败（不影响生成）: {e}")
                 return None
@@ -790,6 +804,66 @@ def _get_h3_task_status(task_id: int) -> Optional[str]:
         db.close()
 
 
+def _cancel_comfyui_prompt(prompt_id: str) -> str:
+    """向 ComfyUI 发送任务取消指令，返回操作说明。
+
+    先查队列精确判定：执行中→移出队列+中断；排队中→仅移出；都无命中→查 history
+    区分已结束/瞬态，瞬态兜底双发。不盲目双发：当前执行的是其他任务时误发
+    /interrupt 会中断别人的任务。
+    """
+    try:
+        queue = _api("GET", "/queue", timeout=15).json()
+        running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+        pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+    except Exception as e:
+        logger.warning(f"[H3视频] 查询 ComfyUI 队列失败（{e}），保守双发取消指令")
+        try:
+            _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+        except Exception:
+            pass
+        try:
+            _api("POST", "/interrupt", timeout=15)
+        except Exception:
+            pass
+        return "ComfyUI 查询失败，已尽力发送取消指令"
+
+    if prompt_id in running_ids:
+        try:
+            _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+        except Exception:
+            pass
+        try:
+            _api("POST", "/interrupt", timeout=15)
+        except Exception:
+            pass
+        return "已中断 ComfyUI 执行中的任务"
+    if prompt_id in pending_ids:
+        try:
+            _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+        except Exception as e:
+            logger.warning(f"[H3视频] 移出 ComfyUI 队列失败: {e}")
+            return "移出队列失败（任务仍标记为取消）"
+        return "已从 ComfyUI 队列移除"
+
+    # 都无命中：查 history 区分「已执行结束」与「状态切换瞬态」
+    try:
+        h = _api("GET", f"/history/{prompt_id}", timeout=15).json()
+        if h.get(prompt_id):
+            return "任务已执行结束（ComfyUI 端无需取消）"
+    except Exception:
+        pass
+    # 瞬态兜底：任务恰在状态切换瞬间，双发覆盖
+    try:
+        _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+    except Exception:
+        pass
+    try:
+        _api("POST", "/interrupt", timeout=15)
+    except Exception:
+        pass
+    return "任务处于状态切换瞬间，已发送取消指令"
+
+
 def cancel_video_task(tenant_id: int, task_id: int) -> None:
     """取消排队中/生成中的任务：移出 ComfyUI 队列或中断执行，并标记为失败"""
     from database.database import SessionLocal
@@ -810,19 +884,11 @@ def cancel_video_task(tenant_id: int, task_id: int) -> None:
     finally:
         db.close()
 
-    # 同步 ComfyUI：执行中的中断，排队中的移出队列
-    cancelled_via = "任务不在 ComfyUI 队列中（直接标记取消）"
+    # 同步 ComfyUI：精确判定 + 瞬态兜底（见 _cancel_comfyui_prompt）
+    cancelled_via = "任务无 ComfyUI 记录（直接标记取消）"
     if prompt_id:
         try:
-            queue = _api("GET", "/queue", timeout=30).json()
-            running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
-            pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
-            if prompt_id in running_ids:
-                _api("POST", "/interrupt", timeout=30)
-                cancelled_via = "已中断 ComfyUI 执行中的任务"
-            elif prompt_id in pending_ids:
-                _api("POST", "/queue", timeout=30, json={"delete": [prompt_id]})
-                cancelled_via = "已从 ComfyUI 队列移除"
+            cancelled_via = _cancel_comfyui_prompt(prompt_id)
         except Exception as e:
             logger.warning(f"[H3视频] 取消任务 {task_id} 时操作 ComfyUI 失败: {e}")
             cancelled_via = "ComfyUI 操作失败（任务仍将标记为取消）"
@@ -990,18 +1056,36 @@ def recover_failed_task(tenant_id: int, task_id: int) -> Tuple[Optional[str], st
 
 
 def delete_video_task(tenant_id: int, task_id: int) -> None:
-    """删除任务记录（软删除，不影响已生成的成片）"""
+    """删除任务记录（软删除，不影响已生成的成片）。
+
+    非「已完成」任务删除时向 ComfyUI 补发取消指令：取消请求可能因竞态漏发
+    （如点取消后立刻删除），避免记录删了 ComfyUI 仍在白跑占用算力。
+    """
     from database.database import SessionLocal
     from models.ai_video_task import AIVideoTask
 
     db = SessionLocal()
+    need_cancel = False
+    prompt_id = ""
     try:
-        db.query(AIVideoTask).filter(
+        task = db.query(AIVideoTask).filter(
             AIVideoTask.id == task_id, AIVideoTask.tenant_id == tenant_id
-        ).update({"deleted_at": datetime.now()})
-        db.commit()
+        ).first()
+        if task and not task.deleted_at:
+            prompt_id = task.h3_prompt_id or ""
+            need_cancel = bool(prompt_id) and task.status != "已完成"
+            db.query(AIVideoTask).filter(
+                AIVideoTask.id == task_id, AIVideoTask.tenant_id == tenant_id
+            ).update({"deleted_at": datetime.now()})
+            db.commit()
     finally:
         db.close()
+    if need_cancel:
+        try:
+            via = _cancel_comfyui_prompt(prompt_id)
+            logger.info(f"[H3视频] 删除任务 {task_id} 时补发 ComfyUI 取消: {via}")
+        except Exception as e:
+            logger.warning(f"[H3视频] 删除任务 {task_id} 补发取消失败: {e}")
 
 
 def resume_pending_tasks() -> Optional[int]:

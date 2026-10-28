@@ -110,12 +110,18 @@ async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="该图片域名不在代理白名单内")
 
     try:
+        from services import tos_service  # 局部导入避免路由层循环依赖
+
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "").split(";")[0].strip()
             if not content_type.startswith("image/"):
-                raise HTTPException(status_code=400, detail="目标地址不是图片")
+                # CDN 对无扩展名对象（TOS 兜底存成 .bin）返回 octet-stream，按魔数嗅探真实格式
+                sniffed = tos_service.sniff_image_content_type(resp.content[:16])
+                if not sniffed:
+                    raise HTTPException(status_code=400, detail="目标地址不是图片")
+                content_type = sniffed
             data = resp.content
     except httpx.HTTPError as e:
         logger.warning(f"[AI创作中心] 代理取图失败: {url}, err={e}")
