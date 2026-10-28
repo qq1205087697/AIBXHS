@@ -175,6 +175,24 @@ def upload_file(file_bytes: bytes, file_name: str,
         raise RuntimeError(f"文件上传到 TOS 失败: {e}")
 
 
+def sniff_image_content_type(data: bytes) -> Optional[str]:
+    """按文件头魔数识别图片真实格式（CDN 对无扩展名/罕见扩展名对象会返回 octet-stream，
+    Content-Type 不可信时以此兜底判断是否图片及实际类型）"""
+    magic_map = [
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"BM", "image/bmp"),
+    ]
+    for magic, ct in magic_map:
+        if data.startswith(magic):
+            return ct
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "") -> str:
     """上传图片到 TOS（images 子目录）"""
     # 根据扩展名推断 content_type

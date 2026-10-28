@@ -798,20 +798,27 @@ const AICreationCenter: React.FC = () => {
     }
   }
 
-  // 收集所有图片为 File：本地文件直接用，产品图片 URL 需下载转 File
+  // 收集所有图片为 File：本地文件直接用，产品图片 URL 并行下载转 File（串行取图会让
+  // 编辑回填场景的提交等待数十秒）
   const collectFiles = async (): Promise<File[]> => {
-    const files: File[] = []
-    for (const f of fileList) {
+    const results: (File | null)[] = []
+    const urlEntries: { idx: number; url: string; name: string }[] = []
+    fileList.forEach((f, i) => {
       if (f.originFileObj instanceof File) {
-        files.push(f.originFileObj)
+        results[i] = f.originFileObj
       } else if (f.url || f.thumbUrl) {
-        const blob = await fetchImageBlob(f.url || f.thumbUrl!)
-        if (blob) {
-          files.push(new File([blob], f.name || `image-${f.uid}.jpg`, { type: blob.type || 'image/jpeg' }))
-        }
+        urlEntries.push({ idx: i, url: f.url || f.thumbUrl!, name: f.name || `image-${f.uid}.jpg` })
       }
-    }
-    return files
+    })
+    await Promise.all(
+      urlEntries.map(async ({ idx, url, name }) => {
+        const blob = await fetchImageBlob(url)
+        if (blob) {
+          results[idx] = new File([blob], name, { type: blob.type || 'image/jpeg' })
+        }
+      })
+    )
+    return results.filter((f): f is File => !!f)
   }
 
   // 复制二次优化后的 H3 提示词
@@ -830,17 +837,19 @@ const AICreationCenter: React.FC = () => {
     confirmedCard?: string,
     productForState?: AmazonProductAnalysisResult,
   ) => {
+    // 先置 loading 再取图：URL 图并行下载仍可能耗时数秒，避免按钮无反馈
+    setLoading(true)
     const files = await collectFiles()
 
     if (files.length === 0) {
       message.warning('请先上传商品图片')
+      setLoading(false)
       return
     }
     if (isRefresh && planRefreshLeft <= 0) {
+      setLoading(false)
       return
     }
-
-    setLoading(true)
 
     let reqPromise: InflightPlanPromise | null = null
     try {
@@ -896,12 +905,14 @@ const AICreationCenter: React.FC = () => {
     // 编辑回填后重新生成：沿用原任务的标题与产品信息，避免丢失后落到默认值
     const restored = activeHistoryId ? history.find((h) => h.id === activeHistoryId) : null
     const title = result?.product_name_cn || result?.product_name_en || restored?.title || '视频生成任务'
+    // 先置 loading 再取图：URL 图下载可能耗时数秒，避免按钮无反馈
+    setLoading(true)
     const files = await collectFiles()
     if (files.length === 0) {
       message.warning('参考图片读取失败，请重新上传')
+      setLoading(false)
       return
     }
-    setLoading(true)
     try {
       const resp = await aiCreationApi.generateVideo(files, {
         prompt: promptText,
