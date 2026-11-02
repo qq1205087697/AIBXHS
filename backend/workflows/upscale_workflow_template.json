@@ -32,7 +32,7 @@
       "帧率": 24,
       "增强强度": 1,
       "输入质量": 14,
-      "GPU选择": "自动"
+      "GPU选择": "Auto (自动)"
     },
     "class_type": "TopazStarlight",
     "_meta": { "title": "TopazStarlight" }
