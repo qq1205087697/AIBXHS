@@ -334,11 +334,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               icon: <Video size={18} />,
               label: 'AI视频',
             },
-            {
-              key: '/ai-image',
-              icon: <ImageIcon size={18} />,
-              label: 'AI生图',
-            },
+            ...(hasPermission('ai_image:use')
+              ? [{
+                  key: '/ai-image',
+                  icon: <ImageIcon size={18} />,
+                  label: 'AI生图',
+                }]
+              : []),
             {
               key: '/upscale-center',
               icon: <Film size={18} />,
@@ -361,11 +363,15 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           shortLabel: "开发",
         }]
       : []),
-    {
-      key: "/data-alert",
-      icon: <AlertTriangle size={20} />,
-      label: "数据驾驶舱",
-    },
+    ...(hasPermission("data_alert:view")
+      ? [
+          {
+            key: "/data-alert",
+            icon: <AlertTriangle size={20} />,
+            label: "数据驾驶舱",
+          },
+        ]
+      : []),
     ...(hasPermission("product:view")
       ? [
           {

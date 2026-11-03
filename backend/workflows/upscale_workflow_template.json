@@ -27,12 +27,12 @@
     "inputs": {
       "图像": ["26", 1],
       "模型": "星光 2.6",
-      "显存上限": 16,
+      "显存上限": 96,
       "放大倍数": 2,
       "帧率": 24,
       "增强强度": 1,
       "输入质量": 14,
-      "GPU选择": "GPU 0: NVIDIA GeForce RTX 5060 Ti"
+      "GPU选择": "Auto (自动)"
     },
     "class_type": "TopazStarlight",
     "_meta": { "title": "TopazStarlight" }

@@ -336,7 +336,9 @@ const mapWmoWeather = (code: number, temp: number): { icon: string; text: string
 
 const Dashboard: React.FC = () => {
   const { currentTheme } = useTheme()
-  const { user } = useAuth()
+  const { user, hasPermission } = useAuth()
+  // 数据驾驶舱权限：无权限时隐藏「今日待处理/消息通知」并跳过相关请求（其数据均来自未开通模块）
+  const canDataAlert = hasPermission('data_alert:view')
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [inventoryAlerts, setInventoryAlerts] = useState<InventoryAlert[]>([])
   const [reviews, setReviews] = useState<ReviewItem[]>([])
@@ -633,7 +635,7 @@ const Dashboard: React.FC = () => {
       }
     } catch { /* 接口失败时保持原列表 */ }
   }
-  useEffect(() => { loadNotices() }, [user?.username])
+  useEffect(() => { if (canDataAlert) loadNotices() }, [user?.username, canDataAlert])
 
   // 搜索面板快捷日期：今日/昨日/近七天/近30天/自定义（默认近七天，点击即加载）
   const QUICK_RANGES = [
@@ -682,6 +684,7 @@ const Dashboard: React.FC = () => {
 
   // 今日待处理：获取各业务待办数量（购物车/货件按用户可见店铺过滤）
   useEffect(() => {
+    if (!canDataAlert) return
     let cancelled = false
     ;(async () => {
       let storeNames: string[] = []
@@ -719,7 +722,7 @@ const Dashboard: React.FC = () => {
       })
     })()
     return () => { cancelled = true }
-  }, [])
+  }, [canDataAlert])
 
   // 每秒刷新世界时钟（已移入 WorldClocks 组件内部，避免整页重渲染卡顿）
 
@@ -1161,7 +1164,8 @@ const Dashboard: React.FC = () => {
         )
       })()}
 
-      {/* 今日待处理 & 消息通知 */}
+      {/* 今日待处理 & 消息通知（依赖数据驾驶舱等模块权限，无权限时整块隐藏） */}
+      {canDataAlert && (
       <Row gutter={16}>
         <Col span={10}>
           <div style={{
@@ -1498,6 +1502,7 @@ const Dashboard: React.FC = () => {
           </div>
         </Col>
       </Row>
+      )}
 
       {/* 消息详情独立弹窗 */}
       <Modal

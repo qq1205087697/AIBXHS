@@ -9,7 +9,7 @@ import time
 
 from pydantic import BaseModel
 
-from dependencies import get_current_user
+from dependencies import PermissionChecker
 from models.user import User
 from config import get_settings
 from services.ai_image_service import (
@@ -76,7 +76,7 @@ def _idem_settle(key: str, task: Dict[str, Any] = None) -> None:
 
 
 @router.get("/options")
-async def get_options(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+async def get_options(current_user: User = Depends(PermissionChecker("ai_image:use"))) -> Dict[str, Any]:
     """生成类型与比例选项（供前端渲染）
 
     比例以 ComfyUI 实时能力为准：探测失败时回退静态表，避免因节点探测抖动禁用整页。
@@ -203,7 +203,7 @@ async def create_image_task(
     product_name: str = Form(""),
     provider: str = Form("local", description="生成通道：local=本地 Qwen Image 2.1 / relay=中转站 Nano Banana 2"),
     idempotency_key: str = Header("", alias="Idempotency-Key"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(PermissionChecker("ai_image:use")),
 ):
     """提交商品套图生成任务：落库后立即返回，生成在后台进行"""
     # 幂等：前端同一份表单只带一个 key；重复点击/重试不会产生第二单
@@ -280,7 +280,7 @@ async def list_tasks(
     page_size: int = 10,
     keyword: str = "",
     status: str = "",
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(PermissionChecker("ai_image:use")),
 ):
     """套图生成任务列表（分页，按时间倒序；status 由服务端过滤，保证分页自洽）"""
     try:
@@ -292,7 +292,7 @@ async def list_tasks(
 
 
 @router.get("/tasks/{task_id}")
-async def get_task(task_id: int, current_user: User = Depends(get_current_user)):
+async def get_task(task_id: int, current_user: User = Depends(PermissionChecker("ai_image:use"))):
     """单任务详情（前端轮询用：只拉当前页仍在生成的单条，避免整页重复传输）"""
     try:
         return get_image_task(current_user.tenant_id, task_id)
@@ -301,14 +301,14 @@ async def get_task(task_id: int, current_user: User = Depends(get_current_user))
 
 
 @router.delete("/tasks/{task_id}")
-async def remove_task(task_id: int, current_user: User = Depends(get_current_user)):
+async def remove_task(task_id: int, current_user: User = Depends(PermissionChecker("ai_image:use"))):
     """删除任务记录（软删除，不影响已生成的图片）"""
     delete_image_task(current_user.tenant_id, task_id)
     return {"success": True}
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: int, current_user: User = Depends(get_current_user)):
+async def cancel_task(task_id: int, current_user: User = Depends(PermissionChecker("ai_image:use"))):
     """取消排队中/生成中的任务（已执行的那一张会自然结束，不再回收）"""
     try:
         return cancel_image_task(current_user.tenant_id, task_id)
@@ -320,7 +320,7 @@ async def cancel_task(task_id: int, current_user: User = Depends(get_current_use
 async def retry_task(
     task_id: int,
     payload: Optional[Dict[str, Any]] = Body(default=None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(PermissionChecker("ai_image:use")),
 ):
     """重试失败子项：body 可带 {"indices": [0, 2]}，缺省重试全部失败项"""
     indices = (payload or {}).get("indices")
@@ -337,7 +337,7 @@ async def retry_task(
 
 
 @router.get("/tasks/{task_id}/download.zip")
-async def download_zip(task_id: int, current_user: User = Depends(get_current_user)):
+async def download_zip(task_id: int, current_user: User = Depends(PermissionChecker("ai_image:use"))):
     """打包下载该任务全部已生成的图片"""
     try:
         data, filename = build_task_zip(current_user.tenant_id, task_id)
@@ -354,7 +354,7 @@ async def download_zip(task_id: int, current_user: User = Depends(get_current_us
 
 
 @router.get("/comfy-history/{prompt_id}")
-async def get_comfy_history(prompt_id: str, current_user: User = Depends(get_current_user)):
+async def get_comfy_history(prompt_id: str, current_user: User = Depends(PermissionChecker("ai_image:use"))):
     """按 ComfyUI prompt_id 查执行历史：原始提示词 + PE 优化后提示词（生图详情弹窗用）"""
     # 归属校验：prompt_id 属于其他租户时一律 404（不泄露存在性）
     if not prompt_belongs_to_tenant(current_user.tenant_id, prompt_id):

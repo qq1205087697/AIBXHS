@@ -699,6 +699,7 @@ async def init_default_permissions(
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "审批视频绑定", "code": "ai_video:approve", "type": "function", "module": "媒体创作中心", "sort_order": 72},
+        {"name": "AI生图", "code": "ai_image:use", "type": "function", "module": "媒体创作中心", "sort_order": 73},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -780,6 +781,10 @@ async def add_missing_permissions(
     
     # 新权限列表（需要补充的）
     new_permissions = [
+        # 首页（基础模块；首页 KPI 接口 dashboard.py 使用此码）
+        {"name": "查看首页", "code": "dashboard:view", "type": "function", "module": "首页", "sort_order": 0},
+        # 数据驾驶舱（独立模块）
+        {"name": "查看数据驾驶舱", "code": "data_alert:view", "type": "function", "module": "数据驾驶舱", "sort_order": 30},
         # 选品管理
         {"name": "查看选品", "code": "product_selection:view", "type": "function", "module": "选品管理", "sort_order": 5},
         {"name": "新增选品", "code": "product_selection:create", "type": "function", "module": "选品管理", "sort_order": 6},
@@ -823,6 +828,7 @@ async def add_missing_permissions(
         # 媒体创作中心
         {"name": "AI视频", "code": "ai_video:use", "type": "function", "module": "媒体创作中心", "sort_order": 71},
         {"name": "审批视频绑定", "code": "ai_video:approve", "type": "function", "module": "媒体创作中心", "sort_order": 72},
+        {"name": "AI生图", "code": "ai_image:use", "type": "function", "module": "媒体创作中心", "sort_order": 73},
         {"name": "超期采购单KPI卡片", "code": "purchase:overdue_kpi", "type": "function", "module": "采购管理", "sort_order": 52},
         {"name": "采购单状态KPI卡片", "code": "purchase:status_kpi", "type": "function", "module": "采购管理", "sort_order": 53},
         {"name": "入库差异KPI卡片", "code": "inbound:diff_kpi", "type": "function", "module": "入库管理", "sort_order": 54},
@@ -877,7 +883,8 @@ async def add_missing_permissions(
     ]
 
     # 先清理无用的旧权限码
-    removed_codes = ["dashboard:view", "review:reply", "robot:inventory", "robot:review", "replenishment:confirm", "replenishment:import"]
+    # 注意：dashboard:view 是首页 KPI 的正常权限码（已纳入权限定义清单与默认基线），不再清理
+    removed_codes = ["review:reply", "robot:inventory", "robot:review", "replenishment:confirm", "replenishment:import"]
     removed_count = 0
     for code in removed_codes:
         result = db.execute(text("""
