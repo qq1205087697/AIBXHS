@@ -341,7 +341,7 @@ async def approve_video_binding(
     if req[3] != "pending":
         raise HTTPException(status_code=400, detail="该申请已处理，请刷新列表")
 
-    _do_bind_media(
+    videos = _do_bind_media(
         db, current_user.tenant_id, req[2], req[1],
         req[4] if req[4] in MEDIA_LABELS else "video",
     )
