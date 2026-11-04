@@ -36,12 +36,13 @@ import {
   DownOutlined,
   FormOutlined,
   MoreOutlined,
+  PlusOutlined,
   SearchOutlined,
   EyeOutlined,
   LinkOutlined,
   PauseCircleOutlined,
 } from '@ant-design/icons'
-import type { UploadFile } from 'antd/es/upload'
+import type { RcFile, UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
 import BindProductModal from '../components/BindProductModal'
 import {
@@ -335,6 +336,28 @@ interface ProductOptionItem {
   images: string[]
 }
 
+// 批量填报：每行一条视频生成任务
+interface BatchVideoRow {
+  key: string
+  productId: number | null
+  productCode: string
+  productName: string
+  images: UploadFile[]
+  prompt: string
+  status: 'idle' | 'submitting' | 'success' | 'failed'
+  error?: string
+}
+
+// 批量填报：产品下拉选项（带产品库图片，选中后自动带入参考图）
+interface BatchProductOption {
+  id: number
+  product_code: string
+  name: string
+  images: string[]
+}
+
+const MAX_BATCH_ROWS = 20
+
 const MARKET_OPTIONS: { label: string; value: VideoMarket }[] = [
   { label: '美国', value: 'US' },
   { label: '加拿大', value: 'CA' },
@@ -484,6 +507,27 @@ const AICreationCenter: React.FC = () => {
   const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([])
   // 从产品库选图时记录来源产品（编码/品名随任务落库）
   const [selectedProducts, setSelectedProducts] = useState<ProductOptionItem[]>([])
+
+  // ===== 批量填报模式：整批共用一套参数，每行独立选择产品、参考图与提示词 =====
+  const [genMode, setGenMode] = useState<'single' | 'batch'>('single')
+  const [batchRows, setBatchRows] = useState<BatchVideoRow[]>([])
+  const [batchAiKey, setBatchAiKey] = useState<string | null>(null)
+  const [batchPlanTarget, setBatchPlanTarget] = useState<{
+    rowKey: string
+    productName: string
+    concepts: VideoConcept[]
+  } | null>(null)
+  const [batchSubmitting, setBatchSubmitting] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
+  // 产品下拉共用一份远程搜索结果：同一时间只会展开一个下拉
+  const [batchProductOptions, setBatchProductOptions] = useState<BatchProductOption[]>([])
+  const [batchProductLoading, setBatchProductLoading] = useState(false)
+  const batchProductKeywordRef = useRef('')
+  const batchProductPageRef = useRef(1)
+  const batchProductTotalRef = useRef(0)
+  const batchProductSeqRef = useRef(0)
+  const batchSearchTimerRef = useRef<number | null>(null)
+  const batchRowSeqRef = useRef(0)
 
   // 参考图变动后：旧方案与商品分析全部失效（否则旧产品名会混入下一次方案生成）
   const invalidatePlans = () => {
@@ -800,10 +844,10 @@ const AICreationCenter: React.FC = () => {
 
   // 收集所有图片为 File：本地文件直接用，产品图片 URL 并行下载转 File（串行取图会让
   // 编辑回填场景的提交等待数十秒）
-  const collectFiles = async (): Promise<File[]> => {
+  const collectFilesFrom = async (items: UploadFile[]): Promise<File[]> => {
     const results: (File | null)[] = []
     const urlEntries: { idx: number; url: string; name: string }[] = []
-    fileList.forEach((f, i) => {
+    items.forEach((f, i) => {
       if (f.originFileObj instanceof File) {
         results[i] = f.originFileObj
       } else if (f.url || f.thumbUrl) {
@@ -819,6 +863,306 @@ const AICreationCenter: React.FC = () => {
       })
     )
     return results.filter((f): f is File => !!f)
+  }
+  const collectFiles = (): Promise<File[]> => collectFilesFrom(fileList)
+
+  // ===== 批量填报：行与产品下拉 =====
+  const createBatchRow = (): BatchVideoRow => ({
+    key: `batch-${++batchRowSeqRef.current}`,
+    productId: null,
+    productCode: '',
+    productName: '',
+    images: [],
+    prompt: '',
+    status: 'idle',
+  })
+
+  const fetchBatchProducts = async (keyword: string, page = 1) => {
+    const seq = ++batchProductSeqRef.current
+    setBatchProductLoading(true)
+    try {
+      const res = await productsApi.getList({
+        search: keyword || undefined,
+        page,
+        page_size: 50,
+        product_type: 'finished',
+      })
+      if (seq !== batchProductSeqRef.current) return
+      const payload = res.data?.data
+      const items: any[] = Array.isArray(payload) ? payload : payload?.items || []
+      const total = Array.isArray(payload) ? res.data?.total ?? items.length : payload?.total ?? 0
+      batchProductKeywordRef.current = keyword
+      batchProductPageRef.current = page
+      batchProductTotalRef.current = total
+      const mapped: BatchProductOption[] = items.map((p) => ({
+        id: p.id,
+        product_code: p.product_code || '',
+        name: p.name || '',
+        images: Array.from(
+          new Set([...(p.images || []), ...(p.main_image ? [p.main_image] : [])])
+        ).filter(Boolean) as string[],
+      }))
+      setBatchProductOptions((prev) =>
+        page === 1 ? mapped : [...prev, ...mapped.filter((m) => !prev.some((x) => x.id === m.id))]
+      )
+    } catch {
+      if (seq === batchProductSeqRef.current) message.error('获取产品列表失败')
+    } finally {
+      if (seq === batchProductSeqRef.current) setBatchProductLoading(false)
+    }
+  }
+
+  const switchGenMode = (mode: 'single' | 'batch') => {
+    setGenMode(mode)
+    if (mode === 'batch') {
+      setBatchRows((prev) => (prev.length > 0 ? prev : [createBatchRow()]))
+      if (batchProductOptions.length === 0) fetchBatchProducts('', 1)
+    }
+  }
+
+  const handleBatchProductSearch = (keyword: string) => {
+    if (batchSearchTimerRef.current) window.clearTimeout(batchSearchTimerRef.current)
+    batchSearchTimerRef.current = window.setTimeout(() => fetchBatchProducts(keyword, 1), 300)
+  }
+
+  const handleBatchProductScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 40) return
+    if (batchProductLoading) return
+    if (batchProductOptions.length >= batchProductTotalRef.current) return
+    fetchBatchProducts(batchProductKeywordRef.current, batchProductPageRef.current + 1)
+  }
+
+  const getBatchRowProductOptions = (row: BatchVideoRow) => {
+    const options = batchProductOptions.map((p) => ({
+      value: p.id,
+      label: p.product_code ? `[${p.product_code}] ${p.name}` : p.name,
+    }))
+    // 搜索词变化后已选产品可能不在当前结果中，补一条避免回显成 id
+    if (row.productId && !options.some((o) => o.value === row.productId)) {
+      options.unshift({
+        value: row.productId,
+        label: row.productCode ? `[${row.productCode}] ${row.productName}` : row.productName,
+      })
+    }
+    return options
+  }
+
+  const handleBatchSelectProduct = (rowKey: string, productId: number | null) => {
+    const product = batchProductOptions.find((p) => p.id === productId) || null
+    setBatchRows((prev) =>
+      prev.map((r) => {
+        if (r.key !== rowKey) return r
+        if (!product) {
+          return { ...r, productId: null, productCode: '', productName: '', status: 'idle', error: undefined }
+        }
+        // 选产品即重置参考图为该产品图片；产品无图时清空，提示手动上传
+        const images: UploadFile[] = product.images.slice(0, MAX_IMAGES).map((url, i) => ({
+          uid: `batch-product-${rowKey}-${i}-${Date.now()}`,
+          name: url.split('/').pop() || `product-image-${i + 1}.jpg`,
+          status: 'done',
+          url,
+          thumbUrl: url,
+        }))
+        return {
+          ...r,
+          productId: product.id,
+          productCode: product.product_code,
+          productName: product.name,
+          images,
+          status: 'idle',
+          error: undefined,
+        }
+      })
+    )
+  }
+
+  // 每行独立的原生 file input：用 label 原生触发，避免程序化 click 被浏览器拦截
+  const handleBatchAddLocalFiles = (rowKey: string, fileList: FileList | null) => {
+    const files = Array.from(fileList || [])
+    if (files.length === 0) return
+    const items: UploadFile[] = files.map((f, i) => ({
+      uid: `batch-upload-${Date.now()}-${i}-${f.name}`,
+      name: f.name,
+      status: 'done',
+      thumbUrl: URL.createObjectURL(f),
+      // 本地文件直接保留原始 File，提交时不再二次下载
+      originFileObj: f as unknown as RcFile,
+    }))
+    setBatchRows((prev) =>
+      prev.map((r) => {
+        if (r.key !== rowKey) return r
+        const merged = [...r.images, ...items].slice(0, MAX_IMAGES)
+        return { ...r, images: merged, status: 'idle', error: undefined }
+      })
+    )
+  }
+
+  const handleBatchRemoveImage = (rowKey: string, uid: string) => {
+    setBatchRows((prev) =>
+      prev.map((r) =>
+        r.key === rowKey
+          ? { ...r, images: r.images.filter((img) => img.uid !== uid), status: 'idle', error: undefined }
+          : r
+      )
+    )
+  }
+
+  const handleBatchPromptChange = (rowKey: string, value: string) => {
+    setBatchRows((prev) =>
+      prev.map((r) =>
+        r.key === rowKey
+          ? { ...r, prompt: value, status: r.status === 'submitting' ? r.status : 'idle', error: undefined }
+          : r
+      )
+    )
+  }
+
+  const handleBatchAddRow = () => {
+    if (batchRows.length >= MAX_BATCH_ROWS) {
+      message.warning(`最多 ${MAX_BATCH_ROWS} 行`)
+      return
+    }
+    setBatchRows((prev) => [...prev, createBatchRow()])
+  }
+
+  const handleBatchRemoveRow = (rowKey: string) => {
+    if (batchRows.length === 1) {
+      // 至少保留一行：清空当前行内容
+      setBatchRows([createBatchRow()])
+      return
+    }
+    setBatchRows((prev) => prev.filter((r) => r.key !== rowKey))
+  }
+
+  // 每行独立生成 3 套方案，选一套后只回填该行提示词
+  const handleBatchGeneratePlan = async (row: BatchVideoRow, rowIndex: number) => {
+    if (batchAiKey) return
+    if (row.images.length === 0) {
+      message.warning(`任务 ${rowIndex}：请先选择产品图片或上传参考图`)
+      return
+    }
+    setBatchAiKey(row.key)
+    try {
+      const files = await collectFilesFrom(row.images)
+      if (files.length === 0) {
+        message.warning('参考图片读取失败，请重试')
+        return
+      }
+      const res = await (aiCreationApi.generateVoiceoverPlans(files, {
+        duration,
+        target_market: getMarketLabel(market),
+        voiceover_language: voiceoverLanguage,
+        video_type: videoType,
+        aspect_ratio: ratio,
+        product_name: row.productName || '',
+      }) as InflightPlanPromise)
+      if (res.data?.success && res.data?.data?.concepts?.length) {
+        setBatchPlanTarget({
+          rowKey: row.key,
+          productName: row.productName,
+          concepts: res.data.data.concepts,
+        })
+      } else {
+        message.error('方案生成异常，请稍后重试')
+      }
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e.message || '方案生成失败')
+    } finally {
+      setBatchAiKey(null)
+    }
+  }
+
+  const handleBatchSelectConcept = (index: number) => {
+    const target = batchPlanTarget
+    const concept = target?.concepts[index]
+    if (!target || !concept) return
+    const prompt = formatSelectedConcept(concept)
+    setBatchRows((prev) =>
+      prev.map((r) => (r.key === target.rowKey ? { ...r, prompt, status: 'idle', error: undefined } : r))
+    )
+    setBatchPlanTarget(null)
+    message.success('已填入该行提示词')
+  }
+
+  const runBatchSubmit = async (targets: BatchVideoRow[]) => {
+    setBatchSubmitting(true)
+    let okCount = 0
+    let failCount = 0
+    for (let i = 0; i < targets.length; i++) {
+      const row = targets[i]
+      setBatchProgress({ done: i, total: targets.length })
+      setBatchRows((prev) =>
+        prev.map((r) => (r.key === row.key ? { ...r, status: 'submitting', error: undefined } : r))
+      )
+      try {
+        const files = await collectFilesFrom(row.images)
+        if (files.length === 0) throw new Error('参考图片读取失败')
+        await aiCreationApi.generateVideo(files, {
+          prompt: row.prompt.trim(),
+          duration,
+          resolution: H3_FIXED_RESOLUTION,
+          ratio,
+          model,
+          market,
+          voiceover_language: voiceoverLanguage,
+          video_type: videoType,
+          title: row.productName || row.productCode || '视频生成任务',
+          product_code: row.productCode,
+          product_name: row.productName,
+        })
+        okCount += 1
+        setBatchRows((prev) =>
+          prev.map((r) => (r.key === row.key ? { ...r, status: 'success', error: undefined } : r))
+        )
+      } catch (e: any) {
+        failCount += 1
+        const detail = e?.response?.data?.detail || e.message || '提交失败'
+        setBatchRows((prev) => prev.map((r) => (r.key === row.key ? { ...r, status: 'failed', error: detail } : r)))
+      }
+    }
+    setBatchProgress(null)
+    setBatchSubmitting(false)
+    if (okCount > 0) {
+      setHistoryPage(1)
+      loadTasks(1)
+    }
+    if (failCount > 0) {
+      message.warning(`提交完成：成功 ${okCount} 条，失败 ${failCount} 条，可修正后重新提交`)
+    } else {
+      message.success(`已提交 ${okCount} 条视频生成任务，排队中`)
+    }
+  }
+
+  const handleBatchSubmit = () => {
+    if (batchSubmitting) return
+    // 已成功的行不重复提交
+    const targets = batchRows.filter((r) => r.status !== 'success')
+    if (targets.length === 0) {
+      message.warning('没有待提交的任务，请新增一行')
+      return
+    }
+    const errors: string[] = []
+    targets.forEach((r) => {
+      const idx = batchRows.findIndex((x) => x.key === r.key) + 1
+      if (!r.productId) errors.push(`任务 ${idx}：请选择产品`)
+      else if (r.images.length === 0) errors.push(`任务 ${idx}：请上传至少一张参考图`)
+      else if (!r.prompt.trim()) errors.push(`任务 ${idx}：请填写提示词`)
+    })
+    if (errors.length > 0) {
+      message.error(
+        errors.slice(0, 3).join('；') + (errors.length > 3 ? `；等 ${errors.length} 项待完善` : '')
+      )
+      return
+    }
+    Modal.confirm({
+      title: `确认提交 ${targets.length} 条视频生成任务？`,
+      content: '提交后任务进入生成队列，可在「生成历史」查看进度；整批共用当前生成参数。',
+      okText: '提交',
+      cancelText: '取消',
+      centered: true,
+      onOk: () => runBatchSubmit(targets),
+    })
   }
 
   // 复制二次优化后的 H3 提示词
@@ -1962,10 +2306,383 @@ const AICreationCenter: React.FC = () => {
       </Card>
   )
 
+  // ===== 批量填报：模式切换、批量表单与方案选择弹窗 =====
+  const renderModeSwitch = () => (
+    <div style={{ flexShrink: 0, marginBottom: 10 }}>
+      <Segmented
+        block
+        value={genMode}
+        onChange={(v) => switchGenMode(v as 'single' | 'batch')}
+        options={[
+          { label: '单个生成', value: 'single' },
+          { label: '批量填报', value: 'batch' },
+        ]}
+      />
+    </div>
+  )
+
+  const renderBatchPlanModal = () => (
+    <Modal
+      title={`AI生成方案${batchPlanTarget?.productName ? ` - ${batchPlanTarget.productName}` : ''}`}
+      open={!!batchPlanTarget}
+      onCancel={() => setBatchPlanTarget(null)}
+      footer={null}
+      width={1200}
+      styles={{ body: { maxHeight: '72vh', overflowY: 'auto', overflowX: 'hidden' } }}
+    >
+      {batchPlanTarget && (
+        <>
+          <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+            选择一套方案后自动填入对应行的提示词，不影响其他任务。
+          </Text>
+          <Row gutter={16}>
+            {batchPlanTarget.concepts.map((concept, idx) => (
+              <Col span={8} key={idx}>
+                <Card
+                  type="inner"
+                  title={
+                    <div>
+                      <Text strong style={{ fontSize: 14 }}>
+                        方案{['一', '二', '三'][idx]}：{concept.concept_title}
+                      </Text>
+                      <div style={{ marginTop: 6 }}>
+                        <Tag color="orange">{concept.marketing_goal}</Tag>
+                      </div>
+                    </div>
+                  }
+                  bodyStyle={{ padding: 0 }}
+                >
+                  <div style={{ height: 460, display: 'flex', flexDirection: 'column' }}>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', padding: 16 }}>
+                      {renderConceptField('情节', concept.story, 'purple')}
+                      {renderConceptField(
+                        '模特',
+                        [
+                          concept.character,
+                          concept.creative_strategy?.age,
+                          concept.creative_strategy?.persona_identity,
+                          concept.creative_strategy?.persona_role,
+                        ]
+                          .filter(Boolean)
+                          .join('；'),
+                        'cyan'
+                      )}
+                      {renderConceptField('环境', concept.environment, 'green')}
+                      {renderConceptField('音乐', concept.music, 'orange')}
+                      {renderConceptField('分镜', renderStoryboard(concept), 'geekblue')}
+                    </div>
+                    <div
+                      style={{
+                        flexShrink: 0,
+                        padding: 12,
+                        background: '#fff',
+                        borderTop: '1px solid #f0f0f0',
+                        position: 'relative',
+                        zIndex: 1,
+                      }}
+                    >
+                      <Button
+                        block
+                        onClick={() => handleBatchSelectConcept(idx)}
+                        style={{
+                          background: currentTheme.selectedBg,
+                          borderColor: currentTheme.primary,
+                          color: currentTheme.primary,
+                        }}
+                      >
+                        选择此方案
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
+              </Col>
+            ))}
+          </Row>
+        </>
+      )}
+    </Modal>
+  )
+
+  const renderBatchTab = () => {
+    const pendingCount = batchRows.filter((r) => r.status !== 'success').length
+    return (
+      <div style={{ display: 'flex', gap: 16, height: '100%', alignItems: 'stretch' }}>
+        {/* 左侧：共用参数 + 多行填报（独立滚动），提交按钮固定在底部 */}
+        <div style={{ width: 400, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          {renderModeSwitch()}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 4 }}>
+            <Card
+              title={
+                <Space>
+                  <FormOutlined />
+                  <span>批量填报</span>
+                </Space>
+              }
+              extra={
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {batchRows.length}/{MAX_BATCH_ROWS} 行
+                </Text>
+              }
+            >
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                每行一条视频任务：选择产品自动带入参考图，也可手动上传覆盖；整批共用以下生成参数。
+              </Text>
+
+              <Divider style={{ margin: '12px 0' }} />
+
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
+                <Text strong style={{ flexShrink: 0, fontSize: 13 }}>视频类型：</Text>
+                <Select<VideoType>
+                  value={videoType}
+                  onChange={setVideoType}
+                  style={{ flex: 1, minWidth: 0 }}
+                  disabled={batchSubmitting}
+                  options={VIDEO_TYPE_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))}
+                />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
+                <Text strong style={{ flexShrink: 0, fontSize: 13 }}>目标市场：</Text>
+                <Select<VideoMarket>
+                  value={market}
+                  onChange={setMarket}
+                  style={{ flex: 1, minWidth: 0 }}
+                  disabled={batchSubmitting}
+                  options={MARKET_OPTIONS}
+                  showSearch
+                  optionFilterProp="label"
+                />
+              </div>
+
+              {videoType === '口播带货' && (
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
+                  <Text strong style={{ flexShrink: 0, fontSize: 13 }}>口播语言：</Text>
+                  <Select<VoiceoverLanguage>
+                    value={voiceoverLanguage}
+                    onChange={setVoiceoverLanguage}
+                    style={{ flex: 1, minWidth: 0 }}
+                    disabled={batchSubmitting}
+                    options={VOICEOVER_LANGUAGE_OPTIONS}
+                  />
+                </div>
+              )}
+
+              <Text type="secondary" style={{ fontSize: 12 }}>视频时长（5 / 10 / 15 秒）</Text>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <Slider
+                  min={5}
+                  max={15}
+                  step={null}
+                  value={duration}
+                  onChange={(v: number) => setDuration(v as VideoDuration)}
+                  disabled={batchSubmitting}
+                  marks={DURATION_MARKS}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <Text strong style={{ flexShrink: 0, width: 48, textAlign: 'right' }}>
+                  {duration}秒
+                </Text>
+              </div>
+
+              <Text type="secondary" style={{ display: 'block', fontSize: 12, margin: '12px 0 8px' }}>
+                视频比例
+              </Text>
+              <div style={{ pointerEvents: batchSubmitting ? 'none' : 'auto', opacity: batchSubmitting ? 0.6 : 1 }}>
+                {renderRatioGrid()}
+              </div>
+
+              <Divider style={{ margin: '12px 0' }} />
+
+              {batchRows.map((row, idx) => (
+                <Card
+                  key={row.key}
+                  size="small"
+                  style={{ marginBottom: 10 }}
+                  title={
+                    <Space size={6}>
+                      <Text strong style={{ fontSize: 13 }}>任务 {idx + 1}</Text>
+                      {row.status === 'success' && <Tag color="success">已提交</Tag>}
+                      {row.status === 'failed' && <Tag color="error">提交失败</Tag>}
+                      {row.status === 'submitting' && <Tag color="processing">提交中</Tag>}
+                    </Space>
+                  }
+                  extra={
+                    <Button
+                      type="text"
+                      danger
+                      size="small"
+                      icon={<DeleteOutlined />}
+                      disabled={batchSubmitting}
+                      onClick={() => handleBatchRemoveRow(row.key)}
+                    />
+                  }
+                >
+                  <Select
+                    showSearch
+                    allowClear
+                    filterOption={false}
+                    placeholder="选择产品（自动带入参考图）"
+                    style={{ width: '100%' }}
+                    value={row.productId ?? undefined}
+                    options={getBatchRowProductOptions(row)}
+                    loading={batchProductLoading}
+                    disabled={batchSubmitting}
+                    onSearch={handleBatchProductSearch}
+                    onPopupScroll={handleBatchProductScroll}
+                    onChange={(v) => handleBatchSelectProduct(row.key, v ?? null)}
+                    notFoundContent={batchProductLoading ? <Spin size="small" /> : '无匹配产品'}
+                  />
+
+                  <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    {row.images.map((img) => (
+                      <div key={img.uid} style={{ position: 'relative', width: 44, height: 44 }}>
+                        <img
+                          src={img.thumbUrl || img.url}
+                          alt={img.name}
+                          style={{
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'cover',
+                            borderRadius: 4,
+                            border: '1px solid #f0f0f0',
+                          }}
+                        />
+                        <Button
+                          type="text"
+                          danger
+                          size="small"
+                          icon={<DeleteOutlined style={{ fontSize: 10 }} />}
+                          disabled={batchSubmitting}
+                          onClick={() => handleBatchRemoveImage(row.key, img.uid)}
+                          style={{ position: 'absolute', top: -8, right: -8, width: 18, height: 18, minWidth: 18, padding: 0 }}
+                        />
+                      </div>
+                    ))}
+                    {row.images.length < MAX_IMAGES && (
+                      <label
+                        style={{
+                          position: 'relative',
+                          width: 44,
+                          height: 44,
+                          border: '1px dashed #d9d9d9',
+                          borderRadius: 4,
+                          background: '#fafafa',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 2,
+                          cursor: batchSubmitting ? 'not-allowed' : 'pointer',
+                          color: '#999',
+                          opacity: batchSubmitting ? 0.5 : 1,
+                        }}
+                      >
+                        <PlusOutlined style={{ fontSize: 14 }} />
+                        <span style={{ fontSize: 11, lineHeight: 1 }}>上传</span>
+                        {/* 透明 file input 覆盖方块，但关闭自身指针命中：悬停/点击交给 label，
+                            由 label 原生激活 input，保证整个方块都是手型光标 */}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          disabled={batchSubmitting}
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: '100%',
+                            opacity: 0,
+                            pointerEvents: 'none',
+                          }}
+                          onChange={(e) => {
+                            handleBatchAddLocalFiles(row.key, e.target.files)
+                            // 清空 value，允许连续选择同一张图片
+                            e.target.value = ''
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  <TextArea
+                    value={row.prompt}
+                    onChange={(e) => handleBatchPromptChange(row.key, e.target.value)}
+                    rows={3}
+                    maxLength={MAX_PROMPT_LENGTH}
+                    disabled={batchSubmitting}
+                    placeholder="填写或粘贴提示词；也可点下方「AI生成方案」"
+                    style={{ marginTop: 8, fontFamily: 'monospace', fontSize: 12 }}
+                  />
+
+                  <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {row.productId ? `${row.images.length}/${MAX_IMAGES} 张参考图` : '未选择产品'}
+                    </Text>
+                    <Button
+                      size="small"
+                      icon={<BulbOutlined />}
+                      loading={batchAiKey === row.key}
+                      disabled={(!!batchAiKey && batchAiKey !== row.key) || batchSubmitting}
+                      onClick={() => handleBatchGeneratePlan(row, idx + 1)}
+                    >
+                      AI生成方案
+                    </Button>
+                  </div>
+
+                  {row.error && (
+                    <div style={{ marginTop: 6, fontSize: 12, color: '#cf1322' }}>{row.error}</div>
+                  )}
+                </Card>
+              ))}
+
+              <Button
+                type="dashed"
+                block
+                icon={<PlusOutlined />}
+                disabled={batchRows.length >= MAX_BATCH_ROWS || batchSubmitting}
+                onClick={handleBatchAddRow}
+              >
+                新增一行
+              </Button>
+            </Card>
+          </div>
+
+          <div style={{ flexShrink: 0, paddingTop: 12, background: '#fff' }}>
+            <Button
+              type="primary"
+              block
+              size="large"
+              icon={<ThunderboltOutlined />}
+              loading={batchSubmitting}
+              disabled={pendingCount === 0}
+              onClick={handleBatchSubmit}
+            >
+              提交全部（{pendingCount} 条）
+            </Button>
+            {batchProgress && (
+              <Text type="secondary" style={{ display: 'block', textAlign: 'center', fontSize: 12, marginTop: 6 }}>
+                正在提交 {Math.min(batchProgress.done + 1, batchProgress.total)}/{batchProgress.total}…
+              </Text>
+            )}
+          </div>
+        </div>
+
+        {/* 右侧：生成历史 */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {renderHistoryCard()}
+        </div>
+
+        {renderBatchPlanModal()}
+      </div>
+    )
+  }
+
   const renderSpeechTab = () => (
     <div style={{ display: 'flex', gap: 16, height: '100%', alignItems: 'stretch' }}>
       {/* 左侧：图片上传 + 参数 + 提示词（独立滚动），立即生成按钮固定在底部 */}
       <div style={{ width: 400, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+        {renderModeSwitch()}
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 4 }}>
         <Card
           title={
@@ -1990,12 +2707,19 @@ const AICreationCenter: React.FC = () => {
             <div
               onMouseEnter={() => setUploadAreaHover(true)}
               onMouseLeave={() => setUploadAreaHover(false)}
+              onClick={(e) => {
+                // 点击空白区域直接选图；缩略图与操作按钮不触发，避免误开文件框
+                const el = e.target as HTMLElement
+                if (el.closest('[data-upload-action]')) return
+                localInputRef.current?.click()
+              }}
               style={{
                 border: `1px dashed ${uploadAreaHover ? currentTheme.primary : '#d9d9d9'}`,
                 borderRadius: 8,
                 background: '#fafafa',
                 padding: '20px 16px 12px',
                 textAlign: 'center',
+                cursor: 'pointer',
               }}
             >
               {fileList.length === 0 && (
@@ -2018,7 +2742,7 @@ const AICreationCenter: React.FC = () => {
               )}
 
               {fileList.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, textAlign: 'left' }}>
+                <div data-upload-action style={{ display: 'flex', flexWrap: 'wrap', gap: 8, textAlign: 'left', cursor: 'default' }}>
                   {fileList.map((f) => (
                     <div key={f.uid} style={{ position: 'relative', width: 80, height: 80 }}>
                       <img
@@ -2040,7 +2764,10 @@ const AICreationCenter: React.FC = () => {
               )}
 
               {/* 固定高度按钮行：悬停时显示，点击区域本身不触发上传 */}
-              <div style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+              <div
+                data-upload-action
+                style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'default' }}
+              >
                 {uploadAreaHover && (
                   <Space size={12}>
                     <Button
@@ -2521,7 +3248,7 @@ const AICreationCenter: React.FC = () => {
   return (
     // 保留 ai-creation-tabs 类名：复用细滚动条样式
     <div className="ai-creation-tabs" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
-      {renderSpeechTab()}
+      {genMode === 'single' ? renderSpeechTab() : renderBatchTab()}
     </div>
   )
 }
