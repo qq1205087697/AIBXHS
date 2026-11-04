@@ -3006,7 +3006,13 @@ const AICreationCenter: React.FC = () => {
 
       {renderPlanModal()}
       {renderProductModal()}
+    </div>
+  )
 
+// 生成历史通用操作弹窗：批量填报模式下同样需要渲染，
+// 否则历史列表里的「详情 / 绑定至产品 / 变高清」点击后没有任何反应
+const renderHistoryModals = () => (
+  <>
       {/* 绑定至产品：选择产品后提交绑定申请，审核通过才写入产品详情（无视频小窗） */}
       <BindProductModal
         open={bindModalOpen}
@@ -3242,13 +3248,14 @@ const AICreationCenter: React.FC = () => {
           </div>
         )}
       </Modal>
-    </div>
-  )
+    </>
+)
 
   return (
     // 保留 ai-creation-tabs 类名：复用细滚动条样式
     <div className="ai-creation-tabs" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
       {genMode === 'single' ? renderSpeechTab() : renderBatchTab()}
+      {renderHistoryModals()}
     </div>
   )
 }
