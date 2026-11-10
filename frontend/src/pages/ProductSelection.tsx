@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Card, Table, Button, Modal, Form, Input, Select, message, Space, Tag, Alert,
-  InputNumber, Tooltip, Progress, Statistic, Row, Col, Typography, Drawer, Descriptions, Image, Dropdown, Tabs
+  InputNumber, Tooltip, Progress, Statistic, Row, Col, Typography, Drawer, Descriptions, Image, Dropdown, Tabs, Upload, DatePicker
 } from 'antd'
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
   RobotOutlined, EyeOutlined, BarChartOutlined,
   AlertOutlined, RiseOutlined, StarOutlined, StarFilled, FireOutlined, MoreOutlined, QuestionCircleOutlined,
-  CheckOutlined, DownOutlined, FileTextOutlined, LinkOutlined, UndoOutlined, CloseOutlined
+  CheckOutlined, DownOutlined, FileTextOutlined, LinkOutlined, UndoOutlined, CloseOutlined, MinusCircleOutlined, TeamOutlined, SyncOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { productSelectionApi, storeGroupsApi } from '../api'
+import dayjs from 'dayjs'
+import { productSelectionApi, storeGroupsApi, uploadApi, developmentBotApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -57,6 +58,14 @@ interface ProductSelectionItem {
   store_group_id?: number | null
   applicant_name?: string
   store_group_name?: string
+  store_group_ids?: number[] | null
+  store_group_names?: string[] | null
+  ali_1688_urls?: string[] | null
+  apply_remark?: string | null
+  apply_images?: string[] | null
+  moq?: number | null
+  group_members?: { user_id: number; username: string; quantity: number; joined_at: string; store_group_id?: number; store_group_name?: string }[] | null
+  group_deadline?: string | null
 }
 
 interface ProfitSetting {
@@ -89,7 +98,7 @@ const calcActualProfit = (
   const rate = useRealtimeRate ? item.realtime_rate : item.scrape_rate
   if (!rate) return null
   const setting = settings[getSiteKey(item.site)]
-  const cost = item.purchase_price * rate  // CNY → 站点货币
+  const cost = item.purchase_price / rate  // 采购成本（外币）= 采购价(CNY) ÷ 汇率（1外币=X人民币）
   const p = item.price
   const profit = p - cost
     - (item.first_leg_cost ?? 0)
@@ -130,9 +139,84 @@ const getCurrencySymbol = (site: string | undefined): string => {
   return '$'
 }
 
+// 产品类型中文映射（key 为数据库原文，德/英文均收录；未收录的原样显示）
+const PRODUCT_TYPE_ZH: Record<string, string> = {
+  'Dekorationen': '装饰品',
+  'Clutches & Evening Bags': '手拿包与晚宴包',
+  'Accessories': '配饰',
+  'Gastgeschenke': '伴手礼',
+  'Masks': '面具',
+  'Masken': '面具',
+  'Balloons': '气球',
+  'Luftballons': '气球',
+  'Banners': '横幅彩旗',
+  'Top-Handle Bags': '手提包',
+  'Henkeltaschen': '手提包',
+  'Hobo Bags': '流浪包',
+  'Rucksäcke': '双肩包',
+  'Fashion Backpacks': '时尚双肩包',
+  'Headwear': '头饰',
+  'Kostüm-Kopfbedeckung': '演出帽饰',
+  'Toys': '玩具',
+  'Spielzeug': '玩具',
+  'Centerpieces': '桌面装饰',
+  'Crossbody Bags': '斜挎包',
+  'Umhängetaschen': '斜挎包',
+  'Garlands': '彩旗花环',
+  'Bekleidung & Zubehör': '服装与配饰',
+  'Apparel & Accessories': '服装与配饰',
+  'Multi-Item Party Favor Packs': '派对礼包组合',
+  'Kuchendekoration': '蛋糕装饰',
+  'Cake & Cupcake Toppers': '蛋糕插牌',
+  'Cake Decorating Supplies': '蛋糕装饰用品',
+  'Shoulder Bags': '单肩包',
+  'Schultertaschen': '单肩包',
+  'Accessoires': '时尚配饰',
+  'Photobooth Props': '拍照道具',
+  'Favors': '派对回礼',
+  'Totes': '托特包',
+  'Apparel': '服装',
+  'Clutches': '手拿包',
+  'Brillen, Sonnenbrillen & Zubehör': '眼镜与太阳镜配件',
+  'Camera & Photo': '相机与摄影',
+  'Headphones': '耳机',
+  'Wearable Technology': '可穿戴设备',
+  'Computers & Accessories': '电脑与配件',
+}
+
+// 待拼团剩余时间文本：每秒自更新（独立小组件，避免整表每秒重渲染）
+const GroupingCountdownText: React.FC<{ deadline?: string | null }> = ({ deadline }) => {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  if (!deadline) return <span>-</span>
+  const ms = new Date(deadline.replace(' ', 'T')).getTime() - now
+  if (ms <= 0) return <span>已超期</span>
+  const d = Math.floor(ms / 86400000)
+  const h = Math.floor((ms % 86400000) / 3600000)
+  const m = Math.floor((ms % 3600000) / 60000)
+  const s = Math.floor((ms % 60000) / 1000)
+  const left = d > 0 ? `${d}天${h}时${m}分` : h > 0 ? `${h}时${m}分${s}秒` : `${m}分${s}秒`
+  return <span>{left}</span>
+}
+
+// 审批弹窗新品表单选项（与开发机器人添加新品一致）
+const DEV_CATEGORY_OPTIONS = [
+  "BALLOON", "CAKE TOPPER", "PARTY SUPPLIES", "PARTY FAVOR", "DISHWARE PLATE", "ADULT COSTUME",
+  "BANNER", "BACKDROP", "GIFT WRAP", "DISPOSABLE NAPKIN", "HANDBAG", "FIGURINE",
+  "COSTUME HEADWEAR", "PET SUPPLIES", "ART CRAFT KIT", "CARRIER BAG CASE", "COSTUME OUTFIT",
+].map(v => ({ label: v, value: v }))
+const DEV_URGENCY_OPTIONS = ["一般", "十分紧急"].map(v => ({ label: v, value: v }))
+const DEV_SEASONALITY_OPTIONS = [
+  "日常", "夏季", "圣诞节", "万圣节", "狂欢节", "跨年", "冬季", "感恩节", "复活节",
+  "5月毕业季", "斋月", "四叶草", "独立日",
+].map(v => ({ label: v, value: v }))
+
 const ProductSelection: React.FC = () => {
   const { currentTheme } = useTheme()
-  const { hasPermission } = useAuth()
+  const { hasPermission, user } = useAuth()
   const [items, setItems] = useState<ProductSelectionItem[]>([])
   const [loading, setLoading] = useState(false)
   const [analyzingIds, setAnalyzingIds] = useState<Set<number>>(new Set())
@@ -154,21 +238,34 @@ const ProductSelection: React.FC = () => {
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailItem, setDetailItem] = useState<ProductSelectionItem | null>(null)
   const [chartHover, setChartHover] = useState<{ x: number; y: number; month: string; value: number; rect: DOMRect | null } | null>(null)
+
+  // 流量趋势：关键词下拉切换 / 容器宽度自适应（不溢出抽屉）
+  const [trendKeyword, setTrendKeyword] = useState<string>('')
+  const [chartW, setChartW] = useState(0)
+  const chartWrapRef = useRef<HTMLDivElement | null>(null)
+  const measureChartW = (el: HTMLDivElement | null) => {
+    chartWrapRef.current = el
+    if (el && el.clientWidth > 0 && el.clientWidth !== chartW) setChartW(el.clientWidth)
+  }
+  useEffect(() => {
+    const el = chartWrapRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setChartW(el.clientWidth))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [detailItem])
   const [form] = Form.useForm()
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [typeOptions, setTypeOptions] = useState<{ label: string; value: string }[]>([])
-  const [dateOptions, setDateOptions] = useState<{ label: string; value: string }[]>([])
   const [siteOptions, setSiteOptions] = useState<{ label: string; value: string }[]>([])
   const [searchText, setSearchText] = useState('')
-  const [datesInitialized, setDatesInitialized] = useState(false)
   const [productTypeFilter, setProductTypeFilter] = useState<string | undefined>(undefined)
   const [siteFilter, setSiteFilter] = useState<string | undefined>(undefined)
-  const [dateFilter, setDateFilter] = useState<string | undefined>(undefined)
   const [localSort, setLocalSort] = useState<{ field: string | null; order: 'ascend' | 'descend' | null }>({
     field: null, order: null,
   })
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
-  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'approved' | 'rejected' | 'empty'>('all')
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'grouping' | 'approved' | 'rejected' | 'empty'>('all')
   const [statusFilter, setStatusFilter] = useState<string[]>([])
   // 申请选品弹窗（单个或批量）
   const [applyModal, setApplyModal] = useState<{
@@ -178,16 +275,43 @@ const ProductSelection: React.FC = () => {
   }>({ open: false, ids: [] })
   const [applySubmitting, setApplySubmitting] = useState(false)
   const [applyForm] = Form.useForm()
-  // 审批通过弹窗（填写品名，生成成品+补货单）
-  const [approveModal, setApproveModal] = useState<{ open: boolean; item?: ProductSelectionItem | null }>({ open: false })
-  const [approveSubmitting, setApproveSubmitting] = useState(false)
-  const [approveForm] = Form.useForm()
-  // 批量审批弹窗（逐条填写品名，合并生成一张补货单）
+  // 申请弹窗已上传图片列表（antd Upload fileList）
+  const [applyImgFiles, setApplyImgFiles] = useState<any[]>([])
+  // 申请图片页内预览（替代默认新开页签）
+  const [applyPreview, setApplyPreview] = useState<{ open: boolean; url: string }>({ open: false, url: '' })
+  // 申请图片上传序号（文件名后缀：ASIN_申请选品_N）
+  const applyUploadSeqRef = useRef(0)
+  // 批量申请分页向导：当前页码、每页表单值与图片快照、逐条记录
+  const [batchStep, setBatchStep] = useState(0)
+  const [batchPageData, setBatchPageData] = useState<Record<number, any>>({})
+  const [batchImgs, setBatchImgs] = useState<Record<number, any[]>>({})
+  const batchWizardItems = useMemo(
+    () => (applyModal.ids && applyModal.ids.length > 1 ? items.filter(i => applyModal.ids.includes(i.id)) : []),
+    [items, applyModal.ids]
+  )
+  const isBatchWizard = batchWizardItems.length > 1
+  // 拼团弹窗
+  const [groupBuyModal, setGroupBuyModal] = useState<{ open: boolean; item: ProductSelectionItem | null; quantity?: number }>({ open: false, item: null })
+  const [groupBuySubmitting, setGroupBuySubmitting] = useState(false)
+  // ASIN 导入选品（拼接亚马逊链接自动抓取）
+  const [amazonModal, setAmazonModal] = useState({ open: false, submitting: false })
+  const [amazonForm] = Form.useForm()
+  const [amazonResults, setAmazonResults] = useState<{ asin: string; ok: boolean; title?: string; error?: string }[] | null>(null)
+  // 审批：弹窗内嵌开发机器人新品表单，提交表单后自动审批通过并创建产品与补货单（唯一审批路径）
+  const [devApproveModal, setDevApproveModal] = useState<{ open: boolean; item?: ProductSelectionItem | null }>({ open: false })
+  const [devApproveForm] = Form.useForm()
+  const [devApproveSubmitting, setDevApproveSubmitting] = useState(false)
+  const [devApproveLoading, setDevApproveLoading] = useState(false)
+  // 批量审批弹窗（分页向导，每页完整新品表单，逐条联动审批）
   const [batchApproveModalOpen, setBatchApproveModalOpen] = useState(false)
   const [batchApproveSubmitting, setBatchApproveSubmitting] = useState(false)
-  const [batchApproveItems, setBatchApproveItems] = useState<{
-    id: number; product_title: string; store_group_name: string; purchase_quantity?: number | null; name: string
-  }[]>([])
+  const [batchApproveLoading, setBatchApproveLoading] = useState(false)
+  const [batchApproveItems, setBatchApproveItems] = useState<ProductSelectionItem[]>([])
+  const [batchApproveStep, setBatchApproveStep] = useState(0)
+  // 每页表单值快照 + 页码镜像（ref 管理：异步预填/翻页读写实时值，避免闭包旧 state 串页）
+  const batchApprovePageDataRef = useRef<Record<number, any>>({})
+  const batchApproveStepRef = useRef(0)
+  useEffect(() => { batchApproveStepRef.current = batchApproveStep }, [batchApproveStep])
   // 利润计算设置
   const [profitSettings, setProfitSettings] = useState<ProfitSettings | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -196,11 +320,9 @@ const ProductSelection: React.FC = () => {
   const [storeGroupOptions, setStoreGroupOptions] = useState<{ label: string; value: number }[]>([])
   const [myStoreGroup, setMyStoreGroup] = useState<{ id: number; name: string } | null>(null)
 
-  // 初始化加载配置数据
+  // 初始化加载配置数据（类型选项由 siteFilter effect 加载）
   useEffect(() => {
-    fetchTypes()
     fetchSites()
-    fetchDates()
     fetchProfitSettings()
     fetchStoreGroups()
   }, [])
@@ -229,48 +351,29 @@ const ProductSelection: React.FC = () => {
     } catch {}
   }
 
-  // 数据刷新（筛选条件变化或初始化完成）
+  // 数据刷新（筛选条件变化或初始化）
   useEffect(() => {
-    if (datesInitialized) {
-      fetchData()
-    }
-  }, [datesInitialized, pagination.current, pagination.pageSize, searchText, productTypeFilter, siteFilter, dateFilter, activeTab, statusFilter, localSort.field, localSort.order, useRealtimeRate])
+    fetchData()
+  }, [pagination.current, pagination.pageSize, searchText, productTypeFilter, siteFilter, activeTab, statusFilter, localSort.field, localSort.order, useRealtimeRate])
 
-  const fetchTypes = async () => {
+  const fetchTypes = async (site?: string) => {
     try {
-      const res = await productSelectionApi.getTypes()
+      const res = await productSelectionApi.getTypes(site)
       if (res.data.success) {
         const types: string[] = res.data.data
-        setTypeOptions(types.map(t => ({ label: t, value: t })))
+        // 筛选框显示中文（未收录的原样显示），值仍为数据库原文
+        setTypeOptions(types.map(t => ({ label: PRODUCT_TYPE_ZH[t] ? `${PRODUCT_TYPE_ZH[t]} (${t})` : t, value: t })))
+        // 当前选中类型在新站点不存在时自动清空
+        setProductTypeFilter(prev => (prev && types.includes(prev) ? prev : undefined))
       }
     } catch {}
   }
 
-  const fetchDates = async (site?: string) => {
-    try {
-      const res = await productSelectionApi.getDates(site)
-      if (res.data.success) {
-        const dates: string[] = res.data.data
-        setDateOptions(dates.map(d => ({ label: d, value: d })))
-        // 仅首次加载时默认选中最新日期
-        if (dates.length > 0 && !datesInitialized) {
-          setDateFilter(dates[0])
-          setDatesInitialized(true)
-        } else if (datesInitialized) {
-          // 站点切换后，当前日期在该站点无数据时回退到该站点最新日期
-          setDateFilter(prev => (prev && dates.includes(prev) ? prev : dates[0]))
-        }
-      }
-    } catch {}
-  }
-
-  // 站点变化时重新加载日期选项（只显示该站点有数据的日期）
+  // 站点变化时，类型选项只显示该站点已有的类型
   useEffect(() => {
-    if (datesInitialized) {
-      fetchDates(siteFilter)
-    }
+    fetchTypes(siteFilter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteFilter, datesInitialized])
+  }, [siteFilter])
 
   const fetchSites = async () => {
     try {
@@ -295,7 +398,6 @@ const ProductSelection: React.FC = () => {
         search: searchText || undefined,
         product_type: productTypeFilter,
         site: siteFilter,
-        date_filter: dateFilter,
         status: statusParams.length ? statusParams : undefined,
         sort_by: localSort.field || undefined,
         sort_order: localSort.order === 'ascend' ? 'asc' : localSort.order === 'descend' ? 'desc' : undefined,
@@ -321,7 +423,6 @@ const ProductSelection: React.FC = () => {
     setSearchText('')
     setProductTypeFilter(undefined)
     setSiteFilter(undefined)
-    setDateFilter(undefined)
     setStatusFilter([])
     setLocalSort({ field: null, order: null })
     setPagination(prev => ({ ...prev, current: 1 }))
@@ -514,29 +615,139 @@ const ProductSelection: React.FC = () => {
     setAnalyzeModal({ open: true, mode: 'single', targetId: detailItem.id, targetItem: detailItem })
   }
 
-  // 打开申请选品弹窗（单个）
+  // 拼团信息：已拼采购数（所有成员数量之和，发起人可累加）
+  const groupInfoOf = (item: ProductSelectionItem | null) => {
+    if (!item) return { joined: 0, moq: 0, members: [] as NonNullable<ProductSelectionItem['group_members']> }
+    const members = Array.isArray(item.group_members) ? item.group_members : []
+    // 已拼总数 = 所有成员数量之和（发起人成员记录与其申请数量同基数；members 为空时回退申请数量）
+    const memberTotal = members.reduce((s, m) => s + (m.quantity || 0), 0)
+    const joined = memberTotal > 0 ? memberTotal : (item.purchase_quantity || 0)
+    return { joined, moq: item.moq || 0, members }
+  }
+
+  // 提交拼团
+  const handleGroupBuySubmit = async () => {
+    const item = groupBuyModal.item
+    if (!item) return
+    if (!groupBuyModal.quantity || groupBuyModal.quantity <= 0) {
+      message.warning('请填写拼团数量')
+      return
+    }
+    setGroupBuySubmitting(true)
+    try {
+      const res = await productSelectionApi.groupBuy(item.id, groupBuyModal.quantity)
+      if (res.data.success) {
+        message.success(res.data.data?.status === 'pending' ? '拼团成功，已达到起订量，进入待审批' : '拼团成功')
+        setGroupBuyModal({ open: false, item: null })
+        fetchData()
+      } else {
+        message.error(res.data.message || '拼团失败')
+      }
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '拼团失败')
+    } finally {
+      setGroupBuySubmitting(false)
+    }
+  }
+
+  // ASIN 导入选品：拼接亚马逊链接自动抓取（标题/价格/评分/星级/评论数 + 卖家精灵FBA费用）
+  const handleAmazonImport = async () => {
+    try {
+      const values = await amazonForm.validateFields()
+      const asins: string[] = (values.asins || '')
+        .split(/[\n,;，；\s]+/)
+        .map((s: string) => s.trim().toUpperCase())
+        .filter(Boolean)
+      if (asins.length === 0) {
+        message.warning('请输入ASIN')
+        return
+      }
+      if (asins.length > 20) {
+        message.warning('单次最多导入 20 个 ASIN')
+        return
+      }
+      setAmazonModal(prev => ({ ...prev, submitting: true }))
+      setAmazonResults(null)
+      const res = await productSelectionApi.importFromAmazon({ site: values.site, asins })
+      if (res.data.success) {
+        const results = res.data.data?.results || []
+        setAmazonResults(results)
+        fetchData()
+      } else {
+        message.error(res.data.message || '导入失败')
+      }
+    } catch (e: any) {
+      if (e.errorFields) return
+      message.error(e.response?.data?.detail || '导入失败')
+    } finally {
+      setAmazonModal(prev => ({ ...prev, submitting: false }))
+    }
+  }
+
+  // 申请表单默认值（单条/批量向导共用）：优先回填记录已有信息
+  const defaultApplyValues = (item?: ProductSelectionItem | null) => {
+    const urls = Array.isArray(item?.ali_1688_urls) && item.ali_1688_urls && item.ali_1688_urls.length > 0
+      ? item.ali_1688_urls
+      : (item?.ali_1688_url ? [item.ali_1688_url] : [''])
+    return {
+      ali_1688_urls: urls,
+      purchase_price: item?.purchase_price ?? undefined,
+      purchase_quantity: item?.purchase_quantity ?? undefined,
+      moq: item?.moq ?? undefined,
+      apply_remark: item?.apply_remark || undefined,
+      // 优先回填该记录已有的分组（多分组申请回填全部），否则自动带出当前用户所属店铺分组
+      store_group_ids: (item?.store_group_ids && item.store_group_ids.length > 0)
+        ? item.store_group_ids
+        : (item?.store_group_id ? [item.store_group_id] : (myStoreGroup ? [myStoreGroup.id] : [])),
+    }
+  }
+  // 记录已有图片 → Upload fileList
+  const imgFilesFromItem = (item?: ProductSelectionItem | null) => {
+    const imgs = Array.isArray(item?.apply_images) ? item.apply_images : []
+    return imgs.map((u, i) => ({ uid: `exist-${i}`, name: `图片${i + 1}`, status: 'done', url: u }))
+  }
+
   const handleSubmitForApproval = (item: ProductSelectionItem) => {
-    applyForm.resetFields()
-    applyForm.setFieldsValue({
-      ali_1688_url: item.ali_1688_url || '',
-      purchase_price: item.purchase_price ?? undefined,
-      purchase_quantity: item.purchase_quantity ?? undefined,
-      // 优先回填该记录已有的分组，否则自动带出当前用户所属店铺分组
-      store_group_id: item.store_group_id ?? myStoreGroup?.id ?? undefined,
-    })
+    setApplyImgFiles(imgFilesFromItem(item))
+    applyUploadSeqRef.current = 0
+    setBatchStep(0)
+    setBatchPageData({})
+    setBatchImgs({})
+    // 预填在弹窗 afterOpenChange 中执行（Modal destroyOnClose，打开前 Form 未挂载，setFieldsValue 会丢失）
     setApplyModal({ open: true, ids: [item.id], item })
   }
 
   // 申请弹窗确认提交
   const handleApplySubmit = async () => {
+    // 批量向导模式：走逐条提交
+    if (isBatchWizard) return handleBatchWizardSubmit()
+    const doSingleSubmit = async () => {
     try {
       const values = await applyForm.validateFields()
+      // 收集非空链接，至少一个
+      const urls: string[] = (values.ali_1688_urls || [])
+        .map((u: string) => (u || '').trim())
+        .filter((u: string) => u)
+      if (urls.length === 0) {
+        message.error('请至少填写一个1688链接')
+        return
+      }
+      // 收集上传完成的图片 URL（回填的存量图片直接带 url）
+      const imgUrls: string[] = applyImgFiles
+        .filter((f: any) => f.status === 'done' && (f.url || f.response?.url))
+        .map((f: any) => f.url || f.response.url)
       setApplySubmitting(true)
       const payload = {
-        ali_1688_url: values.ali_1688_url || undefined,
+        ali_1688_url: urls[0],
+        ali_1688_urls: urls,
         purchase_price: values.purchase_price ?? undefined,
         purchase_quantity: values.purchase_quantity ?? undefined,
-        store_group_id: values.store_group_id ?? undefined,
+        store_group_ids: Array.isArray(values.store_group_ids) && values.store_group_ids.length > 0
+          ? values.store_group_ids
+          : undefined,
+        apply_remark: values.apply_remark?.trim() || undefined,
+        apply_images: imgUrls,
+        moq: values.moq ?? undefined,
       }
       let successCount = 0
       let lastError = ''
@@ -563,9 +774,24 @@ const ProductSelection: React.FC = () => {
     } finally {
       setApplySubmitting(false)
     }
+    }
+    // 数量不足起订量：提醒后进入待拼团（期限7天）
+    const qty = (applyForm.getFieldValue('purchase_quantity') as number | undefined) ?? undefined
+    const moq = (applyForm.getFieldValue('moq') as number | undefined) ?? undefined
+    if (moq && qty && qty < moq) {
+      Modal.confirm({
+        title: '数量达不到起订量',
+        content: `当前申请数量 ${qty} 低于起订量 ${moq}，确定后状态将变更为「待拼团」，期限 7 天，其他用户可在待拼团列表参与拼团。`,
+        okText: '确定',
+        cancelText: '取消',
+        onOk: doSingleSubmit,
+      })
+      return
+    }
+    return doSingleSubmit()
   }
 
-  // 打开批量申请选品弹窗
+  // 打开批量申请选品弹窗（分页向导：每页一条 ASIN）
   const handleBatchSubmitForApproval = () => {
     if (selectedRowKeys.length === 0) {
       message.warning('请先选择要申请选品的产品')
@@ -577,12 +803,102 @@ const ProductSelection: React.FC = () => {
       message.warning('所选选品中没有可申请的产品')
       return
     }
-    applyForm.resetFields()
-    // 批量申请自动带出当前用户所属店铺分组
-    if (myStoreGroup) {
-      applyForm.setFieldsValue({ store_group_id: myStoreGroup.id })
-    }
+    const first = items.find(i => i.id === emptyIds[0])
+    setApplyImgFiles(imgFilesFromItem(first))
+    applyUploadSeqRef.current = 0
+    setBatchStep(0)
+    setBatchPageData({})
+    setBatchImgs({})
+    // 预填在弹窗 afterOpenChange 中执行（Modal destroyOnClose，打开前 Form 未挂载，setFieldsValue 会丢失）
     setApplyModal({ open: true, ids: emptyIds })
+  }
+
+  // 向导翻页：保存当前页快照，载入目标页
+  const goBatchStep = (next: number) => {
+    if (next < 0 || next >= batchWizardItems.length) return
+    const curValues = applyForm.getFieldsValue()
+    const curImgs = applyImgFiles
+    const target = batchWizardItems[next]
+    setBatchPageData(prev => ({ ...prev, [batchStep]: curValues }))
+    setBatchImgs(prev => ({ ...prev, [batchStep]: curImgs }))
+    applyForm.setFieldsValue(batchPageData[next] ?? defaultApplyValues(target))
+    setApplyImgFiles(batchImgs[next] ?? imgFilesFromItem(target))
+    applyUploadSeqRef.current = 0
+    setBatchStep(next)
+  }
+
+  // 批量向导提交：逐条校验并提交
+  const handleBatchWizardSubmit = async () => {
+    // 保存当前页快照
+    const pageData: Record<number, any> = { ...batchPageData, [batchStep]: applyForm.getFieldsValue() }
+    const pageImgs: Record<number, any[]> = { ...batchImgs, [batchStep]: applyImgFiles }
+    // 逐条校验完整性
+    for (let i = 0; i < batchWizardItems.length; i++) {
+      const v = pageData[i] || {}
+      const urls: string[] = (v.ali_1688_urls || []).map((u: string) => (u || '').trim()).filter((u: string) => u)
+      if (urls.length === 0 || v.purchase_price == null || v.purchase_quantity == null) {
+        message.error(`第 ${i + 1} 条（${batchWizardItems[i].asin}）信息不完整：需至少一个1688链接、采购价格和数量`)
+        if (i !== batchStep) goBatchStep(i)
+        return
+      }
+      if (v.moq == null) {
+        message.error(`第 ${i + 1} 条（${batchWizardItems[i].asin}）未填写起订量，无法判断是否需要拼团`)
+        if (i !== batchStep) goBatchStep(i)
+        return
+      }
+    }
+    const doWizardSubmit = async () => {
+    setApplySubmitting(true)
+    try {
+      const results = await Promise.all(batchWizardItems.map((item, i) => {
+        const v = pageData[i] || {}
+        const urls: string[] = (v.ali_1688_urls || []).map((u: string) => (u || '').trim()).filter((u: string) => u)
+        const files: any[] = pageImgs[i] || []
+        const imgUrls = files.filter(f => f.status === 'done' && (f.url || f.response?.url)).map(f => f.url || f.response.url)
+        return productSelectionApi.submitForApproval(item.id, {
+          ali_1688_url: urls[0],
+          ali_1688_urls: urls,
+          purchase_price: v.purchase_price ?? undefined,
+          purchase_quantity: v.purchase_quantity ?? undefined,
+          store_group_ids: Array.isArray(v.store_group_ids) && v.store_group_ids.length > 0
+            ? v.store_group_ids
+            : undefined,
+          apply_remark: v.apply_remark?.trim() || undefined,
+          apply_images: imgUrls,
+          moq: v.moq ?? undefined,
+        })
+      }))
+      const failed = results.filter((r: any) => !r.data.success)
+      if (failed.length > 0) {
+        message.warning(`${batchWizardItems.length - failed.length} 条申请成功，${failed.length} 条失败：${failed[0].data.message || ''}`)
+      } else {
+        message.success(`已提交 ${batchWizardItems.length} 条选品申请`)
+      }
+      setApplyModal({ open: false, ids: [] })
+      setSelectedRowKeys([])
+      fetchData()
+    } catch (e: any) {
+      message.error(e.response?.data?.detail || '批量申请选品失败')
+    } finally {
+      setApplySubmitting(false)
+    }
+    }
+    // 数量不足起订量的记录：提醒后将进入待拼团（期限7天）
+    const groupingAsins = batchWizardItems
+      .map((item, i) => ({ item, v: pageData[i] || {} }))
+      .filter(({ v }) => v.moq && v.purchase_quantity != null && v.purchase_quantity < v.moq)
+      .map(({ item }) => item.asin)
+    if (groupingAsins.length > 0) {
+      Modal.confirm({
+        title: '数量达不到起订量',
+        content: `${groupingAsins.length} 条（${groupingAsins.join('、')}）数量低于起订量，确定后状态将变更为「待拼团」，期限 7 天，其他用户可在待拼团列表参与拼团。`,
+        okText: '确定',
+        cancelText: '取消',
+        onOk: doWizardSubmit,
+      })
+      return
+    }
+    return doWizardSubmit()
   }
 
   // 保存当前站点的利润设置
@@ -625,31 +941,75 @@ const ProductSelection: React.FC = () => {
     }
   }
 
-  // 打开审批通过弹窗（填写品名）
-  const handleApprove = (item: ProductSelectionItem) => {
-    approveForm.resetFields()
-    setApproveModal({ open: true, item })
+  // 选品详情 -> 新品表单默认值（单条审批与批量审批共用同一份口径，保证带出信息完全一致）
+  const buildDevApproveValues = (d: any) => {
+    // 数量按拼团成员分组汇总，与补货单口径一致
+    const qtyByName: Record<string, number> = {}
+    ;(d.group_members || []).forEach((m: any) => {
+      const n = m.store_group_name
+      if (!n) return
+      qtyByName[n] = (qtyByName[n] || 0) + (m.quantity || 0)
+    })
+    const storeRows: { group: string; quantity?: number }[] = Object.keys(qtyByName).length > 0
+      ? Object.entries(qtyByName).map(([n, q]) => ({ group: n, quantity: q }))
+      : ((d.store_group_names || []) as string[]).map(n => ({ group: n, quantity: d.purchase_quantity ?? undefined }))
+    return {
+      title: d.product_title || '',
+      product_title: (Array.isArray(d.keywords) && d.keywords.length ? d.keywords.join('，') : d.product_title) || '',
+      product_name_zh: '',
+      category: undefined,
+      urgency: '一般',
+      seasonality: '日常',
+      development_date: dayjs(),
+      competitors: d.asin || '',
+      purchase_price: d.purchase_price ?? undefined,
+      selling_price: d.price ?? undefined,
+      purchase_link: d.ali_1688_url || (d.ali_1688_urls && d.ali_1688_urls[0]) || '',
+      purchase_info: d.apply_remark || '',
+      store_rows: storeRows.length > 0 ? storeRows : [{ group: undefined, quantity: undefined }],
+    }
   }
 
-  const handleApproveSubmit = async () => {
-    if (!approveModal.item) return
-    try {
-      const values = await approveForm.validateFields()
-      setApproveSubmitting(true)
-      const res = await productSelectionApi.approve(approveModal.item.id, {
-        product_name: (values.product_name || '').trim() || undefined,
+  // 打开审批弹窗：拉取选品详情预填开发机器人新品表单（数量按拼团成员分组汇总，与补货单口径一致）
+  const openDevApproveModal = (item: ProductSelectionItem) => {
+    setDevApproveModal({ open: true, item })
+    setDevApproveLoading(true)
+    devApproveForm.resetFields()
+    productSelectionApi.getById(item.id)
+      .then(res => {
+        if (!res.data?.success || !res.data.data) {
+          message.warning('加载选品申请信息失败，请手动填写')
+          devApproveForm.setFieldsValue({ urgency: '一般', seasonality: '日常', development_date: dayjs() })
+          return
+        }
+        devApproveForm.setFieldsValue(buildDevApproveValues(res.data.data))
       })
-      if (res.data.success) {
-        const d = res.data.data || {}
-        message.success(`审批通过，成品 ${d.product_code || ''} 与补货单 ${d.replenishment_order_number || ''} 已生成`)
-        setApproveModal({ open: false })
-        fetchData()
+      .catch(() => {
+        message.warning('加载选品申请信息失败，请手动填写')
+        devApproveForm.setFieldsValue({ urgency: '一般', seasonality: '日常', development_date: dayjs() })
+      })
+      .finally(() => setDevApproveLoading(false))
+  }
+
+  // 提交审批弹窗：保存新品 + 联动审批（创建产品与补货单，选品置为已审批）
+  const handleDevApproveSubmit = async () => {
+    if (!devApproveModal.item) return
+    const values = await devApproveForm.validateFields()
+    setDevApproveSubmitting(true)
+    try {
+      const res = await developmentBotApi.create(buildDevProductPayload(values, devApproveModal.item.id))
+      if (res.data?.data?.selection_approved === false) {
+        message.warning('新品已保存，但选品联动审批未执行（选品状态可能已变化），请刷新列表核对选品状态')
+      } else {
+        message.success('新品已保存，选品已审批通过，产品与补货单已自动创建')
       }
+      setDevApproveModal({ open: false })
+      fetchData()
     } catch (e: any) {
       if (e?.errorFields) return
-      message.error(e.response?.data?.detail || '审批失败')
+      message.error(e.response?.data?.detail || '提交失败，请稍后重试')
     } finally {
-      setApproveSubmitting(false)
+      setDevApproveSubmitting(false)
     }
   }
 
@@ -698,38 +1058,142 @@ const ProductSelection: React.FC = () => {
       message.warning('所选选品中没有待审批状态的记录')
       return
     }
-    setBatchApproveItems(pendingItems.map(i => ({
-      id: i.id,
-      product_title: i.product_title,
-      store_group_name: i.store_group_name || '',
-      purchase_quantity: i.purchase_quantity,
-      name: '',
-    })))
+    setBatchApproveItems(pendingItems)
+    batchApproveStepRef.current = 0
+    batchApprovePageDataRef.current = {}
+    setBatchApproveStep(0)
     setBatchApproveModalOpen(true)
+    // 显式传入本次待审批列表：setState 后同一轮渲染内 batchApproveItems 仍是旧值，直接读会取不到第一条
+    prefillBatchApprovePage(0, pendingItems)
+  }
+
+  // 批量审批页预填：拉取选品详情生成新品表单默认值（与单条审批弹窗共用 buildDevApproveValues）
+  const prefillBatchApprovePage = (idx: number, list?: ProductSelectionItem[]) => {
+    const it = (list || batchApproveItems)[idx]
+    if (!it) return
+    setBatchApproveLoading(true)
+    productSelectionApi.getById(it.id)
+      .then(res => {
+        if (!res.data?.success || !res.data.data) {
+          if (idx === batchApproveStepRef.current) {
+            message.warning('加载选品申请信息失败，请手动填写')
+            devApproveForm.setFieldsValue({ urgency: '一般', seasonality: '日常', development_date: dayjs() })
+          }
+          return
+        }
+        const vals = buildDevApproveValues(res.data.data)
+        batchApprovePageDataRef.current = { ...batchApprovePageDataRef.current, [idx]: vals }
+        // 仅当该页仍是当前页（用户尚未翻走）才回填表单，避免串页
+        if (idx === batchApproveStepRef.current) devApproveForm.setFieldsValue(vals)
+      })
+      .catch(() => {
+        if (idx === batchApproveStepRef.current) {
+          message.warning('加载选品申请信息失败，请手动填写')
+          devApproveForm.setFieldsValue({ urgency: '一般', seasonality: '日常', development_date: dayjs() })
+        }
+      })
+      .finally(() => {
+        if (idx === batchApproveStepRef.current) setBatchApproveLoading(false)
+      })
+  }
+
+  // 新品表单必填校验（弹窗提交与批量逐条提交共用）
+  const validateDevProductValues = (v: any): string | null => {
+    if (!v?.title?.trim()) return '英文标题'
+    if (!v?.product_title?.trim()) return '英文标题关键词'
+    if (!v?.product_name_zh?.trim()) return '产品中文名称'
+    if (!v?.category) return '类目'
+    if (!v?.development_date) return '日期'
+    return null
+  }
+
+  // 新品 payload 组装（单条审批弹窗与批量逐条提交共用）
+  const buildDevProductPayload = (v: any, selectionId: number) => {
+    const rows = (v.store_rows || []).filter((r: any) => r && r.group)
+    return {
+      title: v.title?.trim(),
+      product_title: v.product_title?.trim(),
+      product_name_zh: v.product_name_zh?.trim(),
+      category: v.category,
+      urgency: v.urgency || '一般',
+      seasonality: v.seasonality || '日常',
+      competitors: v.competitors?.trim() || undefined,
+      purchase_price: v.purchase_price ?? undefined,
+      development_date: v.development_date ? v.development_date.format('YYYY-MM-DD') : undefined,
+      purchase_links: v.purchase_link?.trim() ? [v.purchase_link.trim()] : undefined,
+      purchase_items: (v.purchase_link?.trim() || v.purchase_info?.trim()) ? [{
+        link: v.purchase_link?.trim() || undefined,
+        images: [],
+        info: v.purchase_info?.trim() || undefined,
+      }] : undefined,
+      related_store: rows.map((r: any) => r.group).join('，') || undefined,
+      store_quantities: rows.map((r: any) => ({ store: r.group, quantity: r.quantity ?? 0 })),
+      selection_id: selectionId,
+    }
+  }
+
+  // 批量审批向导翻页：快照当前页 -> 清空表单载入目标页（快照或默认值）-> 懒加载预填
+  const goBatchApproveStep = (next: number) => {
+    if (next < 0 || next >= batchApproveItems.length) return
+    batchApprovePageDataRef.current = {
+      ...batchApprovePageDataRef.current,
+      [batchApproveStepRef.current]: devApproveForm.getFieldsValue(),
+    }
+    const snap = batchApprovePageDataRef.current[next]
+    // resetFields 清空上一页残留字段，再载入目标页数据（setFieldsValue 是 merge 语义）
+    devApproveForm.resetFields()
+    devApproveForm.setFieldsValue(snap ?? {
+      urgency: '一般', seasonality: '日常', development_date: dayjs(),
+    })
+    batchApproveStepRef.current = next
+    setBatchApproveStep(next)
+    if (snap) {
+      setBatchApproveLoading(false)
+    } else {
+      prefillBatchApprovePage(next)
+    }
   }
 
   const handleBatchApproveSubmit = async () => {
-    const emptyIdx = batchApproveItems.findIndex(i => !i.name.trim())
-    if (emptyIdx >= 0) {
-      message.warning(`第 ${emptyIdx + 1} 条「${batchApproveItems[emptyIdx].product_title.slice(0, 30)}…」未填写品名`)
-      return
+    // 合并当前页输入到快照，逐条校验必填
+    batchApprovePageDataRef.current = {
+      ...batchApprovePageDataRef.current,
+      [batchApproveStepRef.current]: devApproveForm.getFieldsValue(),
+    }
+    const pages = batchApproveItems.map((_, i) => batchApprovePageDataRef.current[i])
+    for (let i = 0; i < pages.length; i++) {
+      const miss = validateDevProductValues(pages[i])
+      if (miss) {
+        message.warning(`第 ${i + 1} 条「${batchApproveItems[i].asin}」未填写：${miss}`)
+        batchApproveStepRef.current = i
+        setBatchApproveStep(i)
+        setBatchApproveLoading(false)
+        devApproveForm.resetFields()
+        devApproveForm.setFieldsValue(pages[i] || {})
+        return
+      }
     }
     setBatchApproveSubmitting(true)
+    const failures: string[] = []
     try {
-      const res = await productSelectionApi.batchApprove({
-        items: batchApproveItems.map(i => ({ selection_id: i.id, product_name: i.name.trim() })),
-      })
-      if (res.data.success) {
-        const d = res.data.data || {}
-        const orderCount = d.orders?.length || 0
-        const orderNos = (d.orders || []).map((o: any) => o.order_number).join('、')
-        message.success(`成功审批 ${d.approved_count} 条选品，已生成 ${orderCount} 张补货单${orderNos ? `（${orderNos}）` : ''}`)
-        setBatchApproveModalOpen(false)
-        setSelectedRowKeys([])
-        fetchData()
+      for (let i = 0; i < batchApproveItems.length; i++) {
+        try {
+          const res = await developmentBotApi.create(buildDevProductPayload(pages[i], batchApproveItems[i].id))
+          if (res.data?.data?.selection_approved === false) {
+            failures.push(`第 ${i + 1} 条（${batchApproveItems[i].asin}）联动未执行（选品状态已变化）`)
+          }
+        } catch (e: any) {
+          failures.push(`第 ${i + 1} 条（${batchApproveItems[i].asin}）：${e.response?.data?.detail || '提交失败'}`)
+        }
       }
-    } catch (e: any) {
-      message.error(e.response?.data?.detail || '批量审批失败')
+      if (failures.length > 0) {
+        message.warning(`部分条目未完成联动审批：${failures.join('；')}`)
+      } else {
+        message.success(`已提交 ${batchApproveItems.length} 条新品，全部审批通过并生成产品与补货单`)
+      }
+      setBatchApproveModalOpen(false)
+      setSelectedRowKeys([])
+      fetchData()
     } finally {
       setBatchApproveSubmitting(false)
     }
@@ -741,15 +1205,15 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const pendingIds = items.filter(i => ids.includes(i.id) && i.status === 'pending').map(i => i.id)
-    if (pendingIds.length === 0) {
-      message.warning('所选选品中没有待审批状态的记录')
+    const cancelIds = items.filter(i => ids.includes(i.id) && (i.status === 'pending' || i.status === 'grouping')).map(i => i.id)
+    if (cancelIds.length === 0) {
+      message.warning('所选选品中没有待审批或待拼团状态的记录')
       return
     }
     try {
-      const res = await productSelectionApi.batchCancelApproval(pendingIds)
+      const res = await productSelectionApi.batchCancelApproval(cancelIds)
       if (res.data.success) {
-        message.success(res.data.message || `成功取消 ${pendingIds.length} 条选品申请`)
+        message.success(res.data.message || `成功取消 ${cancelIds.length} 条选品申请`)
         setSelectedRowKeys([])
         fetchData()
       }
@@ -838,18 +1302,39 @@ const ProductSelection: React.FC = () => {
   const handleRecalcScores = async () => {
     setRecalcing(true)
     try {
-      const res = await productSelectionApi.recalcScores()
+      const res = await productSelectionApi.rescrapeFbaFees()
       if (res.data.success) {
-        message.success(`重新计算完成，共 ${res.data.data} 条记录`)
-        fetchData()
+        message.success(res.data.message || 'FBA利润重抓已在后台启动，完成后数据自动更新')
       } else {
-        message.error('重新计算失败')
+        message.error('启动FBA利润重抓失败')
       }
     } catch (e: any) {
-      message.error(e.response?.data?.detail || '重新计算失败')
+      message.error(e.response?.data?.detail || '启动FBA利润重抓失败')
     } finally {
       setRecalcing(false)
     }
+  }
+
+  // 批量重算FBA利润：勾选时只重算勾选记录，未勾选时确认后全量重算
+  const handleBatchRescrapeFba = () => {
+    if (selectedRowKeys.length === 0) {
+      Modal.confirm({
+        title: '未勾选记录',
+        content: '当前未勾选任何记录，将对全部选品重新计算FBA利润（后台执行），确定继续吗？',
+        okText: '全部重算',
+        cancelText: '取消',
+        onOk: handleRecalcScores,
+      })
+      return
+    }
+    setRecalcing(true)
+    productSelectionApi.rescrapeFbaFees(selectedRowKeys as number[])
+      .then(res => {
+        if (res.data.success) message.success(res.data.message || 'FBA利润重抓已在后台启动')
+        else message.error('启动FBA利润重抓失败')
+      })
+      .catch((e: any) => message.error(e.response?.data?.detail || '启动FBA利润重抓失败'))
+      .finally(() => setRecalcing(false))
   }
 
   const handleViewDetail = (item: ProductSelectionItem) => {
@@ -892,8 +1377,8 @@ const ProductSelection: React.FC = () => {
         maxWidth = Math.max(maxWidth, textWidth)
       }
     }
-    // Tag组件有左右padding 7px * 2 = 14px，边框 1px * 2 = 2px，加上额外空间
-    return Math.max(80, Math.min(300, Math.ceil(maxWidth) + 30))
+    // Tag 左右padding 14px + 边框 2px + 右margin 8px + 单元格padding 16px ≈ 40px，再留 8px 余量
+    return Math.max(80, Math.min(300, Math.ceil(maxWidth) + 48))
   }, [items])
 
   // 当前使用的汇率（按站点货币去重，供问号提示展示）
@@ -1058,6 +1543,32 @@ const ProductSelection: React.FC = () => {
       render: (val: number | null) => val != null ? `¥${val.toFixed(2)}` : '-',
     },
     {
+      title: (
+        <span>
+          汇率{' '}
+          <Tooltip title={useRealtimeRate
+            ? `${dayjs().format('YYYY-MM-DD')} 最新汇率`
+            : '抓取时汇率（抓取日期见各记录悬浮提示）'}>
+            <QuestionCircleOutlined style={{ color: '#999' }} />
+          </Tooltip>
+        </span>
+      ),
+      key: 'exchange_rates',
+      width: 140,
+      render: (_: any, record: ProductSelectionItem) => {
+        const rate = useRealtimeRate ? record.realtime_rate : record.scrape_rate
+        const fmtRate = (r: number | null | undefined) => (r != null && r > 0 ? r.toFixed(4) : '-')
+        const tip = useRealtimeRate
+          ? `${dayjs().format('YYYY-MM-DD')}（最新）实时汇率`
+          : `${record.created_at ? String(record.created_at).slice(0, 10) : '-'}（抓取日期）抓取时汇率`
+        return (
+          <Tooltip title={tip}>
+            <span style={{ whiteSpace: 'nowrap' }}>{fmtRate(rate)}</span>
+          </Tooltip>
+        )
+      },
+    },
+    {
       title: '15%毛利',
       dataIndex: 'price',
       key: 'profit_15',
@@ -1065,7 +1576,7 @@ const ProductSelection: React.FC = () => {
       sorter: true,
       render: (_: number | null, record: ProductSelectionItem) => {
         const rate = useRealtimeRate ? record.realtime_rate : record.scrape_rate
-        if (record.price != null && rate) return `¥${(record.price * 0.15 / rate).toFixed(2)}`
+        if (record.price != null && rate) return `¥${(record.price * 0.15 * rate).toFixed(2)}`
         return '-'
       },
     },
@@ -1110,6 +1621,25 @@ const ProductSelection: React.FC = () => {
         try { data = JSON.parse(val.replace(/'/g, '"').replace(/\bNone\b/g, 'null')) } catch {}
         if (!data || typeof data !== 'object') return <span style={{ fontSize: 12 }}>{val}</span>
 
+        // 多关键词嵌套格式 {关键词: {月份: 流量}}：按月对所有关键词求和，展示整体趋势
+        const src = data as Record<string, unknown>
+        if (Object.values(src).some(v => v && typeof v === 'object')) {
+          const monthSet = new Set<string>()
+          Object.values(src).forEach(sub => {
+            if (sub && typeof sub === 'object') Object.keys(sub as Record<string, unknown>).forEach(m => monthSet.add(m))
+          })
+          const summed: Record<string, number | null> = {}
+          Array.from(monthSet).sort().forEach(m => {
+            let total: number | null = null
+            Object.values(src).forEach(sub => {
+              const v = (sub as Record<string, unknown>)[m]
+              if (typeof v === 'number') total = (total ?? 0) + v
+            })
+            summed[m] = total
+          })
+          data = summed
+        }
+
         // 解析后保留所有月份，处理 None 值
         const entries = Object.entries(data)
           .sort((a, b) => a[0].localeCompare(b[0]))
@@ -1122,12 +1652,13 @@ const ProductSelection: React.FC = () => {
         const minVal = Math.min(...validValues)
         const range = maxVal - minVal || 1
 
-        // 折线图参数 - 展示全部数据
-        const pointGap = 16
-        const padX = 10
+        // 折线图参数 - 固定在列宽内自适应分布（任意月份数都不溢出）
+        const chartW = 200 // 列宽220 - 单元格padding
+        const padX = 6
         const padY = 4
         const chartH = 36
-        const totalW = entries.length * pointGap + padX * 2
+        const pointGap = entries.length > 1 ? (chartW - padX * 2) / (entries.length - 1) : 0
+        const totalW = chartW
 
         // 生成折线路径和点坐标
         let pathD = ''
@@ -1181,7 +1712,7 @@ const ProductSelection: React.FC = () => {
             }
           >
             <div style={{ display: 'inline-block', lineHeight: 1 }}>
-              <svg width={totalW} height={chartH} style={{ verticalAlign: 'middle', overflow: 'visible' }}>
+              <svg width={totalW} height={chartH} style={{ verticalAlign: 'middle', display: 'block' }}>
                 {/* 渐变填充区域 */}
                 <defs>
                   <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
@@ -1207,7 +1738,7 @@ const ProductSelection: React.FC = () => {
                   const isLast = i === points.length - 1
                   return (
                     <g key={month}>
-                      <circle cx={x} cy={y} r={isLast ? 3.5 : 2} fill="#fff" stroke="#1677ff" strokeWidth={isLast ? 2 : 1.2} />
+                      <circle cx={x} cy={y} r={isLast ? (pointGap < 8 ? 2.5 : 3.5) : (pointGap < 8 ? 1.4 : 2)} fill="#fff" stroke="#1677ff" strokeWidth={isLast ? 2 : 1.2} />
                     </g>
                   )
                 })}
@@ -1219,8 +1750,12 @@ const ProductSelection: React.FC = () => {
                   const val = lastEntry[1]
                   if (val == null) return null
                   const label = val >= 10000 ? `${(val / 10000).toFixed(1)}w` : String(val)
+                  // 标签水平夹在图表宽度内，垂直不越过顶边
+                  const labelHalf = label.length * 3
+                  const lx = Math.min(Math.max(lastPoint.x, labelHalf), totalW - labelHalf)
+                  const ly = Math.max(lastPoint.y - 7, 8)
                   return (
-                    <text x={lastPoint.x} y={lastPoint.y - 7} textAnchor="middle" fill="#1677ff" fontSize={9} fontWeight={600}>
+                    <text x={lx} y={ly} textAnchor="middle" fill="#1677ff" fontSize={9} fontWeight={600}>
                       {label}
                     </text>
                   )
@@ -1258,7 +1793,13 @@ const ProductSelection: React.FC = () => {
       key: 'purchase_quantity',
       width: 80,
       sorter: true,
-      render: (val: number | null | undefined) => val != null ? val : '-',
+      render: (val: number | null | undefined, record: ProductSelectionItem) => {
+        // 发起人补数后，数量跟随拼团成员总数更新（与拼团弹窗口径一致）
+        const members = Array.isArray(record.group_members) ? record.group_members : []
+        const memberTotal = members.reduce((s, m) => s + (m.quantity || 0), 0)
+        const qty = memberTotal > 0 ? memberTotal : val
+        return qty != null ? qty : '-'
+      },
     },
     {
       title: '实际毛利润',
@@ -1297,9 +1838,27 @@ const ProductSelection: React.FC = () => {
       title: '申请人',
       dataIndex: 'applicant_name',
       key: 'applicant_name',
-      width: 90,
+      width: 120,
       ellipsis: true,
-      render: (text: string | undefined) => text || '-',
+      render: (text: string | undefined, record: ProductSelectionItem) => {
+        if (!text) return '-'
+        const members = Array.isArray(record.group_members) ? record.group_members : []
+        if (members.length === 0) return text
+        // 标签形式：xxx：50
+        return (
+          <Space size={4} wrap>
+            {members.map((m: any) => (
+              <Tag
+                key={m.user_id}
+                color={m.user_id === record.applicant_id ? 'blue' : 'default'}
+                style={{ margin: 0 }}
+              >
+                {`${m.username}：${m.quantity}`}
+              </Tag>
+            ))}
+          </Space>
+        )
+      },
     },
     {
       title: '申请店铺分组',
@@ -1307,7 +1866,20 @@ const ProductSelection: React.FC = () => {
       key: 'store_group_name',
       width: 130,
       ellipsis: true,
-      render: (text: string | undefined) => text ? <Tag color="blue">{text}</Tag> : '-',
+      render: (_: string | undefined, record: ProductSelectionItem) => {
+        const names = (record.store_group_names && record.store_group_names.length > 0)
+          ? record.store_group_names
+          : (record.store_group_name ? [record.store_group_name] : [])
+        if (names.length === 0) return '-'
+        return (
+          <Tooltip title={names.join('、')}>
+            <span>
+              <Tag color="blue">{names[0]}</Tag>
+              {names.length > 1 && <Tag color="blue">+{names.length - 1}</Tag>}
+            </span>
+          </Tooltip>
+        )
+      },
     },
     {
       title: '状态',
@@ -1318,6 +1890,22 @@ const ProductSelection: React.FC = () => {
       render: (status: string | null, record: ProductSelectionItem) => {
         if (!status) return null
         if (status === 'pending') return <Tag color="processing">待审批</Tag>
+        if (status === 'grouping') {
+          const expired = record.group_deadline
+            ? new Date(record.group_deadline.replace(' ', 'T')).getTime() <= Date.now()
+            : false
+          const tip = (
+            <>
+              <div>剩余：<GroupingCountdownText deadline={record.group_deadline} /></div>
+              {record.group_deadline && <div>拼团期限：{record.group_deadline}</div>}
+            </>
+          )
+          return (
+            <Tooltip title={tip}>
+              <Tag color={expired ? 'error' : 'warning'}>待拼团</Tag>
+            </Tooltip>
+          )
+        }
         if (status === 'approved') return <Tag color="success">已审批</Tag>
         if (status === 'rejected') {
           const tag = <Tag color="error">审批未通过</Tag>
@@ -1327,6 +1915,20 @@ const ProductSelection: React.FC = () => {
         }
         return <Tag color="default">{status}</Tag>
       },
+    },
+    {
+      title: '抓取日期',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 170,
+      render: (text: string) => text ? <span style={{ whiteSpace: 'nowrap' }}>{text.slice(0, 19)}</span> : '-',
+    },
+    {
+      title: '更新日期',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      width: 170,
+      render: (text: string) => text ? <span style={{ whiteSpace: 'nowrap' }}>{text.slice(0, 19)}</span> : '-',
     },
     {
       title: '操作',
@@ -1358,7 +1960,7 @@ const ProductSelection: React.FC = () => {
             key: 'approve',
             icon: <CheckOutlined />,
             label: '审批',
-            onClick: () => handleApprove(record),
+            onClick: () => openDevApproveModal(record),
           })
           dropdownItems.push({
             key: 'reject',
@@ -1368,13 +1970,21 @@ const ProductSelection: React.FC = () => {
             onClick: () => openRejectModal([record.id]),
           })
         }
-        if (record.status === 'pending') {
+        if (record.status === 'pending' || record.status === 'grouping') {
           dropdownItems.push({
             key: 'cancel-application',
             icon: <DeleteOutlined />,
             label: '取消申请',
             danger: true,
             onClick: () => handleCancelApprovalApplication(record.id),
+          })
+        }
+        if (record.status === 'grouping') {
+          dropdownItems.push({
+            key: 'group-buy',
+            icon: <TeamOutlined />,
+            label: '拼团',
+            onClick: () => setGroupBuyModal({ open: true, item: record, quantity: undefined }),
           })
         }
         if (record.status === 'approved' && canApprove) {
@@ -1487,6 +2097,7 @@ const ProductSelection: React.FC = () => {
         items={[
           { key: 'all', label: '全部' },
           { key: 'empty', label: '未申请' },
+          { key: 'grouping', label: '待拼团' },
           { key: 'pending', label: '待审批' },
           { key: 'approved', label: '已审批' },
           { key: 'rejected', label: '审批未通过' },
@@ -1510,7 +2121,9 @@ const ProductSelection: React.FC = () => {
                 placeholder="产品类型"
                 options={typeOptions}
                 allowClear
-                style={{ width: 110 }}
+                showSearch
+                optionFilterProp="label"
+                style={{ width: 210 }}
                 value={productTypeFilter}
                 onChange={(v) => { setProductTypeFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
@@ -1521,14 +2134,6 @@ const ProductSelection: React.FC = () => {
                 style={{ width: 90 }}
                 value={siteFilter}
                 onChange={(v) => { setSiteFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
-              />
-              <Select
-                placeholder="选品日期"
-                options={dateOptions}
-                allowClear
-                style={{ width: 130 }}
-                value={dateFilter}
-                onChange={(v) => { setDateFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
               <Select
                 mode="multiple"
@@ -1591,6 +2196,12 @@ const ProductSelection: React.FC = () => {
                       onClick: handleBatchCancelApprovalApplication,
                     },
                     {
+                      key: 'batch-rescrape-fba',
+                      icon: <SyncOutlined />,
+                      label: '重算FBA利润',
+                      onClick: handleBatchRescrapeFba,
+                    },
+                    {
                       key: 'batch-analyze',
                       icon: <RobotOutlined />,
                       label: batchProgress ? `AI分析中 ${batchProgress.completed}/${batchProgress.total}` : 'AI分析',
@@ -1625,8 +2236,20 @@ const ProductSelection: React.FC = () => {
                   利润计算逻辑
                 </Button>
               )}
+              <Button
+                icon={<PlusOutlined />}
+                type="primary"
+                onClick={() => {
+                  amazonForm.resetFields()
+                  amazonForm.setFieldsValue({ site: 'us' })
+                  setAmazonResults(null)
+                  setAmazonModal({ open: true, submitting: false })
+                }}
+              >
+                ASIN导入
+              </Button>
               <Button onClick={handleRecalcScores} loading={recalcing}>
-                重算分数
+                重新计算FBA利润
               </Button>
               <Button
                 onClick={handleSwitchRate}
@@ -1641,7 +2264,7 @@ const ProductSelection: React.FC = () => {
                     <div>当前使用：{useRealtimeRate ? '实时汇率' : '抓取时汇率'}</div>
                     {currentRates.length > 0 ? (
                       currentRates.map(r => (
-                        <div key={r.currency}>1 CNY：{r.rate}{r.currency}</div>
+                        <div key={r.currency}>1 {r.currency} = {r.rate} CNY</div>
                       ))
                     ) : (
                       <div>暂无汇率数据，请先切换汇率</div>
@@ -1665,7 +2288,7 @@ const ProductSelection: React.FC = () => {
             dataSource={items}
             columns={columns}
             rowKey="id"
-            scroll={{ x: 3065, y: 'calc(100vh - 420px)' }}
+            scroll={{ x: 3545, y: 'calc(100vh - 420px)' }}
             onChange={(pagination, _, sorter) => {
               setPagination(prev => ({ ...prev, current: pagination.current, pageSize: pagination.pageSize || 20 }))
               if (sorter && !Array.isArray(sorter) && sorter.columnKey) {
@@ -1810,43 +2433,219 @@ const ProductSelection: React.FC = () => {
         </Form>
       </Modal>
 
-      {/* 申请选品弹窗 */}
+      {/* 参与拼团弹窗 */}
       <Modal
-        title={`申请选品${applyModal.ids.length > 1 ? `（${applyModal.ids.length} 条）` : ''}`}
+        title="参与拼团"
+        open={groupBuyModal.open}
+        onOk={handleGroupBuySubmit}
+        onCancel={() => setGroupBuyModal({ open: false, item: null })}
+        okText="确定"
+        cancelText="取消"
+        confirmLoading={groupBuySubmitting}
+        width={440}
+        destroyOnClose
+      >
+        {groupBuyModal.item && (() => {
+          const info = groupInfoOf(groupBuyModal.item)
+          const percent = info.moq > 0 ? Math.min(100, Math.round((info.joined / info.moq) * 100)) : 0
+          return (
+            <>
+              <Descriptions column={1} size="small" style={{ marginBottom: 12 }}>
+                <Descriptions.Item label="ASIN">{groupBuyModal.item.asin}</Descriptions.Item>
+                <Descriptions.Item label="产品">
+                  <Text style={{ maxWidth: 280, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {groupBuyModal.item.product_title}
+                  </Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="拼团剩余">
+                  <GroupingCountdownText deadline={groupBuyModal.item.group_deadline} />
+                </Descriptions.Item>
+              </Descriptions>
+              <div style={{ marginBottom: 4 }}>
+                <Text strong>已拼采购数：{info.joined}</Text>
+                <Text type="secondary"> / 起订量：{info.moq}</Text>
+              </div>
+              <Progress percent={percent} status={info.joined >= info.moq && info.moq > 0 ? 'success' : 'active'} />
+              {info.members.length > 0 && (
+                <div style={{ marginTop: 4, marginBottom: 12 }}>
+                  {info.members.map((m, idx) => (
+                    <Tag key={`${m.user_id}-${idx}`} color={m.user_id === groupBuyModal.item?.applicant_id ? 'blue' : 'default'}>
+                      {`${m.username}${m.store_group_name ? `·${m.store_group_name}` : ''}：${m.quantity}`}
+                    </Tag>
+                  ))}
+                </div>
+              )}
+              {user && groupBuyModal.item.applicant_id === user.id && (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message={`您是发起人，输入的数量将累加到您已拼的数量（当前 ${info.members.find(m => m.user_id === user.id)?.quantity ?? info.joined}）`}
+                />
+              )}
+              <Form layout="vertical">
+                <Form.Item label="我要拼的数量" required style={{ marginBottom: 0 }}>
+                  <InputNumber
+                    min={1}
+                    precision={0}
+                    style={{ width: '100%' }}
+                    placeholder="请输入拼团数量"
+                    value={groupBuyModal.quantity}
+                    onChange={(v) => setGroupBuyModal(prev => ({ ...prev, quantity: v ?? undefined }))}
+                  />
+                </Form.Item>
+              </Form>
+            </>
+          )
+        })()}
+      </Modal>
+
+      {/* ASIN 导入选品弹窗：拼接亚马逊链接自动抓取 */}
+      <Modal
+        title="ASIN导入选品"
+        open={amazonModal.open}
+        onOk={handleAmazonImport}
+        onCancel={() => setAmazonModal({ open: false, submitting: false })}
+        okText="导入"
+        cancelText="取消"
+        confirmLoading={amazonModal.submitting}
+        width={520}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="输入 ASIN 后自动拼接亚马逊链接抓取：标题/售价/评分/评论数/主图，FBA费用（佣金/尾程/重量）调卖家精灵接口，头程按重量自动计算"
+        />
+        <Form form={amazonForm} layout="vertical">
+          <Form.Item name="site" label="站点" rules={[{ required: true, message: '请选择站点' }]}>
+            <Select
+              options={[
+                { label: '美国站', value: 'us' },
+                { label: '德国站', value: 'de' },
+                { label: '英国站', value: 'uk' },
+              ]}
+              placeholder="选择站点"
+            />
+          </Form.Item>
+          <Form.Item
+            name="asins"
+            label="ASIN（每行一个，可逗号分隔，单次最多 20 个）"
+            rules={[{ required: true, message: '请输入ASIN' }]}
+          >
+            <Input.TextArea rows={6} placeholder={'B0CXYZ1234\nB0ABCD5678'} />
+          </Form.Item>
+        </Form>
+        {amazonResults && (
+          <div style={{ maxHeight: 220, overflow: 'auto' }}>
+            {amazonResults.map(r => (
+              <div key={r.asin} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '4px 0', borderBottom: '1px solid #f0f0f0' }}>
+                {r.ok
+                  ? <CheckOutlined style={{ color: '#52c41a', marginTop: 3 }} />
+                  : <CloseOutlined style={{ color: '#ff4d4f', marginTop: 3 }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div>
+                    <Text strong>{r.asin}</Text>
+                    {r.ok && r.title && (
+                      <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                        {r.title.slice(0, 40)}{r.title.length > 40 ? '...' : ''}
+                      </Text>
+                    )}
+                  </div>
+                  {!r.ok && r.error && <Text type="danger" style={{ fontSize: 12 }}>{r.error}</Text>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
+
+      {/* 申请选品弹窗（批量时为分页向导：每页一条 ASIN） */}
+      <Modal
+        title={isBatchWizard
+          ? `批量申请选品（第 ${batchStep + 1}/${batchWizardItems.length} 个）`
+          : `申请选品${applyModal.ids.length > 1 ? `（${applyModal.ids.length} 条）` : ''}`}
         open={applyModal.open}
         onOk={handleApplySubmit}
         onCancel={() => setApplyModal({ open: false, ids: [] })}
         confirmLoading={applySubmitting}
         width={520}
         destroyOnClose
+        afterOpenChange={(open) => {
+          // 打开动画结束后（Form 已挂载）再回填，否则 setFieldsValue 丢失
+          if (open) {
+            applyForm.resetFields()
+            const cur = isBatchWizard ? batchWizardItems[batchStep] : applyModal.item
+            applyForm.setFieldsValue(batchPageData[batchStep] ?? defaultApplyValues(cur))
+          }
+        }}
+        footer={isBatchWizard ? [
+          <Button key="cancel" onClick={() => setApplyModal({ open: false, ids: [] })}>取消</Button>,
+          <Button key="prev" disabled={batchStep === 0} onClick={() => goBatchStep(batchStep - 1)}>上一页</Button>,
+          batchStep < batchWizardItems.length - 1
+            ? <Button key="next" type="primary" onClick={() => goBatchStep(batchStep + 1)}>下一页</Button>
+            : <Button key="submit" type="primary" loading={applySubmitting} onClick={handleApplySubmit}>提交申请（{batchWizardItems.length} 条）</Button>,
+        ] : undefined}
       >
-        {applyModal.ids.length > 1 && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="填写的信息将应用到所有选中的选品"
-          />
-        )}
-        {applyModal.item && applyModal.ids.length === 1 && (
-          <div style={{ marginBottom: 16 }}>
-            <Text type="secondary">产品：</Text>
-            <Text ellipsis style={{ maxWidth: 380 }}>{applyModal.item.product_title}</Text>
+        {isBatchWizard && batchWizardItems[batchStep] ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            {batchWizardItems[batchStep].image_url ? (
+              <Image src={batchWizardItems[batchStep].image_url} width={48} height={48} style={{ objectFit: 'cover', borderRadius: 4 }} />
+            ) : (
+              <div style={{ width: 48, height: 48, background: '#f5f5f5', borderRadius: 4 }} />
+            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600 }}>ASIN：{batchWizardItems[batchStep].asin}</div>
+              <Text type="secondary" ellipsis style={{ maxWidth: 360, display: 'block' }}>{batchWizardItems[batchStep].product_title}</Text>
+            </div>
           </div>
+        ) : (
+          applyModal.item && applyModal.ids.length === 1 && (
+            <div style={{ marginBottom: 16 }}>
+              <Text type="secondary">产品：</Text>
+              <Text ellipsis style={{ maxWidth: 380 }}>{applyModal.item.product_title}</Text>
+            </div>
+          )
         )}
         <Form form={applyForm} layout="vertical">
-          <Form.Item
-            name="ali_1688_url"
-            label="1688链接"
-            rules={[
-              { required: true, message: '请输入1688链接' },
-              { type: 'url', message: '请输入有效的链接地址' },
-            ]}
-          >
-            <Input placeholder="https://detail.1688.com/..." />
+          <Form.Item label="1688链接" required style={{ marginBottom: 4 }}>
+            <Form.List name="ali_1688_urls">
+              {(fields, { add, remove }, { errors }) => (
+                <>
+                  {fields.map((field, index) => (
+                    <Row key={field.key} gutter={8} align="middle" style={{ marginBottom: 4 }}>
+                      <Col flex="auto">
+                        <Form.Item
+                          name={field.name}
+                          noStyle
+                          rules={[
+                            { required: index === 0, message: '请输入1688链接' },
+                            { type: 'url', message: '请输入有效的链接地址' },
+                          ]}
+                        >
+                          <Input placeholder="https://detail.1688.com/..." />
+                        </Form.Item>
+                      </Col>
+                      <Col flex="none">
+                        <Space size={0}>
+                          {fields.length > 1 && (
+                            <Button type="text" size="small" icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+                          )}
+                          {index === fields.length - 1 && (
+                            <Button type="text" size="small" icon={<PlusOutlined />} onClick={() => add('')} />
+                          )}
+                        </Space>
+                      </Col>
+                    </Row>
+                  ))}
+                  <Form.ErrorList errors={errors} />
+                </>
+              )}
+            </Form.List>
           </Form.Item>
           <Row gutter={16}>
-            <Col span={12}>
+            <Col span={8}>
               <Form.Item
                 name="purchase_price"
                 label="采购价格（¥）"
@@ -1855,7 +2654,7 @@ const ProductSelection: React.FC = () => {
                 <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="人民币" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col span={8}>
               <Form.Item
                 name="purchase_quantity"
                 label="数量"
@@ -1864,91 +2663,337 @@ const ProductSelection: React.FC = () => {
                 <InputNumber style={{ width: '100%' }} min={1} precision={0} placeholder="采购数量" />
               </Form.Item>
             </Col>
+            <Col span={8}>
+              <Form.Item
+                name="moq"
+                label="起订量"
+                rules={[{ required: true, message: '请输入起订量' }]}
+              >
+                <InputNumber style={{ width: '100%' }} min={1} precision={0} placeholder="MOQ" />
+              </Form.Item>
+            </Col>
           </Row>
-          <Form.Item name="store_group_id" label="申请店铺分组">
-            <Select placeholder="选择店铺分组" options={storeGroupOptions} allowClear />
+          <Form.Item name="store_group_ids" label="申请店铺分组（可多选，合并为一条申请）">
+            <Select mode="multiple" placeholder="选择店铺分组（可多选）" options={storeGroupOptions} allowClear />
+          </Form.Item>
+          <Form.Item name="apply_remark" label="备注">
+            <Input.TextArea rows={2} maxLength={500} showCount placeholder="选品备注说明（选填）" />
+          </Form.Item>
+          <Form.Item label="上传图片">
+            <Upload
+              listType="picture-card"
+              fileList={applyImgFiles}
+              accept="image/*"
+              multiple
+              customRequest={async (options: any) => {
+                const { file, onSuccess, onError } = options
+                try {
+                  // TOS 存放：选品/{ASIN}_申请选品_{序号}.{ext}
+                  const seq = ++applyUploadSeqRef.current
+                  const curAsin = isBatchWizard ? batchWizardItems[batchStep]?.asin : applyModal.item?.asin
+                  const asin = curAsin || String(Date.now())
+                  const res = await uploadApi.uploadImage(file as File, `${asin}_申请选品_${seq}`, '选品')
+                  if (res.data.success) onSuccess?.(res.data.data)
+                  else onError?.(new Error(res.data.message || '上传失败'))
+                } catch (err: any) {
+                  onError?.(err)
+                }
+              }}
+              onChange={({ fileList }) => setApplyImgFiles(fileList)}
+              onPreview={(file) => {
+                const url: string | undefined = file.url || file.response?.url || file.thumbUrl
+                if (url) setApplyPreview({ open: true, url })
+              }}
+            >
+              {applyImgFiles.length >= 8 ? null : (
+                <div><PlusOutlined /><div style={{ marginTop: 4 }}>上传</div></div>
+              )}
+            </Upload>
+            <Image
+              style={{ display: 'none' }}
+              src={applyPreview.url}
+              preview={{
+                visible: applyPreview.open,
+                src: applyPreview.url,
+                onVisibleChange: (v) => setApplyPreview(prev => ({ ...prev, open: v })),
+              }}
+            />
           </Form.Item>
         </Form>
       </Modal>
 
-      {/* 审批通过弹窗 */}
+      {/* 审批弹窗：内嵌开发机器人新品表单，提交后自动审批通过并创建产品与补货单 */}
       <Modal
-        title="审批通过"
-        open={approveModal.open}
-        onOk={handleApproveSubmit}
-        onCancel={() => setApproveModal({ open: false })}
-        confirmLoading={approveSubmitting}
-        okText="确认审批"
-        width={520}
+        title={`审批 - 完善新品信息${devApproveModal.item ? `（${devApproveModal.item.asin || devApproveModal.item.product_title || ''}）` : ''}`}
+        open={devApproveModal.open}
+        onCancel={() => setDevApproveModal({ open: false })}
+        width={860}
         destroyOnClose
-      >
-        {approveModal.item && (
-          <>
-            <div style={{ marginBottom: 16 }}>
-              <Text type="secondary">产品：</Text>
-              <Text ellipsis style={{ maxWidth: 380 }}>{approveModal.item.product_title}</Text>
-            </div>
-            <Row gutter={16} style={{ marginBottom: 16 }}>
-              <Col span={12}>
-                <Text type="secondary">采购数量：</Text>
-                <Text>{approveModal.item.purchase_quantity ?? '-'}</Text>
-              </Col>
-              <Col span={12}>
-                <Text type="secondary">店铺分组：</Text>
-                {approveModal.item.store_group_name
-                  ? <Tag color="blue">{approveModal.item.store_group_name}</Tag>
-                  : <Text>-</Text>}
-              </Col>
-            </Row>
-            <Form form={approveForm} layout="vertical">
-              <Form.Item
-                name="product_name"
-                label="品名"
-                rules={[{ required: true, message: '请输入品名' }]}
-                extra="确认后将生成新成品和补货单，采购数量与店铺分组取申请选品时填写值"
-              >
-                <Input placeholder="请输入品名" maxLength={200} />
-              </Form.Item>
-            </Form>
-          </>
-        )}
-      </Modal>
-
-      {/* 批量审批弹窗：逐条填写品名，合并生成一张补货单 */}
-      <Modal
-        title={`批量审批（${batchApproveItems.length} 条）`}
-        open={batchApproveModalOpen}
-        onOk={handleBatchApproveSubmit}
-        onCancel={() => setBatchApproveModalOpen(false)}
-        confirmLoading={batchApproveSubmitting}
-        okText="确认审批"
-        width={640}
-        destroyOnClose
+        footer={[
+          <Button key="cancel" onClick={() => setDevApproveModal({ open: false })}>取消</Button>,
+          <Button key="ok" type="primary" loading={devApproveSubmitting} onClick={handleDevApproveSubmit}>
+            提交并审批通过
+          </Button>,
+        ]}
       >
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="每条选品将生成一个成品（需填写品名）；补货单按申请人和店铺分组归并，相同的人生成同一张，不同的人分开生成"
+          message="已带出选品申请信息，请补全必填项；提交后自动创建新品、产品与补货单，选品标记为已审批"
         />
-        <div style={{ maxHeight: 420, overflow: 'auto' }}>
-          {batchApproveItems.map((item, idx) => (
-            <div key={item.id} style={{ marginBottom: 16 }}>
-              <div style={{ marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Text type="secondary">{idx + 1}.</Text>
-                <Text ellipsis style={{ flex: 1, minWidth: 0 }} title={item.product_title}>{item.product_title}</Text>
-                {item.store_group_name && <Tag color="blue" style={{ flexShrink: 0 }}>{item.store_group_name}</Tag>}
-                <Text type="secondary" style={{ flexShrink: 0 }}>数量：{item.purchase_quantity ?? '-'}</Text>
-              </div>
-              <Input
-                placeholder="请输入品名"
-                maxLength={200}
-                value={item.name}
-                onChange={(e) => setBatchApproveItems(prev => prev.map(p => p.id === item.id ? { ...p, name: e.target.value } : p))}
+        <Form form={devApproveForm} layout="vertical" disabled={devApproveLoading}>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="title" label="英文标题" rules={[{ required: true, message: '请输入英文标题' }]}>
+                <Input placeholder="只填英文" maxLength={75} showCount />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="product_title" label="英文标题关键词" rules={[{ required: true, message: '请输入英文标题关键词' }]}>
+                <Input.TextArea rows={1} placeholder="只填英文，多个关键词用逗号分隔" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="product_name_zh" label="产品中文名称" rules={[{ required: true, message: '请输入产品中文名称' }]}>
+                <Input placeholder="产品中文名称" maxLength={200} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="category" label="类目" rules={[{ required: true, message: '请选择类目' }]}>
+                <Select placeholder="选择商品类目" options={DEV_CATEGORY_OPTIONS} showSearch />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="urgency" label="产品紧急度">
+                <Select options={DEV_URGENCY_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="seasonality" label="产品季节性">
+                <Select options={DEV_SEASONALITY_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="development_date" label="日期" rules={[{ required: true, message: '请选择日期' }]}>
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="purchase_price" label="进货价">
+                <InputNumber style={{ width: '100%' }} min={0} precision={2} prefix="¥" placeholder="进货价" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="selling_price" label="售价">
+                <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="售价" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="competitors" label="竞品ASIN">
+                <Input placeholder="竞品ASIN" maxLength={100} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="purchase_link" label="采购链接">
+            <Input placeholder="粘贴采购链接（1688/淘宝等）" allowClear />
+          </Form.Item>
+          <Form.Item name="purchase_info" label="采购信息备注">
+            <Input.TextArea rows={2} placeholder="采购信息备注（选填）" maxLength={500} />
+          </Form.Item>
+          <Form.Item label="关联店铺分组与采购数量" style={{ marginBottom: 4 }}>
+            <Form.List name="store_rows">
+              {(fields, { add, remove }) => (
+                <>
+                  {fields.map(field => (
+                    <Row key={field.key} gutter={8} style={{ marginBottom: 8 }}>
+                      <Col span={12}>
+                        <Form.Item name={[field.name, 'group']} noStyle>
+                          <Select placeholder="选择店铺分组" options={storeGroupOptions} showSearch allowClear />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item name={[field.name, 'quantity']} noStyle>
+                          <InputNumber style={{ width: '100%' }} min={1} precision={0} placeholder="采购数量" />
+                        </Form.Item>
+                      </Col>
+                      <Col span={4}>
+                        <Button type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+                      </Col>
+                    </Row>
+                  ))}
+                  <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add({ group: undefined, quantity: undefined })}>
+                    添加店铺分组
+                  </Button>
+                </>
+              )}
+            </Form.List>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 批量审批弹窗：分页向导（每页一条选品 + 完整新品表单，逐条联动审批） */}
+      <Modal
+        title={batchApproveItems.length > 1
+          ? `批量审批（第 ${batchApproveStep + 1}/${batchApproveItems.length} 条）`
+          : '批量审批'}
+        open={batchApproveModalOpen}
+        onCancel={() => setBatchApproveModalOpen(false)}
+        confirmLoading={batchApproveSubmitting}
+        width={860}
+        destroyOnClose
+        afterOpenChange={(open) => {
+          // Modal destroyOnClose：打开前 setFieldsValue 会丢失，挂载后按当前页快照兜底回填
+          if (!open) return
+          const snap = batchApprovePageDataRef.current[batchApproveStepRef.current]
+          devApproveForm.resetFields()
+          if (snap) devApproveForm.setFieldsValue(snap)
+        }}
+        footer={[
+          <Button key="cancel" onClick={() => setBatchApproveModalOpen(false)}>取消</Button>,
+          <Button key="prev" disabled={batchApproveStep === 0} onClick={() => goBatchApproveStep(batchApproveStep - 1)}>上一页</Button>,
+          batchApproveStep < batchApproveItems.length - 1
+            ? <Button key="next" type="primary" onClick={() => goBatchApproveStep(batchApproveStep + 1)}>下一页</Button>
+            : <Button key="submit" type="primary" loading={batchApproveSubmitting} onClick={handleBatchApproveSubmit}>提交审批（{batchApproveItems.length} 条）</Button>,
+        ]}
+      >
+        {batchApproveItems.length > 0 && (() => {
+          const item = batchApproveItems[batchApproveStep]
+          const sgNames = (item.store_group_names && item.store_group_names.length > 0)
+            ? item.store_group_names
+            : (item.store_group_name ? [item.store_group_name] : [])
+          return (
+            <>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`第 ${batchApproveStep + 1} 条，共 ${batchApproveItems.length} 条；已带出申请信息，补全必填项后提交，将自动创建新品、产品与补货单`}
               />
-            </div>
-          ))}
-        </div>
+              <Descriptions column={3} size="small" style={{ marginBottom: 12 }}>
+                <Descriptions.Item label="ASIN">{item.asin || '-'}</Descriptions.Item>
+                <Descriptions.Item label="申请人">{item.applicant_name || '-'}</Descriptions.Item>
+                <Descriptions.Item label="采购价格">
+                  {item.purchase_price != null ? `¥${Number(item.purchase_price).toFixed(2)}` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="店铺分组" span={3}>
+                  {sgNames.length > 0
+                    ? sgNames.map((n, i) => <Tag key={i} color="blue">{n}</Tag>)
+                    : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="拼团成员" span={3}>
+                  {(item.group_members || []).length > 0
+                    ? item.group_members!.map((m, idx) => (
+                      <Tag key={`${m.user_id}-${idx}`} color={m.store_group_name ? 'blue' : 'default'}>
+                        {`${m.username}${m.store_group_name ? `·${m.store_group_name}` : ''}：${m.quantity}`}
+                      </Tag>
+                    ))
+                    : '-'}
+                </Descriptions.Item>
+              </Descriptions>
+              <Form form={devApproveForm} layout="vertical" disabled={batchApproveLoading}>
+                <Row gutter={12}>
+                  <Col span={12}>
+                    <Form.Item name="title" label="英文标题" rules={[{ required: true, message: '请输入英文标题' }]}>
+                      <Input placeholder="只填英文" maxLength={75} showCount />
+                    </Form.Item>
+                  </Col>
+                  <Col span={12}>
+                    <Form.Item name="product_title" label="英文标题关键词" rules={[{ required: true, message: '请输入英文标题关键词' }]}>
+                      <Input.TextArea rows={1} placeholder="只填英文，多个关键词用逗号分隔" />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Row gutter={12}>
+                  <Col span={12}>
+                    <Form.Item name="product_name_zh" label="产品中文名称" rules={[{ required: true, message: '请输入产品中文名称' }]}>
+                      <Input placeholder="产品中文名称" maxLength={200} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={12}>
+                    <Form.Item name="category" label="类目" rules={[{ required: true, message: '请选择类目' }]}>
+                      <Select placeholder="选择商品类目" options={DEV_CATEGORY_OPTIONS} showSearch />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item name="urgency" label="产品紧急度">
+                      <Select options={DEV_URGENCY_OPTIONS} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="seasonality" label="产品季节性">
+                      <Select options={DEV_SEASONALITY_OPTIONS} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="development_date" label="日期" rules={[{ required: true, message: '请选择日期' }]}>
+                      <DatePicker style={{ width: '100%' }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item name="purchase_price" label="进货价">
+                      <InputNumber style={{ width: '100%' }} min={0} precision={2} prefix="¥" placeholder="进货价" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="selling_price" label="售价">
+                      <InputNumber style={{ width: '100%' }} min={0} precision={2} placeholder="售价" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="competitors" label="竞品ASIN">
+                      <Input placeholder="竞品ASIN" maxLength={100} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item name="purchase_link" label="采购链接">
+                  <Input placeholder="粘贴采购链接（1688/淘宝等）" allowClear />
+                </Form.Item>
+                <Form.Item name="purchase_info" label="采购信息备注">
+                  <Input.TextArea rows={2} placeholder="采购信息备注（选填）" maxLength={500} />
+                </Form.Item>
+                <Form.Item label="关联店铺分组与采购数量" style={{ marginBottom: 4 }}>
+                  <Form.List name="store_rows">
+                    {(fields, { add, remove }) => (
+                      <>
+                        {fields.map(field => (
+                          <Row key={field.key} gutter={8} style={{ marginBottom: 8 }}>
+                            <Col span={12}>
+                              <Form.Item name={[field.name, 'group']} noStyle>
+                                <Select placeholder="选择店铺分组" options={storeGroupOptions} showSearch allowClear />
+                              </Form.Item>
+                            </Col>
+                            <Col span={8}>
+                              <Form.Item name={[field.name, 'quantity']} noStyle>
+                                <InputNumber style={{ width: '100%' }} min={1} precision={0} placeholder="采购数量" />
+                              </Form.Item>
+                            </Col>
+                            <Col span={4}>
+                              <Button type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+                            </Col>
+                          </Row>
+                        ))}
+                        <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add({ group: undefined, quantity: undefined })}>
+                          添加店铺分组
+                        </Button>
+                      </>
+                    )}
+                  </Form.List>
+                </Form.Item>
+              </Form>
+            </>
+          )
+        })()}
       </Modal>
 
       {/* 拒绝审批弹窗：拒绝原因选填 */}
@@ -1998,7 +3043,7 @@ const ProductSelection: React.FC = () => {
               type="info"
               showIcon
               style={{ marginBottom: 16 }}
-              message="实际毛利润 = 价格 - 采购成本（按汇率换算为站点货币）- 头程 - 尾程 - 佣金 - 广告费 - 仓储费 - 税金 - 退货；实际毛利率 = 实际毛利润 ÷ 价格。美国站默认不含退货，德国/英国站默认含退货。"
+              message="实际毛利润 = 价格 - 采购成本（按汇率换算为站点货币）- 头程 - 尾程 - 佣金 - 广告费 - 仓储费 - 税金 - 退货；实际毛利率 = 实际毛利润 ÷ 价格。汇率方向为 1外币兑人民币；默认税金/退货率：美国站税金0%、退货6%，德国/英国站税金20%、退货6%。"
             />
             <Tabs
               activeKey={settingsTab}
@@ -2048,7 +3093,7 @@ const ProductSelection: React.FC = () => {
                   </Row>
                   <div style={{ marginTop: 16, padding: 12, background: 'rgba(0,0,0,0.03)', borderRadius: 6, fontSize: 13 }}>
                     <Text type="secondary">
-                      毛利润（{s.currency}）= 价格 - 采购成本（CNY×汇率）- 头程 - 尾程 - 佣金 - 价格×{(s.ad_fee_rate * 100).toFixed(1)}%（广告费）- 价格×{(s.storage_fee_rate * 100).toFixed(1)}%（仓储费）- 价格×{(s.tax_rate * 100).toFixed(1)}%（税金）{s.return_rate > 0 ? ` - 价格×${(s.return_rate * 100).toFixed(1)}%（退货）` : ''}
+                      毛利润（{s.currency}）= 价格 - 采购成本（CNY÷汇率）- 头程 - 尾程 - 佣金 - 价格×{(s.ad_fee_rate * 100).toFixed(1)}%（广告费）- 价格×{(s.storage_fee_rate * 100).toFixed(1)}%（仓储费）- 价格×{(s.tax_rate * 100).toFixed(1)}%（税金）{s.return_rate > 0 ? ` - 价格×${(s.return_rate * 100).toFixed(1)}%（退货）` : ''}
                     </Text>
                   </div>
                 </div>
@@ -2113,7 +3158,7 @@ const ProductSelection: React.FC = () => {
               <Descriptions.Item label="15%毛利">
                 {(() => {
                   const rate = useRealtimeRate ? detailItem.realtime_rate : detailItem.scrape_rate
-                  if (detailItem.price != null && rate) return `¥${(detailItem.price * 0.15 / rate).toFixed(2)}`
+                  if (detailItem.price != null && rate) return `¥${(detailItem.price * 0.15 * rate).toFixed(2)}`
                   return '-'
                 })()}
               </Descriptions.Item>
@@ -2130,7 +3175,11 @@ const ProductSelection: React.FC = () => {
               <Descriptions.Item label="数量">{detailItem.purchase_quantity ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="申请人">{detailItem.applicant_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="申请店铺分组" labelStyle={{ whiteSpace: 'nowrap' }}>
-                {detailItem.store_group_name ? <Tag color="blue">{detailItem.store_group_name}</Tag> : '-'}
+                {(detailItem.store_group_names?.length
+                  ? detailItem.store_group_names
+                  : (detailItem.store_group_name ? [detailItem.store_group_name] : [])
+                ).map((n, i) => <Tag key={i} color="blue">{n}</Tag>)}
+                {!(detailItem.store_group_names?.length || detailItem.store_group_name) && '-'}
               </Descriptions.Item>
               <Descriptions.Item label="实际毛利润">
                 {(() => {
@@ -2196,13 +3245,26 @@ const ProductSelection: React.FC = () => {
             {(() => {
               const val = detailItem.traffic_trend
               if (!val) return null
-              let data: Record<string, number | null> | null = null
-              try { data = JSON.parse(val.replace(/'/g, '"').replace(/\bNone\b/g, 'null')) } catch {}
-              if (!data || typeof data !== 'object') return null
+              let parsed: Record<string, unknown> | null = null
+              try { parsed = JSON.parse(val.replace(/'/g, '"').replace(/\bNone\b/g, 'null')) } catch {}
+              if (!parsed || typeof parsed !== 'object') return null
 
-              const entries = Object.entries(data)
-                .sort((a, b) => a[0].localeCompare(b[0]))
-                .map(([k, v]) => [k, typeof v === 'number' ? v : null] as [string, number | null])
+              // 多关键词嵌套格式 {关键词: {月份: 流量}}：每个关键词一张折线图；老格式为单关键词
+              const toEntries = (obj: Record<string, unknown>) =>
+                Object.entries(obj)
+                  .sort((a, b) => a[0].localeCompare(b[0]))
+                  .map(([k, v]) => [k, typeof v === 'number' ? v : null] as [string, number | null])
+              const isNested = Object.values(parsed).some(v => v && typeof v === 'object')
+              const seriesList: { name: string; entries: [string, number | null][] }[] = isNested
+                ? Object.entries(parsed)
+                    .filter(([, v]) => v && typeof v === 'object')
+                    .map(([name, sub]) => ({ name, entries: toEntries(sub as Record<string, unknown>) }))
+                : [{ name: '', entries: toEntries(parsed) }]
+
+              const activeSeries = seriesList.find(s => s.name === trendKeyword) || seriesList[0]
+              if (!activeSeries) return null
+
+              const entries = activeSeries.entries
 
               const validValues = entries.map(([, v]) => v).filter((v): v is number => v != null)
               if (validValues.length === 0) return null
@@ -2211,22 +3273,24 @@ const ProductSelection: React.FC = () => {
               const minVal = Math.min(...validValues)
               const range = maxVal - minVal || 1
 
-              // 图表尺寸 - 更高更宽
-              const pointGap = 52
-              const padX = 30
+              // 宽度自适应：SVG 宽度 = 容器实测宽度，坐标间隔 = 可用宽度 / 点数（带下限），不产生横向滚动
               const padY = 16
               const leftW = 60 // Y轴区域宽度
+              const rightPad = 40 // 右侧留白（容纳末点数值气泡）
               const bottomH = 28 // X轴区域高度
               const chartH = 200
               const chartInnerH = chartH - padY - bottomH
-              const totalW = Math.max(700, entries.length * pointGap + padX + leftW + 60)
+              const totalW = Math.max(320, chartW || 600)
+              const usableW = totalW - leftW - rightPad
+              const pointGap = entries.length > 1 ? Math.max(4, usableW / (entries.length - 1)) : usableW / 2
+              const labelEvery = Math.max(1, Math.ceil(56 / pointGap))
 
               let pathD = ''
               let areaD = ''
               const points: { x: number; y: number; month: string; value: number | null }[] = []
 
               entries.forEach(([month, value], i) => {
-                const x = leftW + padX + i * pointGap
+                const x = leftW + i * pointGap
                 if (value == null) {
                   points.push({ x, y: chartH / 2, month, value: null })
                   return
@@ -2249,7 +3313,7 @@ const ProductSelection: React.FC = () => {
                   }
                 }
               })
-              areaD += ` L ${leftW + padX + (entries.length - 1) * pointGap} ${chartH - bottomH} Z`
+              areaD += ` L ${leftW + (entries.length - 1) * pointGap} ${chartH - bottomH} Z`
 
               // Y轴刻度（4档）
               const yTicks = [0, 1, 2, 3, 4].map(i => ({
@@ -2260,14 +3324,30 @@ const ProductSelection: React.FC = () => {
               // 网格线
               const gridLines = yTicks.slice(0, -1).map(t => t.y)
 
+              const dense = pointGap < 14
+              const dotR = dense ? 2 : 4
+              const lastR = dense ? 3 : 6
+              const heatR = dense ? 7 : 18
+              const containerId = 'detail-chart-container-0'
+              const gradId = 'detailAreaGrad-0'
+              const displayName = activeSeries.name ? `流量趋势 · ${activeSeries.name}` : '流量趋势'
+
               const formatNum = (n: number) => n >= 10000 ? `${(n / 10000).toFixed(1)}w` : String(Math.round(n))
 
               return (
-                <Card size="small" title={<span><RiseOutlined style={{ marginRight: 6 }} />流量趋势</span>} style={{ marginBottom: 16, overflow: 'visible' }}>
-                  <div id="detail-chart-container" style={{ position: 'relative', overflow: 'visible' }}>
-                    <svg width={totalW} height={chartH} style={{ verticalAlign: 'middle', overflow: 'visible', display: 'block' }}>
+                <Card size="small"
+                  title={<span><RiseOutlined style={{ marginRight: 6 }} />{displayName || '流量趋势'}</span>}
+                  extra={isNested && (
+                    <Select size="small" style={{ minWidth: 150 }} showSearch
+                      value={activeSeries.name}
+                      onChange={(v: string) => setTrendKeyword(v)}
+                      options={seriesList.map(s => ({ value: s.name, label: s.name }))} />
+                  )}
+                  style={{ marginBottom: 16, overflow: 'hidden' }}>
+                  <div ref={measureChartW} id={containerId} style={{ position: 'relative', overflow: 'visible' }}>
+                    <svg width={totalW} height={chartH} style={{ verticalAlign: 'middle', overflow: 'visible', display: 'block', maxWidth: '100%' }}>
                       <defs>
-                        <linearGradient id="detailAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
                           <stop offset="0%" stopColor="#1677ff" stopOpacity="0.15" />
                           <stop offset="100%" stopColor="#1677ff" stopOpacity="0.01" />
                         </linearGradient>
@@ -2293,16 +3373,18 @@ const ProductSelection: React.FC = () => {
                           fill="#999" fontSize={10}>{formatNum(t.val)}</text>
                       ))}
 
-                      {/* X轴月份标签 */}
-                      {entries.map(([month], i) => (
-                        <text key={`xt${i}`} x={leftW + padX + i * pointGap} y={chartH - bottomH + 14}
-                          textAnchor="middle" fill="#999" fontSize={10}>
-                          {month}
-                        </text>
+                      {/* X轴时间标签（间隔自适应，避免拥挤） */}
+                      {points.map(({ x, month }, i) => (
+                        (i % labelEvery === 0) ? (
+                          <text key={`xt${i}`} x={x} y={chartH - bottomH + 14}
+                            textAnchor="middle" fill="#999" fontSize={10}>
+                            {month}
+                          </text>
+                        ) : null
                       ))}
 
                       {/* 面积填充 */}
-                      <path d={areaD} fill="url(#detailAreaGrad)" />
+                      <path d={areaD} fill={`url(#${gradId})`} />
 
                       {/* 折线 */}
                       <path d={pathD} fill="none" stroke="#1677ff" strokeWidth={2.5}
@@ -2311,15 +3393,15 @@ const ProductSelection: React.FC = () => {
                       {/* 数据点 + hover热区 */}
                       {points.map(({ x, y, month, value }, i) => {
                         if (value == null) {
-                          return <line key={month} x1={x - 5} y1={chartH / 2} x2={x + 5} y2={chartH / 2}
+                          return <line key={month} x1={x - 3} y1={chartH / 2} x2={x + 3} y2={chartH / 2}
                             stroke="#d9d9d9" strokeWidth={2} strokeDasharray="3 3" />
                         }
                         const isLast = i === points.length - 1
                         return (
                           <g key={month}>
-                            <circle cx={x} cy={y} r={isLast ? 6 : 4} fill="#fff" stroke="#1677ff"
+                            <circle cx={x} cy={y} r={isLast ? lastR : dotR} fill="#fff" stroke="#1677ff"
                               strokeWidth={isLast ? 2.5 : 1.5} />
-                            {isLast && (
+                            {isLast && !dense && (
                               <>
                                 <rect x={x - 24} y={y - 26} width={48} height={20} rx={4}
                                   fill="#1677ff" opacity={0.92} />
@@ -2327,9 +3409,9 @@ const ProductSelection: React.FC = () => {
                                   fontSize={10} fontWeight={600}>{formatNum(value)}</text>
                               </>
                             )}
-                            <circle cx={x} cy={y} r={18} fill="transparent" style={{ cursor: 'pointer' }}
+                            <circle cx={x} cy={y} r={heatR} fill="transparent" style={{ cursor: 'pointer' }}
                               onMouseEnter={() => {
-                                const container = document.getElementById('detail-chart-container')
+                                const container = document.getElementById(containerId)
                                 setChartHover({ x, y, month, value, rect: container?.getBoundingClientRect() || null })
                               }}
                               onMouseLeave={() => setChartHover(null)}

@@ -25,7 +25,7 @@ import {
 import { ArrowLeft, CopyPlus, Download, FileSpreadsheet, ImagePlus, MinusCircle, Plus, PlusCircle, Save } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import dayjs, { Dayjs } from "dayjs";
-import { developmentBotApi, departmentsApi, storeGroupsApi, type DevelopmentProject, type ProductDevelopmentPayload } from "../api";
+import { developmentBotApi, departmentsApi, storeGroupsApi, productSelectionApi, type DevelopmentProject, type ProductDevelopmentPayload } from "../api";
 import { useAuth } from "../contexts/AuthContext";
 import ImagesUpload from "../components/ImagesUpload";
 
@@ -159,6 +159,7 @@ const ProductDevelopmentCreate: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const warehouseRecordId = searchParams.get("record"); // KPI 通知跳转：仓库针对已有新品上传六面图
+  const selectionId = searchParams.get("selection"); // 选品审批跳转：预填选品申请信息，保存后自动创建产品与补货单
   const { user } = useAuth();
   const [form] = Form.useForm<FormValues>();
   const [saving, setSaving] = React.useState(false);
@@ -340,6 +341,58 @@ const ProductDevelopmentCreate: React.FC = () => {
     site_owners: [],
   });
 
+  // 选品审批跳转：加载选品申请信息预填第一行（数量按拼团成员分组汇总，与审批生成补货单同口径）
+  const [selectionInfo, setSelectionInfo] = React.useState<any>(null);
+  React.useEffect(() => {
+    if (!selectionId) return;
+    productSelectionApi.getById(Number(selectionId))
+      .then((res) => {
+        if (!res.data?.success || !res.data.data) {
+          message.warning("未找到关联的选品记录，请手动填写");
+          return;
+        }
+        const it = res.data.data;
+        setSelectionInfo(it);
+        const qtyByName: Record<string, number> = {};
+        ((it.group_members || []) as any[]).forEach((m) => {
+          const n = m.store_group_name;
+          if (!n) return;
+          qtyByName[n] = (qtyByName[n] || 0) + (m.quantity || 0);
+        });
+        const storeRows: StoreRow[] = Object.keys(qtyByName).length > 0
+          ? Object.entries(qtyByName).map(([n, q]) => ({ path: [n], quantity: q }))
+          : ((it.store_group_names || []) as string[]).map((n) => ({ path: [n], quantity: it.purchase_quantity ?? undefined }));
+        form.setFieldsValue({
+          products: [{
+            title: it.product_title || "",
+            product_title: (Array.isArray(it.keywords) && it.keywords.length ? it.keywords.join("，") : it.product_title) || "",
+            product_name_zh: "",
+            category: undefined as unknown as string,
+            store_rows: storeRows.length > 0 ? storeRows : [{ path: undefined, quantity: undefined }],
+            purchase_items: [{
+              link: it.ali_1688_url || (it.ali_1688_urls && it.ali_1688_urls[0]) || "",
+              images: it.apply_images || [],
+              info: it.apply_remark || "",
+            }],
+            purchase_info: "",
+            urgency: "一般",
+            seasonality: "日常",
+            competitors: it.asin || "",
+            purchase_price: it.purchase_price ?? undefined,
+            selling_price: it.price ?? undefined,
+            de_keywords: "",
+            en_keywords: "",
+            au_keywords: "",
+            development_date: dayjs(),
+            reference_images: [],
+            warehouse_note: "",
+            site_owners: [],
+          }],
+        });
+      })
+      .catch(() => message.warning("加载选品申请信息失败，可手动填写"));
+  }, [selectionId]);
+
   const handleWarehouseSave = async () => {
     if (!warehouseRecord) return;
     setSaving(true);
@@ -359,12 +412,26 @@ const ProductDevelopmentCreate: React.FC = () => {
 
   const handleSubmit = async (values: FormValues) => {
     const payloads = (values.products || []).map((row) => toPayload(row, user?.nickname || undefined));
+    // 选品审批联动：selection_id 只挂到第一条新品（审批只执行一次）
+    if (selectionId && payloads.length > 0) payloads[0].selection_id = Number(selectionId);
     setSaving(true);
     try {
       if (payloads.length > 1) await developmentBotApi.createBatch(payloads);
-      else await developmentBotApi.create(payloads[0]);
-      message.success(`已提交 ${payloads.length} 条新品到数据库，已按部门推送采购/仓库/美工提醒`);
-      navigate("/development");
+      else {
+        const res = await developmentBotApi.create(payloads[0]);
+        if (selectionId && res.data?.data?.selection_approved === false) {
+          message.info("新品已保存；关联选品此前已审批通过，未重复创建产品与补货单");
+          navigate("/development");
+          return;
+        }
+      }
+      if (selectionId) {
+        message.success("新品已保存，关联选品已审批通过，产品与补货单已自动创建");
+        navigate("/product-selection");
+      } else {
+        message.success(`已提交 ${payloads.length} 条新品到数据库，已按部门推送采购/仓库/美工提醒`);
+        navigate("/development");
+      }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "保存失败，请稍后重试");
     } finally {
@@ -422,6 +489,14 @@ const ProductDevelopmentCreate: React.FC = () => {
         <Space direction="vertical" size={4} style={{ marginBottom: 20 }}>
           <Button type="link" icon={<ArrowLeft size={16} />} onClick={() => navigate("/development")} style={{ padding: 0 }}>返回新品记录</Button>
           <Title level={2} style={{ margin: 0 }}>批量添加新品</Title>
+          {selectionId && selectionInfo && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginTop: 8 }}
+              message={`正在为选品「${selectionInfo.asin || selectionInfo.product_title || `#${selectionId}`}」创建新品，已带出申请信息；保存后将自动创建产品与补货单，并把选品标记为已审批`}
+            />
+          )}
           <Text type="secondary">每个分组代表一条完整新品，保存后写入产品开发数据库（ad_product_info），并按部门推送采购/仓库/美工提醒。</Text>
         </Space>
 

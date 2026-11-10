@@ -9,7 +9,7 @@ from openpyxl.styles import Font
 
 # 标准平台列表（与前端下拉一致）
 STANDARD_PLATFORMS = {
-    "amazon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other",
+    "amazon", "ozon", "ebay", "walmart", "shopify", "shopee", "lazada", "tiktok", "temu", "other",
     "temu_half", "temu_full", "shein_half", "shein_full", "aliexpress_half", "aliexpress_full"
 }
 

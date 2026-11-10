@@ -29,11 +29,13 @@ def _get_ext(filename: str) -> str:
 async def upload_image(
     file: UploadFile = File(...),
     custom_name: str = Form(""),
+    subdir: str = Form("images"),
     current_user: User = Depends(get_current_user),
 ):
     """上传图片到 TOS，返回公网访问 URL
 
     :param custom_name: 自定义文件名（如产品编码），不含扩展名
+    :param subdir: TOS 子目录（默认 images）
     """
     ext = _get_ext(file.filename or "")
     if ext not in ALLOWED_IMAGE_EXT:
@@ -52,6 +54,7 @@ async def upload_image(
         url = tos_service.upload_image(
             file_bytes, file.filename or "image.jpg",
             custom_name=custom_name.strip() if custom_name else "",
+            subdir=(subdir.strip().strip("/") or "images"),
         )
         return {
             "success": True,

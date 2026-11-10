@@ -57,6 +57,7 @@ import {
   Film,
   Image as ImageIcon,
   ClipboardCheck,
+  UploadCloud,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -353,6 +354,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                   label: '媒体绑定审核',
                 }]
               : []),
+            ...(hasPermission('product:edit') || hasPermission('ai_video:approve')
+              ? [{
+                  key: '/video-upload',
+                  icon: <UploadCloud size={18} />,
+                  label: '视频上传',
+                }]
+              : []),
           ],
         }] : []),
     ...(hasPermission("development:view")
@@ -564,6 +572,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
       '/video-binding-review': '媒体绑定审核',
+      '/video-upload': '视频上传',
     };
     return pathMap[location.pathname] || "未知页面";
   };

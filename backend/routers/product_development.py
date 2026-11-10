@@ -33,6 +33,8 @@ from database.database import get_db
 from dependencies import get_current_user, get_current_admin_user
 from models.ad_product_info import AdProductInfo
 from models.user import User
+from services.operation_log import log_order_create, log_product_create
+from utils.order_number import generate_replenishment_order_number
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,8 @@ class ProductDevelopmentPayload(BaseModel):
     purchase_items: Optional[List[dict]] = None
     # 关联店铺采购数量对应：[{store, quantity}]
     store_quantities: Optional[List[dict]] = None
+    # 来自选品审批：保存新品后自动创建产品与补货单，并将选品标记为已审批
+    selection_id: Optional[int] = None
 
 
 class BatchPayload(BaseModel):
@@ -1078,6 +1082,130 @@ async def import_projects_parse(
     return {"success": True, "data": {"rows": rows, "failed": len(errors), "errors": errors}}
 
 
+def _approve_selection_from_development(db: Session, tenant_id: int, operator: User,
+                                        selection_id: int, product_name: str,
+                                        purchase_price, main_image) -> bool:
+    """开发机器人保存新品后联动选品审批：
+    创建成品（BXHS-CP-#####）+ 按拼团成员分组汇总数量生成补货单（与选品审批端点同口径），
+    并将选品标记为已审批。整体在同一事务中，失败随新品一起回滚。
+    返回是否执行了联动审批：选品已审批/不存在时跳过（防止重复建品），新品本身正常保存"""
+    from routers.product_selection import _resolve_group_quantities
+
+    row = db.execute(text(
+        "SELECT status, product_title, image_url, asin, purchase_price, purchase_quantity, applicant_id, "
+        "store_group_id, store_group_ids, group_members FROM product_selections "
+        "WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+    ), {"id": selection_id, "tid": tenant_id}).fetchone()
+    if not row:
+        logger.warning(f"选品审批联动：选品 {selection_id} 不存在，跳过联动")
+        return False
+    status = row[0] or ""
+    if status not in ("pending", "grouping"):
+        logger.warning(f"选品审批联动：选品 {selection_id} 状态为 {status}（已审批过），跳过联动防止重复创建")
+        return False
+
+    _, product_title, sel_image, asin, sel_price, purchase_quantity, applicant_id, \
+        store_group_id, sg_ids_raw, members_raw = row
+
+    name = (product_name or "").strip() or (product_title or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写产品中文名称（联动审批时用于创建成品）")
+
+    now = datetime.now()
+    prefix = "BXHS-CP-"
+    code_row = db.execute(text("""
+        SELECT product_code FROM products
+        WHERE tenant_id = :tid AND product_code LIKE :pat
+        ORDER BY CAST(SUBSTRING(product_code, :pl) AS UNSIGNED) DESC
+        LIMIT 1
+    """), {"tid": tenant_id, "pat": f"{prefix}%", "pl": len(prefix) + 1}).fetchone()
+    next_num = 1
+    if code_row and code_row[0]:
+        digits = "".join(ch for ch in str(code_row[0])[len(prefix):] if ch.isdigit())
+        if digits:
+            next_num = int(digits) + 1
+    product_code = f"{prefix}{next_num:05d}"
+
+    result = db.execute(text("""
+        INSERT INTO products (tenant_id, product_code, name, product_type, product_attribute,
+            purchase_price, main_image, asin, status, is_robot_monitored, no_accessory, local_quantity,
+            created_at, updated_at)
+        VALUES (:tenant_id, :product_code, :name, 'finished', 'general',
+            :purchase_price, :main_image, :asin, 'active', 1, 0, 0,
+            :created_at, :updated_at)
+    """), {
+        "tenant_id": tenant_id,
+        "product_code": product_code,
+        "name": name,
+        "purchase_price": purchase_price if purchase_price is not None else sel_price,
+        "main_image": main_image or sel_image,
+        "asin": asin,
+        "created_at": now,
+        "updated_at": now,
+    })
+    product_id = result.lastrowid
+    log_product_create(
+        db, tenant_id, operator.id, operator.nickname or operator.username,
+        product_id, product_code, name,
+        {"product_code": product_code, "name": name, "product_type": "finished",
+         "purchase_price": float(purchase_price) if purchase_price is not None else None,
+         "来源": "开发机器人选品审批"}
+    )
+
+    group_qty_list = _resolve_group_quantities(members_raw, sg_ids_raw, purchase_quantity)
+    for gid, qty, creator_id in group_qty_list:
+        if not gid:
+            logger.warning(f"选品 {selection_id} 存在无分组归属的拼团数量 {qty}，未生成补货单")
+            continue
+        sg = db.execute(text(
+            "SELECT name FROM store_groups WHERE id = :gid AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"gid": gid, "tid": tenant_id}).fetchone()
+        if not sg:
+            logger.warning(f"选品 {selection_id} 补货分组 {gid} 不存在，跳过")
+            continue
+        order_number = generate_replenishment_order_number()
+        db.execute(text("""
+            INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
+                created_by, created_at, updated_at)
+            VALUES (:tenant_id, :order_number, :store_group_id, 'pending', :notes,
+                :created_by, :created_at, :updated_at)
+        """), {
+            "tenant_id": tenant_id,
+            "order_number": order_number,
+            "store_group_id": gid,
+            "notes": f"由选品审批生成（{name}）",
+            "created_by": creator_id or applicant_id or operator.id,
+            "created_at": now,
+            "updated_at": now,
+        })
+        order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+        db.execute(text("""
+            INSERT INTO replenishment_items (tenant_id, replenishment_order_id, product_id, quantity, notes,
+                created_at, updated_at)
+            VALUES (:tenant_id, :replenishment_order_id, :product_id, :quantity, :notes,
+                :created_at, :updated_at)
+        """), {
+            "tenant_id": tenant_id,
+            "replenishment_order_id": order_id,
+            "product_id": product_id,
+            "quantity": qty,
+            "notes": f"来源选品：{product_title or ''}",
+            "created_at": now,
+            "updated_at": now,
+        })
+        log_order_create(
+            db, tenant_id, operator.id, operator.nickname or operator.username,
+            "replenishment", order_id, order_number,
+            {"单号": order_number, "店铺分组": sg[0], "数量": qty,
+             "来源": "开发机器人选品审批"}
+        )
+
+    db.execute(text(
+        "UPDATE product_selections SET status = 'approved', updated_at = NOW() WHERE id = :id"
+    ), {"id": selection_id})
+    return True
+
+
 @router.post("/projects")
 async def create_project(
     payload: ProductDevelopmentPayload,
@@ -1086,12 +1214,26 @@ async def create_project(
 ):
     """新增一条开发新品记录"""
     try:
+        logger.info(f"[选品联动] 创建新品：selection_id={payload.selection_id}，品名={payload.product_name_zh}")
         item = _create_one(db, current_user.tenant_id, payload)
+        db.flush()
+        selection_approved = False
+        if payload.selection_id:
+            # 选品审批联动：保存新品后自动创建产品与补货单，选品置为已审批
+            # 选品已审批过时跳过联动（防止重复建品），新品本身正常保存
+            selection_approved = _approve_selection_from_development(
+                db, current_user.tenant_id, current_user, payload.selection_id,
+                payload.product_name_zh or "", payload.purchase_price,
+                (payload.reference_images or [None])[0] if payload.reference_images else None,
+            )
+            logger.info(f"[选品联动] 联动结果 selection_approved={selection_approved}")
         db.commit()
         db.refresh(item)
         _notify_new_product(db, current_user.tenant_id, item)
         db.commit()
-        return {"success": True, "data": _serialize(item)}
+        data = _serialize(item)
+        data["selection_approved"] = selection_approved
+        return {"success": True, "data": data}
     except HTTPException:
         raise
     except Exception as e:

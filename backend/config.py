@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     FEISHU_VIDEO_TABLE_ID: str = ""
     # 填报人（人员字段）飞书 open_id，留空自动尝试取应用机器人自身身份
     FEISHU_VIDEO_REPORTER_OPEN_ID: str = ""
+    # 飞书多维表 - Ozon 视频上传留痕表（与 Amazon 表共用 FEISHU_VIDEO_BASE_TOKEN，独立数据表）
+    FEISHU_OZON_VIDEO_TABLE_ID: str = ""
     # 紫鸟启动名→紫鸟登录账号映射（JSON 字符串，按顺序取登录账号命中的第一个启动名）
     ZINIAO_ACCOUNT_MAP: str = ""
     # 飞书 webhook - 邮件机器人自动化

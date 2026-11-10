@@ -794,10 +794,11 @@ export const productsApi = {
 
 // ========== Upload API (火山引擎 TOS) ==========
 export const uploadApi = {
-  uploadImage: (file: File, customName?: string) => {
+  uploadImage: (file: File, customName?: string, subdir?: string) => {
     const formData = new FormData();
     formData.append("file", file);
     if (customName) formData.append("custom_name", customName);
+    if (subdir) formData.append("subdir", subdir);
     return apiClient.post("/upload/image", formData, {
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 60000,
@@ -1327,7 +1328,7 @@ export const productBindingsApi = {
 
 // ========== Product Selection API ==========
 export const productSelectionApi = {
-  getTypes: () => apiClient.get("/product-selection/types"),
+  getTypes: (site?: string) => apiClient.get("/product-selection/types", { params: site ? { site } : {} }),
   getDates: (site?: string) => apiClient.get("/product-selection/dates", { params: site ? { site } : {} }),
   getSites: () => apiClient.get("/product-selection/sites"),
   getList: (params?: {
@@ -1345,11 +1346,18 @@ export const productSelectionApi = {
   getById: (id: number) => apiClient.get(`/product-selection/${id}`),
   submitForApproval: (id: number, data?: {
     ali_1688_url?: string;
+    ali_1688_urls?: string[];
     purchase_price?: number;
     purchase_quantity?: number;
     store_group_id?: number;
+    store_group_ids?: number[];
+    apply_remark?: string;
+    apply_images?: string[];
+    moq?: number;
   }) =>
     apiClient.post(`/product-selection/${id}/submit-for-approval`, data || {}),
+  groupBuy: (id: number, quantity: number) =>
+    apiClient.post(`/product-selection/${id}/group-buy`, { quantity }),
   getProfitSettings: () => apiClient.get("/product-selection/profit-settings"),
   saveProfitSettings: (data: {
     site: string;
@@ -1392,6 +1400,8 @@ export const productSelectionApi = {
     traffic_trend?: string;
     category?: string[];
   }) => apiClient.post("/product-selection/", data),
+  importFromAmazon: (data: { site: string; asins: string[] }) =>
+    apiClient.post("/product-selection/import-from-amazon", data, { timeout: 300000 }),
   update: (
     id: number,
     data: {
@@ -1423,6 +1433,8 @@ export const productSelectionApi = {
     apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
   recalcScores: () =>
     apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  rescrapeFbaFees: (ids?: number[]) =>
+    apiClient.post("/product-selection/rescrape-fba-fees", ids && ids.length > 0 ? { ids } : {}, { timeout: 30000 }),
   switchRate: (useRealtime: boolean) =>
     apiClient.post(
       "/product-selection/switch-rate",
@@ -1695,6 +1707,8 @@ export interface ProductDevelopmentPayload {
   purchase_items?: { link?: string; images?: string[]; info?: string }[];
   // 关联店铺采购数量对应：[{store, quantity}]
   store_quantities?: { store: string; quantity: number }[];
+  // 来自选品审批：保存新品后自动创建产品与补货单，并将选品标记为已审批
+  selection_id?: number;
 }
 
 export interface DevelopmentProject
@@ -2047,6 +2061,45 @@ export interface AmazonSkuEntry {
   ziniao_start_name: string;
 }
 
+/** 统一上传用的平台 SKU 条目（Amazon 含 ASIN/紫鸟，Ozon 含凭证可用性标记） */
+export interface PlatformSkuEntry {
+  pp_id: number;
+  store_id: number;
+  platform: "amazon" | "ozon" | string;
+  sku: string;
+  store_name: string;
+  site: string;
+  // amazon 专属
+  asin?: string;
+  has_asin?: boolean;
+  ziniao_account?: string;
+  ziniao_start_name?: string;
+  // ozon 专属
+  has_offer_id?: boolean;
+  has_credentials?: boolean;
+  ozon_product_id?: string;
+}
+
+/** Ozon 上传结果（每个店铺一条） */
+export interface OzonUploadResult {
+  store_id: number;
+  store_name: string;
+  task_id?: number;
+  offer_ids: string[];
+  ok: boolean;
+  error?: string;
+}
+
+/** Ozon 任务状态查询结果（每店铺一条） */
+export interface OzonTaskStatusResult {
+  store_id: number;
+  task_id: number;
+  status?: string;
+  error_text?: string;
+  items?: { offer_id?: string; product_id?: number; status?: string; errors?: unknown[] }[];
+  error?: string;
+}
+
 export const videoBindingApi = {
   /** 提交绑定申请（ai_video:use）；media_type=image 时绑定的是图片 */
   submit: (data: {
@@ -2099,6 +2152,43 @@ export const videoBindingApi = {
       message: string;
       data?: { success: number; failed: number; errors: string[] };
     }>("/video-bindings/feishu-sku-upload", data),
+  /** 产品 AMAZON+OZON 平台 SKU×店铺列表（视频统一上传数据源，分平台返回） */
+  getPlatformSkus: (productId: number) =>
+    apiClient.get<{
+      success: boolean;
+      data: {
+        amazon: PlatformSkuEntry[];
+        ozon: PlatformSkuEntry[];
+        feishu_video_configured: boolean;
+        ozon_trace_configured: boolean;
+      };
+    }>("/video-bindings/platform-skus", { params: { product_id: productId } }),
+  /** 视频统一上传：按勾选 SKU 平台自动路由（amazon→飞书RPA，ozon→attributes/update+飞书留痕） */
+  uploadSkuVideos: (data: {
+    product_id: number;
+    video_url?: string;
+    video_urls?: string[];
+    items: { pp_id: number; store_id: number }[];
+  }) =>
+    apiClient.post<{
+      success: boolean;
+      message: string;
+      data?: {
+        amazon?: { success?: number; failed?: number; errors?: string[]; error?: string } | null;
+        ozon?: {
+          results?: OzonUploadResult[];
+          batch_no?: string;
+          feishu_traced?: boolean;
+          trace?: { success?: number; failed?: number; errors?: string[] } | null;
+        } | null;
+      };
+    }>("/video-bindings/sku-video-upload", data),
+  /** 查询 Ozon 视频任务处理结果（终态时自动回写飞书留痕表） */
+  getOzonUploadStatus: (tasks: { store_id: number; task_id: number; batch_no?: string }[]) =>
+    apiClient.post<{ success: boolean; data: { results: OzonTaskStatusResult[] } }>(
+      "/video-bindings/ozon-upload-status",
+      { tasks },
+    ),
 };
 
 export const aiCreationApi = {

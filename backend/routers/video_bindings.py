@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 import json
+import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -13,6 +14,13 @@ from services.feishu_video_sku_service import (
     is_configured as feishu_video_configured,
     resolve_start_name,
 )
+from services.feishu_ozon_video_service import (
+    is_configured as ozon_trace_configured,
+    create_ozon_upload_records,
+    new_batch_no,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/video-bindings", tags=["video_bindings"])
 
@@ -50,8 +58,15 @@ def _parse_store_ids(raw) -> List[int]:
     return []
 
 
-def _load_amazon_sku_entries(db: Session, tenant_id: int, product_id: int, id_filter: Optional[List[dict]] = None):
-    """查产品 AMAZON 平台 SKU×店铺组合条目（含紫鸟登录账号/启动名），id_filter 限定 (pp_id, store_id) 对"""
+def _load_platform_sku_entries(
+    db: Session, tenant_id: int, product_id: int,
+    platforms: List[str], id_filter: Optional[List[dict]] = None,
+):
+    """查产品指定平台的 SKU×店铺组合条目（含紫鸟/凭证可用性），id_filter 限定 (pp_id, store_id) 对
+
+    amazon 条目：asin / has_asin / ziniao_account / ziniao_start_name
+    ozon 条目：has_offer_id（sku 即 offer_id）/ has_credentials（店铺已配置 Ozon API 凭证，只回布尔不回明文）
+    """
     product = db.execute(text("""
         SELECT id, product_code, name FROM products
         WHERE id = :pid AND tenant_id = :tid AND deleted_at IS NULL
@@ -59,24 +74,30 @@ def _load_amazon_sku_entries(db: Session, tenant_id: int, product_id: int, id_fi
     if not product:
         raise HTTPException(status_code=404, detail="商品不存在")
 
-    pp_rows = db.execute(text("""
-        SELECT pp.id, pp.sku, pp.asin, pp.store_id FROM platform_products pp
+    plat_list = [p.strip().lower() for p in platforms if p and p.strip()]
+    plat_params = {f"plat_{i}": p for i, p in enumerate(plat_list)}
+    plat_placeholders = ",".join([f":plat_{i}" for i in range(len(plat_list))])
+    pp_rows = db.execute(text(f"""
+        SELECT pp.id, pp.sku, pp.asin, pp.store_id, pp.platform, pp.platform_product_id FROM platform_products pp
         WHERE pp.product_id = :pid AND pp.tenant_id = :tid
-          AND pp.platform = 'amazon' AND pp.deleted_at IS NULL
+          AND LOWER(pp.platform) IN ({plat_placeholders}) AND pp.deleted_at IS NULL
         ORDER BY pp.id
-    """), {"pid": product_id, "tid": tenant_id}).fetchall()
+    """), {"pid": product_id, "tid": tenant_id, **plat_params}).fetchall()
 
-    # 汇总店铺 ID 批量查店铺信息
+    # 汇总店铺 ID 批量查店铺信息（Ozon 凭证仅用于 has_credentials 判定，不回传明文）
     all_store_ids = sorted({sid for row in pp_rows for sid in _parse_store_ids(row[3])})
     store_map = {}
     if all_store_ids:
         placeholders = ",".join([f":sid_{i}" for i in range(len(all_store_ids))])
         sid_params = {f"sid_{i}": sid for i, sid in enumerate(all_store_ids)}
         store_rows = db.execute(
-            text(f"SELECT id, name, ziniao_account, site FROM stores WHERE id IN ({placeholders}) AND deleted_at IS NULL"),
+            text(f"SELECT id, name, ziniao_account, site, ozon_client_id, ozon_api_key FROM stores WHERE id IN ({placeholders}) AND deleted_at IS NULL"),
             sid_params,
         ).fetchall()
-        store_map = {r[0]: {"name": r[1] or "", "ziniao_account": r[2] or "", "site": r[3] or ""} for r in store_rows}
+        store_map = {r[0]: {
+            "name": r[1] or "", "ziniao_account": r[2] or "", "site": r[3] or "",
+            "ozon_client_id": r[4] or "", "ozon_api_key": r[5] or "",
+        } for r in store_rows}
 
     allowed = None
     if id_filter is not None:
@@ -84,24 +105,52 @@ def _load_amazon_sku_entries(db: Session, tenant_id: int, product_id: int, id_fi
 
     entries = []
     for row in pp_rows:
+        platform = (row[4] or "").strip().lower()
         for sid in _parse_store_ids(row[3]):
             if allowed is not None and (int(row[0]), int(sid)) not in allowed:
                 continue
-            store = store_map.get(sid, {"name": "", "ziniao_account": "", "site": ""})
-            asin = (row[2] or "").strip()
-            account = store["ziniao_account"]
-            entries.append({
+            store = store_map.get(sid, {"name": "", "ziniao_account": "", "site": "", "ozon_client_id": "", "ozon_api_key": ""})
+            sku = (row[1] or "").strip()
+            entry = {
                 "pp_id": int(row[0]),
                 "store_id": int(sid),
-                "sku": row[1] or "",
-                "asin": asin,
-                "has_asin": bool(asin),
+                "platform": platform,
+                "sku": sku,
                 "store_name": store["name"],
                 "site": store["site"],
-                "ziniao_account": account,
-                "ziniao_start_name": resolve_start_name(account),
-            })
+            }
+            if platform == "ozon":
+                entry["has_offer_id"] = bool(sku)
+                entry["has_credentials"] = bool(store["ozon_client_id"] and store["ozon_api_key"])
+                entry["ozon_product_id"] = str(row[5] or "")
+            else:
+                asin = (row[2] or "").strip()
+                account = store["ziniao_account"]
+                entry["asin"] = asin
+                entry["has_asin"] = bool(asin)
+                entry["ziniao_account"] = account
+                entry["ziniao_start_name"] = resolve_start_name(account)
+            entries.append(entry)
     return product, entries
+
+
+def _load_amazon_sku_entries(db: Session, tenant_id: int, product_id: int, id_filter: Optional[List[dict]] = None):
+    """查产品 AMAZON 平台 SKU×店铺组合条目（兼容旧接口），id_filter 限定 (pp_id, store_id) 对"""
+    return _load_platform_sku_entries(db, tenant_id, product_id, ["amazon"], id_filter)
+
+
+def _load_ozon_store_credentials(db: Session, tenant_id: int, store_ids: List[int]) -> Dict[int, dict]:
+    """按店铺 ID 查 Ozon API 凭证（仅后端内部使用，明文不回传前端）"""
+    if not store_ids:
+        return {}
+    placeholders = ",".join([f":sid_{i}" for i in range(len(store_ids))])
+    params = {f"sid_{i}": sid for i, sid in enumerate(store_ids)}
+    params["tid"] = tenant_id
+    rows = db.execute(
+        text(f"SELECT id, name, ozon_client_id, ozon_api_key FROM stores WHERE id IN ({placeholders}) AND tenant_id = :tid AND deleted_at IS NULL"),
+        params,
+    ).fetchall()
+    return {r[0]: {"client_id": r[2] or "", "api_key": r[3] or "", "store_name": r[1] or ""} for r in rows}
 
 
 class VideoBindingSubmit(BaseModel):
@@ -460,3 +509,222 @@ async def upload_sku_video_to_feishu(
     if result["failed"]:
         message += f"，失败 {result['failed']} 条"
     return {"success": True, "message": message, "data": result}
+
+
+# ==================== 视频统一上传（Amazon 写飞书 RPA / Ozon 走 API + 飞书留痕） ====================
+
+@router.get("/platform-skus")
+async def list_platform_skus(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("ai_video:approve", "product:edit")),
+):
+    """产品 AMAZON+OZON 平台 SKU×店铺组合列表（视频统一上传数据源，分平台返回）"""
+    _, entries = _load_platform_sku_entries(db, current_user.tenant_id, product_id, ["amazon", "ozon"])
+    return {
+        "success": True,
+        "data": {
+            "amazon": [e for e in entries if e["platform"] == "amazon"],
+            "ozon": [e for e in entries if e["platform"] == "ozon"],
+            "feishu_video_configured": feishu_video_configured(),
+            "ozon_trace_configured": ozon_trace_configured(),
+        },
+    }
+
+
+class SkuVideoUploadItem(BaseModel):
+    pp_id: int
+    store_id: int
+
+
+class SkuVideoUploadBody(BaseModel):
+    product_id: int
+    video_url: Optional[str] = None
+    video_urls: Optional[List[str]] = None
+    items: List[SkuVideoUploadItem]
+
+
+@router.post("/sku-video-upload")
+async def upload_sku_video_unified(
+    body: SkuVideoUploadBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("ai_video:approve", "product:edit")),
+):
+    """视频统一上传：按勾选 SKU 的平台自动路由
+
+    - Amazon SKU → 写飞书多维表（外部 RPA 消费），记录数 = 视频数 × SKU 数
+    - Ozon SKU   → 按 store 调 /v1/product/attributes/update（覆盖语义），再写 Ozon 留痕表
+    """
+    video_urls = [u.strip() for u in (body.video_urls or []) if u and u.strip()]
+    if not video_urls and body.video_url and body.video_url.strip():
+        video_urls = [body.video_url.strip()]
+    if not video_urls:
+        raise HTTPException(status_code=400, detail="视频地址不能为空")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="请至少勾选一个 SKU")
+
+    # 服务端按 (pp_id, store_id) 重查条目，不信任前端回传的 ASIN/凭证信息
+    product, entries = _load_platform_sku_entries(
+        db, current_user.tenant_id, body.product_id, ["amazon", "ozon"],
+        id_filter=[{"pp_id": it.pp_id, "store_id": it.store_id} for it in body.items],
+    )
+    if not entries:
+        raise HTTPException(status_code=400, detail="所选 SKU 不存在或已删除")
+
+    product_code = product[1] or ""
+    product_name = product[2] or ""
+    amazon_entries = [e for e in entries if e["platform"] == "amazon"]
+    ozon_entries = [e for e in entries if e["platform"] == "ozon"]
+
+    data: Dict = {"amazon": None, "ozon": None}
+    msgs: List[str] = []
+
+    # ---- Amazon 分支：写飞书多维表（外部 RPA 消费），行为与旧 /feishu-sku-upload 一致 ----
+    if amazon_entries:
+        if not feishu_video_configured():
+            data["amazon"] = {"error": "飞书视频上传表未配置（FEISHU_VIDEO_BASE_TOKEN / FEISHU_VIDEO_TABLE_ID），Amazon 上传未执行"}
+        else:
+            no_asin = [e["sku"] or f"#{e['pp_id']}" for e in amazon_entries if not e.get("has_asin")]
+            if no_asin:
+                data["amazon"] = {"error": f"以下 Amazon SKU 未绑定 ASIN，无法上传：{'、'.join(no_asin)}"}
+            else:
+                from services.feishu_video_sku_service import create_sku_video_records as _create
+                try:
+                    result = await _create(video_urls, product_code, amazon_entries)
+                    data["amazon"] = result
+                    msgs.append(f"Amazon 已写入 {result['success']} 条飞书记录")
+                    if result["failed"]:
+                        logger.warning("统一上传 Amazon 部分失败 product=%s: %s", product_code, "; ".join(result["errors"]))
+                except Exception as e:
+                    logger.exception("统一上传 Amazon 失败 product=%s", product_code)
+                    data["amazon"] = {"error": f"Amazon 上传失败：{e}"}
+
+    # ---- Ozon 分支：attributes/update（覆盖语义）+ 飞书留痕 ----
+    if ozon_entries:
+        from services.ozon_video_service import validate_video_urls, update_product_videos
+        verrs = validate_video_urls(video_urls)
+        if verrs:
+            data["ozon"] = {"error": "；".join(verrs), "results": []}
+        else:
+            no_offer = [e["sku"] or f"#{e['pp_id']}" for e in ozon_entries if not e.get("has_offer_id")]
+            no_cred = sorted({e["store_name"] or f"店铺#{e['store_id']}" for e in ozon_entries if not e.get("has_credentials")})
+            block_errors = []
+            if no_offer:
+                block_errors.append(f"以下 Ozon SKU 未填货号(offer_id)：{'、'.join(no_offer)}")
+            if no_cred:
+                block_errors.append(f"以下店铺未配置 Ozon 凭证，请先在店铺管理填写 Client-Id / Api-Key：{'、'.join(no_cred)}")
+            if block_errors:
+                data["ozon"] = {"error": "；".join(block_errors), "results": []}
+            else:
+                store_ids = sorted({e["store_id"] for e in ozon_entries})
+                creds = _load_ozon_store_credentials(db, current_user.tenant_id, store_ids)
+                results: List[Dict] = []
+                task_map: Dict[int, int] = {}
+                batch_no = new_batch_no()
+                for sid in store_ids:
+                    c = creds.get(sid) or {}
+                    s_entries = [e for e in ozon_entries if e["store_id"] == sid]
+                    offer_ids = [e["sku"] for e in s_entries]
+                    store_label = c.get("store_name") or s_entries[0].get("store_name") or f"店铺#{sid}"
+                    if not c.get("client_id") or not c.get("api_key"):
+                        results.append({"store_id": sid, "store_name": store_label, "offer_ids": offer_ids, "ok": False,
+                                        "error": "店铺未配置 Ozon 凭证"})
+                        continue
+                    try:
+                        r = await update_product_videos(c["client_id"], c["api_key"], offer_ids, video_urls, product_code)
+                        task_map[sid] = r["task_id"]
+                        results.append({"store_id": sid, "store_name": store_label, "task_id": r["task_id"],
+                                        "offer_ids": offer_ids, "ok": True})
+                    except Exception as e:
+                        logger.warning("统一上传 Ozon 失败 store=%s: %s", sid, e)
+                        results.append({"store_id": sid, "store_name": store_label, "offer_ids": offer_ids,
+                                        "ok": False, "error": str(e)})
+
+                # 飞书留痕：只要存在成功提交的店铺任务就写入（未配置留痕表时跳过，不影响上传结果）
+                trace_info = None
+                feishu_traced = False
+                if task_map and ozon_trace_configured():
+                    try:
+                        trace_entries = [
+                            {
+                                "sku": e["sku"], "store_id": e["store_id"],
+                                "store_name": e.get("store_name") or "", "site": e.get("site") or "",
+                                "ozon_product_id": e.get("ozon_product_id") or "",
+                            }
+                            for e in ozon_entries if e["store_id"] in task_map
+                        ]
+                        trace = await create_ozon_upload_records(
+                            video_urls, product_code, product_name, trace_entries, task_map, batch_no
+                        )
+                        feishu_traced = trace["success"] > 0
+                        trace_info = {"success": trace["success"], "failed": trace["failed"],
+                                      "errors": trace["errors"][:5]}
+                    except Exception as e:
+                        logger.warning("Ozon 视频留痕失败 batch=%s: %s", batch_no, e)
+                        trace_info = {"success": 0, "failed": 0, "errors": [f"留痕写入失败：{e}"]}
+                elif task_map:
+                    trace_info = {"success": 0, "failed": 0,
+                                  "errors": ["Ozon 留痕表未配置（FEISHU_OZON_VIDEO_TABLE_ID），已跳过留痕"]}
+
+                ok_stores = [r for r in results if r["ok"]]
+                if ok_stores:
+                    msgs.append(f"Ozon 已提交 {len(ok_stores)} 个店铺任务（异步审核）")
+                data["ozon"] = {"results": results, "batch_no": batch_no,
+                                "feishu_traced": feishu_traced, "trace": trace_info}
+
+    amazon_ok = bool(data["amazon"] and isinstance(data["amazon"].get("success"), int) and data["amazon"]["success"] > 0)
+    ozon_ok = bool(data["ozon"] and any(r.get("ok") for r in data["ozon"].get("results") or []))
+    if msgs:
+        message = "；".join(msgs)
+    else:
+        first_error = (data["amazon"] or {}).get("error") or (data["ozon"] or {}).get("error") or "未执行任何上传"
+        message = first_error
+    return {"success": amazon_ok or ozon_ok, "message": message, "data": data}
+
+
+class OzonTaskStatusItem(BaseModel):
+    store_id: int
+    task_id: int
+    batch_no: Optional[str] = None
+
+
+class OzonTaskStatusBody(BaseModel):
+    tasks: List[OzonTaskStatusItem]
+
+
+@router.post("/ozon-upload-status")
+async def ozon_upload_status(
+    body: OzonTaskStatusBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("ai_video:approve", "product:edit")),
+):
+    """查询 Ozon 视频更新任务处理结果（/v1/product/import/info），终态时回写留痕表"""
+    from services.ozon_video_service import get_import_status, summarize_import_items
+
+    results: List[Dict] = []
+    for t in body.tasks:
+        creds = _load_ozon_store_credentials(db, current_user.tenant_id, [t.store_id])
+        c = creds.get(t.store_id) or {}
+        if not c.get("client_id") or not c.get("api_key"):
+            results.append({"store_id": t.store_id, "task_id": t.task_id, "error": "店铺未配置 Ozon 凭证"})
+            continue
+        try:
+            items = await get_import_status(c["client_id"], c["api_key"], t.task_id)
+            status_text, error_text = summarize_import_items(items)
+            # 终态时回写留痕表（处理中不回写，避免覆盖「已提交」）
+            if t.batch_no and ozon_trace_configured() and status_text in ("成功", "失败"):
+                try:
+                    await update_status_by_task_trace(t.batch_no, t.task_id, status_text, error_text)
+                except Exception as te:
+                    logger.warning("Ozon 留痕状态回写失败 batch=%s task=%s: %s", t.batch_no, t.task_id, te)
+            results.append({"store_id": t.store_id, "task_id": t.task_id,
+                            "status": status_text, "error_text": error_text, "items": items})
+        except Exception as e:
+            results.append({"store_id": t.store_id, "task_id": t.task_id, "error": str(e)})
+    return {"success": True, "data": {"results": results}}
+
+
+def update_status_by_task_trace(batch_no: str, task_id: int, status_text: str, error_text: str):
+    """延迟导入包装，避免模块顶层循环依赖"""
+    from services.feishu_ozon_video_service import update_status_by_task
+    return update_status_by_task(batch_no, task_id, status_text, error_text)

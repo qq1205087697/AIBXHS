@@ -280,11 +280,11 @@ def init_db():
                     product_type VARCHAR(100) NULL COMMENT '类型',
                     site VARCHAR(50) NULL COMMENT '站点',
                     monthly_sales INT NULL COMMENT '近一个月销量',
-                    traffic_trend VARCHAR(200) NULL COMMENT '流量趋势',
+                    traffic_trend TEXT NULL COMMENT '流量趋势(单关键词{月:流量}或多关键词{词:{月:流量}})',
             seasonality TEXT NULL COMMENT '季节性判断',
             infringement_analysis TEXT NULL COMMENT '侵权分析',
             infringement_conclusion VARCHAR(500) NULL COMMENT '侵权分析结论',
-            traffic_score_result VARCHAR(500) NULL COMMENT '流量评分结果',
+            traffic_score_result TEXT NULL COMMENT '流量评分结果(多关键词时含最优关键词标注)',
             traffic_score FLOAT NULL COMMENT '流量评分',
             sales_score FLOAT NULL COMMENT '销量评分',
             rating_score FLOAT NULL COMMENT '星级评分',
@@ -309,18 +309,24 @@ def init_db():
                 pass  # 列已存在则忽略
             # 为已存在的表添加汇率列（如果不存在）
             try:
-                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1人民币兑外币)' AFTER cost_at_15_profit"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1外币兑人民币)' AFTER cost_at_15_profit"))
                 conn.commit()
             except Exception:
                 pass
             try:
-                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1人民币兑外币)' AFTER scrape_rate"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1外币兑人民币)' AFTER scrape_rate"))
                 conn.commit()
             except Exception:
                 pass
             # 为已存在的表添加类目列（如果不存在）
             try:
                 conn.execute(text("ALTER TABLE product_selections ADD COLUMN category VARCHAR(1000) NULL COMMENT '类目(JSON列表)' AFTER realtime_rate"))
+                conn.commit()
+            except Exception:
+                pass
+            # 多选店铺分组（合并为一条申请时记录全部分组，JSON数组）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN store_group_ids TEXT NULL COMMENT '申请店铺分组ID列表(JSON数组)' AFTER store_group_id"))
                 conn.commit()
             except Exception:
                 pass
