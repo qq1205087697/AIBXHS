@@ -20,7 +20,7 @@ const sourceMeta: Record<string, { label: string; color: string }> = {
 }
 
 /** 媒体绑定审核：AI视频/高清处理/AI生图「绑定至产品」申请的审核列表 */
-const VideoBindingReview: React.FC = () => {
+const VideoBindingReview: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
   const { hasPermission } = useAuth()
   const [statusFilter, setStatusFilter] = useState<string>('pending')
   const [searchText, setSearchText] = useState('')
@@ -378,9 +378,9 @@ const VideoBindingReview: React.FC = () => {
   ]
 
   return (
-    <div style={{ padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={embedded ? { height: '100%', display: 'flex', flexDirection: 'column' } : { padding: 24, height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Card
-        title="媒体绑定审核"
+        title={embedded ? undefined : '媒体绑定审核'}
         style={{ flex: 1, display: 'flex', flexDirection: 'column' }}
         styles={{ body: { padding: 16, flex: 1, display: 'flex', flexDirection: 'column' } }}
       >

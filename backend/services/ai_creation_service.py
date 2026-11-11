@@ -1749,6 +1749,100 @@ async def generate_voiceover_plans(
     return parsed
 
 
+async def generate_single_video_plan_from_bytes(
+    items: List[Tuple[str, bytes]],
+    *,
+    duration: int = 15,
+    target_market: str = "美国",
+    voiceover_language: str = "自动",
+    aspect_ratio: str = "9:16",
+    product_name: str = "",
+    demand_description: str = "",
+    video_type: str = "口播带货",
+) -> Dict[str, Any]:
+    """媒体任务中心专用：参考图 + 需求描述只生成 1 套视频方案。
+
+    与 AI 视频页的三套方案共用同一套分析/分镜口径，但通过追加输出限制，
+    只保留第一套方案，避免美工在多套方案之间做选择。
+    """
+    if not 5 <= int(duration) <= 30:
+        raise AIAnalysisError("视频时长仅支持 5 / 10 / 15 秒")
+    if not settings.OPENAI_API_KEY:
+        raise AIAnalysisError("OpenAI API Key 未配置")
+    if not items:
+        raise AIAnalysisError("请先选择参考图")
+
+    is_showcase = (video_type or "口播带货") == "产品展示"
+    content = _build_user_content_from_bytes(items, hint="请根据以下商品图片生成视频方案。")
+    if len(content) <= 1:
+        raise AIAnalysisError("没有可用的图片内容")
+
+    if is_showcase:
+        plan_text = build_product_showcase_user_prompt(
+            image_count=len(items),
+            duration=int(duration),
+            target_market=target_market,
+            aspect_ratio=aspect_ratio,
+            product_name=product_name,
+        )
+        system_prompt = PRODUCT_SHOWCASE_SYSTEM_PROMPT
+    else:
+        plan_text = build_voiceover_plan_user_prompt(
+            image_count=len(items),
+            duration=int(duration),
+            target_market=target_market,
+            voiceover_language=voiceover_language,
+            aspect_ratio=aspect_ratio,
+            product_name=product_name,
+        )
+        system_prompt = VOICEOVER_PLAN_SYSTEM_PROMPT
+
+    extra_lines = []
+    if (demand_description or "").strip():
+        extra_lines.append(f"【运营需求描述】{demand_description.strip()}")
+    extra_lines.append(
+        "【本次输出限制】只生成 1 套方案：只输出「方案一」，不要输出方案二/方案三，"
+        "方案数量必须为 1。"
+    )
+    content[0] = {"type": "text", "text": plan_text + "\n\n" + "\n".join(extra_lines)}
+    system_prompt += "\n\n【输出数量】本次只允许生成 1 套方案，禁止输出多套。"
+
+    client = OpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        base_url=settings.OPENAI_API_BASE,
+        max_retries=0,
+        timeout=900,
+    )
+    model = settings.OPENAI_VISION_MODEL or "gpt-4o"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content},
+    ]
+
+    logger.info(
+        f"[媒体任务中心] 生成单套视频方案：model={model}, 图片={len(items)} 张, "
+        f"时长={duration}s, 市场={target_market}, 类型={video_type}"
+    )
+
+    try:
+        raw_text = await asyncio.wait_for(
+            asyncio.to_thread(_call_vision_stream_sync, client, model, messages, 900),
+            timeout=960,
+        )
+    except asyncio.TimeoutError:
+        raise AIAnalysisError("AI 生成超时（16分钟），请稍后重试或减少参考图数量")
+
+    if not raw_text:
+        raise AIAnalysisError("AI 模型返回内容为空")
+
+    parsed = parse_voiceover_plan_text(raw_text)
+    concepts = parsed.get("concepts") or []
+    if not concepts:
+        raise AIAnalysisError(f"无法解析 AI 返回的方案内容: {raw_text[:200]}")
+
+    return {"product": parsed.get("product") or {}, "concept": concepts[0], "raw_text": raw_text}
+
+
 # ---------- 新方案结束 ----------
 
 

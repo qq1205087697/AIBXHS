@@ -34,7 +34,6 @@ import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
 import AIImageStudio from './pages/AIImageStudio';
-import VideoBindingReview from './pages/VideoBindingReview';
 import VideoUploadCenter from './pages/VideoUploadCenter';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -372,7 +371,7 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <MainLayout>
-              <VideoBindingReview />
+              <VideoUploadCenter initialTab="binding" />
             </MainLayout>
           </ProtectedRoute>
         }

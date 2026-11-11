@@ -401,6 +401,23 @@ async def approve_video_binding(
         WHERE id = :id AND tenant_id = :tid
     """), {"uid": current_user.id, "uname": current_user.username,
            "id": request_id, "tid": current_user.tenant_id})
+    # 媒体任务中心联动：绑定申请审核通过后，对应媒体任务进入「待上传」
+    media_row = db.execute(text("""
+        SELECT id, tenant_id FROM media_requests
+        WHERE binding_request_id = :bid AND tenant_id = :tid AND deleted_at IS NULL
+        LIMIT 1
+    """), {"bid": request_id, "tid": current_user.tenant_id}).fetchone()
+    if media_row:
+        db.execute(text("""
+            UPDATE media_requests
+            SET stage = '待上传', bind_status = '已通过', updated_at = NOW()
+            WHERE id = :mid AND tenant_id = :tid
+        """), {"mid": media_row[0], "tid": current_user.tenant_id})
+        db.execute(text("""
+            INSERT INTO media_request_logs (tenant_id, request_id, actor_id, actor_name, action, note)
+            VALUES (:tid, :rid, :uid, :uname, '绑定审核通过', '视频已绑定至产品，进入「待上传」')
+        """), {"tid": current_user.tenant_id, "rid": media_row[0],
+               "uid": current_user.id, "uname": current_user.username})
     db.commit()
     # 首条视频标记（len==1 即绑定前产品无任何视频）；飞书视频表未配置时不出弹窗
     return {
@@ -435,6 +452,24 @@ async def reject_video_binding(
         WHERE id = :id AND tenant_id = :tid
     """), {"reason": reason, "uid": current_user.id, "uname": current_user.username,
            "id": request_id, "tid": current_user.tenant_id})
+    # 媒体任务中心联动：绑定申请被拒绝，任务留在「待绑定」，可修改后重新提交
+    media_row = db.execute(text("""
+        SELECT id FROM media_requests
+        WHERE binding_request_id = :bid AND tenant_id = :tid AND deleted_at IS NULL
+        LIMIT 1
+    """), {"bid": request_id, "tid": current_user.tenant_id}).fetchone()
+    if media_row:
+        db.execute(text("""
+            UPDATE media_requests
+            SET bind_status = '已拒绝', updated_at = NOW()
+            WHERE id = :mid AND tenant_id = :tid
+        """), {"mid": media_row[0], "tid": current_user.tenant_id})
+        db.execute(text("""
+            INSERT INTO media_request_logs (tenant_id, request_id, actor_id, actor_name, action, note)
+            VALUES (:tid, :rid, :uid, :uname, '绑定审核拒绝', :note)
+        """), {"tid": current_user.tenant_id, "rid": media_row[0],
+               "uid": current_user.id, "uname": current_user.username,
+               "note": (reason or "绑定申请被拒绝，可修改后重新提交")[:1000]})
     db.commit()
     return {"success": True, "message": "已拒绝该绑定申请"}
 

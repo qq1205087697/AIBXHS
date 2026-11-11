@@ -2100,6 +2100,214 @@ export interface OzonTaskStatusResult {
   error?: string;
 }
 
+/** ==================== 媒体创作中心 · 视频需求流转 ==================== */
+export type MediaStage =
+  | "待提交" | "待审核" | "待生成" | "已生成" | "待确认"
+  | "待高清" | "待绑定" | "待上传" | "已上传";
+
+/** 提报时选中的目标平台 SKU（后端落库的展示字段） */
+export interface MediaPlatformItem {
+  pp_id: number;
+  store_id: number;
+  platform: string;
+  sku: string;
+  store_name: string;
+  site: string;
+  asin?: string;
+  offer_id?: string;
+  has_asin?: boolean;
+  has_credentials?: boolean;
+}
+
+export interface MediaPlanShot {
+  timestamp: string;
+  shot_purpose?: string;
+  description?: string;
+  voiceover?: string;
+}
+
+export interface MediaPlan {
+  concept_title: string;
+  marketing_goal?: string;
+  story?: string;
+  character?: string;
+  environment?: string;
+  music?: string;
+  storyboard: MediaPlanShot[];
+  video_type?: string;
+  duration?: number;
+  ratio?: string;
+  language?: string;
+  generated_at?: string;
+}
+
+export interface MediaRequestItem {
+  id: number;
+  no: number;
+  seq: string;
+  parent_id?: number | null;
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  product_image?: string | null;
+  platform?: string | null;
+  platform_items: MediaPlatformItem[];
+  demand_types: string[];
+  demand_type?: string | null;
+  description?: string | null;
+  prompt?: string | null;
+  plan?: MediaPlan | null;
+  ref_images: string[];
+  ratio: string;
+  resolution: string;
+  duration: number;
+  video_type?: string | null;
+  stage: MediaStage;
+  gen_status?: string | null;
+  gen_task_id?: number | null;
+  gen_time?: string | null;
+  media_url?: string | null;
+  hd_status?: string | null;
+  hd_task_id?: number | null;
+  hd_url?: string | null;
+  hd_time?: string | null;
+  bind_status?: string | null;
+  binding_request_id?: number | null;
+  upload_status?: string | null;
+  upload_time?: string | null;
+  upload_result?: Record<string, unknown> | null;
+  submitter_name?: string | null;
+  submit_time?: string | null;
+  reviewer_name?: string | null;
+  reviewer_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  logs?: MediaRequestLog[];
+}
+
+export interface MediaRequestLog {
+  id: number;
+  actor_name: string;
+  action: string;
+  note: string;
+  created_at: string;
+}
+
+/** 提报弹窗：跨产品的平台 SKU×店铺条目 */
+export interface ProductSkuEntry {
+  pp_id: number;
+  store_id: number;
+  product_id: number;
+  platform: string;
+  sku: string;
+  asin: string;
+  store_name: string;
+  site: string;
+  usable: boolean;
+  unusable_reason?: string | null;
+}
+
+/** 提报弹窗：按产品分组（可展开选择具体店铺/SKU） */
+export interface ProductSkuGroup {
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  product_image?: string | null;
+  entries: ProductSkuEntry[];
+}
+
+export const mediaRequestApi = {
+  /** 按阶段查询单据（顺带同步 AI 生成状态） */
+  list: (params: {
+    stage: MediaStage;
+    op?: string;
+    platform?: string;
+    keyword?: string;
+    page?: number;
+    page_size?: number;
+  }) =>
+    apiClient.get<{
+      success: boolean;
+      data: { items: MediaRequestItem[]; total: number; counts: Record<string, number> };
+    }>("/media-requests", { params }),
+  /** 单据详情（含操作日志时间线） */
+  get: (id: number) =>
+    apiClient.get<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`),
+  /** 各阶段数量（「待绑定」数量由绑定审核接口单独提供） */
+  counts: () =>
+    apiClient.get<{ success: boolean; data: Record<string, number> }>("/media-requests/counts"),
+  /** 提报弹窗数据源：按产品分组的平台 SKU×店铺条目（含可上传性标记） */
+  listProductSkus: (params: { keyword?: string; platform?: string; page?: number; page_size?: number }) =>
+    apiClient.get<{ success: boolean; data: { items: ProductSkuGroup[]; total: number } }>(
+      "/media-requests/product-skus",
+      { params },
+    ),
+  /** 运营提报 */
+  create: (data: {
+    product_id: number;
+    demand_types: string[];
+    description?: string;
+    prompt?: string;
+    ref_images?: string[];
+    platform_items: { pp_id: number; store_id: number }[];
+  }) => apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>("/media-requests", data),
+  /** 待提交改需求描述/类型；待生成改提示词/参考图/参数 */
+  update: (
+    id: number,
+    data: {
+      description?: string;
+      demand_types?: string[];
+      prompt?: string;
+      ref_images?: string[];
+      ratio?: string;
+      resolution?: string;
+      duration?: number;
+    },
+  ) => apiClient.patch<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`, data),
+  /** 待提交 → 待审核 */
+  submit: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/submit`),
+  /** 运营主管审核（通过时按需求类型拆单） */
+  review: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/review`, data),
+  /** 美工点击生成：提交真实 AI 视频任务 */
+  generate: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate`),
+  /** 待生成页「AI 生成方案」：只生成 1 套方案并回填提示词（大模型耗时较长，单独放宽超时） */
+  generatePlan: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: { prompt: string; plan: MediaPlan } }>(
+      `/media-requests/${id}/generate-plan`,
+      undefined,
+      { timeout: 600000 },
+    ),
+  /** 美工审核成片 → 待确认 / 退回待生成 */
+  genReview: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/gen-review`, data),
+  /** 运营二次审核 → 待高清 / 退回待生成 */
+  confirm: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/confirm`, data),
+  /** 待高清 → 提交超分任务（强制高清门禁，scale 1.0~4.0x），完成后自动进入待绑定 */
+  upscale: (id: number, scale?: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(
+      `/media-requests/${id}/upscale`,
+      scale ? { scale } : undefined,
+    ),
+  /** 待绑定 → 提交绑定至产品申请（上传前门禁），审核通过后进入待上传 */
+  bind: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/bind`),
+  /** AI图片需求：待生成页直接上传成片（图片地址），进入已生成审核 */
+  uploadMedia: (id: number, mediaUrl: string) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(
+      `/media-requests/${id}/upload-media`,
+      { media_url: mediaUrl },
+    ),
+  /** 待上传 → 真实调用 Amazon（飞书 RPA）/ Ozon（Seller API）上传 */
+  upload: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data?: Record<string, unknown>; item?: MediaRequestItem }>(
+      `/media-requests/${id}/upload`,
+    ),
+};
+
 export const videoBindingApi = {
   /** 提交绑定申请（ai_video:use）；media_type=image 时绑定的是图片 */
   submit: (data: {
