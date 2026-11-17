@@ -984,6 +984,15 @@ export const outboundOrdersApi = {
       handler?: string;
       outbound_date?: string;
       notes?: string;
+      store_group_id?: number | null;
+      items?: {
+        product_id: number;
+        quantity: number;
+        unit_price?: number;
+        notes?: string;
+        selected_batch_id?: number | null;
+        selected_batch_number?: string;
+      }[];
     },
   ) => apiClient.put(`/outbound-orders/${id}`, data),
   confirm: (id: number) => apiClient.put(`/outbound-orders/${id}/confirm`),

@@ -26,7 +26,7 @@ class Product(BaseModel):
     brand = Column(String(100), nullable=True, comment="品牌")
     price = Column(DECIMAL(12, 2), nullable=True, comment="售价")
     cost_price = Column(DECIMAL(12, 2), nullable=True, comment="成本价")
-    status = Column(Enum(ProductStatus), default=ProductStatus.ACTIVE, index=True, comment="状态")
+    status = Column(Enum(ProductStatus, values_callable=lambda e: [m.value for m in e]), default=ProductStatus.ACTIVE, index=True, comment="状态")
     is_robot_monitored = Column(Boolean, default=True, comment="是否机器人监控")
     config = Column(JSON, nullable=True, comment="商品配置(安全库存等)")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
