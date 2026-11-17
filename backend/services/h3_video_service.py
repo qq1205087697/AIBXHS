@@ -313,9 +313,16 @@ def _run_task(task_id: int, h3_prompt_id: str) -> None:
         for _ in range(max_polls):
             threading.Event().wait(interval)
             # 取消/状态变更检查：任务已不在进行中（如被用户取消）时退出轮询
-            if _get_h3_task_status(task_id) not in ("排队中", "生成中"):
+            status_now, latest_prompt_id = _get_h3_task_state(task_id)
+            if status_now not in ("排队中", "生成中"):
                 logger.info(f"[H3视频] 任务 {task_id} 状态已变更，轮询退出")
                 return
+            # 插队会删除旧队列条目并以新 ID 重新提交：每轮跟随 DB 中最新的 ComfyUI 任务 ID
+            if latest_prompt_id and latest_prompt_id != h3_prompt_id:
+                logger.info(
+                    f"[H3视频] 任务 {task_id} ComfyUI ID 变更: {h3_prompt_id} → {latest_prompt_id}（插队重排）"
+                )
+                h3_prompt_id = latest_prompt_id
             try:
                 history = _api("GET", f"/history/{h3_prompt_id}").json()
             except requests.exceptions.Timeout as e:
@@ -677,6 +684,51 @@ def _serialize(task) -> Dict[str, Any]:
     }
 
 
+def _compute_queue_ahead(db) -> Dict[int, int]:
+    """计算进行中任务各自「前方的任务数」（全租户口径，与 ComfyUI 实际执行顺序一致）
+
+    - 生成中任务：0（无任务在它前面）
+    - 已提交 ComfyUI 的排队任务：pending 队列中位于其前的条目数 + 执行中任务数
+    - 尚未提交（仍在上传参考图/优化提示词）的排队任务：排在当前队列末尾之后，按提交顺序递增
+    - ComfyUI 不可达时回退：按任务提交顺序（ID 升序）估算
+    """
+    from models.ai_video_task import AIVideoTask
+
+    rows = (
+        db.query(AIVideoTask.id, AIVideoTask.status, AIVideoTask.h3_prompt_id)
+        .filter(AIVideoTask.status.in_(["排队中", "生成中"]), AIVideoTask.deleted_at.is_(None))
+        .all()
+    )
+    if not rows:
+        return {}
+    try:
+        queue = _api("GET", "/queue", timeout=15).json()
+        running_ids = [e[1] for e in (queue.get("queue_running") or []) if len(e) > 1]
+        pending_ids = [e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1]
+    except Exception as e:
+        logger.warning(f"[H3视频] 查询 ComfyUI 队列失败，排队位置按提交顺序估算: {e}")
+        return {
+            r.id: (0 if r.status == "生成中" else i)
+            for i, r in enumerate(sorted(rows, key=lambda x: x.id))
+        }
+
+    running_count = len(running_ids)
+    preparing = sorted((r for r in rows if not r.h3_prompt_id), key=lambda x: x.id)
+    base = running_count + len(pending_ids)
+    ahead: Dict[int, int] = {}
+    for r in rows:
+        pid = r.h3_prompt_id
+        if r.status == "生成中" or (pid and pid in running_ids):
+            ahead[r.id] = 0
+        elif pid and pid in pending_ids:
+            ahead[r.id] = pending_ids.index(pid) + running_count
+        elif not pid:
+            ahead[r.id] = base + sum(1 for p in preparing if p.id < r.id)
+        else:
+            ahead[r.id] = base  # 瞬态：不在队列中（待入队/刚结束待写 history），按队尾估算
+    return ahead
+
+
 def list_video_tasks(
     tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = "", bind_status: str = "all"
 ) -> Dict[str, Any]:
@@ -794,6 +846,15 @@ def list_video_tasks(
                         item["upscale_video_url"] = mapping[r.video_url]
         except Exception as e:
             logger.warning(f"生成历史附加超分结果失败: {e}")
+        # 附加排队位置（仅排队中任务）：前端显示「前方x条任务」
+        if any(r.status == "排队中" for r in rows):
+            try:
+                ahead_map = _compute_queue_ahead(db)
+                for r, item in zip(rows, items):
+                    if r.status == "排队中":
+                        item["queue_ahead"] = ahead_map.get(r.id)
+            except Exception as e:
+                logger.warning(f"生成历史附加排队位置失败: {e}")
         return {"items": items, "total": total}
     finally:
         db.close()
@@ -808,6 +869,23 @@ def _get_h3_task_status(task_id: int) -> Optional[str]:
     try:
         r = db.query(AIVideoTask.status).filter(AIVideoTask.id == task_id).first()
         return r[0] if r else None
+    finally:
+        db.close()
+
+
+def _get_h3_task_state(task_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """读取任务当前状态与 ComfyUI 任务 ID（轮询循环内感知取消与插队重排）"""
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    db = SessionLocal()
+    try:
+        r = (
+            db.query(AIVideoTask.status, AIVideoTask.h3_prompt_id)
+            .filter(AIVideoTask.id == task_id)
+            .first()
+        )
+        return (r[0], r[1]) if r else (None, None)
     finally:
         db.close()
 
@@ -914,6 +992,161 @@ def cancel_video_task(tenant_id: int, task_id: int) -> None:
     finally:
         db.close()
     logger.info(f"[H3视频] 任务 {task_id} 已取消: {cancelled_via}")
+
+
+def _jump_video_task_to_front(
+    task_id: int,
+    prompt_id: str,
+    *,
+    prompt: str,
+    h3_prompt: str,
+    images_json: str,
+    duration: Optional[int],
+    resolution: Optional[str],
+    ratio: Optional[str],
+) -> str:
+    """把排队任务移到 ComfyUI 待执行队列最前：删除旧条目 → front:true 重新提交 → 回写新 prompt_id。
+
+    返回新的 ComfyUI prompt_id；失败抛 H3VideoError。
+    ComfyUI 本地 API 的 POST /prompt 支持 front 参数（true 表示插到队列最前）。
+    """
+    try:
+        urls = json.loads(images_json) if images_json else []
+    except Exception:
+        urls = []
+    urls = [u for u in urls if u]
+    if not urls:
+        raise H3VideoError("任务没有参考图地址，无法插队，请稍后重试或取消后重新提交")
+
+    # 删除旧排队条目（已不在队列时为无害空操作）
+    try:
+        _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+    except Exception as e:
+        logger.warning(f"[H3视频] 插队任务 {task_id} 移出旧队列条目失败: {e}")
+
+    # 防竞态复判：删除瞬间任务可能恰好开始执行，此时放弃重排，避免同一任务重复提交
+    try:
+        running2 = [e[1] for e in (_api("GET", "/queue", timeout=15).json().get("queue_running") or []) if len(e) > 1]
+        if prompt_id in running2:
+            raise H3VideoError("任务已开始生成，无需插队")
+    except H3VideoError:
+        raise
+    except Exception:
+        pass
+
+    # 下载历史参考图 → 上传 ComfyUI → 重建工作流 → front:true 插队提交
+    images = _download_reference_images(urls)
+    person_picture = _detect_person_picture(prompt, len(images))
+
+    def _up(item: Tuple[int, bytes]) -> str:
+        idx, content = item
+        return _upload_image(idx, content)
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        image_names = list(ex.map(_up, enumerate([c for _, c in images])))
+
+    workflow = _build_workflow(
+        prompt=h3_prompt or prompt,
+        duration=duration or 15,
+        resolution=resolution or "0.5",
+        ratio=ratio or "9:16",
+        image_names=image_names,
+        with_ref_note=not h3_prompt,
+        person_picture=person_picture,
+    )
+    try:
+        resp = _api("POST", "/prompt", timeout=60, json={"prompt": workflow, "front": True})
+        new_prompt_id = resp.json()["prompt_id"]
+    except Exception as e:
+        raise H3VideoError(f"插队重新提交工作流失败: {str(e)[:200]}")
+
+    _update_task(task_id, h3_prompt_id=new_prompt_id)
+    logger.info(f"[H3视频] 任务 {task_id} 已插队重排: {prompt_id} → {new_prompt_id}")
+    return new_prompt_id
+
+
+def prioritize_video_task(tenant_id: int, task_id: int, mode: str) -> Tuple[str, str]:
+    """排队任务插队，返回 (action, message)。
+
+    mode="interrupt"：先取消当前执行中的任务（其记录由自身轮询线程按 ComfyUI 结果标记失败），
+                      本任务立即开始生成；
+    mode="wait"：不打断当前任务，本任务排到队首，当前任务完成后立即执行。
+
+    实现：删除 ComfyUI 中本任务的旧排队条目 → front:true 重新提交工作流 → 回写新 prompt_id
+    （轮询线程每轮从 DB 读取最新 ID，自动跟随）。interrupt 模式下先插队再中断，
+    确保中断后弹出的是本任务而非其他排队任务。
+    仅已提交 ComfyUI 的「排队中」任务可插队；准备中任务稍后再试。
+    """
+    from database.database import SessionLocal
+    from models.ai_video_task import AIVideoTask
+
+    if mode not in ("interrupt", "wait"):
+        raise H3VideoError("无效的插队方式")
+
+    db = SessionLocal()
+    try:
+        task = db.query(AIVideoTask).filter(
+            AIVideoTask.id == task_id,
+            AIVideoTask.tenant_id == tenant_id,
+            AIVideoTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise H3VideoError("任务不存在或已删除")
+        if task.status == "生成中":
+            raise H3VideoError("任务已在生成中，无需插队")
+        if task.status != "排队中":
+            raise H3VideoError("任务已结束，无需插队")
+        fields = {
+            "prompt_id": task.h3_prompt_id,
+            "prompt": task.prompt or "",
+            "h3_prompt": task.h3_prompt or "",
+            "images_json": task.images or "",
+            "duration": task.duration,
+            "resolution": task.resolution,
+            "ratio": task.ratio,
+        }
+    finally:
+        db.close()
+
+    prompt_id = fields["prompt_id"]
+    if not prompt_id:
+        raise H3VideoError("任务仍在准备中（上传参考图/提交工作流），请稍后再试")
+
+    try:
+        queue = _api("GET", "/queue", timeout=15).json()
+        running_ids = [e[1] for e in (queue.get("queue_running") or []) if len(e) > 1]
+        pending_ids = [e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1]
+    except Exception as e:
+        raise H3VideoError(f"查询 ComfyUI 队列失败，请稍后重试: {str(e)[:200]}")
+
+    if prompt_id in running_ids:
+        # DB 状态尚未被轮询线程刷新，实际已在生成
+        raise H3VideoError("任务已开始生成，无需插队")
+
+    is_front = prompt_id in pending_ids and pending_ids.index(prompt_id) == 0
+
+    if mode == "interrupt" and running_ids:
+        # 本任务不在队首时先插队，再中断当前任务——中断后弹出的才是本任务
+        if not is_front:
+            _jump_video_task_to_front(task_id, prompt_id, **{k: v for k, v in fields.items() if k != "prompt_id"})
+        # 中断时用的是最初捕获的执行中 ID：若其间当前任务已自然结束，该 ID 落在 history 中，
+        # _cancel_comfyui_prompt 判定后不会误中断已弹出的本任务
+        try:
+            _cancel_comfyui_prompt(running_ids[0])
+        except Exception as e:
+            logger.warning(f"[H3视频] 插队任务 {task_id} 中断当前任务失败: {e}")
+        logger.info(f"[H3视频] 任务 {task_id} 插队（interrupt）：已中断当前任务 {running_ids[0]}")
+        return ("interrupted", "已取消当前执行中的任务，本任务开始生成")
+
+    # wait 模式（或 interrupt 但当前恰好无执行任务）：不动当前任务，只把本任务顶到队首
+    if is_front:
+        if mode == "interrupt":
+            return ("already_front", "当前没有执行中的任务，本任务即将开始生成")
+        return ("already_front", "本任务已是队首，将紧随当前任务执行" if running_ids else "本任务已是队首，即将开始生成")
+    _jump_video_task_to_front(task_id, prompt_id, **{k: v for k, v in fields.items() if k != "prompt_id"})
+    if mode == "interrupt":
+        return ("jumped", "本任务已排到队首，即将开始执行")
+    return ("jumped", "本任务已排到队首，当前任务完成后立即执行")
 
 
 def _download_reference_images(urls: List[str]) -> List[Tuple[str, bytes]]:

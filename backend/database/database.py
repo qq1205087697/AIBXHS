@@ -271,6 +271,8 @@ def init_db():
                     stage VARCHAR(20) NOT NULL DEFAULT '待提交' COMMENT '流转阶段',
                     gen_status VARCHAR(20) NULL COMMENT '生成状态：生成中/失败',
                     gen_task_id INT NULL COMMENT 'AI视频任务ID',
+                    gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图',
+                    gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）',
                     gen_time DATETIME NULL COMMENT '生成时间',
                     media_url VARCHAR(1000) NULL COMMENT '生成成片地址',
                     hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败',
@@ -314,11 +316,15 @@ def init_db():
             # 已存在的 media_requests 表补 plan / 高清 / 绑定门禁字段
             _media_extra_columns = [
                 ("plan", "ALTER TABLE media_requests ADD COLUMN plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）' AFTER prompt"),
+                ("gen_kind", "ALTER TABLE media_requests ADD COLUMN gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图' AFTER gen_task_id"),
+                ("gen_user_id", "ALTER TABLE media_requests ADD COLUMN gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）' AFTER gen_kind"),
                 ("hd_status", "ALTER TABLE media_requests ADD COLUMN hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败' AFTER media_url"),
                 ("hd_task_id", "ALTER TABLE media_requests ADD COLUMN hd_task_id INT NULL COMMENT '超分任务ID' AFTER hd_status"),
                 ("hd_url", "ALTER TABLE media_requests ADD COLUMN hd_url VARCHAR(1000) NULL COMMENT '高清成片地址' AFTER hd_task_id"),
                 ("hd_time", "ALTER TABLE media_requests ADD COLUMN hd_time DATETIME NULL COMMENT '高清完成时间' AFTER hd_url"),
                 ("bind_status", "ALTER TABLE media_requests ADD COLUMN bind_status VARCHAR(20) NULL COMMENT '绑定状态：审核中/已通过/已拒绝' AFTER hd_time"),
+                ("media_type", "ALTER TABLE media_requests ADD COLUMN media_type VARCHAR(10) NULL COMMENT '成片类型：video=视频/image=图片（已有素材提报时标记）' AFTER binding_request_id"),
+                ("media_style", "ALTER TABLE media_requests ADD COLUMN media_style VARCHAR(20) NULL COMMENT '图片类型：主图/附图/A+（已有素材图片提报时标记）' AFTER media_type"),
                 ("binding_request_id", "ALTER TABLE media_requests ADD COLUMN binding_request_id INT NULL COMMENT '绑定申请ID' AFTER bind_status"),
             ]
             for _col, _sql in _media_extra_columns:

@@ -65,6 +65,11 @@ class GeneratePromptsRequest(BaseModel):
     concepts: list
 
 
+class PrioritizeTaskRequest(BaseModel):
+    """排队任务插队方式：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行"""
+    mode: str
+
+
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
@@ -407,6 +412,28 @@ async def cancel_upscale_task_endpoint(
     return {"success": True, "message": "任务已取消"}
 
 
+@router.post("/upscale-tasks/{task_id}/prioritize")
+async def prioritize_upscale_task_endpoint(
+    task_id: int,
+    body: PrioritizeTaskRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """超分排队任务插队（mode: interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行）。
+
+    含 ComfyUI 查询/重排与源视频重新下载上传（秒级到分钟级，取决于视频大小），
+    放到线程池执行避免阻塞事件循环。
+    """
+    from services.upscale_service import prioritize_upscale_task, UpscaleError
+
+    try:
+        action, message = await asyncio.to_thread(
+            prioritize_upscale_task, current_user.tenant_id, task_id, body.mode
+        )
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
+
+
 @router.post("/upscale-tasks/{task_id}/retry")
 async def retry_upscale_task_endpoint(
     task_id: int,
@@ -500,6 +527,29 @@ async def cancel_video_task_endpoint(
     except H3VideoError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "message": "任务已取消"}
+
+
+@router.post("/video-tasks/{task_id}/prioritize")
+async def prioritize_video_task_endpoint(
+    task_id: int,
+    body: PrioritizeTaskRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """排队任务插队。
+
+    mode="interrupt"：取消当前执行中任务，本任务立即生成；
+    mode="wait"：等待当前执行中任务完成后，本任务立即执行。
+    含 ComfyUI 查询/重排与参考图下载（秒级），放到线程池执行避免阻塞事件循环。
+    """
+    from services.h3_video_service import prioritize_video_task
+
+    try:
+        action, message = await asyncio.to_thread(
+            prioritize_video_task, current_user.tenant_id, task_id, body.mode
+        )
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
 
 
 @router.post("/video-tasks/{task_id}/recover")

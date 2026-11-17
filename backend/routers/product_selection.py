@@ -488,6 +488,8 @@ async def get_product_selections(
     product_type: Optional[str] = None,
     site: Optional[str] = None,
     date_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = "desc",
     rate_mode: Optional[str] = "realtime",
@@ -525,6 +527,14 @@ async def get_product_selections(
         if date_filter:
             where_conditions.append("DATE(ps.created_at) = :date_filter")
             params["date_filter"] = date_filter
+
+        # 日期区间筛选（创建日期，含首尾两天）
+        if start_date:
+            where_conditions.append("DATE(ps.created_at) >= :start_date")
+            params["start_date"] = start_date
+        if end_date:
+            where_conditions.append("DATE(ps.created_at) <= :end_date")
+            params["end_date"] = end_date
 
         if status:
             status_filters = []

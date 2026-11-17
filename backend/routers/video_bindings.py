@@ -329,7 +329,7 @@ def _do_bind_media(db: Session, tenant_id: int, product_id: int, media_url: str,
                    media_type: str = "video"):
     """审核通过后执行真实绑定：视频写 products.videos（上限 6），图片写 products.images（上限 9）"""
     row = db.execute(text("""
-        SELECT video_url, videos, images, product_code FROM products
+        SELECT video_url, videos, images, main_image, product_code FROM products
         WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL
     """), {"id": product_id, "tid": tenant_id}).fetchone()
     if not row:
@@ -339,6 +339,9 @@ def _do_bind_media(db: Session, tenant_id: int, product_id: int, media_url: str,
     kind = "图片" if is_image else "视频"
     if is_image:
         items = _parse_json_images(row[2])
+        # 兼容图集为空但存在主图的产品：先把主图并入图集，避免绑定后图集只剩新图（主图丢失）
+        if not items and row[3]:
+            items = [row[3]]
         limit, column, subdir = MAX_PRODUCT_IMAGES, "images", "images"
     else:
         # 兼容历史单视频：videos 为空且 video_url 有值时，先把旧视频并入列表
@@ -358,7 +361,7 @@ def _do_bind_media(db: Session, tenant_id: int, product_id: int, media_url: str,
     try:
         from services.tos_service import bound_video_target_name, rename_file
         final_url = rename_file(
-            media_url, bound_video_target_name(row[3], len(items) + 1), subdir=subdir
+            media_url, bound_video_target_name(row[4], len(items) + 1), subdir=subdir
         )
     except Exception as rename_err:
         import logging

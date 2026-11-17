@@ -35,7 +35,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/media-requests", tags=["media_requests"])
 
 STAGES = ["待提交", "待审核", "待生成", "已生成", "待确认", "待高清", "待绑定", "待上传", "已上传"]
-DEMAND_TYPES = ["口播带货视频", "产品展示视频", "AI图片"]
+# 图片类需求类型：与 AI 生图模块（ai_image_service.GEN_TYPES / APLUS_SPECS）对齐
+IMAGE_TYPES = ["白底图", "场景图（不带人物）", "场景图（带人物）", "特写图", "特写白底图", "卖点图", "高级A+图", "普通A+图", "手机A+图"]
+DEMAND_TYPES = ["口播带货视频", "产品展示视频"] + IMAGE_TYPES
+# 已有素材图片提报的用途类型（写图片上传多维表「类型」字段）
+IMAGE_STYLES = ["主图", "附图", "A+"]
 VIDEO_TYPES = ["口播带货视频", "产品展示视频"]
 VIDEO_TYPE_MAP = {"口播带货视频": "口播带货", "产品展示视频": "产品展示"}
 RATIOS = ["9:16", "16:9", "1:1", "3:4"]
@@ -112,12 +116,12 @@ def _serialize(row) -> Dict[str, Any]:
 
 
 def _defaults_for(demand_type: str) -> Dict[str, Any]:
-    # AI图片不走视频生成管线，video_type 留空；生成方式为美工在待生成页直接上传成片
+    # 图片类需求不走视频生成管线，video_type 留空；生成方式为美工在待生成页直接上传成片
     return {
         "ratio": "9:16",
         "resolution": "0.3",
         "duration": 15,
-        "video_type": VIDEO_TYPE_MAP.get(demand_type, "" if demand_type == "AI图片" else "口播带货"),
+        "video_type": VIDEO_TYPE_MAP.get(demand_type, "" if demand_type in IMAGE_TYPES else "口播带货"),
     }
 
 
@@ -148,14 +152,14 @@ def _format_plan_prompt(plan: Dict[str, Any], video_type: str) -> str:
     return "\n".join(lines)
 
 
-def _download_ref_images(urls: List[str]) -> List[tuple]:
+def _download_ref_images(urls: List[str], limit: int = 9, timeout: int = 60) -> List[tuple]:
     """服务端下载参考图字节（TOS 同区域直连），任一张失败即报错。"""
     import requests
 
     out = []
-    for idx, url in enumerate(urls[:9]):
+    for idx, url in enumerate(urls[:limit]):
         try:
-            resp = requests.get(url, timeout=60)
+            resp = requests.get(url, timeout=timeout)
             resp.raise_for_status()
         except Exception as e:
             raise ValueError(f"参考图 {idx + 1} 下载失败：{str(e)[:120]}")
@@ -166,10 +170,102 @@ def _download_ref_images(urls: List[str]) -> List[tuple]:
     return out
 
 
+def _promote_queued_image_rows(db: Session, tenant_id: int) -> None:
+    """排队中的生图单自动流转：同一美工前一张生图完成后，自动提交下一张。
+
+    按单据顺序逐张补位（一次轮询每用户最多提交 1 张），避免并发冲突；
+    参考图下载/提交失败时标记「失败」，可人工重新生成。
+    """
+    from services.ai_image_service import submit_image_task, AIImageError, AIImageBusyError
+
+    queued = db.execute(text("""
+        SELECT id, gen_user_id, demand_type, description, prompt, ref_images, product_code, product_name
+        FROM media_requests
+        WHERE tenant_id = :tid AND stage = '待生成' AND gen_status = '排队中'
+          AND gen_kind = 'image' AND gen_task_id IS NULL AND deleted_at IS NULL
+        ORDER BY gen_user_id, id
+    """), {"tid": tenant_id}).fetchall()
+    if not queued:
+        return
+
+    from models.ai_image_task import AIImageTask
+
+    # 每个用户只保留最早的一条排队单尝试补位
+    first_by_user: Dict[int, Any] = {}
+    for r in queued:
+        first_by_user.setdefault(r[1], r)
+
+    for uid, r in first_by_user.items():
+        active = db.query(AIImageTask.id).filter(
+            AIImageTask.user_id == uid,
+            AIImageTask.status.in_(["排队中", "生成中"]),
+            AIImageTask.deleted_at.is_(None),
+        ).first()
+        if active:
+            continue  # 该用户仍有生图任务在跑，继续排队
+
+        demand_type = (r[2] or "").strip()
+        gen_params = IMAGE_GEN_PARAMS.get(demand_type)
+        if not gen_params:
+            db.execute(text("""
+                UPDATE media_requests SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
+                WHERE id = :id AND tenant_id = :tid
+            """), {"id": r[0], "tid": tenant_id})
+            _add_log(db, tenant_id, r[0], None, "生成失败", f"需求类型 {demand_type} 不支持自动生图，请人工处理")
+            continue
+
+        uname = db.execute(text("SELECT username FROM users WHERE id = :uid"), {"uid": uid}).scalar() or ""
+        try:
+            images = _download_ref_images([u for u in _json(r[5], []) if u], 8, 30)
+        except ValueError as e:
+            db.execute(text("""
+                UPDATE media_requests SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
+                WHERE id = :id AND tenant_id = :tid
+            """), {"id": r[0], "tid": tenant_id})
+            _add_log(db, tenant_id, r[0], None, "生成失败", f"排队自动提交失败：{str(e)[:200]}")
+            continue
+
+        try:
+            task = submit_image_task(
+                tenant_id=tenant_id, user_id=uid, creator_name=uname,
+                title=f"{r[6] or ''} {demand_type}".strip()[:200] or "商品套图",
+                product_info=(r[3] or "").strip()[:5000],
+                prompt=(r[4] or "").strip()[:2000],
+                images=images,
+                product_code=r[6] or "", product_name=r[7] or "",
+                provider="local", **gen_params,
+            )
+        except AIImageBusyError:
+            continue  # 极端并发下被抢，下轮再试
+        except AIImageError as e:
+            db.execute(text("""
+                UPDATE media_requests SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
+                WHERE id = :id AND tenant_id = :tid
+            """), {"id": r[0], "tid": tenant_id})
+            _add_log(db, tenant_id, r[0], None, "生成失败", f"排队自动提交失败：{str(e)[:200]}")
+            continue
+
+        db.execute(text("""
+            UPDATE media_requests
+            SET gen_status = '生成中', gen_task_id = :task_id, gen_time = NOW(), updated_at = NOW()
+            WHERE id = :id AND tenant_id = :tid
+        """), {"task_id": task.get("id"), "id": r[0], "tid": tenant_id})
+        _add_log(db, tenant_id, r[0], None, "自动提交生图",
+                 f"排队流转：{demand_type}（AI生图任务 #{task.get('id')}）")
+    db.commit()
+
+
 def _sync_generation(db: Session, tenant_id: int) -> None:
-    """把「生成中」单据与 AI 视频任务状态对齐；完成后自动流入「已生成」。"""
+    """把「生成中 / 排队中」单据与生成任务状态对齐；完成后自动流入「已生成」。
+
+    gen_kind='video' 对齐 AI 视频任务（AIVideoTask），
+    gen_kind='image' 对齐 AI 生图任务（AIImageTask）；
+    排队中的生图单在前一张完成后自动逐张提交（_promote_queued_image_rows）。
+    """
+    _promote_queued_image_rows(db, tenant_id)
+
     rows = db.execute(text("""
-        SELECT id, gen_task_id FROM media_requests
+        SELECT id, gen_task_id, gen_kind FROM media_requests
         WHERE tenant_id = :tid AND gen_status = '生成中'
           AND gen_task_id IS NOT NULL AND deleted_at IS NULL
     """), {"tid": tenant_id}).fetchall()
@@ -177,14 +273,53 @@ def _sync_generation(db: Session, tenant_id: int) -> None:
         return
 
     from models.ai_video_task import AIVideoTask
+    from models.ai_image_task import AIImageTask
 
-    task_ids = [r[1] for r in rows]
-    tasks = {
-        t.id: t for t in db.query(AIVideoTask).filter(AIVideoTask.id.in_(task_ids)).all()
-    }
+    video_ids = [r[1] for r in rows if (r[2] or "video") == "video"]
+    image_ids = [r[1] for r in rows if r[2] == "image"]
+    video_tasks = {
+        t.id: t for t in db.query(AIVideoTask).filter(AIVideoTask.id.in_(video_ids)).all()
+    } if video_ids else {}
+    image_tasks = {
+        t.id: t for t in db.query(AIImageTask).filter(AIImageTask.id.in_(image_ids)).all()
+    } if image_ids else {}
+
+    def _first_image_url(task) -> Optional[str]:
+        """从生图任务 result_images（[{type,url,status}]）取第一张已完成的图。"""
+        for item in (_json(task.result_images, []) or []):
+            if isinstance(item, dict) and item.get("status") == "已完成" and item.get("url"):
+                return item["url"]
+        return None
+
     changed = False
     for r in rows:
-        task = tasks.get(r[1])
+        kind = r[2] or "video"
+        if kind == "image":
+            task = image_tasks.get(r[1])
+            if not task:
+                continue
+            url = _first_image_url(task)
+            if task.status in ("已完成", "部分完成") and url:
+                db.execute(text("""
+                    UPDATE media_requests
+                    SET stage = '已生成', gen_status = NULL, media_url = :url,
+                        gen_time = COALESCE(:t, NOW()), updated_at = NOW()
+                    WHERE id = :id AND tenant_id = :tid
+                """), {"url": url, "t": task.finished_at, "id": r[0], "tid": tenant_id})
+                _add_log(db, tenant_id, r[0], None, "生成成功", "AI 生图完成，自动流转「已生成」")
+                changed = True
+            elif task.status in ("失败", "已取消"):
+                db.execute(text("""
+                    UPDATE media_requests
+                    SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
+                    WHERE id = :id AND tenant_id = :tid
+                """), {"id": r[0], "tid": tenant_id})
+                _add_log(db, tenant_id, r[0], None, "生成失败",
+                         (task.error_message or "AI 生图失败，可修改提示词后重新生图")[:1000])
+                changed = True
+            continue
+
+        task = video_tasks.get(r[1])
         if not task:
             continue
         if task.status == "已完成" and task.video_url:
@@ -283,6 +418,10 @@ class MediaRequestCreate(BaseModel):
     prompt: str = ""
     ref_images: List[str] = []
     platform_items: List[PlatformItemIn]
+    # 已有素材提报（待绑定/待上传页签）：运营直接上传成片，跳过生成/审核/高清，落在「待绑定」
+    media_url: Optional[str] = None
+    media_kind: Optional[str] = None  # video / image
+    media_style: Optional[str] = None  # 图片用途：主图 / 附图 / A+（写图片表「类型」字段）
 
 
 class MediaRequestUpdate(BaseModel):
@@ -546,16 +685,35 @@ async def create_media_request(
         "has_credentials": bool(e.get("has_credentials")),
     } for e in entries]
 
+    # 已有素材提报：跳过生成/审核/高清，直接落「待绑定」；
+    # 视频同时把 hd_url 置为素材地址（视为已是成片，通过高清门禁），图片绑定走 media_url
+    external = bool((body.media_url or "").strip())
+    media_url_val: Optional[str] = None
+    media_kind = (body.media_kind or "video").lower()
+    media_style_val: Optional[str] = None
+    if external:
+        media_url_val = body.media_url.strip()
+        if media_kind not in ("video", "image"):
+            raise HTTPException(status_code=400, detail="素材类型只支持 video / image")
+        if not media_url_val.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="素材地址无效")
+        if media_kind == "image":
+            media_style_val = (body.media_style or "附图").strip()
+            if media_style_val not in IMAGE_STYLES:
+                raise HTTPException(status_code=400, detail="图片类型只支持：主图 / 附图 / A+")
+
     result = db.execute(text("""
         INSERT INTO media_requests
             (tenant_id, no, seq, product_id, product_code, product_name, product_image,
              platform, platform_items, demand_types, description, prompt, ref_images,
              ratio, resolution, duration, video_type, stage,
+             media_url, media_type, media_style, hd_url,
              submitter_id, submitter_name, created_at, updated_at)
         VALUES
             (:tid, :no, :seq, :pid, :pcode, :pname, :pimg,
              :platform, :items, :types, :desc, :prompt, :refs,
-             '9:16', '0.3', 15, :vtype, '待提交',
+             :ratio, :resolution, :duration, :vtype, :stage,
+             :media_url, :media_type, :media_style, :hd_url,
              :uid, :uname, NOW(), NOW())
     """), {
         "tid": current_user.tenant_id,
@@ -571,17 +729,34 @@ async def create_media_request(
         "desc": (body.description or "").strip(),
         "prompt": (body.prompt or "").strip(),
         "refs": _dumps(ref_images),
+        # 已有素材不写视频参数（那是 AI 生成链的参数，对现成素材无意义）
+        "ratio": None if external else "9:16",
+        "resolution": None if external else "0.3",
+        "duration": None if external else 15,
         "vtype": VIDEO_TYPE_MAP.get(demand_types[0], "") if demand_types else "",
+        "stage": "待绑定" if external else "待提交",
+        "media_url": media_url_val,
+        "media_type": media_kind if external else None,
+        "media_style": media_style_val,
+        "hd_url": media_url_val if (external and media_kind == "video") else None,
         "uid": current_user.id,
         "uname": current_user.username,
     })
     request_id = result.lastrowid
-    _add_log(db, current_user.tenant_id, request_id, current_user, "创建提报",
-             f"需求类型：{'、'.join(demand_types)}；目标 SKU {len(safe_items)} 个")
+    if external:
+        kind_label = "图片" if media_kind == "image" else "视频"
+        style_label = f"（{media_style_val}）" if media_style_val else ""
+        _add_log(db, current_user.tenant_id, request_id, current_user, "创建提报（已有素材）",
+                 f"运营上传已有{kind_label}{style_label}，跳过生成/审核/高清直接进入绑定；目标 SKU {len(safe_items)} 个")
+    else:
+        _add_log(db, current_user.tenant_id, request_id, current_user, "创建提报",
+                 f"需求类型：{'、'.join(demand_types)}；目标 SKU {len(safe_items)} 个")
     db.commit()
 
     row = _load_row(db, current_user.tenant_id, request_id)
-    return {"success": True, "message": "提报已创建", "data": _serialize(row)}
+    return {"success": True,
+            "message": "已创建素材提报，直接进入「待绑定」" if external else "提报已创建",
+            "data": _serialize(row)}
 
 
 @router.patch("/{request_id}")
@@ -666,6 +841,25 @@ async def submit_media_request(
     db.commit()
     return {"success": True, "message": "已提交至「待审核」",
             "data": _serialize(_load_row(db, current_user.tenant_id, request_id))}
+
+
+@router.delete("/{request_id}")
+async def delete_media_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(READ_PERM),
+):
+    """删除单据（软删，不可恢复）。任何阶段均可删除，拆单子单亦可。"""
+    row = _load_row(db, current_user.tenant_id, request_id)
+
+    db.execute(text("""
+        UPDATE media_requests SET deleted_at = NOW(), updated_at = NOW()
+        WHERE id = :id AND tenant_id = :tid
+    """), {"id": request_id, "tid": current_user.tenant_id})
+    _add_log(db, current_user.tenant_id, request_id, current_user, "删除单据",
+             f"{current_user.username} 删除了「{row.stage}」阶段的单据")
+    db.commit()
+    return {"success": True, "message": "已删除"}
 
 
 # ==================== 运营主管审核（通过时按需求类型拆单） ====================
@@ -764,8 +958,8 @@ async def generate_media_request(
     row = _load_row(db, current_user.tenant_id, request_id)
     if row.stage != "待生成":
         raise HTTPException(status_code=400, detail="只有「待生成」的单据可以触发生成")
-    if (row.demand_type or "") == "AI图片":
-        raise HTTPException(status_code=400, detail="AI图片需求不走 AI 视频，请在 AI生图 完成后于本页直接上传成片")
+    if (row.demand_type or "") in IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="图片类需求不走 AI 视频，请在 AI生图 完成后于本页直接上传成片")
     if row.gen_status == "生成中":
         raise HTTPException(status_code=400, detail="该单据正在生成中，请等待完成")
 
@@ -832,6 +1026,106 @@ async def generate_media_request(
             "data": _serialize(_load_row(db, current_user.tenant_id, request_id))}
 
 
+# 图片需求类型 → AI 生图参数（main_types=主副图类型 / aplus_type=A+ 类型）
+IMAGE_GEN_PARAMS: Dict[str, Dict[str, Any]] = {
+    "白底图": {"main_types": ["white_background"]},
+    "场景图（不带人物）": {"main_types": ["scene"]},
+    "场景图（带人物）": {"main_types": ["scene_person"]},
+    "特写图": {"main_types": ["closeup"]},
+    "特写白底图": {"main_types": ["closeup_white"]},
+    "卖点图": {"main_types": ["selling_point"]},
+    "高级A+图": {"aplus_type": "aplus_advanced"},
+    "普通A+图": {"aplus_type": "aplus_normal"},
+    "手机A+图": {"aplus_type": "aplus_mobile"},
+}
+
+
+@router.post("/{request_id}/generate-image")
+async def generate_media_image(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(WORK_PERM),
+):
+    """图片类需求：待生成页直接调用 AI 生图（复用 AI生图 服务，Qwen Image 2.1）。
+
+    参考图 + 需求描述（作商品信息）+ 行内提示词（作附加提示词），
+    按需求类型映射生图类型，1:1 比例生成 1 张；
+    提交后单据进入「生成中」，完成后由 _sync_generation 自动流转「已生成」。
+    """
+    row = _load_row(db, current_user.tenant_id, request_id)
+    demand_type = (row.demand_type or "").strip()
+    if row.stage != "待生成":
+        raise HTTPException(status_code=400, detail="只有「待生成」的单据可以生图")
+    if demand_type not in IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="仅图片类需求支持在任务中心直接生图")
+    if row.gen_status == "生成中":
+        raise HTTPException(status_code=400, detail="该单据正在生图中，请等待完成")
+    gen_params = IMAGE_GEN_PARAMS.get(demand_type)
+    if not gen_params:
+        raise HTTPException(status_code=400, detail=f"需求类型 {demand_type} 暂不支持生图")
+
+    refs = [u for u in _json(row.ref_images, []) if u]
+    if not refs:
+        raise HTTPException(status_code=400, detail="请先上传/选择参考图（1~8 张），再提交生图")
+
+    try:
+        images = await run_in_threadpool(_download_ref_images, refs, 8, 30)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from services.ai_image_service import submit_image_task, AIImageError, AIImageBusyError
+
+    def _queue_row():
+        """并发冲突（同一美工已有生图任务在跑）：转入排队，前面完成由 _sync_generation 自动提交。"""
+        db.execute(text("""
+            UPDATE media_requests
+            SET gen_status = '排队中', gen_task_id = NULL, gen_kind = 'image', gen_user_id = :uid,
+                gen_time = NOW(), media_url = NULL, updated_at = NOW()
+            WHERE id = :id AND tenant_id = :tid
+        """), {"uid": current_user.id, "id": request_id, "tid": current_user.tenant_id})
+        _add_log(db, current_user.tenant_id, request_id, current_user, "排队等待",
+                 f"{demand_type} 已加入生图队列，前面的生图完成后自动提交")
+
+    try:
+        try:
+            task = await run_in_threadpool(
+                submit_image_task,
+                tenant_id=current_user.tenant_id,
+                user_id=current_user.id,
+                creator_name=current_user.username or "",
+                title=f"{row.product_code or ''} {demand_type}".strip()[:200] or "商品套图",
+                product_info=(row.description or "").strip()[:5000],
+                prompt=(row.prompt or "").strip()[:2000],
+                images=images,
+                product_code=row.product_code or "",
+                product_name=row.product_name or "",
+                provider="local",
+                **gen_params,
+            )
+        except AIImageBusyError:
+            _queue_row()
+            db.commit()
+            return {"success": True, "message": "已有生图任务在进行，本单已加入排队，完成后自动提交",
+                    "data": _serialize(_load_row(db, current_user.tenant_id, request_id))}
+    except AIImageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("媒体单据 %s 提交 AI 生图失败", request_id)
+        raise HTTPException(status_code=500, detail=f"提交生图失败：{str(e)[:200]}")
+
+    db.execute(text("""
+        UPDATE media_requests
+        SET gen_status = '生成中', gen_task_id = :task_id, gen_kind = 'image', gen_user_id = :uid, gen_time = NOW(),
+            media_url = NULL, upload_status = NULL, updated_at = NOW()
+        WHERE id = :id AND tenant_id = :tid
+    """), {"task_id": task.get("id"), "uid": current_user.id, "id": request_id, "tid": current_user.tenant_id})
+    _add_log(db, current_user.tenant_id, request_id, current_user, "提交生图",
+             f"{demand_type} · 1:1 · 1 张（AI生图任务 #{task.get('id')}）")
+    db.commit()
+    return {"success": True, "message": "已提交 AI 生图，完成后自动进入「已生成」",
+            "data": _serialize(_load_row(db, current_user.tenant_id, request_id))}
+
+
 @router.post("/{request_id}/generate-plan")
 async def generate_media_plan(
     request_id: int,
@@ -842,8 +1136,8 @@ async def generate_media_plan(
     row = _load_row(db, current_user.tenant_id, request_id)
     if row.stage != "待生成":
         raise HTTPException(status_code=400, detail="只有「待生成」的单据可以生成方案")
-    if (row.demand_type or "") == "AI图片":
-        raise HTTPException(status_code=400, detail="AI图片需求不需要视频方案，请上传成片")
+    if (row.demand_type or "") in IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="图片类需求不需要视频方案，请上传成片")
 
     refs = [u for u in _json(row.ref_images, []) if u]
     if not refs:
@@ -925,7 +1219,7 @@ async def generate_media_plan(
     }
 
 
-# ==================== AI图片：待生成页直接上传成片 ====================
+# ==================== 图片类需求：待生成页直接上传成片 ====================
 
 class UploadMediaBody(BaseModel):
     media_url: str
@@ -938,12 +1232,12 @@ async def upload_media_for_request(
     db: Session = Depends(get_db),
     current_user: User = Depends(WORK_PERM),
 ):
-    """AI图片需求：美工在 AI生图 完成后，把成片地址上传到单据，直接进入「已生成」审核。"""
+    """图片类需求：美工在 AI生图 完成后，把成片地址上传到单据，直接进入「已生成」审核。"""
     row = _load_row(db, current_user.tenant_id, request_id)
     if row.stage != "待生成":
         raise HTTPException(status_code=400, detail="只有「待生成」的单据可以上传成片")
-    if (row.demand_type or "") != "AI图片":
-        raise HTTPException(status_code=400, detail="仅 AI图片 需求支持直接上传成片")
+    if (row.demand_type or "") not in IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="仅图片类需求支持直接上传成片")
     media_url = (body.media_url or "").strip()
     if not media_url:
         raise HTTPException(status_code=400, detail="成片地址不能为空")
@@ -955,7 +1249,7 @@ async def upload_media_for_request(
         WHERE id = :id AND tenant_id = :tid
     """), {"url": media_url, "id": request_id, "tid": current_user.tenant_id})
     _add_log(db, current_user.tenant_id, request_id, current_user, "上传成片",
-             "AI图片成片已上传，进入「已生成」审核")
+             "图片需求成片已上传，进入「已生成」审核")
     db.commit()
     return {"success": True, "message": "成片已上传，进入「已生成」审核",
             "data": _serialize(_load_row(db, current_user.tenant_id, request_id))}
@@ -1013,13 +1307,20 @@ async def confirm_media_request(
         raise HTTPException(status_code=400, detail="只有「待确认」的单据可以二次审核")
 
     if body.passed:
+        # 图片类需求不需要视频高清（Topaz 超分仅针对视频），确认通过后直接进入「待绑定」
+        next_stage = "待绑定" if (row.demand_type or "") in IMAGE_TYPES else "待高清"
         db.execute(text("""
             UPDATE media_requests
-            SET stage = '待高清', reviewer_id = :uid, reviewer_name = :uname,
+            SET stage = :stage, reviewer_id = :uid, reviewer_name = :uname,
                 reviewer_at = NOW(), updated_at = NOW()
             WHERE id = :id AND tenant_id = :tid
-        """), {"uid": current_user.id, "uname": current_user.username,
+        """), {"stage": next_stage, "uid": current_user.id, "uname": current_user.username,
                "id": request_id, "tid": current_user.tenant_id})
+        if next_stage == "待绑定":
+            _add_log(db, current_user.tenant_id, request_id, current_user, "运营确认通过",
+                     "二次审核通过；图片需求免高清，直接进入「待绑定」")
+            db.commit()
+            return {"success": True, "message": "二次审核通过；图片需求免高清，已进入「待绑定」"}
         _add_log(db, current_user.tenant_id, request_id, current_user, "运营确认通过",
                  "二次审核通过，进入「待高清」（高清为绑定前强制环节）")
         db.commit()
@@ -1106,7 +1407,8 @@ async def bind_media_request(
 ):
     """待绑定页提交「绑定至产品」申请：复用媒体绑定审核通道，审核通过后才能上传。
 
-    提交的是高清成片地址（hd_url），绑定审核通过后视频写入产品 videos 列表，
+    视频提交高清成片地址（hd_url），图片类需求免高清直接用原成片（media_url）；
+    审核通过后视频写 products.videos、图片写 products.images，
     并由 video_bindings 审核钩子把单据推进「待上传」。
     """
     row = _load_row(db, current_user.tenant_id, request_id)
@@ -1114,17 +1416,21 @@ async def bind_media_request(
         raise HTTPException(status_code=400, detail="只有「待绑定」的单据可以提交绑定申请")
     if row.bind_status == "审核中":
         raise HTTPException(status_code=400, detail="绑定申请审核中，请等待审核结果")
-    hd_url = (row.hd_url or "").strip()
-    if not hd_url:
-        raise HTTPException(status_code=400, detail="单据缺少高清成片地址，请先完成高清")
+    # 图片类：需求类型为图片，或已有素材提报标记 media_type='image'
+    is_image = (row.media_type == "image") or ((row.demand_type or "") in IMAGE_TYPES)
+    bind_url = (row.media_url or "").strip() if is_image else (row.hd_url or "").strip()
+    if not bind_url:
+        raise HTTPException(status_code=400,
+                            detail="单据缺少成片地址，图片需求请先上传成片，视频需求请先完成高清")
+    bind_media_kind = "image" if is_image else "video"
 
     from routers.video_bindings import submit_video_binding, VideoBindingSubmit
 
     body = VideoBindingSubmit(
-        video_url=hd_url,
+        video_url=bind_url,
         product_id=row.product_id,
         source="upscale",
-        media_type="video",
+        media_type=bind_media_kind,
         task_title=f"媒体任务 {row.seq} · {row.product_code or ''}".strip()[:200],
     )
     result = await submit_video_binding(body=body, db=db, current_user=current_user)
@@ -1134,9 +1440,10 @@ async def bind_media_request(
         r = db.execute(text("""
             SELECT id FROM video_binding_requests
             WHERE tenant_id = :tid AND video_url = :url AND product_id = :pid
-              AND media_type = 'video' AND status = 'pending' AND deleted_at IS NULL
+              AND media_type = :mtype AND status = 'pending' AND deleted_at IS NULL
             ORDER BY id DESC LIMIT 1
-        """), {"tid": current_user.tenant_id, "url": hd_url, "pid": row.product_id}).fetchone()
+        """), {"tid": current_user.tenant_id, "url": bind_url, "pid": row.product_id,
+               "mtype": bind_media_kind}).fetchone()
         binding_id = r[0] if r else None
     except Exception:
         pass
@@ -1164,10 +1471,12 @@ async def upload_media_request(
     row = _load_row(db, current_user.tenant_id, request_id)
     if row.stage != "待上传":
         raise HTTPException(status_code=400, detail="只有「待上传」的单据可以上传")
-    # 绑定门禁：视频必须已通过绑定审核并写入产品，才允许上传至平台
+    if (row.upload_status or "").strip() in ("上传排队中", "上传中"):
+        raise HTTPException(status_code=400, detail="该单据正在由 RPA 处理（排队中/上传中），请勿重复提交")
+    # 绑定门禁：成片必须已通过绑定审核并写入产品，才允许上传至平台
     if row.bind_status != "已通过":
-        raise HTTPException(status_code=400, detail="该视频尚未通过绑定审核（未绑定到产品），不能上传至平台")
-    # 上传优先使用高清成片；无高清地址时回退原成片（正常流程必有高清）
+        raise HTTPException(status_code=400, detail="该素材尚未通过绑定审核（未绑定到产品），不能上传至平台")
+    # 上传优先使用高清成片；无高清地址时回退原成片（图片素材直接用 media_url）
     media_url = (row.hd_url or "").strip() or (row.media_url or "").strip()
     if not media_url:
         raise HTTPException(status_code=400, detail="单据缺少成片地址，无法上传")
@@ -1177,35 +1486,72 @@ async def upload_media_request(
     if not pairs:
         raise HTTPException(status_code=400, detail="单据缺少目标平台 SKU")
 
-    body = SkuVideoUploadBody(
-        product_id=row.product_id,
-        video_urls=[media_url],
-        items=[SkuVideoUploadItem(**p) for p in pairs],
-    )
-    try:
-        result = await upload_sku_video_unified(body=body, db=db, current_user=current_user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("媒体单据 %s 上传失败", request_id)
-        raise HTTPException(status_code=500, detail=f"上传失败：{str(e)[:200]}")
+    is_image = (row.media_type or "").strip() == "image"
+    if is_image:
+        # 图片：写入 Amazon 图片上传多维表（SKU/紫鸟账号/店铺/站点/图片/类型），RPA 消费。
+        # Ozon 图片上传暂未接入，只取 Amazon SKU。
+        from services.feishu_image_sku_service import create_sku_image_records, feishu_image_configured
+
+        if not feishu_image_configured():
+            raise HTTPException(status_code=400,
+                                detail="飞书图片上传表未配置，请在 backend/.env 填写 FEISHU_IMAGE_BASE_TOKEN / FEISHU_IMAGE_TABLE_ID 后重启服务")
+        product, entries = _load_platform_sku_entries(
+            db, current_user.tenant_id, row.product_id, ["amazon"], id_filter=pairs
+        )
+        amazon_entries = [e for e in entries if (e.get("platform") or "").lower() == "amazon"]
+        if not amazon_entries:
+            raise HTTPException(status_code=400, detail="图片上传暂仅支持 Amazon 平台 SKU（Ozon 图片上传未接入）")
+        image_style = (row.media_style or "附图").strip()
+        try:
+            stats = await create_sku_image_records(
+                media_url, product[1] or "", amazon_entries, image_style, request_id=request_id
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("媒体单据 %s 图片上传失败", request_id)
+            raise HTTPException(status_code=500, detail=f"图片上传失败：{str(e)[:200]}")
+        ok = bool(stats.get("success"))
+        message = (f"图片已写入 {stats.get('success', 0)} 条 Amazon 图片表记录（类型：{image_style}）"
+                   + (f"，失败 {stats['failed']} 条：{'；'.join(stats['errors'][:3])}" if stats.get("failed") else ""))
+        result = {"success": ok, "message": message, "data": stats}
+    else:
+        # 视频：走统一上传通道（Amazon 写视频多维表由 RPA 上传 / Ozon Seller API 直传）
+        body = SkuVideoUploadBody(
+            product_id=row.product_id,
+            video_urls=[media_url],
+            items=[SkuVideoUploadItem(**p) for p in pairs],
+        )
+        try:
+            result = await upload_sku_video_unified(body=body, db=db, current_user=current_user)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("媒体单据 %s 上传失败", request_id)
+            raise HTTPException(status_code=500, detail=f"上传失败：{str(e)[:200]}")
 
     ok = bool(result.get("success"))
-    message = result.get("message") or ("上传成功" if ok else "上传失败")
+    message = result.get("message") or ("提交成功" if ok else "提交失败")
+    # 点击上传只负责把素材写入平台通道（Amazon 视频表/图片表 → 影刀 RPA 消费；
+    # Ozon Seller API 直传），单据置「上传排队中」并留在待上传页签。
+    # RPA/外部流程完成实际上传后直接改库即可进入已上传：
+    #   UPDATE media_requests SET stage='已上传', upload_status='已完成', upload_time=NOW()
+    #   WHERE id=... AND deleted_at IS NULL
+    # 失败时只写 upload_status='上传失败'（留在待上传，前端出现「重新上传」）。
     db.execute(text("""
         UPDATE media_requests
-        SET stage = :stage, upload_status = :status, upload_time = NOW(),
+        SET stage = '待上传', upload_status = :status, upload_time = NULL,
             upload_result = :result, updated_at = NOW()
         WHERE id = :id AND tenant_id = :tid
     """), {
-        "stage": "已上传" if ok else "待上传",
-        "status": "已提交" if ok else "上传失败",
+        "status": "上传排队中" if ok else "上传失败",
         "result": _dumps(result),
         "id": request_id,
         "tid": current_user.tenant_id,
     })
     _add_log(db, current_user.tenant_id, request_id, current_user,
-             "上传成功" if ok else "上传失败", message[:1000])
+             "提交上传" if ok else "上传失败", message[:1000])
     db.commit()
-    return {"success": ok, "message": message, "data": result,
+    return {"success": ok, "message": message if not ok else f"{message}，已进入上传队列（上传排队中）",
+            "data": result,
             "item": _serialize(_load_row(db, current_user.tenant_id, request_id))}

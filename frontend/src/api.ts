@@ -1338,6 +1338,8 @@ export const productSelectionApi = {
     product_type?: string;
     site?: string;
     date_filter?: string;
+    start_date?: string;
+    end_date?: string;
     status?: string[];
     sort_by?: string;
     sort_order?: string;
@@ -1983,6 +1985,8 @@ export interface AIVideoTask {
   bound?: boolean;
   /** ComfyUI 任务 ID */
   h3_prompt_id: string;
+  /** 排队位置：前方还有几条任务（仅排队中任务，后端按 ComfyUI 实际队列计算附加） */
+  queue_ahead?: number | null;
   /** 生成总耗时（秒），未完成为 null */
   cost_seconds: number | null;
   error_message: string | null;
@@ -2021,6 +2025,8 @@ export interface VideoUpscaleTask {
   video_url?: string;
   /** 绑定状态：成片或源视频已通过审核绑定至产品（后端附加） */
   bound?: boolean;
+  /** 排队位置：前方还有几条任务（仅排队中任务，后端按 ComfyUI 实际队列计算附加） */
+  queue_ahead?: number | null;
   created_at: string;
   cost_seconds?: number | null;
 }
@@ -2167,6 +2173,10 @@ export interface MediaRequestItem {
   gen_task_id?: number | null;
   gen_time?: string | null;
   media_url?: string | null;
+  /** 成片类型：video=视频 / image=图片（已有素材提报时标记） */
+  media_type?: string | null;
+  /** 图片素材用途：主图 / 附图 / A+ */
+  media_style?: string | null;
   hd_status?: string | null;
   hd_task_id?: number | null;
   hd_url?: string | null;
@@ -2242,7 +2252,7 @@ export const mediaRequestApi = {
       "/media-requests/product-skus",
       { params },
     ),
-  /** 运营提报 */
+  /** 运营提报（待提交页签）；待绑定/待上传页签可传 media_url+media_kind 直接上传已有素材（落待绑定） */
   create: (data: {
     product_id: number;
     demand_types: string[];
@@ -2250,6 +2260,10 @@ export const mediaRequestApi = {
     prompt?: string;
     ref_images?: string[];
     platform_items: { pp_id: number; store_id: number }[];
+    media_url?: string;
+    media_kind?: 'video' | 'image';
+    /** 图片素材用途：主图 / 附图 / A+（写 Amazon 图片表「类型」字段） */
+    media_style?: string;
   }) => apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>("/media-requests", data),
   /** 待提交改需求描述/类型；待生成改提示词/参考图/参数 */
   update: (
@@ -2267,12 +2281,18 @@ export const mediaRequestApi = {
   /** 待提交 → 待审核 */
   submit: (id: number) =>
     apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/submit`),
+  /** 删除单据（软删，不可恢复）：待提交页签=「取消」，其余页签=「删除」，任意阶段可用 */
+  remove: (id: number) =>
+    apiClient.delete<{ success: boolean; message: string }>(`/media-requests/${id}`),
   /** 运营主管审核（通过时按需求类型拆单） */
   review: (id: number, data: { passed: boolean; reason?: string }) =>
     apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/review`, data),
   /** 美工点击生成：提交真实 AI 视频任务 */
   generate: (id: number) =>
     apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate`),
+  /** 图片类需求：待生成页直接提交 AI 生图（复用 AI生图 服务），完成后自动进入已生成 */
+  generateImage: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate-image`),
   /** 待生成页「AI 生成方案」：只生成 1 套方案并回填提示词（大模型耗时较长，单独放宽超时） */
   generatePlan: (id: number) =>
     apiClient.post<{ success: boolean; message: string; data: { prompt: string; plan: MediaPlan } }>(
@@ -2295,12 +2315,6 @@ export const mediaRequestApi = {
   /** 待绑定 → 提交绑定至产品申请（上传前门禁），审核通过后进入待上传 */
   bind: (id: number) =>
     apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/bind`),
-  /** AI图片需求：待生成页直接上传成片（图片地址），进入已生成审核 */
-  uploadMedia: (id: number, mediaUrl: string) =>
-    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(
-      `/media-requests/${id}/upload-media`,
-      { media_url: mediaUrl },
-    ),
   /** 待上传 → 真实调用 Amazon（飞书 RPA）/ Ozon（Seller API）上传 */
   upload: (id: number) =>
     apiClient.post<{ success: boolean; message: string; data?: Record<string, unknown>; item?: MediaRequestItem }>(
@@ -2547,6 +2561,12 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/video-tasks/${taskId}/cancel`,
     ),
+  /** 排队任务插队：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行 */
+  prioritizeVideoTask: (taskId: number, mode: "interrupt" | "wait") =>
+    apiClient.post<{ success: boolean; action: string; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/prioritize`,
+      { mode },
+    ),
   /** 智能重试失败的视频任务（原记录重试）：能接续 ComfyUI 就接续收片，
    *  否则服务端直接取历史参考图原位重新提交，无需前端取图 */
   recoverVideoTask: (taskId: number) =>
@@ -2584,6 +2604,12 @@ export const aiCreationApi = {
   cancelUpscaleTask: (taskId: number) =>
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/upscale-tasks/${taskId}/cancel`,
+    ),
+  /** 超分排队任务插队：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行 */
+  prioritizeUpscaleTask: (taskId: number, mode: "interrupt" | "wait") =>
+    apiClient.post<{ success: boolean; action: string; message: string }>(
+      `/ai-creation/upscale-tasks/${taskId}/prioritize`,
+      { mode },
     ),
   /** 重试失败的超分任务：在原记录上重置状态并重新入队 */
   retryUpscaleTask: (taskId: number) =>

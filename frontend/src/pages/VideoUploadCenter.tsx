@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Alert, Button, Card, Checkbox, Descriptions, Empty, Image, Input, Modal, Pagination, Popover, Select, Space, Spin,
-  Table, Tabs, Tag, Timeline, Tooltip, message,
+  Alert, Button, Card, Checkbox, Descriptions, Empty, Image, Input, Modal, Pagination, Popconfirm, Popover, Radio, Select, Slider, Space, Spin,
+  Table, Tabs, Tag, Timeline, Tooltip, Typography, message,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
@@ -31,18 +31,32 @@ const STAGES: MediaStage[] = ['待提交', '待审核', '待生成', '已生成'
 const STAGE_HINT: Record<MediaStage, string> = {
   待提交: '运营提报视频需求：选择产品与目标平台 SKU，填写需求类型与需求描述后提交。可在此阶段修改需求描述/需求类型。',
   待审核: '运营主管审核需求：通过后按需求类型拆成待生成子单（勾 N 个类型拆 N 条）；驳回退回待提交。',
-  待生成: '美工微调提示词、上传参考图（1~9 张）并设置时长/比例/分辨率，点击生成调用 AI 视频；生成完成后自动进入已生成。',
+  待生成: '美工微调提示词、上传参考图（1~9 张）并设置时长/比例/分辨率，点击生成调用 AI 视频；图片类需求点「生成」按需求类型直接生图，完成后自动进入已生成。',
   已生成: '美工审核成片内容：通过后进入待确认；不通过退回待生成，需重新生成。',
-  待确认: '运营二次审核内容：通过后进入待高清；驳回退回待生成重新生成。',
+  待确认: '运营二次审核内容：通过后进入待高清（图片类需求免高清，直接进入待绑定）；驳回退回待生成重新生成。',
   待高清: '强制高清门禁：成片必须先完成高清处理（Topaz 超分，档位可选）才能进入绑定；高清中自动等待，失败可重新提交。',
-  待绑定: '绑定门禁：提交「绑定至产品」申请，审核人直接在本页任务行上通过/拒绝；通过后视频写入产品并自动进入待上传。',
-  待上传: '已绑定产品后，按提报时选择的平台 SKU 上传：Amazon 写飞书多维表由 RPA 上传，Ozon 走 Seller API 直传（异步审核）。',
-  已上传: '流程结束：成片已提交至所属平台，可查看上传时间与上传结果。',
+  待绑定: '绑定门禁：提交「绑定至产品」申请，审核人直接在本页任务行上通过/拒绝；通过后视频写入产品并自动进入待上传。也可用「新增提报（已有素材）」直接上传已有视频/图片进入绑定。',
+  待上传: '已绑定产品后，按提报时选择的平台 SKU 上传：Amazon 写飞书多维表由 RPA 上传，Ozon 走 Seller API 直传（异步审核）。点「上传」后单据变为「上传排队中」（按钮置灰），RPA/平台完成上传后自动进入已上传。也可用「新增提报（已有素材）」上传已有素材（先走绑定审核）。',
+  已上传: '流程结束：RPA/平台完成上传后进入本页签，可查看上传时间与上传结果。',
 }
 
-const DEMAND_TYPES = ['口播带货视频', '产品展示视频', 'AI图片']
-const DEMAND_COLOR: Record<string, string> = { 口播带货视频: 'purple', 产品展示视频: 'blue', AI图片: 'gold' }
-const isImageDemand = (t?: string | null) => t === 'AI图片'
+// 图片类需求类型：与 AI 生图模块的类型清单对齐（白底/场景/特写/卖点/A+）
+const IMAGE_TYPES = ['白底图', '场景图（不带人物）', '场景图（带人物）', '特写图', '特写白底图', '卖点图', '高级A+图', '普通A+图', '手机A+图']
+const DEMAND_TYPES = ['口播带货视频', '产品展示视频', ...IMAGE_TYPES]
+const DEMAND_COLOR: Record<string, string> = {
+  口播带货视频: 'purple',
+  产品展示视频: 'blue',
+  白底图: 'gold',
+  '场景图（不带人物）': 'cyan',
+  '场景图（带人物）': 'geekblue',
+  特写图: 'orange',
+  特写白底图: 'volcano',
+  卖点图: 'lime',
+  '高级A+图': 'magenta',
+  '普通A+图': 'red',
+  '手机A+图': 'green',
+}
+const isImageDemand = (t?: string | null) => !!t && IMAGE_TYPES.includes(t)
 const RATIOS = ['9:16', '16:9', '1:1', '3:4']
 const RESOLUTIONS: { value: string; label: string }[] = [
   { value: '0.3', label: '0.3K 快速' },
@@ -60,6 +74,35 @@ const platformMeta = (p?: string | null) => {
   if (key === 'amazon') return { label: 'Amazon', color: 'orange' }
   return { label: p || '-', color: 'default' }
 }
+
+// 详情弹窗：值单元格不换行（超宽时弹窗内横向滚动）
+const NW = { whiteSpace: 'nowrap' } as React.CSSProperties
+const nwCell = () => ({ style: { whiteSpace: 'nowrap' as const } })
+
+// 弹窗统一：垂直居中，内容超高时在弹窗内部滚动（外部页面不滚动）
+const MODAL_BODY_STYLE = { maxHeight: 'calc(100vh - 240px)', overflowY: 'auto' as const }
+
+// ===== 高清放大弹窗（与 AI 创作中心「视频高清放大」同款逻辑） =====
+// 源视频分辨率按生成参数推算（H3 官方尺寸表 + 画面比例），处理后总像素不超过 2K
+const { Text } = Typography
+const HD_2K_PIXELS = 2560 * 1440
+const HD_H3_SIZE: Record<string, [number, number]> = {
+  '0.3': [736, 416], '0.5': [960, 544], '0.9': [1280, 736],
+}
+const hdSourceRes = (ratio?: string | null, resolution?: string | null): { w: number; h: number } => {
+  const base = HD_H3_SIZE[resolution || '0.5'] || HD_H3_SIZE['0.5']
+  if (!ratio || ratio === '16:9') return { w: base[0], h: base[1] }
+  if (ratio === '9:16') return { w: base[1], h: base[0] }
+  const rv = ratio === '1:1' ? 1 : ratio === '3:4' ? 3 / 4 : 9 / 16
+  const h = Math.max(32, Math.round(Math.sqrt((base[0] * base[1]) / rv) / 32) * 32)
+  const w = Math.max(32, Math.round((base[0] * base[1]) / h / 32) * 32)
+  return { w, h }
+}
+const hdMaxCard = (w: number, h: number) => Math.max(1, Math.floor(Math.min(4, Math.sqrt(HD_2K_PIXELS / (w * h))) * 20) / 20)
+const hdFormatMp = (w: number, h: number) => `${((w * h) / 1000000).toFixed(1)}MP`
+// 耗时估算（分钟，实测拟合）：耗时 ≈ 4.05 × 输出MP × 时长秒/5
+const hdCostMinutes = (w: number, h: number, scale: number, duration: number) =>
+  (((w * h) / 1000000) * scale * scale * 4.05 * duration) / 5
 
 const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ initialTab = 'tasks' }) => {
   const { hasPermission } = useAuth()
@@ -85,11 +128,9 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   const [detailLoading, setDetailLoading] = useState(false)
   const [logItem, setLogItem] = useState<MediaRequestItem | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
-  const [uploadResult, setUploadResult] = useState<{ open: boolean; message: string; data?: unknown }>({ open: false, message: '' })
   const [planLoadingId, setPlanLoadingId] = useState<number | null>(null)
-  // 待高清档位（每行独立记忆，默认 2.0x）
-  const [hdScales, setHdScales] = useState<Record<number, number>>({})
-  const hdScaleOf = (id: number) => hdScales[id] ?? 2
+  // 高清放大弹窗（单行 / 批量共用）
+  const [hdModal, setHdModal] = useState<{ ids: number[]; label: string; scale: number } | null>(null)
   const [planModal, setPlanModal] = useState<{ open: boolean; plan?: MediaPlan | null; item?: MediaRequestItem | null }>({ open: false })
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerLoading, setPickerLoading] = useState(false)
@@ -102,6 +143,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   // ===== 新增提报 =====
   const [createOpen, setCreateOpen] = useState(false)
   const [creating, setCreating] = useState(false)
+  // normal=待提交需求提报；media=待绑定/待上传页签上传已有素材（跳过生成/审核/高清，直接落待绑定）
+  const [createMode, setCreateMode] = useState<'normal' | 'media'>('normal')
+  const [extKind, setExtKind] = useState<'video' | 'image'>('video')
+  const [extStyle, setExtStyle] = useState<'主图' | '附图' | 'A+'>('附图')
+  const [extUrl, setExtUrl] = useState<string | undefined>()
   // 提报弹窗：按产品分组（展开选择具体店铺/SKU），选中项落到「待提交」后逐条填写需求
   const [skuGroups, setSkuGroups] = useState<ProductSkuGroup[]>([])
   const [skuTotal, setSkuTotal] = useState(0)
@@ -140,11 +186,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     load()
   }, [load])
 
-  // 有「生成中 / 高清中」单据时轮询，后台任务完成后会自动流转到下一阶段
+  // 有「排队中 / 生成中 / 高清中 / 上传排队中」单据时轮询，后台任务完成后会自动流转到下一阶段
   useEffect(() => {
-    const busy = items.some((i) => i.gen_status === '生成中' || i.hd_status === '高清中')
+    const busy = items.some((i) => i.gen_status === '排队中' || i.gen_status === '生成中' || i.hd_status === '高清中' || i.upload_status === '上传排队中' || i.upload_status === '上传中')
     if (!busy) return
-    const timer = setInterval(() => load(true), 5000)
+    const timer = setInterval(() => load(true), 600000)
     return () => clearInterval(timer)
   }, [items, load])
 
@@ -166,9 +212,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     }
   }, [skuKeyword, skuPlatform])
 
-  const openCreate = () => {
+  const openCreate = (mode: 'normal' | 'media' = 'normal') => {
+    setCreateMode(mode)
     setSkuKeyword(''); setSkuKeywordInput(''); setSkuPlatform(undefined)
     setSkuSelected({}); setSkuPage(1)
+    setExtKind('video'); setExtStyle('附图'); setExtUrl(undefined)
     setCreateOpen(true)
     loadSkus(1, '', undefined)
   }
@@ -214,6 +262,9 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   const handleCreate = async () => {
     const selected = Object.values(skuSelected)
     if (!selected.length) { message.warning('请先展开勾选要提报的店铺/SKU'); return }
+    // 已有素材模式：成片必传，多个产品共用同一素材各建一条单据
+    const isMedia = createMode === 'media'
+    if (isMedia && !extUrl) { message.warning('请先上传已有素材（视频或图片）'); return }
 
     // 按产品分组：同一产品的多个 SKU 合为一张提报单；需求在添加后逐条填写（提交前必填）
     const byProduct = new Map<number, ProductSkuEntry[]>()
@@ -232,6 +283,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
           await mediaRequestApi.create({
             product_id: pid,
             platform_items: entries.map((e) => ({ pp_id: e.pp_id, store_id: e.store_id })),
+            ...(isMedia ? { media_url: extUrl, media_kind: extKind, media_style: extKind === 'image' ? extStyle : undefined } : {}),
           })
           okCount += 1
         } catch {
@@ -239,11 +291,19 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         }
       }
       if (okCount) {
-        message.success(`已添加 ${okCount} 张提报单${failCount ? `，失败 ${failCount} 张` : ''}，请在「待提交」逐条填写需求后提交`)
-        setCreateOpen(false)
-        resetCreate()
-        setStage('待提交'); setPage(1)
-        load()
+        if (isMedia) {
+          message.success(`已创建 ${okCount} 张素材提报单${failCount ? `，失败 ${failCount} 张` : ''}，请提交绑定申请，审核通过后进入「待上传」`)
+          setCreateOpen(false)
+          resetCreate()
+          setStage('待绑定'); setPage(1)
+          load()
+        } else {
+          message.success(`已添加 ${okCount} 张提报单${failCount ? `，失败 ${failCount} 张` : ''}，请在「待提交」逐条填写需求后提交`)
+          setCreateOpen(false)
+          resetCreate()
+          setStage('待提交'); setPage(1)
+          load()
+        }
       } else {
         message.error('提报创建失败，请重试')
       }
@@ -262,6 +322,22 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     try {
       const r = await mediaRequestApi.submit(id)
       await refreshAfter(r.data?.message || '已提交至「待审核」')
+    } catch (e: any) { message.error(errText(e)) }
+  }
+
+  // 取消待提交单据（软删，不可恢复）
+  const doCancel = async (id: number) => {
+    try {
+      const r = await mediaRequestApi.remove(id)
+      await refreshAfter(r.data?.message || '已取消')
+    } catch (e: any) { message.error(errText(e)) }
+  }
+
+  // 删除任意阶段单据（软删，不可恢复）
+  const doDelete = async (id: number) => {
+    try {
+      const r = await mediaRequestApi.remove(id)
+      await refreshAfter(r.data?.message || '已删除')
     } catch (e: any) { message.error(errText(e)) }
   }
 
@@ -297,6 +373,14 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     } catch (e: any) { message.error(errText(e)) }
   }
 
+  // 图片类需求：任务中心内直接提交 AI 生图（按需求类型映射），完成后自动流转
+  const doGenerateImage = async (id: number) => {
+    try {
+      const r = await mediaRequestApi.generateImage(id)
+      await refreshAfter(r.data?.message || '已提交 AI 生图')
+    } catch (e: any) { message.error(errText(e)) }
+  }
+
   const doGenReview = async (id: number, passed: boolean, reason?: string) => {
     try {
       const r = await mediaRequestApi.genReview(id, { passed, reason })
@@ -311,11 +395,34 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     } catch (e: any) { message.error(errText(e)) }
   }
 
-  const doUpscale = async (id: number, scale?: number) => {
+  // 打开高清放大弹窗（单行 / 批量共用），确认后在弹窗内选倍数提交
+  const openHdModal = (ids: number[], label: string) => {
+    if (!ids.length) { message.warning('请先勾选要提交高清的单据'); return }
+    setHdModal({ ids, label, scale: 2 })
+  }
+
+  const submitHdModal = async () => {
+    if (!hdModal) return
+    setBatchLoading(true)
     try {
-      const r = await mediaRequestApi.upscale(id, scale)
-      await refreshAfter(r.data?.message || '已提交高清处理')
-    } catch (e: any) { message.error(errText(e)) }
+      if (hdModal.ids.length === 1) {
+        const r = await mediaRequestApi.upscale(hdModal.ids[0], hdModal.scale)
+        message.success(r.data?.message || '已提交高清处理，可随时查看进度')
+      } else {
+        let ok = 0
+        let fail = 0
+        for (const id of hdModal.ids) {
+          try { await mediaRequestApi.upscale(id, hdModal.scale); ok += 1 } catch { fail += 1 }
+        }
+        message.info(`批量高清提交完成：成功 ${ok} 条${fail ? `，失败 ${fail} 条` : ''}`)
+      }
+      setHdModal(null)
+      load()
+    } catch (e: any) {
+      message.error(errText(e))
+    } finally {
+      setBatchLoading(false)
+    }
   }
 
   const doBind = async (id: number) => {
@@ -336,45 +443,55 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   }
 
   const doUpload = async (id: number) => {
+    const target = items.find((i) => i.id === id)
+    const isImage = target?.media_type === 'image'
     Modal.confirm({
       title: '确认上传至所属平台？',
-      content: '将按提报时选择的平台 SKU 上传成片：Amazon 写入飞书多维表由 RPA 上传；Ozon 走 Seller API 直传（异步审核）。',
+      content: isImage
+        ? '将按提报时选择的 Amazon SKU 把图片写入图片上传多维表（SKU / 紫鸟账号 / 店铺 / 站点 / 图片 / 类型），单据变为「上传排队中」，影刀 RPA 完成后自动进入已上传。Ozon 图片上传暂未接入。'
+        : '将按提报时选择的平台 SKU 上传成片：Amazon 写入飞书多维表、Ozon 走 Seller API 直传。提交后单据变为「上传排队中」，RPA/平台完成后自动进入已上传。',
       okText: '开始上传',
       cancelText: '取消',
       onOk: async () => {
         try {
           const r = await mediaRequestApi.upload(id)
-          setUploadResult({ open: true, message: r.data?.message || '上传完成', data: r.data?.data })
+          message.success(r.data?.message || '上传完成', 5)
           await load(true)
         } catch (e: any) { message.error(errText(e)) }
       },
     })
   }
 
-  const runBatch = async (label: string, fn: (id: number) => Promise<void>) => {
-    if (!selectedRowKeys.length) return
+  const runBatch = async (label: string, fn: (id: number) => Promise<void>, ids?: React.Key[]) => {
+    const keys = ids ?? selectedRowKeys
+    if (!keys.length) return
     setBatchLoading(true)
     let ok = 0
     let fail = 0
-    for (const key of selectedRowKeys) {
+    const errs: string[] = []
+    for (const key of keys) {
       try {
         await fn(Number(key))
         ok += 1
-      } catch {
+      } catch (e: any) {
         fail += 1
+        errs.push(`单据 #${key}：${errText(e)}`)
       }
     }
     setBatchLoading(false)
     setSelectedRowKeys([])
     await load(true)
-    message[fail ? 'warning' : 'success'](`${label}完成：成功 ${ok} 条${fail ? `，失败 ${fail} 条` : ''}`)
+    const failNote = errs.slice(0, 3).join('；')
+    const text = `${label}完成：成功 ${ok} 条${fail ? `，失败 ${fail} 条${failNote ? `（${failNote}${errs.length > 3 ? ' 等' : ''}）` : ''}` : ''}`
+    // message 第二参数必须是数字秒数（传对象会导致提示常驻不消失）
+    message[fail ? 'warning' : 'success'](text, fail ? 8 : 3)
   }
 
   // ===== 行内编辑（待生成） =====
   const patch = async (id: number, data: Parameters<typeof mediaRequestApi.update>[1], ok = '已保存') => {
     try {
       await mediaRequestApi.update(id, data)
-      message.success(ok)
+      if (ok) message.success(ok)
       await load(true)
     } catch (e: any) { message.error(errText(e)) }
   }
@@ -480,18 +597,17 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, demand_types: types } : i)))
     try {
       await mediaRequestApi.update(item.id, { demand_types: types })
-      message.success('需求类型已保存')
     } catch (e: any) {
       message.error(errText(e))
       load(true)
     }
   }
 
-  // 行内保存需求描述（待提交）
+  // 行内保存需求描述（待提交）：静默保存，不打断填写
   const saveDesc = (item: MediaRequestItem, value: string) => {
     const next = value.trim()
     if (next === (item.description || '')) return
-    patch(item.id, { description: next }, '需求描述已保存')
+    patch(item.id, { description: next }, '')
   }
 
   const addRefImage = (item: MediaRequestItem, url: string) => {
@@ -547,7 +663,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         },
       },
       {
-        title: '商品', dataIndex: 'product_code', width: 268,
+        title: '商品', dataIndex: 'product_code', width: 230,
         render: (_, r) => (
           <Space size={8} align="start">
             {r.product_image
@@ -555,7 +671,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
               : <div style={{ width: 42, height: 42, borderRadius: 6, background: '#f5f5f5' }} />}
             <div style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 500 }}>{r.product_code}</div>
-              <div style={{ color: '#8c8c8c', fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.product_name}>
+              <div style={{ color: '#8c8c8c', fontSize: 12, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.product_name}>
                 {r.product_name}
               </div>
             </div>
@@ -563,7 +679,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         ),
       },
       {
-        title: '目标 SKU', dataIndex: 'platform_items', width: 230,
+        title: '目标 SKU', dataIndex: 'platform_items', width: 170,
         render: (_, r) => {
           const list = r.platform_items || []
           if (!list.length) return '-'
@@ -583,11 +699,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         },
       },
       {
-        title: '需求类型', dataIndex: 'demand_type', width: 160,
+        title: '需求类型', dataIndex: 'demand_type', width: 190,
         render: (_, r) => {
           const types = r.demand_type ? [r.demand_type] : (r.demand_types || [])
           if (stage === '待提交') {
-            // 行内下拉多选：勾选即保存，参考需求演示页交互
+            // 行内下拉多选：勾选即静默保存；已选类型直接展示在单元格内
             const sel = r.demand_types || []
             return (
               <Popover
@@ -596,17 +712,17 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
                 open={dtPopId === r.id}
                 onOpenChange={(o) => setDtPopId(o ? r.id : null)}
                 content={
-                  <div style={{ minWidth: 170 }}>
+                  <div style={{ minWidth: 240, maxHeight: 340, overflowY: 'auto' }}>
                     {DEMAND_TYPES.map((t) => (
                       <div
                         key={t}
                         onClick={() => saveDemands(r, sel.includes(t) ? sel.filter((x) => x !== t) : [...sel, t])}
-                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 6, cursor: 'pointer' }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
                         onMouseEnter={(e) => { e.currentTarget.style.background = '#f2f6ff' }}
                         onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
                       >
-                        <Checkbox checked={sel.includes(t)} />
-                        <Tag color={DEMAND_COLOR[t] || 'default'} style={{ margin: 0 }}>{t}</Tag>
+                        <Checkbox checked={sel.includes(t)} style={{ transform: 'scale(1.2)' }} />
+                        <Tag color={DEMAND_COLOR[t] || 'default'} style={{ margin: 0, fontSize: 12, lineHeight: '20px', padding: '0 8px' }}>{t}</Tag>
                       </div>
                     ))}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #f0f0f0', marginTop: 6, paddingTop: 6 }}>
@@ -616,16 +732,22 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
                   </div>
                 }
               >
-                <Button
-                  size="small"
-                  style={{ width: '100%', justifyContent: 'flex-start', maxWidth: 150, overflow: 'hidden' }}
-                  icon={<DownOutlined style={{ fontSize: 9, color: '#a8b0bd' }} />}
-                  iconPosition="end"
+                <div
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6, width: 172,
+                    minHeight: 30, padding: '2px 8px', background: '#fff',
+                    border: '1px solid #d9d9d9', borderRadius: 6, cursor: 'pointer',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#1677ff' }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#d9d9d9' }}
                 >
-                  {sel.length
-                    ? <span>{sel.map((t) => <Tag key={t} color={DEMAND_COLOR[t] || 'default'} style={{ margin: '0 3px 0 0' }}>{t}</Tag>)}</span>
-                    : <span style={{ color: '#b7bec9' }}>请选择需求类型</span>}
-                </Button>
+                  <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: 3, overflow: 'hidden' }}>
+                    {sel.length
+                      ? sel.map((t) => <Tag key={t} color={DEMAND_COLOR[t] || 'default'} style={{ margin: 0, fontSize: 12, lineHeight: '20px', padding: '0 8px' }}>{t}</Tag>)
+                      : <span style={{ color: '#b7bec9', fontSize: 12 }}>请选择需求类型</span>}
+                  </div>
+                  <DownOutlined style={{ fontSize: 10, color: '#a8b0bd' }} />
+                </div>
               </Popover>
             )
           }
@@ -635,7 +757,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         },
       },
       {
-        title: '需求描述', dataIndex: 'description', width: 240,
+        title: '需求描述', dataIndex: 'description', width: 200,
         render: (_, r) => stage === '待提交'
           ? (
             <Input.TextArea
@@ -643,7 +765,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
               defaultValue={r.description || ''}
               placeholder="请填写需求描述（提交前必填）"
               autoSize={{ minRows: 2, maxRows: 4 }}
-              style={{ width: 220, fontSize: 12 }}
+              style={{ width: 180, fontSize: 12 }}
               onBlur={(e) => saveDesc(r, e.target.value)}
             />
           )
@@ -764,56 +886,19 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       })
     }
 
-    // 待提交：参考图同样行内编辑（本地上传 / 从产品图选择 / 删除）
-    if (stage === '待提交') {
-      base.push({
-        title: '参考图', dataIndex: 'ref_images', width: 190,
-        render: (_, r) => (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 180 }}>
-              {(r.ref_images || []).map((url) => (
-                <div key={url} style={{ position: 'relative' }}>
-                  <Image src={url} width={34} height={34} style={{ objectFit: 'cover', borderRadius: 4 }} />
-                  <Button
-                    size="small" type="text" danger icon={<DeleteOutlined />}
-                    style={{ position: 'absolute', top: -8, right: -10, width: 18, height: 18 }}
-                    onClick={() => removeRefImage(r, url)}
-                  />
-                </div>
-              ))}
-              {(r.ref_images || []).length < 9 && (
-                <TosUpload
-                  key={`${r.id}-${(r.ref_images || []).length}`}
-                  type="image"
-                  placeholder="+ 参考图"
-                  onChange={(url) => addRefImage(r, url || '')}
-                />
-              )}
-              {!(r.ref_images || []).length && <span style={{ color: '#bfbfbf' }}>未上传（选填）</span>}
-            </div>
-            <Button
-              size="small" type="link" icon={<PictureOutlined />} style={{ paddingInline: 0 }}
-              onClick={() => openProductPicker(r.product_id, r)}
-            >
-              从产品图选择
-            </Button>
-          </div>
-        ),
-      })
-    }
+    // 参考图由美工在「待生成」阶段上传（主管审核后），待提交不显示参考图列
 
     if (stage === '待生成') {
       base.push({
         title: '生成状态', dataIndex: 'gen_status', width: 110,
         render: (_, r) => {
-          if (isImageDemand(r.demand_type)) {
-            return r.media_url ? <Tag color="success">已上传成片</Tag> : <Tag>待上传成片</Tag>
-          }
-          return r.gen_status === '生成中'
-            ? <Tag color="processing">生成中</Tag>
-            : r.gen_status === '失败'
-              ? <Tag color="error">生成失败</Tag>
-              : r.media_url ? <Tag color="success">已生成</Tag> : <Tag>未生成</Tag>
+          return r.gen_status === '排队中'
+            ? <Tag color="cyan">排队中</Tag>
+            : r.gen_status === '生成中'
+              ? <Tag color="processing">生成中</Tag>
+              : r.gen_status === '失败'
+                ? <Tag color="error">生成失败</Tag>
+                : r.media_url ? <Tag color="success">已生成</Tag> : <Tag>未生成</Tag>
         },
       })
     }
@@ -848,10 +933,14 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
 
     if (['待绑定', '待上传', '已上传'].includes(stage)) {
       base.push({
-        title: '高清成片', dataIndex: 'hd_url', width: 100,
-        render: (_, r) => r.hd_url
-          ? <Button size="small" type="link" icon={<VideoCameraOutlined />} onClick={() => setVideoUrl(r.hd_url!)}>查看</Button>
-          : <span style={{ color: '#bfbfbf' }}>{stage === '待绑定' ? '未高清' : '—'}</span>,
+        title: '成片', dataIndex: 'hd_url', width: 100,
+        render: (_, r) => r.media_type === 'image' || isImageDemand(r.demand_type)
+          ? (r.media_url
+            ? <Image src={r.media_url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 6 }} />
+            : <span style={{ color: '#bfbfbf' }}>—</span>)
+          : r.hd_url
+            ? <Button size="small" type="link" icon={<VideoCameraOutlined />} onClick={() => setVideoUrl(r.hd_url!)}>查看</Button>
+            : <span style={{ color: '#bfbfbf' }}>{stage === '待绑定' ? '未高清' : '—'}</span>,
       })
     }
 
@@ -866,10 +955,14 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       })
     }
 
-    if (stage === '待上传') {
+    if (stage === '待上传' || stage === '已上传') {
       base.push({
         title: '上传状态', dataIndex: 'upload_status', width: 110,
-        render: (v) => v === '上传失败' ? <Tag color="error">上传失败</Tag> : v ? <Tag color="success">{v}</Tag> : <Tag>待上传</Tag>,
+        render: (v) => v === '上传失败'
+          ? <Tag color="error">上传失败</Tag>
+          : v === '上传排队中' || v === '上传中'
+            ? <Tag color="processing">{v}</Tag>
+            : v ? <Tag color="success">{v}</Tag> : <Tag>待上传</Tag>,
       })
       base.push({ title: '上传时间', dataIndex: 'upload_time', width: 150, render: (v) => v || '-' })
     }
@@ -878,40 +971,39 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     }
 
     base.push({
-      title: '操作', key: 'ops', width: 230, fixed: 'right',
+      title: '操作', key: 'ops', width: stage === '待提交' ? 224 : 264, fixed: 'right',
       render: (_, r) => {
         const btns: React.ReactNode[] = []
         if (stage === '待提交' && canReport) {
           btns.push(<Button key="submit" size="small" type="primary" icon={<SendOutlined />} onClick={() => doSubmit(r.id)}>提交</Button>)
+          btns.push(
+            <Popconfirm key="cancel" title="取消这条提报？" description="取消后单据将被删除，不可恢复" okText="取消单据" cancelText="返回"
+              okButtonProps={{ danger: true }} onConfirm={() => doCancel(r.id)}>
+              <Button key="cancel" size="small" danger>取消</Button>
+            </Popconfirm>,
+          )
         }
         if (stage === '待审核' && canReview) {
           btns.push(<Button key="pass" size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => doReview(r.id, true)}>通过</Button>)
           btns.push(<Button key="reject" size="small" danger onClick={() => askReason('驳回需求（退回待提交）', (reason) => doReview(r.id, false, reason))}>驳回</Button>)
         }
         if (stage === '待生成' && canWork) {
-          if (isImageDemand(r.demand_type)) {
-            // AI图片：美工在 AI生图 完成后直接上传成片（图片），进入已生成审核
-            btns.push(
-              <TosUpload
-                key={`upmedia-${r.id}-${r.media_url ? 1 : 0}`}
-                type="image"
-                placeholder={r.media_url ? '重新上传成片' : '上传成片'}
-                onChange={(url) => {
-                  if (!url) return
-                  mediaRequestApi.uploadMedia(r.id, url)
-                    .then(async (res) => { await refreshAfter(res.data?.message || '成片已上传') })
-                    .catch((e: any) => message.error(errText(e)))
-                }}
-              />,
-            )
-          } else {
-            const generating = r.gen_status === '生成中'
-            btns.push(
-              <Button key="gen" size="small" type="primary" icon={<ThunderboltOutlined />} loading={generating} disabled={generating} onClick={() => doGenerate(r.id)}>
-                {generating ? '生成中…' : r.gen_status === '失败' ? '重新生成' : '生成'}
-              </Button>,
-            )
-          }
+          // 图片类 / 视频类统一用「生成」按钮：图片走 AI生图，视频走 AI视频
+          const busy = r.gen_status === '生成中' || r.gen_status === '排队中'
+          const isImg = isImageDemand(r.demand_type)
+          btns.push(
+            <Tooltip
+              key="gen"
+              title={isImg ? '按需求类型 + 参考图调用 AI 生图，完成后自动进入「已生成」' : undefined}
+            >
+              <Button
+                size="small" type="primary" icon={<ThunderboltOutlined />}
+                loading={busy} disabled={busy} onClick={() => (isImg ? doGenerateImage(r.id) : doGenerate(r.id))}
+              >
+                {r.gen_status === '排队中' ? '排队中…' : busy ? '生成中…' : r.gen_status === '失败' ? '重新生成' : '生成'}
+              </Button>
+            </Tooltip>,
+          )
         }
         if (stage === '已生成' && canWork) {
           btns.push(<Button key="pass" size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => doGenReview(r.id, true)}>通过</Button>)
@@ -924,15 +1016,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         if (stage === '待高清' && canWork) {
           const hdBusy = r.hd_status === '高清中'
           btns.push(
-            <Select
-              key="hdscale" size="small" style={{ width: 72 }} value={hdScaleOf(r.id)} disabled={hdBusy}
-              options={[1.5, 2, 3, 4].map((v) => ({ value: v, label: `${v}x` }))}
-              onChange={(v) => setHdScales((p) => ({ ...p, [r.id]: v }))}
-            />,
             <Tooltip key="hd" title={r.media_url ? '' : '缺少成片地址，无法提交高清'}>
               <Button
                 size="small" type="primary" icon={<ThunderboltOutlined />}
-                loading={hdBusy} disabled={hdBusy || !r.media_url} onClick={() => doUpscale(r.id, hdScaleOf(r.id))}
+                loading={hdBusy} disabled={hdBusy || !r.media_url}
+                onClick={() => openHdModal([r.id], r.product_name || `单据 #${r.id}`)}
               >
                 {hdBusy ? '高清中…' : r.hd_status === '失败' ? '重新高清' : '提交高清'}
               </Button>
@@ -946,11 +1034,12 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
             btns.push(<Button key="pass" size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => doBindReview(r.binding_request_id!, true)}>通过</Button>)
             btns.push(<Button key="reject" size="small" danger onClick={() => askReason('拒绝绑定申请（可修改后重新提交）', (reason) => doBindReview(r.binding_request_id!, false, reason))}>拒绝</Button>)
           } else {
+            const bindable = r.media_type === 'image' ? !!r.media_url : !!r.hd_url
             btns.push(
-              <Tooltip key="bind" title={r.hd_url ? '' : '请先完成高清，再提交绑定申请'}>
+              <Tooltip key="bind" title={bindable ? '' : r.media_type === 'image' ? '缺少素材图片地址' : '请先完成高清，再提交绑定申请'}>
                 <Button
                   size="small" type="primary" icon={<CheckCircleOutlined />}
-                  disabled={binding || !r.hd_url} onClick={() => doBind(r.id)}
+                  disabled={binding || !bindable} onClick={() => doBind(r.id)}
                 >
                   {binding ? '审核中…' : r.bind_status === '已拒绝' ? '重新提交绑定' : '提交绑定'}
                 </Button>
@@ -960,24 +1049,42 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         }
         if (stage === '待上传' && canUpload) {
           const bound = r.bind_status === '已通过'
+          const queued = r.upload_status === '上传排队中'
+          const running = r.upload_status === '上传中'
           btns.push(
-            <Tooltip key="upload" title={bound ? '' : '视频未通过绑定审核，不能上传'}>
+            <Tooltip key="upload" title={queued ? '已提交上传、排队等待 RPA 处理' : running ? 'RPA 正在上传中，完成后自动进入已上传' : bound ? '' : '视频未通过绑定审核，不能上传'}>
               <Button
                 size="small" type="primary" icon={<CloudUploadOutlined />}
-                disabled={!bound} onClick={() => doUpload(r.id)}
+                disabled={!bound || queued || running} onClick={() => doUpload(r.id)}
               >
-                {r.upload_status === '上传失败' ? '重新上传' : '上传'}
+                {queued ? '排队中…' : running ? '上传中…' : r.upload_status === '上传失败' ? '重新上传' : '上传'}
               </Button>
             </Tooltip>,
           )
         }
         btns.push(<Button key="log" size="small" icon={<EyeOutlined />} onClick={() => openLog(r.id)}>日志</Button>)
         btns.push(<Button key="detail" size="small" onClick={() => openDetail(r.id)}>详情</Button>)
-        return <Space size={4} wrap>{btns}</Space>
+        if (stage !== '待提交') {
+          // 待提交已有「取消」（同为软删）；其余页签统一提供「删除」
+          btns.push(
+            <Popconfirm key="del" title="删除这条单据？" description="删除后单据不可恢复" okText="删除" cancelText="返回"
+              okButtonProps={{ danger: true }} onConfirm={() => doDelete(r.id)}>
+              <Button size="small" danger>删除</Button>
+            </Popconfirm>,
+          )
+        }
+        return <Space size={4}>{btns}</Space>
       },
     })
 
-    return base
+    // 所有列名列头与单元格内容统一居中；操作列减小内边距保证按钮完整
+    return base.map((col) => ({
+      ...col,
+      onHeaderCell: () => ({ style: { textAlign: 'center' as const } }),
+      onCell: col.key === 'ops'
+        ? () => ({ style: { textAlign: 'center' as const, padding: '4px 6px' } })
+        : () => ({ style: { textAlign: 'center' as const } }),
+    }))
   })()
 
   // ===== 批量按钮 =====
@@ -995,7 +1102,23 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       })
     }
     if (stage === '待生成' && canWork) {
-      list.push({ label: '批量生成', type: 'primary', onClick: () => runBatch('批量生成', async (id) => { await mediaRequestApi.generate(id) }) })
+      list.push({
+        label: '批量生成', type: 'primary',
+        onClick: () => {
+          // 排队中 / 生成中的单据自动跳过（后端也会拦截重复提交，前端直接跳过避免误报失败）
+          const sel = items.filter((i) => selectedRowKeys.includes(i.id))
+          const busy = sel.filter((i) => i.gen_status === '生成中' || i.gen_status === '排队中')
+          const ids = sel.filter((i) => i.gen_status !== '生成中' && i.gen_status !== '排队中').map((i) => i.id)
+          if (!ids.length) { message.warning('所选单据全部正在生成/排队中，无需重复提交'); return }
+          if (busy.length) message.info(`已自动跳过 ${busy.length} 条生成中/排队中的单据`)
+          runBatch('批量生成', async (id) => {
+            // 图片类走 AI 生图（不要求视频提示词），视频类走 AI 视频
+            const row = items.find((i) => i.id === id)
+            if (row && isImageDemand(row.demand_type)) await mediaRequestApi.generateImage(id)
+            else await mediaRequestApi.generate(id)
+          }, ids)
+        },
+      })
     }
     if (stage === '已生成' && canWork) {
       list.push({ label: '批量通过', type: 'primary', onClick: () => runBatch('批量成片审核通过', async (id) => { await mediaRequestApi.genReview(id, { passed: true }) }) })
@@ -1012,7 +1135,13 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       })
     }
     if (stage === '待高清' && canWork) {
-      list.push({ label: '批量高清', type: 'primary', onClick: () => runBatch('批量提交高清', async (id) => { await mediaRequestApi.upscale(id, hdScaleOf(id)) }) })
+      list.push({
+        label: '批量高清', type: 'primary',
+        onClick: () => openHdModal(
+          items.filter((i) => selectedRowKeys.includes(i.id)).map((i) => i.id),
+          `${selectedRowKeys.length} 条单据`,
+        ),
+      })
     }
     if (stage === '待绑定' && canWork) {
       list.push({ label: '批量提交绑定', type: 'primary', onClick: () => runBatch('批量提交绑定', async (id) => { await mediaRequestApi.bind(id) }) })
@@ -1039,7 +1168,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       list.push({ label: '批量上传', type: 'primary', onClick: () => runBatch('批量上传', async (id) => { const r = await mediaRequestApi.upload(id); if (r.data?.success === false) throw new Error(r.data?.message) }) })
     }
     return list
-  }, [stage, selectedRowKeys, canReport, canReview, canWork, canUpload, load, hdScales, items])
+  }, [stage, selectedRowKeys, canReport, canReview, canWork, canUpload, load, items])
 
   if (!canReport && !canReview && !canWork) {
     return (
@@ -1070,9 +1199,16 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 12 }}>
           {stage === '待提交' && canReport && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate('normal')}>
               新增提报
             </Button>
+          )}
+          {(stage === '待绑定' || stage === '待上传') && canReport && (
+            <Tooltip title="上传已有的视频/图片素材，跳过生成与高清，直接提交绑定审核">
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate('media')}>
+                新增提报（已有素材）
+              </Button>
+            </Tooltip>
           )}
           {batchActions.map((b) => (
             <Button key={b.label} type={b.type} danger={b.danger} loading={batchLoading} onClick={b.onClick}>{b.label}</Button>
@@ -1111,7 +1247,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
           loading={loading}
           columns={columns}
           dataSource={items}
-          scroll={{ x: 2296 }}
+          scroll={{ x: stage === '待提交' ? 1964 : 2194 }}
           rowSelection={stage === '已上传' ? undefined : {
             selectedRowKeys,
             onChange: setSelectedRowKeys,
@@ -1138,8 +1274,8 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       {/* ===== 新增提报（按产品分组，展开勾选店铺/SKU；需求添加后逐条填写） ===== */}
       <Modal
         open={createOpen}
-        title={<span>添加商品<span style={{ color: '#8c8c8c', fontSize: 12, fontWeight: 400, marginLeft: 10 }}>展开产品勾选店铺/SKU 加入「待提交」；需求在添加后逐条填写</span></span>}
-        width={1000}
+        title={<span>{createMode === 'media' ? '新增提报（已有素材）' : '添加商品'}<span style={{ color: '#8c8c8c', fontSize: 12, fontWeight: 400, marginLeft: 10 }}>{createMode === 'media' ? '上传已有视频/图片，勾选产品与店铺/SKU 后直接进入「待绑定」' : '展开产品勾选店铺/SKU 加入「待提交」；需求在添加后逐条填写'}</span></span>}
+        width={1000} centered bodyStyle={MODAL_BODY_STYLE}
         okText="确认添加"
         cancelText="取消"
         confirmLoading={creating}
@@ -1274,17 +1410,51 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
             showSizeChanger={false} onChange={(p) => loadSkus(p, skuKeyword, skuPlatform, true)}
           />
         </div>
+
+        {createMode === 'media' && (
+          <div style={{ marginTop: 16, border: '1px solid #f0f0f0', borderRadius: 8, padding: '12px 16px' }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>已有素材（必传）</div>
+            <Space align="center" style={{ marginBottom: 8 }} wrap>
+              <Radio.Group
+                size="small" value={extKind}
+                onChange={(e) => { setExtKind(e.target.value); setExtUrl(undefined) }}
+              >
+                <Radio.Button value="video">视频</Radio.Button>
+                <Radio.Button value="image">图片</Radio.Button>
+              </Radio.Group>
+              {extKind === 'image' && (
+                <Radio.Group
+                  size="small" value={extStyle}
+                  onChange={(e) => setExtStyle(e.target.value)}
+                  options={[
+                    { value: '主图', label: '主图' },
+                    { value: '附图', label: '附图' },
+                    { value: 'A+', label: 'A+' },
+                  ]}
+                  optionType="button"
+                />
+              )}
+              <span style={{ color: '#8c8c8c', fontSize: 12 }}>
+                创建后直接进入「待绑定」，提交绑定申请审核通过后进入「待上传」
+              </span>
+            </Space>
+            <TosUpload type={extKind} value={extUrl} onChange={(v) => setExtUrl(v)} />
+          </div>
+        )}
       </Modal>
 
       {/* ===== 日志 ===== */}
-      <Modal open={!!logItem} title={`操作日志${logItem ? ` · 单据 ${logItem.seq}` : ''}`} footer={null} width={620} onCancel={() => setLogItem(null)}>
+      <Modal open={!!logItem} title={`操作日志${logItem ? ` · 单据 ${logItem.seq}` : ''}`} footer={null} width={620} centered bodyStyle={MODAL_BODY_STYLE} onCancel={() => setLogItem(null)}>
         {logItem?.logs?.length
           ? (
             <Timeline
+              style={{ paddingTop: 8 }}
               items={logItem.logs.map((l) => ({
                 children: (
                   <div>
-                    <div style={{ color: '#8c8c8c', fontSize: 12 }}>{l.created_at} · {l.actor_name}</div>
+                    <div style={{ color: '#8c8c8c', fontSize: 12 }}>
+                      {l.created_at} · 操作人：<span style={{ color: '#1677ff', fontWeight: 600 }}>{l.actor_name || '系统'}</span>
+                    </div>
                     <div style={{ fontWeight: 600 }}>{l.action}</div>
                     <div style={{ color: '#595959', fontSize: 12 }}>{l.note}</div>
                   </div>
@@ -1300,38 +1470,54 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         open={!!detailItem || detailLoading}
         title={`单据详情${detailItem ? ` · ${detailItem.seq}` : ''}`}
         footer={null}
-        width={860}
+        width={1040} centered bodyStyle={MODAL_BODY_STYLE}
         onCancel={() => setDetailItem(null)}
       >
         {detailLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>}
         {detailItem && (
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            <Descriptions size="small" column={2} bordered>
-              <Descriptions.Item label="单据关联号">{detailItem.seq}</Descriptions.Item>
-              <Descriptions.Item label="当前阶段"><Tag color="blue">{detailItem.stage}</Tag></Descriptions.Item>
-              <Descriptions.Item label="产品编码">{detailItem.product_code}</Descriptions.Item>
-              <Descriptions.Item label="产品名称">{detailItem.product_name}</Descriptions.Item>
-              <Descriptions.Item label="运营">{detailItem.submitter_name || '-'}</Descriptions.Item>
-              <Descriptions.Item label="提交时间">{detailItem.submit_time || '-'}</Descriptions.Item>
-              <Descriptions.Item label="需求类型" span={2}>
-                {(detailItem.demand_type ? [detailItem.demand_type] : detailItem.demand_types).map((t) => <Tag key={t} color={DEMAND_COLOR[t]}>{t}</Tag>)}
-              </Descriptions.Item>
-              <Descriptions.Item label="需求描述" span={2}>{detailItem.description || '—'}</Descriptions.Item>
-              <Descriptions.Item label="提示词" span={2}>{detailItem.prompt || '—'}</Descriptions.Item>
-              <Descriptions.Item label="视频参数" span={2}>
-                {detailItem.ratio} · {detailItem.duration}s · {RESOLUTIONS.find((o) => o.value === detailItem.resolution)?.label || detailItem.resolution}
-              </Descriptions.Item>
-              <Descriptions.Item label="生成时间">{detailItem.gen_time || '-'}</Descriptions.Item>
-              <Descriptions.Item label="上传时间">{detailItem.upload_time || '-'}</Descriptions.Item>
-              <Descriptions.Item label="高清状态">
-                {detailItem.hd_status === '高清中' ? '高清中' : detailItem.hd_status === '失败' ? '高清失败' : detailItem.hd_url ? '已完成' : '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="高清时间">{detailItem.hd_time || '-'}</Descriptions.Item>
-              <Descriptions.Item label="绑定状态">
-                {detailItem.bind_status === '审核中' ? '审核中' : detailItem.bind_status === '已通过' ? '已通过' : detailItem.bind_status === '已拒绝' ? '已拒绝' : '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="绑定申请">{detailItem.binding_request_id ? `#${detailItem.binding_request_id}` : '-'}</Descriptions.Item>
-            </Descriptions>
+            <div style={{ overflowX: 'auto' }}>
+              <Descriptions size="small" column={2} bordered labelStyle={{ width: 96, whiteSpace: 'nowrap' }}>
+                <Descriptions.Item label="单据关联号" contentStyle={NW}>{detailItem.seq}</Descriptions.Item>
+                <Descriptions.Item label="当前阶段" contentStyle={NW}><Tag color="blue">{detailItem.stage}</Tag></Descriptions.Item>
+                <Descriptions.Item label="产品编码" contentStyle={NW}>{detailItem.product_code}</Descriptions.Item>
+                <Descriptions.Item label="产品名称" contentStyle={NW}>{detailItem.product_name}</Descriptions.Item>
+                <Descriptions.Item label="运营" contentStyle={NW}>{detailItem.submitter_name || '-'}</Descriptions.Item>
+                <Descriptions.Item label="提交时间" contentStyle={NW}>{detailItem.submit_time || '-'}</Descriptions.Item>
+                <Descriptions.Item label="需求类型" span={2} contentStyle={NW}>
+                  {(detailItem.demand_type ? [detailItem.demand_type] : detailItem.demand_types).map((t) => <Tag key={t} color={DEMAND_COLOR[t]}>{t}</Tag>)}
+                </Descriptions.Item>
+                <Descriptions.Item label="需求描述" span={2}>{detailItem.description || '—'}</Descriptions.Item>
+                <Descriptions.Item label="提示词" span={2}>{detailItem.prompt || '—'}</Descriptions.Item>
+                {/* 视频参数在审核拆单后才生效；已有素材单显示素材信息；未选需求类型 / 图片类不显示 */}
+                <Descriptions.Item label="视频参数" span={2} contentStyle={NW}>
+                  {detailItem.media_type === 'image'
+                    ? `已有图片素材${detailItem.media_style ? `（${detailItem.media_style}）` : ''}`
+                    : detailItem.media_type === 'video'
+                      ? '已有视频素材'
+                      : detailItem.demand_type && !isImageDemand(detailItem.demand_type)
+                        ? `${detailItem.ratio} · ${detailItem.duration}s · ${RESOLUTIONS.find((o) => o.value === detailItem.resolution)?.label || detailItem.resolution}`
+                        : '—'}
+                </Descriptions.Item>
+                <Descriptions.Item label="生成时间" contentStyle={NW}>{detailItem.gen_time || '-'}</Descriptions.Item>
+                {(detailItem.upload_status || detailItem.upload_time) && (
+                  <Descriptions.Item label="上传状态" contentStyle={NW}>
+                    <Tag color={detailItem.upload_status === '上传失败' ? 'error' : ['上传排队中', '上传中'].includes(detailItem.upload_status || '') ? 'processing' : 'success'}>
+                      {detailItem.upload_status || '已完成'}
+                    </Tag>
+                  </Descriptions.Item>
+                )}
+                <Descriptions.Item label="上传时间" contentStyle={NW}>{detailItem.upload_time || '-'}</Descriptions.Item>
+                <Descriptions.Item label="高清状态" contentStyle={NW}>
+                  {detailItem.hd_status === '高清中' ? '高清中' : detailItem.hd_status === '失败' ? '高清失败' : detailItem.hd_url ? '已完成' : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="高清时间" contentStyle={NW}>{detailItem.hd_time || '-'}</Descriptions.Item>
+                <Descriptions.Item label="绑定状态" contentStyle={NW}>
+                  {detailItem.bind_status === '审核中' ? '审核中' : detailItem.bind_status === '已通过' ? '已通过' : detailItem.bind_status === '已拒绝' ? '已拒绝' : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="绑定申请" contentStyle={NW}>{detailItem.binding_request_id ? `#${detailItem.binding_request_id}` : '-'}</Descriptions.Item>
+              </Descriptions>
+            </div>
 
             {detailItem.plan && (
               <div>
@@ -1354,12 +1540,13 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
               <Table
                 size="small" rowKey={(r) => `${r.pp_id}_${r.store_id}`} pagination={false}
                 dataSource={detailItem.platform_items || []}
+                scroll={{ x: 'max-content' }}
                 columns={[
-                  { title: '平台', dataIndex: 'platform', width: 90, render: (v) => <Tag color={platformMeta(v).color}>{platformMeta(v).label}</Tag> },
-                  { title: '店铺', dataIndex: 'store_name', width: 160 },
-                  { title: '站点', dataIndex: 'site', width: 100 },
-                  { title: 'SKU / 货号', dataIndex: 'sku', width: 200 },
-                  { title: 'ASIN', dataIndex: 'asin', render: (v) => v || '-' },
+                  { title: '平台', dataIndex: 'platform', onCell: nwCell, render: (v) => <Tag color={platformMeta(v).color}>{platformMeta(v).label}</Tag> },
+                  { title: '店铺', dataIndex: 'store_name', onCell: nwCell },
+                  { title: '站点', dataIndex: 'site', onCell: nwCell },
+                  { title: 'SKU / 货号', dataIndex: 'sku', onCell: nwCell },
+                  { title: 'ASIN', dataIndex: 'asin', onCell: nwCell, render: (v) => v || '-' },
                 ]}
               />
             </div>
@@ -1400,7 +1587,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       </Modal>
 
       {/* ===== 成片预览（视频 / AI图片） ===== */}
-      <Modal open={!!videoUrl} footer={null} width={720} onCancel={() => setVideoUrl(null)} destroyOnClose>
+      <Modal open={!!videoUrl} footer={null} width={720} centered bodyStyle={MODAL_BODY_STYLE} destroyOnClose onCancel={() => setVideoUrl(null)} destroyOnClose>
         {videoUrl && (
           /\.(jpg|jpeg|png|gif|webp|bmp)(\?|$)/i.test(videoUrl)
             ? <Image src={videoUrl} width="100%" style={{ borderRadius: 8 }} />
@@ -1408,28 +1595,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         )}
       </Modal>
 
-      {/* ===== 上传结果 ===== */}
-      <Modal
-        open={uploadResult.open}
-        title="上传结果"
-        width={720}
-        onCancel={() => setUploadResult({ open: false, message: '' })}
-        footer={<Button type="primary" onClick={() => setUploadResult({ open: false, message: '' })}>知道了</Button>}
-      >
-        <Alert
-          type={uploadResult.message.includes('失败') ? 'error' : 'success'}
-          showIcon message={uploadResult.message} style={{ marginBottom: 12 }}
-        />
-        <pre style={{ background: '#fafafa', border: '1px solid #f0f0f0', borderRadius: 6, padding: 10, maxHeight: 360, overflow: 'auto', fontSize: 12 }}>
-          {JSON.stringify(uploadResult.data || {}, null, 2)}
-        </pre>
-      </Modal>
-
       {/* ===== 视频方案 ===== */}
       <Modal
         open={planModal.open}
         title={`视频方案${planModal.plan ? ` · ${planModal.plan.concept_title}` : ''}`}
-        width={860}
+        width={860} centered bodyStyle={MODAL_BODY_STYLE}
         footer={null}
         onCancel={() => setPlanModal({ open: false })}
       >
@@ -1473,11 +1643,60 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         ) : <Empty description="暂无方案" />}
       </Modal>
 
+      {/* ===== 高清放大（待高清 → Topaz 超分）：与 AI 创作中心「视频高清放大」同款 ===== */}
+      <Modal
+        open={!!hdModal}
+        title="视频高清放大"
+        okText="提交任务"
+        cancelText="取消"
+        centered
+        width={480}
+        confirmLoading={batchLoading}
+        onOk={submitHdModal}
+        onCancel={() => setHdModal(null)}
+      >
+        {hdModal && (() => {
+          const row = hdModal.ids.length === 1 ? items.find((i) => i.id === hdModal.ids[0]) : null
+          const res = row ? hdSourceRes(row.ratio, row.resolution) : null
+          const maxCard = res ? hdMaxCard(res.w, res.h) : 4
+          return (
+            <>
+              <div style={{ marginBottom: 12 }}><Text strong>品名：</Text><Text>{hdModal.label}</Text></div>
+              {res ? (
+                <div style={{ marginBottom: 8 }}>
+                  <Text strong>当前分辨率：</Text>
+                  <Text>{res.w}×{res.h}（{hdFormatMp(res.w, res.h)}）</Text>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 8 }}><Text type="secondary">批量提交：按各单据成片参数分别计算</Text></div>
+              )}
+              <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: '12px 16px 8px' }}>
+                <div style={{ marginBottom: 2 }}>
+                  <Text strong style={{ fontSize: 13 }}>放大倍数</Text>
+                  <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>最高不超过 2K 画质（自动限制）</Text>
+                </div>
+                <Slider
+                  min={1} max={maxCard} step={0.05} value={hdModal.scale}
+                  onChange={(v) => setHdModal({ ...hdModal, scale: v })}
+                  tooltip={{ formatter: (v) => `×${Number(v ?? 0).toFixed(2)}` }}
+                />
+                <div><Text type="secondary" style={{ fontSize: 12 }}>当前倍数：×{hdModal.scale.toFixed(2)}</Text></div>
+                {res && row && (
+                  <div><Text type="secondary" style={{ fontSize: 12 }}>
+                    预计耗时：约 {Math.max(1, Math.round(hdCostMinutes(res.w, res.h, hdModal.scale, row.duration || 15)))} 分钟
+                  </Text></div>
+                )}
+              </div>
+            </>
+          )
+        })()}
+      </Modal>
+
       {/* ===== 产品图库选参考图 ===== */}
       <Modal
         open={pickerOpen}
         title="从产品管理选择参考图"
-        width={780}
+        width={780} centered bodyStyle={MODAL_BODY_STYLE}
         okText={pickerSelected.length ? `添加（${pickerSelected.length}）` : '添加'}
         cancelText="取消"
         confirmLoading={pickerLoading}

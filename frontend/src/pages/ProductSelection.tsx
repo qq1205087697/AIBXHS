@@ -184,6 +184,63 @@ const PRODUCT_TYPE_ZH: Record<string, string> = {
   'Computers & Accessories': '电脑与配件',
 }
 
+// Python repr 字符串 → JSON：按引号 token 逐段转换（字符串统一用双引号包裹并转义内部双引号），
+// True/False/None → true/false/null。爬虫存的是 str(dict) 产物，且键含撇号时外层用双引号、
+// 内层用单引号（如 {"women's bags": {'2024-10': 1}}），简单的 replace 全部单引号会弄坏撇号。
+const pyReprToJson = (raw: string): string => {
+  let out = ''
+  let i = 0
+  while (i < raw.length) {
+    const ch = raw[i]
+    if (ch === "'" || ch === '"') {
+      const quote = ch
+      let str = ''
+      i++
+      while (i < raw.length) {
+        const c = raw[i]
+        if (c === '\\' && i + 1 < raw.length) {
+          const n = raw[i + 1]
+          if (n === quote || n === '\\') {
+            const lit = n
+            str += lit === '"' ? '\\"' : lit === '\\' ? '\\\\' : lit
+            i += 2
+            continue
+          }
+          str += c + n // \n、\t、\u... 等 JSON 同义转义，原样保留
+          i += 2
+          continue
+        }
+        if (c === quote) break
+        if (c === '"') { str += '\\"'; i++; continue }
+        str += c
+        i++
+      }
+      i++ // 跳过结束引号
+      out += `"${str}"`
+      continue
+    }
+    if (raw.startsWith('True', i)) { out += 'true'; i += 4; continue }
+    if (raw.startsWith('False', i)) { out += 'false'; i += 5; continue }
+    if (raw.startsWith('None', i)) { out += 'null'; i += 4; continue }
+    out += ch
+    i++
+  }
+  return out
+}
+
+// 流量趋势解析：优先按标准 JSON 解析；失败再按 Python repr 转换后解析。
+const parseTrendData = (raw: string | null | undefined): Record<string, any> | null => {
+  if (!raw) return null
+  const tryParse = (s: string): Record<string, any> | null => {
+    try {
+      const d = JSON.parse(s)
+      if (d && typeof d === 'object' && !Array.isArray(d)) return d
+    } catch { /* ignore */ }
+    return null
+  }
+  return tryParse(raw) ?? tryParse(pyReprToJson(raw))
+}
+
 // 待拼团剩余时间文本：每秒自更新（独立小组件，避免整表每秒重渲染）
 const GroupingCountdownText: React.FC<{ deadline?: string | null }> = ({ deadline }) => {
   const [now, setNow] = useState(() => Date.now())
@@ -267,6 +324,8 @@ const ProductSelection: React.FC = () => {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'grouping' | 'approved' | 'rejected' | 'empty'>('all')
   const [statusFilter, setStatusFilter] = useState<string[]>([])
+  // 创建日期区间筛选（null = 不按日期过滤）
+  const [dateFilter, setDateFilter] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null)
   // 申请选品弹窗（单个或批量）
   const [applyModal, setApplyModal] = useState<{
     open: boolean
@@ -354,7 +413,7 @@ const ProductSelection: React.FC = () => {
   // 数据刷新（筛选条件变化或初始化）
   useEffect(() => {
     fetchData()
-  }, [pagination.current, pagination.pageSize, searchText, productTypeFilter, siteFilter, activeTab, statusFilter, localSort.field, localSort.order, useRealtimeRate])
+  }, [pagination.current, pagination.pageSize, searchText, productTypeFilter, siteFilter, activeTab, statusFilter, dateFilter, localSort.field, localSort.order, useRealtimeRate])
 
   const fetchTypes = async (site?: string) => {
     try {
@@ -398,6 +457,8 @@ const ProductSelection: React.FC = () => {
         search: searchText || undefined,
         product_type: productTypeFilter,
         site: siteFilter,
+        start_date: dateFilter?.[0]?.format('YYYY-MM-DD') || undefined,
+        end_date: dateFilter?.[1]?.format('YYYY-MM-DD') || undefined,
         status: statusParams.length ? statusParams : undefined,
         sort_by: localSort.field || undefined,
         sort_order: localSort.order === 'ascend' ? 'asc' : localSort.order === 'descend' ? 'desc' : undefined,
@@ -424,6 +485,7 @@ const ProductSelection: React.FC = () => {
     setProductTypeFilter(undefined)
     setSiteFilter(undefined)
     setStatusFilter([])
+    setDateFilter(null)
     setLocalSort({ field: null, order: null })
     setPagination(prev => ({ ...prev, current: 1 }))
   }
@@ -1617,8 +1679,7 @@ const ProductSelection: React.FC = () => {
       width: 220,
       render: (val: string) => {
         if (!val) return '-'
-        let data: Record<string, number | null> | null = null
-        try { data = JSON.parse(val.replace(/'/g, '"').replace(/\bNone\b/g, 'null')) } catch {}
+        let data: Record<string, number | null> | null = parseTrendData(val)
         if (!data || typeof data !== 'object') return <span style={{ fontSize: 12 }}>{val}</span>
 
         // 多关键词嵌套格式 {关键词: {月份: 流量}}：按月对所有关键词求和，展示整体趋势
@@ -2148,6 +2209,12 @@ const ProductSelection: React.FC = () => {
                   { label: '审批未通过', value: 'rejected' },
                 ]}
                 onChange={(v) => { setStatusFilter(v); setPagination(prev => ({ ...prev, current: 1 })) }}
+              />
+              <DatePicker.RangePicker
+                placeholder={['开始日期', '结束日期']}
+                style={{ width: 235 }}
+                value={dateFilter}
+                onChange={(v) => { setDateFilter(v as [dayjs.Dayjs, dayjs.Dayjs] | null); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
               <Button onClick={handleReset}>重置</Button>
             </Space>
@@ -3245,8 +3312,7 @@ const ProductSelection: React.FC = () => {
             {(() => {
               const val = detailItem.traffic_trend
               if (!val) return null
-              let parsed: Record<string, unknown> | null = null
-              try { parsed = JSON.parse(val.replace(/'/g, '"').replace(/\bNone\b/g, 'null')) } catch {}
+              const parsed = parseTrendData(val)
               if (!parsed || typeof parsed !== 'object') return null
 
               // 多关键词嵌套格式 {关键词: {月份: 流量}}：每个关键词一张折线图；老格式为单关键词

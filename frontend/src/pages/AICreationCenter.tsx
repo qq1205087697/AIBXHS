@@ -20,6 +20,7 @@ import {
   Pagination,
   Image,
   Dropdown,
+  Radio,
 } from 'antd'
 import {
   UploadOutlined,
@@ -41,6 +42,7 @@ import {
   EyeOutlined,
   LinkOutlined,
   PauseCircleOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import type { RcFile, UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
@@ -666,6 +668,10 @@ const AICreationCenter: React.FC = () => {
   // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
   const [historyBindFilter, setHistoryBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
   const [cancellingId, setCancellingId] = useState<number | null>(null)
+  // 插队弹窗：排队任务选择「取消当前执行中任务」或「等待当前执行中任务完成后执行」
+  const [prioritizeTask, setPrioritizeTask] = useState<AIVideoTask | null>(null)
+  const [prioritizeMode, setPrioritizeMode] = useState<'interrupt' | 'wait'>('interrupt')
+  const [prioritizingId, setPrioritizingId] = useState<number | null>(null)
   const keywordTimerRef = useRef<number | null>(null)
   // 图片缓存恢复完成前禁止写入缓存，防止挂载时空列表先把 IndexedDB 里的图片清掉
   const fileListCacheReadyRef = useRef(false)
@@ -1388,6 +1394,27 @@ const AICreationCenter: React.FC = () => {
         }
       },
     })
+  }
+
+  // ===== 排队任务插队：弹窗选择插队方式后调用后端重排 ComfyUI 队列 =====
+  const openPrioritizeModal = (item: AIVideoTask) => {
+    setPrioritizeMode('interrupt')
+    setPrioritizeTask(item)
+  }
+
+  const handlePrioritizeSubmit = async () => {
+    if (!prioritizeTask || prioritizingId != null) return
+    setPrioritizingId(prioritizeTask.id)
+    try {
+      const resp = await aiCreationApi.prioritizeVideoTask(prioritizeTask.id, prioritizeMode)
+      message.success(resp.data.message || '已插队')
+      setPrioritizeTask(null)
+      loadTasks()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '插队失败，请稍后重试')
+    } finally {
+      setPrioritizingId(null)
+    }
   }
 
   const retryTask = async (item: AIVideoTask) => {
@@ -2114,12 +2141,14 @@ const AICreationCenter: React.FC = () => {
                 <Text strong ellipsis style={{ fontSize: 13, flex: '0 1 auto', minWidth: 0 }}>
                   {item.title}
                 </Text>
-                {/* 排队中/生成中：紧贴标题右侧转圈；失败：红色标签；已完成：紧贴标题右侧显示生成总耗时 */}
+                {/* 排队中/生成中：紧贴标题右侧转圈（排队中带前方任务数）；失败：红色标签；已完成：显示生成总耗时 */}
                 {item.status === '排队中' || item.status === '生成中' ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                     <Spin size="small" />
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {item.status === '排队中' ? '排队中' : '生成中'}
+                      {item.status === '排队中'
+                        ? `排队中${item.queue_ahead != null ? ` · 前方${item.queue_ahead}条任务` : ''}`
+                        : '生成中'}
                     </Text>
                   </span>
                 ) : item.status === '失败' ? (
@@ -2176,6 +2205,17 @@ const AICreationCenter: React.FC = () => {
                               icon: <ThunderboltOutlined />,
                               disabled: !!item.upscale_video_url,
                               onClick: () => openUpscaleModal(item),
+                            },
+                          ]
+                        : []),
+                      ...(item.status === '排队中'
+                        ? [
+                            {
+                              key: 'prioritize',
+                              label: prioritizingId === item.id ? '插队中…' : '插队',
+                              icon: <RocketOutlined />,
+                              disabled: prioritizingId != null,
+                              onClick: () => openPrioritizeModal(item),
                             },
                           ]
                         : []),
@@ -3100,6 +3140,36 @@ const renderHistoryModals = () => (
             </Text>
           </div>
         </div>
+      </Modal>
+
+      {/* 排队任务插队：取消当前执行中任务立即执行，或等当前任务完成后立即执行 */}
+      <Modal
+        open={!!prioritizeTask}
+        title={`插队：${prioritizeTask?.title || '排队任务'}`}
+        okText="确定插队"
+        cancelText="取消"
+        centered
+        confirmLoading={prioritizingId != null}
+        onOk={handlePrioritizeSubmit}
+        onCancel={() => setPrioritizeTask(null)}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            本任务当前为「排队中」状态，选择插队方式：
+          </Text>
+        </div>
+        <Radio.Group
+          value={prioritizeMode}
+          onChange={(e) => setPrioritizeMode(e.target.value)}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+        >
+          <Radio value="interrupt">
+            <span style={{ fontSize: 13 }}>取消当前执行中任务，本任务立即开始生成</span>
+          </Radio>
+          <Radio value="wait">
+            <span style={{ fontSize: 13 }}>等待当前执行中任务完成后，本任务立即执行</span>
+          </Radio>
+        </Radio.Group>
       </Modal>
 
       {/* 成片全屏预览：左侧视频，右侧参数 */}

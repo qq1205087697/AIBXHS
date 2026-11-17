@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Card, Button, Spin, Tag, Typography, Space, Input, Empty, Modal, Pagination, message, Segmented } from 'antd'
-import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined, PauseCircleOutlined, RedoOutlined } from '@ant-design/icons'
+import { Card, Button, Spin, Tag, Typography, Space, Input, Empty, Modal, Pagination, message, Segmented, Radio } from 'antd'
+import { DeleteOutlined, SearchOutlined, VideoCameraOutlined, LinkOutlined, PauseCircleOutlined, RedoOutlined, RocketOutlined } from '@ant-design/icons'
 import BindProductModal from '../components/BindProductModal'
 import CompareVideoModal from '../components/CompareVideoModal'
 import { aiCreationApi, VideoUpscaleTask } from '../api'
@@ -32,6 +32,10 @@ const UpscaleCenter: React.FC = () => {
   const [bindTitle, setBindTitle] = useState('')
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
   const [cancellingId, setCancellingId] = useState<number | null>(null)
+  // 插队弹窗：排队任务选择「取消当前执行中任务」或「等待当前执行中任务完成后执行」
+  const [prioritizeTask, setPrioritizeTask] = useState<VideoUpscaleTask | null>(null)
+  const [prioritizeMode, setPrioritizeMode] = useState<'interrupt' | 'wait'>('interrupt')
+  const [prioritizingId, setPrioritizingId] = useState<number | null>(null)
   // 失败任务重试中标记（一次只允许一个重试请求，防止重复提交）
   const [retryingId, setRetryingId] = useState<number | null>(null)
 
@@ -72,6 +76,27 @@ const UpscaleCenter: React.FC = () => {
         }
       },
     })
+  }
+
+  // ===== 排队任务插队：弹窗选择插队方式后调用后端重排 ComfyUI 队列 =====
+  const openPrioritizeModal = (item: VideoUpscaleTask) => {
+    setPrioritizeMode('interrupt')
+    setPrioritizeTask(item)
+  }
+
+  const handlePrioritizeSubmit = async () => {
+    if (!prioritizeTask || prioritizingId != null) return
+    setPrioritizingId(prioritizeTask.id)
+    try {
+      const resp = await aiCreationApi.prioritizeUpscaleTask(prioritizeTask.id, prioritizeMode)
+      message.success(resp.data.message || '已插队')
+      setPrioritizeTask(null)
+      loadTasks()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '插队失败，请稍后重试')
+    } finally {
+      setPrioritizingId(null)
+    }
   }
 
   // 下载源视频/超分结果（入口：对比弹窗「更多」菜单）：走后端代理流式下载（跨域 <a download> 不生效）
@@ -270,7 +295,9 @@ const UpscaleCenter: React.FC = () => {
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                       <Spin size="small" />
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        {item.status}
+                        {item.status === '排队中'
+                          ? `排队中${item.queue_ahead != null ? ` · 前方${item.queue_ahead}条任务` : ''}`
+                          : '处理中'}
                       </Text>
                     </span>
                   ) : item.status === '失败' ? (
@@ -304,6 +331,17 @@ const UpscaleCenter: React.FC = () => {
                       }}
                     >
                       绑定至产品
+                    </Button>
+                  )}
+                  {item.status === '排队中' && (
+                    <Button
+                      size="small"
+                      icon={<RocketOutlined />}
+                      loading={prioritizingId === item.id}
+                      disabled={prioritizingId != null}
+                      onClick={() => openPrioritizeModal(item)}
+                    >
+                      插队
                     </Button>
                   )}
                   {(item.status === '排队中' || item.status === '处理中') && (
@@ -442,6 +480,36 @@ const UpscaleCenter: React.FC = () => {
           </div>
         )}
       </Card>
+
+      {/* 排队任务插队：取消当前执行中任务立即执行，或等当前任务完成后立即执行 */}
+      <Modal
+        open={!!prioritizeTask}
+        title={`插队：${prioritizeTask?.title || '排队任务'}`}
+        okText="确定插队"
+        cancelText="取消"
+        centered
+        confirmLoading={prioritizingId != null}
+        onOk={handlePrioritizeSubmit}
+        onCancel={() => setPrioritizeTask(null)}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            本任务当前为「排队中」状态，选择插队方式：
+          </Text>
+        </div>
+        <Radio.Group
+          value={prioritizeMode}
+          onChange={(e) => setPrioritizeMode(e.target.value)}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+        >
+          <Radio value="interrupt">
+            <span style={{ fontSize: 13 }}>取消当前执行中任务，本任务立即开始处理</span>
+          </Radio>
+          <Radio value="wait">
+            <span style={{ fontSize: 13 }}>等待当前执行中任务完成后，本任务立即执行</span>
+          </Radio>
+        </Radio.Group>
+      </Modal>
 
       {/* 全屏对比预览：专用对比器，rAF 逐帧同步 + 拖动进度条即时跟随 */}
       <CompareVideoModal
