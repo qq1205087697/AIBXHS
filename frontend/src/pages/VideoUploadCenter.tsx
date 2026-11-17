@@ -1587,7 +1587,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       </Modal>
 
       {/* ===== 成片预览（视频 / AI图片） ===== */}
-      <Modal open={!!videoUrl} footer={null} width={720} centered bodyStyle={MODAL_BODY_STYLE} destroyOnClose onCancel={() => setVideoUrl(null)} destroyOnClose>
+      <Modal open={!!videoUrl} footer={null} width={720} centered bodyStyle={MODAL_BODY_STYLE} destroyOnClose onCancel={() => setVideoUrl(null)}>
         {videoUrl && (
           /\.(jpg|jpeg|png|gif|webp|bmp)(\?|$)/i.test(videoUrl)
             ? <Image src={videoUrl} width="100%" style={{ borderRadius: 8 }} />
