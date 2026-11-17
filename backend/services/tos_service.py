@@ -193,8 +193,8 @@ def sniff_image_content_type(data: bytes) -> Optional[str]:
     return None
 
 
-def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "") -> str:
-    """上传图片到 TOS（images 子目录）"""
+def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "", subdir: str = "images") -> str:
+    """上传图片到 TOS（默认 images 子目录，可指定）"""
     # 根据扩展名推断 content_type
     _, ext = os.path.splitext(file_name)
     ext = ext.lower()
@@ -207,7 +207,7 @@ def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
         ".bmp": "image/bmp",
     }
     content_type = ct_map.get(ext, "image/jpeg")
-    return upload_file(file_bytes, file_name, content_type=content_type, subdir="images", custom_name=custom_name)
+    return upload_file(file_bytes, file_name, content_type=content_type, subdir=subdir, custom_name=custom_name)
 
 
 def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> str:

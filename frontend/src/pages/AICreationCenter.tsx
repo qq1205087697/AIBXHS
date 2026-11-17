@@ -20,6 +20,7 @@ import {
   Pagination,
   Image,
   Dropdown,
+  Radio,
 } from 'antd'
 import {
   UploadOutlined,
@@ -40,6 +41,7 @@ import {
   EyeOutlined,
   LinkOutlined,
   PauseCircleOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
@@ -622,6 +624,10 @@ const AICreationCenter: React.FC = () => {
   // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
   const [historyBindFilter, setHistoryBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
   const [cancellingId, setCancellingId] = useState<number | null>(null)
+  // 插队弹窗：排队任务选择「取消当前执行中任务」或「等待当前执行中任务完成后执行」
+  const [prioritizeTask, setPrioritizeTask] = useState<AIVideoTask | null>(null)
+  const [prioritizeMode, setPrioritizeMode] = useState<'interrupt' | 'wait'>('interrupt')
+  const [prioritizingId, setPrioritizingId] = useState<number | null>(null)
   const keywordTimerRef = useRef<number | null>(null)
   // 图片缓存恢复完成前禁止写入缓存，防止挂载时空列表先把 IndexedDB 里的图片清掉
   const fileListCacheReadyRef = useRef(false)
@@ -800,10 +806,10 @@ const AICreationCenter: React.FC = () => {
 
   // 收集所有图片为 File：本地文件直接用，产品图片 URL 并行下载转 File（串行取图会让
   // 编辑回填场景的提交等待数十秒）
-  const collectFiles = async (): Promise<File[]> => {
+  const collectFilesFrom = async (items: UploadFile[]): Promise<File[]> => {
     const results: (File | null)[] = []
     const urlEntries: { idx: number; url: string; name: string }[] = []
-    fileList.forEach((f, i) => {
+    items.forEach((f, i) => {
       if (f.originFileObj instanceof File) {
         results[i] = f.originFileObj
       } else if (f.url || f.thumbUrl) {
@@ -820,6 +826,7 @@ const AICreationCenter: React.FC = () => {
     )
     return results.filter((f): f is File => !!f)
   }
+  const collectFiles = (): Promise<File[]> => collectFilesFrom(fileList)
 
   // 复制二次优化后的 H3 提示词
   const copyH3Prompt = async (text: string) => {
@@ -1044,6 +1051,27 @@ const AICreationCenter: React.FC = () => {
         }
       },
     })
+  }
+
+  // ===== 排队任务插队：弹窗选择插队方式后调用后端重排 ComfyUI 队列 =====
+  const openPrioritizeModal = (item: AIVideoTask) => {
+    setPrioritizeMode('interrupt')
+    setPrioritizeTask(item)
+  }
+
+  const handlePrioritizeSubmit = async () => {
+    if (!prioritizeTask || prioritizingId != null) return
+    setPrioritizingId(prioritizeTask.id)
+    try {
+      const resp = await aiCreationApi.prioritizeVideoTask(prioritizeTask.id, prioritizeMode)
+      message.success(resp.data.message || '已插队')
+      setPrioritizeTask(null)
+      loadTasks()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '插队失败，请稍后重试')
+    } finally {
+      setPrioritizingId(null)
+    }
   }
 
   const retryTask = async (item: AIVideoTask) => {
@@ -1770,12 +1798,14 @@ const AICreationCenter: React.FC = () => {
                 <Text strong ellipsis style={{ fontSize: 13, flex: '0 1 auto', minWidth: 0 }}>
                   {item.title}
                 </Text>
-                {/* 排队中/生成中：紧贴标题右侧转圈；失败：红色标签；已完成：紧贴标题右侧显示生成总耗时 */}
+                {/* 排队中/生成中：紧贴标题右侧转圈（排队中带前方任务数）；失败：红色标签；已完成：显示生成总耗时 */}
                 {item.status === '排队中' || item.status === '生成中' ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                     <Spin size="small" />
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {item.status === '排队中' ? '排队中' : '生成中'}
+                      {item.status === '排队中'
+                        ? `排队中${item.queue_ahead != null ? ` · 前方${item.queue_ahead}条任务` : ''}`
+                        : '生成中'}
                     </Text>
                   </span>
                 ) : item.status === '失败' ? (
@@ -1832,6 +1862,17 @@ const AICreationCenter: React.FC = () => {
                               icon: <ThunderboltOutlined />,
                               disabled: !!item.upscale_video_url,
                               onClick: () => openUpscaleModal(item),
+                            },
+                          ]
+                        : []),
+                      ...(item.status === '排队中'
+                        ? [
+                            {
+                              key: 'prioritize',
+                              label: prioritizingId === item.id ? '插队中…' : '插队',
+                              icon: <RocketOutlined />,
+                              disabled: prioritizingId != null,
+                              onClick: () => openPrioritizeModal(item),
                             },
                           ]
                         : []),
@@ -1990,12 +2031,19 @@ const AICreationCenter: React.FC = () => {
             <div
               onMouseEnter={() => setUploadAreaHover(true)}
               onMouseLeave={() => setUploadAreaHover(false)}
+              onClick={(e) => {
+                // 点击空白区域直接选图；缩略图与操作按钮不触发，避免误开文件框
+                const el = e.target as HTMLElement
+                if (el.closest('[data-upload-action]')) return
+                localInputRef.current?.click()
+              }}
               style={{
                 border: `1px dashed ${uploadAreaHover ? currentTheme.primary : '#d9d9d9'}`,
                 borderRadius: 8,
                 background: '#fafafa',
                 padding: '20px 16px 12px',
                 textAlign: 'center',
+                cursor: 'pointer',
               }}
             >
               {fileList.length === 0 && (
@@ -2018,7 +2066,7 @@ const AICreationCenter: React.FC = () => {
               )}
 
               {fileList.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, textAlign: 'left' }}>
+                <div data-upload-action style={{ display: 'flex', flexWrap: 'wrap', gap: 8, textAlign: 'left', cursor: 'default' }}>
                   {fileList.map((f) => (
                     <div key={f.uid} style={{ position: 'relative', width: 80, height: 80 }}>
                       <img
@@ -2040,7 +2088,10 @@ const AICreationCenter: React.FC = () => {
               )}
 
               {/* 固定高度按钮行：悬停时显示，点击区域本身不触发上传 */}
-              <div style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+              <div
+                data-upload-action
+                style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'default' }}
+              >
                 {uploadAreaHover && (
                   <Space size={12}>
                     <Button
@@ -2279,7 +2330,13 @@ const AICreationCenter: React.FC = () => {
 
       {renderPlanModal()}
       {renderProductModal()}
+    </div>
+  )
 
+// 生成历史通用操作弹窗：在页面根节点渲染，保证历史列表里的
+// 「详情 / 绑定至产品 / 变高清」点击后能正常弹出
+const renderHistoryModals = () => (
+  <>
       {/* 绑定至产品：选择产品后提交绑定申请，审核通过才写入产品详情（无视频小窗） */}
       <BindProductModal
         open={bindModalOpen}
@@ -2367,6 +2424,36 @@ const AICreationCenter: React.FC = () => {
             </Text>
           </div>
         </div>
+      </Modal>
+
+      {/* 排队任务插队：取消当前执行中任务立即执行，或等当前任务完成后立即执行 */}
+      <Modal
+        open={!!prioritizeTask}
+        title={`插队：${prioritizeTask?.title || '排队任务'}`}
+        okText="确定插队"
+        cancelText="取消"
+        centered
+        confirmLoading={prioritizingId != null}
+        onOk={handlePrioritizeSubmit}
+        onCancel={() => setPrioritizeTask(null)}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            本任务当前为「排队中」状态，选择插队方式：
+          </Text>
+        </div>
+        <Radio.Group
+          value={prioritizeMode}
+          onChange={(e) => setPrioritizeMode(e.target.value)}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+        >
+          <Radio value="interrupt">
+            <span style={{ fontSize: 13 }}>取消当前执行中任务，本任务立即开始生成</span>
+          </Radio>
+          <Radio value="wait">
+            <span style={{ fontSize: 13 }}>等待当前执行中任务完成后，本任务立即执行</span>
+          </Radio>
+        </Radio.Group>
       </Modal>
 
       {/* 成片全屏预览：左侧视频，右侧参数 */}
@@ -2515,13 +2602,14 @@ const AICreationCenter: React.FC = () => {
           </div>
         )}
       </Modal>
-    </div>
-  )
+    </>
+)
 
   return (
     // 保留 ai-creation-tabs 类名：复用细滚动条样式
     <div className="ai-creation-tabs" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
       {renderSpeechTab()}
+      {renderHistoryModals()}
     </div>
   )
 }

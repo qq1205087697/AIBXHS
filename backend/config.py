@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     FEISHU_VIDEO_TABLE_ID: str = ""
     # 填报人（人员字段）飞书 open_id，留空自动尝试取应用机器人自身身份
     FEISHU_VIDEO_REPORTER_OPEN_ID: str = ""
+    # 飞书多维表 - Amazon 图片上传表（图片素材按 SKU 上传，外部 RPA 消费；字段：SKU/紫鸟账号/店铺名/站点/图片/类型）
+    FEISHU_IMAGE_BASE_TOKEN: str = ""
+    FEISHU_IMAGE_TABLE_ID: str = ""
+    # 飞书多维表 - Ozon 视频上传留痕表（与 Amazon 表共用 FEISHU_VIDEO_BASE_TOKEN，独立数据表）
+    FEISHU_OZON_VIDEO_TABLE_ID: str = ""
     # 紫鸟启动名→紫鸟登录账号映射（JSON 字符串，按顺序取登录账号命中的第一个启动名）
     ZINIAO_ACCOUNT_MAP: str = ""
     # 飞书 webhook - 邮件机器人自动化
@@ -49,10 +54,6 @@ class Settings(BaseSettings):
     FEISHU_PAGE_INFO_WEBHOOK_URL: str = ""
     # 飞书 webhook - 开广告提交地址
     FEISHU_AD_WEBHOOK_URL: str = ""
-    # 美工图片 TOS 自动迁移开关（false 关闭启动时自动迁移）
-    DESIGNER_IMAGE_AUTO_MIGRATE: str = "true"
-    # 六面图 TOS 自动迁移开关（false 关闭启动时自动迁移）
-    SIXFACE_IMAGE_AUTO_MIGRATE: str = "true"
     # 飞书 webhook - 编辑基础信息提交地址
     FEISHU_EDIT_WEBHOOK_URL: str = ""
     # 飞书 webhook - 一键优化提交地址

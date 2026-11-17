@@ -244,6 +244,95 @@ def init_db():
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """))
             conn.commit()
+            # 媒体创作中心：需求单据表（运营提报 → 主管审核 → 美工生成 → 内容审核 → 运营确认 → 待上传 → 已上传）
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_requests (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tenant_id INT NOT NULL COMMENT '租户ID',
+                    no INT NOT NULL COMMENT '主单号（审核通过拆单时子单沿用）',
+                    seq VARCHAR(20) NOT NULL COMMENT '单据关联号：1 / 1-1 / 1-2',
+                    parent_id INT NULL COMMENT '子单的父单ID',
+                    product_id INT NOT NULL COMMENT '产品ID',
+                    product_code VARCHAR(100) NULL COMMENT '产品编码',
+                    product_name VARCHAR(300) NULL COMMENT '产品名称',
+                    product_image VARCHAR(1000) NULL COMMENT '产品主图',
+                    platform VARCHAR(20) NULL COMMENT '主平台：amazon/ozon',
+                    platform_items TEXT NULL COMMENT '目标平台 SKU 条目（JSON 数组）',
+                    demand_types TEXT NULL COMMENT '需求类型（JSON 数组）',
+                    demand_type VARCHAR(40) NULL COMMENT '拆单后的单个需求类型',
+                    description TEXT NULL COMMENT '需求描述',
+                    prompt TEXT NULL COMMENT '视频提示词',
+                    plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）',
+                    ref_images TEXT NULL COMMENT '参考图地址（JSON 数组，1~9 张）',
+                    ratio VARCHAR(10) DEFAULT '9:16' COMMENT '视频比例',
+                    resolution VARCHAR(10) DEFAULT '0.3' COMMENT '分辨率档位',
+                    duration INT DEFAULT 15 COMMENT '视频时长（5/10/15）',
+                    video_type VARCHAR(20) DEFAULT '口播带货' COMMENT '视频类型：口播带货/产品展示',
+                    stage VARCHAR(20) NOT NULL DEFAULT '待提交' COMMENT '流转阶段',
+                    gen_status VARCHAR(20) NULL COMMENT '生成状态：生成中/失败',
+                    gen_task_id INT NULL COMMENT 'AI视频任务ID',
+                    gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图',
+                    gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）',
+                    gen_time DATETIME NULL COMMENT '生成时间',
+                    media_url VARCHAR(1000) NULL COMMENT '生成成片地址',
+                    hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败',
+                    hd_task_id INT NULL COMMENT '超分任务ID',
+                    hd_url VARCHAR(1000) NULL COMMENT '高清成片地址',
+                    hd_time DATETIME NULL COMMENT '高清完成时间',
+                    bind_status VARCHAR(20) NULL COMMENT '绑定状态：审核中/已通过/已拒绝',
+                    binding_request_id INT NULL COMMENT '绑定申请ID',
+                    upload_status VARCHAR(20) NULL COMMENT '上传状态',
+                    upload_time DATETIME NULL COMMENT '上传时间',
+                    upload_result TEXT NULL COMMENT '上传结果（JSON）',
+                    submitter_id INT NULL COMMENT '提报人ID',
+                    submitter_name VARCHAR(100) NULL COMMENT '提报人',
+                    submit_time DATETIME NULL COMMENT '提交审核时间',
+                    reviewer_id INT NULL COMMENT '审核人ID',
+                    reviewer_name VARCHAR(100) NULL COMMENT '审核人',
+                    reviewer_at DATETIME NULL COMMENT '最近审核时间',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    deleted_at DATETIME NULL,
+                    INDEX idx_media_tenant_stage (tenant_id, stage),
+                    INDEX idx_media_tenant_no (tenant_id, no),
+                    INDEX idx_media_task (gen_task_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='媒体创作中心需求单据'
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_request_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tenant_id INT NOT NULL,
+                    request_id INT NOT NULL,
+                    actor_id INT NULL,
+                    actor_name VARCHAR(100) NULL,
+                    action VARCHAR(50) NULL,
+                    note VARCHAR(1000) NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_media_log_request (request_id),
+                    INDEX idx_media_log_tenant (tenant_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='媒体创作中心操作日志'
+            """))
+            conn.commit()
+            # 已存在的 media_requests 表补 plan / 高清 / 绑定门禁字段
+            _media_extra_columns = [
+                ("plan", "ALTER TABLE media_requests ADD COLUMN plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）' AFTER prompt"),
+                ("gen_kind", "ALTER TABLE media_requests ADD COLUMN gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图' AFTER gen_task_id"),
+                ("gen_user_id", "ALTER TABLE media_requests ADD COLUMN gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）' AFTER gen_kind"),
+                ("hd_status", "ALTER TABLE media_requests ADD COLUMN hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败' AFTER media_url"),
+                ("hd_task_id", "ALTER TABLE media_requests ADD COLUMN hd_task_id INT NULL COMMENT '超分任务ID' AFTER hd_status"),
+                ("hd_url", "ALTER TABLE media_requests ADD COLUMN hd_url VARCHAR(1000) NULL COMMENT '高清成片地址' AFTER hd_task_id"),
+                ("hd_time", "ALTER TABLE media_requests ADD COLUMN hd_time DATETIME NULL COMMENT '高清完成时间' AFTER hd_url"),
+                ("bind_status", "ALTER TABLE media_requests ADD COLUMN bind_status VARCHAR(20) NULL COMMENT '绑定状态：审核中/已通过/已拒绝' AFTER hd_time"),
+                ("media_type", "ALTER TABLE media_requests ADD COLUMN media_type VARCHAR(10) NULL COMMENT '成片类型：video=视频/image=图片（已有素材提报时标记）' AFTER binding_request_id"),
+                ("media_style", "ALTER TABLE media_requests ADD COLUMN media_style VARCHAR(20) NULL COMMENT '图片类型：主图/附图/A+（已有素材图片提报时标记）' AFTER media_type"),
+                ("binding_request_id", "ALTER TABLE media_requests ADD COLUMN binding_request_id INT NULL COMMENT '绑定申请ID' AFTER bind_status"),
+            ]
+            for _col, _sql in _media_extra_columns:
+                try:
+                    conn.execute(text(_sql))
+                    conn.commit()
+                except Exception:
+                    pass  # 列已存在则忽略
             # 创建 scheduler_locks 表
             create_lock_table_sql = """
                 CREATE TABLE IF NOT EXISTS scheduler_locks (
@@ -280,11 +369,11 @@ def init_db():
                     product_type VARCHAR(100) NULL COMMENT '类型',
                     site VARCHAR(50) NULL COMMENT '站点',
                     monthly_sales INT NULL COMMENT '近一个月销量',
-                    traffic_trend VARCHAR(200) NULL COMMENT '流量趋势',
+                    traffic_trend TEXT NULL COMMENT '流量趋势(单关键词{月:流量}或多关键词{词:{月:流量}})',
             seasonality TEXT NULL COMMENT '季节性判断',
             infringement_analysis TEXT NULL COMMENT '侵权分析',
             infringement_conclusion VARCHAR(500) NULL COMMENT '侵权分析结论',
-            traffic_score_result VARCHAR(500) NULL COMMENT '流量评分结果',
+            traffic_score_result TEXT NULL COMMENT '流量评分结果(多关键词时含最优关键词标注)',
             traffic_score FLOAT NULL COMMENT '流量评分',
             sales_score FLOAT NULL COMMENT '销量评分',
             rating_score FLOAT NULL COMMENT '星级评分',
@@ -309,18 +398,24 @@ def init_db():
                 pass  # 列已存在则忽略
             # 为已存在的表添加汇率列（如果不存在）
             try:
-                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1人民币兑外币)' AFTER cost_at_15_profit"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1外币兑人民币)' AFTER cost_at_15_profit"))
                 conn.commit()
             except Exception:
                 pass
             try:
-                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1人民币兑外币)' AFTER scrape_rate"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1外币兑人民币)' AFTER scrape_rate"))
                 conn.commit()
             except Exception:
                 pass
             # 为已存在的表添加类目列（如果不存在）
             try:
                 conn.execute(text("ALTER TABLE product_selections ADD COLUMN category VARCHAR(1000) NULL COMMENT '类目(JSON列表)' AFTER realtime_rate"))
+                conn.commit()
+            except Exception:
+                pass
+            # 多选店铺分组（合并为一条申请时记录全部分组，JSON数组）
+            try:
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN store_group_ids TEXT NULL COMMENT '申请店铺分组ID列表(JSON数组)' AFTER store_group_id"))
                 conn.commit()
             except Exception:
                 pass

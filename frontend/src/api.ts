@@ -794,10 +794,11 @@ export const productsApi = {
 
 // ========== Upload API (火山引擎 TOS) ==========
 export const uploadApi = {
-  uploadImage: (file: File, customName?: string) => {
+  uploadImage: (file: File, customName?: string, subdir?: string) => {
     const formData = new FormData();
     formData.append("file", file);
     if (customName) formData.append("custom_name", customName);
+    if (subdir) formData.append("subdir", subdir);
     return apiClient.post("/upload/image", formData, {
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 60000,
@@ -1327,7 +1328,7 @@ export const productBindingsApi = {
 
 // ========== Product Selection API ==========
 export const productSelectionApi = {
-  getTypes: () => apiClient.get("/product-selection/types"),
+  getTypes: (site?: string) => apiClient.get("/product-selection/types", { params: site ? { site } : {} }),
   getDates: (site?: string) => apiClient.get("/product-selection/dates", { params: site ? { site } : {} }),
   getSites: () => apiClient.get("/product-selection/sites"),
   getList: (params?: {
@@ -1337,6 +1338,8 @@ export const productSelectionApi = {
     product_type?: string;
     site?: string;
     date_filter?: string;
+    start_date?: string;
+    end_date?: string;
     status?: string[];
     sort_by?: string;
     sort_order?: string;
@@ -1345,11 +1348,18 @@ export const productSelectionApi = {
   getById: (id: number) => apiClient.get(`/product-selection/${id}`),
   submitForApproval: (id: number, data?: {
     ali_1688_url?: string;
+    ali_1688_urls?: string[];
     purchase_price?: number;
     purchase_quantity?: number;
     store_group_id?: number;
+    store_group_ids?: number[];
+    apply_remark?: string;
+    apply_images?: string[];
+    moq?: number;
   }) =>
     apiClient.post(`/product-selection/${id}/submit-for-approval`, data || {}),
+  groupBuy: (id: number, quantity: number) =>
+    apiClient.post(`/product-selection/${id}/group-buy`, { quantity }),
   getProfitSettings: () => apiClient.get("/product-selection/profit-settings"),
   saveProfitSettings: (data: {
     site: string;
@@ -1392,6 +1402,8 @@ export const productSelectionApi = {
     traffic_trend?: string;
     category?: string[];
   }) => apiClient.post("/product-selection/", data),
+  importFromAmazon: (data: { site: string; asins: string[] }) =>
+    apiClient.post("/product-selection/import-from-amazon", data, { timeout: 300000 }),
   update: (
     id: number,
     data: {
@@ -1423,6 +1435,8 @@ export const productSelectionApi = {
     apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
   recalcScores: () =>
     apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  rescrapeFbaFees: (ids?: number[]) =>
+    apiClient.post("/product-selection/rescrape-fba-fees", ids && ids.length > 0 ? { ids } : {}, { timeout: 30000 }),
   switchRate: (useRealtime: boolean) =>
     apiClient.post(
       "/product-selection/switch-rate",
@@ -1695,6 +1709,8 @@ export interface ProductDevelopmentPayload {
   purchase_items?: { link?: string; images?: string[]; info?: string }[];
   // 关联店铺采购数量对应：[{store, quantity}]
   store_quantities?: { store: string; quantity: number }[];
+  // 来自选品审批：保存新品后自动创建产品与补货单，并将选品标记为已审批
+  selection_id?: number;
 }
 
 export interface DevelopmentProject
@@ -1969,6 +1985,8 @@ export interface AIVideoTask {
   bound?: boolean;
   /** ComfyUI 任务 ID */
   h3_prompt_id: string;
+  /** 排队位置：前方还有几条任务（仅排队中任务，后端按 ComfyUI 实际队列计算附加） */
+  queue_ahead?: number | null;
   /** 生成总耗时（秒），未完成为 null */
   cost_seconds: number | null;
   error_message: string | null;
@@ -2007,6 +2025,8 @@ export interface VideoUpscaleTask {
   video_url?: string;
   /** 绑定状态：成片或源视频已通过审核绑定至产品（后端附加） */
   bound?: boolean;
+  /** 排队位置：前方还有几条任务（仅排队中任务，后端按 ComfyUI 实际队列计算附加） */
+  queue_ahead?: number | null;
   created_at: string;
   cost_seconds?: number | null;
 }
@@ -2046,6 +2066,261 @@ export interface AmazonSkuEntry {
   ziniao_account: string;
   ziniao_start_name: string;
 }
+
+/** 统一上传用的平台 SKU 条目（Amazon 含 ASIN/紫鸟，Ozon 含凭证可用性标记） */
+export interface PlatformSkuEntry {
+  pp_id: number;
+  store_id: number;
+  platform: "amazon" | "ozon" | string;
+  sku: string;
+  store_name: string;
+  site: string;
+  // amazon 专属
+  asin?: string;
+  has_asin?: boolean;
+  ziniao_account?: string;
+  ziniao_start_name?: string;
+  // ozon 专属
+  has_offer_id?: boolean;
+  has_credentials?: boolean;
+  ozon_product_id?: string;
+}
+
+/** Ozon 上传结果（每个店铺一条） */
+export interface OzonUploadResult {
+  store_id: number;
+  store_name: string;
+  task_id?: number;
+  offer_ids: string[];
+  ok: boolean;
+  error?: string;
+}
+
+/** Ozon 任务状态查询结果（每店铺一条） */
+export interface OzonTaskStatusResult {
+  store_id: number;
+  task_id: number;
+  status?: string;
+  error_text?: string;
+  items?: { offer_id?: string; product_id?: number; status?: string; errors?: unknown[] }[];
+  error?: string;
+}
+
+/** ==================== 媒体创作中心 · 视频需求流转 ==================== */
+export type MediaStage =
+  | "待提交" | "待审核" | "待生成" | "已生成" | "待确认"
+  | "待高清" | "待绑定" | "待上传" | "已上传";
+
+/** 提报时选中的目标平台 SKU（后端落库的展示字段） */
+export interface MediaPlatformItem {
+  pp_id: number;
+  store_id: number;
+  platform: string;
+  sku: string;
+  store_name: string;
+  site: string;
+  asin?: string;
+  offer_id?: string;
+  has_asin?: boolean;
+  has_credentials?: boolean;
+}
+
+export interface MediaPlanShot {
+  timestamp: string;
+  shot_purpose?: string;
+  description?: string;
+  voiceover?: string;
+}
+
+export interface MediaPlan {
+  concept_title: string;
+  marketing_goal?: string;
+  story?: string;
+  character?: string;
+  environment?: string;
+  music?: string;
+  storyboard: MediaPlanShot[];
+  video_type?: string;
+  duration?: number;
+  ratio?: string;
+  language?: string;
+  generated_at?: string;
+}
+
+export interface MediaRequestItem {
+  id: number;
+  no: number;
+  seq: string;
+  parent_id?: number | null;
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  product_image?: string | null;
+  platform?: string | null;
+  platform_items: MediaPlatformItem[];
+  demand_types: string[];
+  demand_type?: string | null;
+  description?: string | null;
+  prompt?: string | null;
+  plan?: MediaPlan | null;
+  ref_images: string[];
+  ratio: string;
+  resolution: string;
+  duration: number;
+  video_type?: string | null;
+  stage: MediaStage;
+  gen_status?: string | null;
+  gen_task_id?: number | null;
+  gen_time?: string | null;
+  media_url?: string | null;
+  /** 成片类型：video=视频 / image=图片（已有素材提报时标记） */
+  media_type?: string | null;
+  /** 图片素材用途：主图 / 附图 / A+ */
+  media_style?: string | null;
+  hd_status?: string | null;
+  hd_task_id?: number | null;
+  hd_url?: string | null;
+  hd_time?: string | null;
+  bind_status?: string | null;
+  binding_request_id?: number | null;
+  upload_status?: string | null;
+  upload_time?: string | null;
+  upload_result?: Record<string, unknown> | null;
+  submitter_name?: string | null;
+  submit_time?: string | null;
+  reviewer_name?: string | null;
+  reviewer_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  logs?: MediaRequestLog[];
+}
+
+export interface MediaRequestLog {
+  id: number;
+  actor_name: string;
+  action: string;
+  note: string;
+  created_at: string;
+}
+
+/** 提报弹窗：跨产品的平台 SKU×店铺条目 */
+export interface ProductSkuEntry {
+  pp_id: number;
+  store_id: number;
+  product_id: number;
+  platform: string;
+  sku: string;
+  asin: string;
+  store_name: string;
+  site: string;
+  usable: boolean;
+  unusable_reason?: string | null;
+}
+
+/** 提报弹窗：按产品分组（可展开选择具体店铺/SKU） */
+export interface ProductSkuGroup {
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  product_image?: string | null;
+  entries: ProductSkuEntry[];
+}
+
+export const mediaRequestApi = {
+  /** 按阶段查询单据（顺带同步 AI 生成状态） */
+  list: (params: {
+    stage: MediaStage;
+    op?: string;
+    platform?: string;
+    keyword?: string;
+    page?: number;
+    page_size?: number;
+  }) =>
+    apiClient.get<{
+      success: boolean;
+      data: { items: MediaRequestItem[]; total: number; counts: Record<string, number> };
+    }>("/media-requests", { params }),
+  /** 单据详情（含操作日志时间线） */
+  get: (id: number) =>
+    apiClient.get<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`),
+  /** 各阶段数量（「待绑定」数量由绑定审核接口单独提供） */
+  counts: () =>
+    apiClient.get<{ success: boolean; data: Record<string, number> }>("/media-requests/counts"),
+  /** 提报弹窗数据源：按产品分组的平台 SKU×店铺条目（含可上传性标记） */
+  listProductSkus: (params: { keyword?: string; platform?: string; page?: number; page_size?: number }) =>
+    apiClient.get<{ success: boolean; data: { items: ProductSkuGroup[]; total: number } }>(
+      "/media-requests/product-skus",
+      { params },
+    ),
+  /** 运营提报（待提交页签）；待绑定/待上传页签可传 media_url+media_kind 直接上传已有素材（落待绑定） */
+  create: (data: {
+    product_id: number;
+    demand_types: string[];
+    description?: string;
+    prompt?: string;
+    ref_images?: string[];
+    platform_items: { pp_id: number; store_id: number }[];
+    media_url?: string;
+    media_kind?: 'video' | 'image';
+    /** 图片素材用途：主图 / 附图 / A+（写 Amazon 图片表「类型」字段） */
+    media_style?: string;
+  }) => apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>("/media-requests", data),
+  /** 待提交改需求描述/类型；待生成改提示词/参考图/参数 */
+  update: (
+    id: number,
+    data: {
+      description?: string;
+      demand_types?: string[];
+      prompt?: string;
+      ref_images?: string[];
+      ratio?: string;
+      resolution?: string;
+      duration?: number;
+    },
+  ) => apiClient.patch<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`, data),
+  /** 待提交 → 待审核 */
+  submit: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/submit`),
+  /** 删除单据（软删，不可恢复）：待提交页签=「取消」，其余页签=「删除」，任意阶段可用 */
+  remove: (id: number) =>
+    apiClient.delete<{ success: boolean; message: string }>(`/media-requests/${id}`),
+  /** 运营主管审核（通过时按需求类型拆单） */
+  review: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/review`, data),
+  /** 美工点击生成：提交真实 AI 视频任务 */
+  generate: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate`),
+  /** 图片类需求：待生成页直接提交 AI 生图（复用 AI生图 服务），完成后自动进入已生成 */
+  generateImage: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate-image`),
+  /** 待生成页「AI 生成方案」：只生成 1 套方案并回填提示词（大模型耗时较长，单独放宽超时） */
+  generatePlan: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: { prompt: string; plan: MediaPlan } }>(
+      `/media-requests/${id}/generate-plan`,
+      undefined,
+      { timeout: 600000 },
+    ),
+  /** 美工审核成片 → 待确认 / 退回待生成 */
+  genReview: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/gen-review`, data),
+  /** 运营二次审核 → 待高清 / 退回待生成 */
+  confirm: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/confirm`, data),
+  /** 待高清 → 提交超分任务（强制高清门禁，scale 1.0~4.0x），完成后自动进入待绑定 */
+  upscale: (id: number, scale?: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(
+      `/media-requests/${id}/upscale`,
+      scale ? { scale } : undefined,
+    ),
+  /** 待绑定 → 提交绑定至产品申请（上传前门禁），审核通过后进入待上传 */
+  bind: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/bind`),
+  /** 待上传 → 真实调用 Amazon（飞书 RPA）/ Ozon（Seller API）上传 */
+  upload: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data?: Record<string, unknown>; item?: MediaRequestItem }>(
+      `/media-requests/${id}/upload`,
+    ),
+};
 
 export const videoBindingApi = {
   /** 提交绑定申请（ai_video:use）；media_type=image 时绑定的是图片 */
@@ -2099,6 +2374,43 @@ export const videoBindingApi = {
       message: string;
       data?: { success: number; failed: number; errors: string[] };
     }>("/video-bindings/feishu-sku-upload", data),
+  /** 产品 AMAZON+OZON 平台 SKU×店铺列表（视频统一上传数据源，分平台返回） */
+  getPlatformSkus: (productId: number) =>
+    apiClient.get<{
+      success: boolean;
+      data: {
+        amazon: PlatformSkuEntry[];
+        ozon: PlatformSkuEntry[];
+        feishu_video_configured: boolean;
+        ozon_trace_configured: boolean;
+      };
+    }>("/video-bindings/platform-skus", { params: { product_id: productId } }),
+  /** 视频统一上传：按勾选 SKU 平台自动路由（amazon→飞书RPA，ozon→attributes/update+飞书留痕） */
+  uploadSkuVideos: (data: {
+    product_id: number;
+    video_url?: string;
+    video_urls?: string[];
+    items: { pp_id: number; store_id: number }[];
+  }) =>
+    apiClient.post<{
+      success: boolean;
+      message: string;
+      data?: {
+        amazon?: { success?: number; failed?: number; errors?: string[]; error?: string } | null;
+        ozon?: {
+          results?: OzonUploadResult[];
+          batch_no?: string;
+          feishu_traced?: boolean;
+          trace?: { success?: number; failed?: number; errors?: string[] } | null;
+        } | null;
+      };
+    }>("/video-bindings/sku-video-upload", data),
+  /** 查询 Ozon 视频任务处理结果（终态时自动回写飞书留痕表） */
+  getOzonUploadStatus: (tasks: { store_id: number; task_id: number; batch_no?: string }[]) =>
+    apiClient.post<{ success: boolean; data: { results: OzonTaskStatusResult[] } }>(
+      "/video-bindings/ozon-upload-status",
+      { tasks },
+    ),
 };
 
 export const aiCreationApi = {
@@ -2249,6 +2561,12 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/video-tasks/${taskId}/cancel`,
     ),
+  /** 排队任务插队：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行 */
+  prioritizeVideoTask: (taskId: number, mode: "interrupt" | "wait") =>
+    apiClient.post<{ success: boolean; action: string; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/prioritize`,
+      { mode },
+    ),
   /** 智能重试失败的视频任务（原记录重试）：能接续 ComfyUI 就接续收片，
    *  否则服务端直接取历史参考图原位重新提交，无需前端取图 */
   recoverVideoTask: (taskId: number) =>
@@ -2286,6 +2604,12 @@ export const aiCreationApi = {
   cancelUpscaleTask: (taskId: number) =>
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/upscale-tasks/${taskId}/cancel`,
+    ),
+  /** 超分排队任务插队：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行 */
+  prioritizeUpscaleTask: (taskId: number, mode: "interrupt" | "wait") =>
+    apiClient.post<{ success: boolean; action: string; message: string }>(
+      `/ai-creation/upscale-tasks/${taskId}/prioritize`,
+      { mode },
     ),
   /** 重试失败的超分任务：在原记录上重置状态并重新入队 */
   retryUpscaleTask: (taskId: number) =>

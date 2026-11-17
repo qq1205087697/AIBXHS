@@ -161,6 +161,15 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 选品费用字段重抓：佣金/头程/尾程/重量为空或0的记录自动调卖家精灵接口补抓（每2小时）
+    scheduler.add_job(
+        product_selection_fees_rescrape_job,
+        trigger=IntervalTrigger(hours=2),
+        id="product_selection_fees_rescrape",
+        name="选品费用字段重抓（佣金/头程/尾程/重量）",
+        replace_existing=True
+    )
+
     scheduler.add_job(
         check_overdue_purchase_orders_job,
         trigger="cron",
@@ -194,8 +203,40 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 拼团超期处理：每小时检查一次，grouping 超过7天期限自动转审批未通过
+    scheduler.add_job(
+        product_selection_group_expire_job,
+        trigger="interval",
+        hours=1,
+        id="product_selection_group_expire",
+        name="选品拼团超期处理",
+        replace_existing=True
+    )
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
+
+
+def product_selection_group_expire_job():
+    """拼团超期处理：grouping 状态超过7天期限未达起订量的记录，自动转为审批未通过"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        result = db.execute(text(
+            "UPDATE product_selections SET status = 'rejected', "
+            "reject_reason = '拼团超期（7天未达起订量），自动关闭', "
+            "group_deadline = NULL, updated_at = NOW() "
+            "WHERE status = 'grouping' AND group_deadline IS NOT NULL AND group_deadline < NOW() AND deleted_at IS NULL"
+        ))
+        db.commit()
+        if result.rowcount > 0:
+            logger.info(f"拼团超期处理：{result.rowcount} 条待拼团记录已超期自动关闭")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"拼团超期处理失败: {e}")
+    finally:
+        db.close()
 
 
 def startop_pull_job():
@@ -783,6 +824,19 @@ def _sel_calc_traffic(traffic_trend_str):
     if not isinstance(month_volume, dict) or not month_volume:
         return 0.0, ""
 
+    # 多关键词嵌套格式 {关键词: {月份: 流量}}：每个关键词单独评分，取最优分作为商品流量分
+    if any(isinstance(v, dict) for v in month_volume.values()):
+        best_score, best_result, best_kw = 0.0, "", ""
+        for kw, sub_series in month_volume.items():
+            if not isinstance(sub_series, dict) or not sub_series:
+                continue
+            s, sr = _sel_calc_traffic(str(sub_series))
+            if s > best_score:
+                best_score, best_result, best_kw = s, sr, kw
+        if not best_kw:
+            return 0.0, ""
+        return best_score, f"最优关键词[{best_kw}] {best_result}"
+
     values = [v for v in month_volume.values() if isinstance(v, (int, float))]
     n = len(values)
     if n == 0:
@@ -1030,6 +1084,260 @@ def recalc_product_selection_scores_job():
         db.rollback()
     finally:
         release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+# ========== 选品费用字段重抓（佣金/头程/尾程/重量） ==========
+# 卖家精灵利润计算接口：按站点市场ID查询ASIN的佣金(referralFee)/尾程(fbaFee)/重量
+TOOL4SELLER_FBA_CALC_URL = "https://das-server.tool4seller.cn/ap/fba/calculate"
+# 站点 -> (利润计算店铺marketplaceId, 币种)
+SEL_FEE_MARKETPLACE_MAP = {
+    "us": ("ATVPDKIKX0DER", "USD"),
+    "de": ("A1PA6795UKMFR9", "EUR"),
+    "uk": ("A1F83G8C2ARO7P", "GBP"),
+}
+# 亚马逊重量单位 -> kg 换算系数
+WEIGHT_UNIT_TO_KG = {
+    "kilograms": 1.0,
+    "grams": 0.001,
+    "pounds": 0.45359237,
+    "ounces": 0.0283495231,
+}
+
+
+def _sel_site_key(site) -> str:
+    """站点字符串归一化为 us/de/uk（与路由端 _normalize_site_key 一致）"""
+    s = (site or "").lower()
+    if "德" in (site or "") or "de" in s:
+        return "de"
+    if "英" in (site or "") or "uk" in s or "gb" in s:
+        return "uk"
+    return "us"
+
+
+def _fetch_fx_to_cny_rates_safe() -> dict:
+    """获取实时汇率（1外币兑人民币），失败返回空dict（复用路由端实现）"""
+    try:
+        from routers.product_selection import _get_cny_rates
+        return _get_cny_rates() or {}
+    except Exception as e:
+        logger.warning(f"获取实时汇率失败，头程将跳过计算: {e}")
+        return {}
+
+
+def product_selection_fees_rescrape_job(limit: int = None, full: bool = False, ids: list = None):
+    """重抓选品FBA利润字段（佣金/头程/尾程/重量）：
+    - ids 指定时：仅重算指定记录（批量勾选触发，强制重算可见记录）
+    - 否则：费用为空或为0的记录
+    调用卖家精灵利润计算接口，接口频繁调用可能返回错误的0.0，因此任一字段为0时自动重试（最多3次，
+    字段级取重试结果最大值）；重量按单位换算为kg，头程按公式自动计算
+    （头程 = 重量 × 货代费用(元/kg) ÷ 汇率，汇率方向为 1外币 = X人民币）。
+
+    显示规则（佣金/头程/尾程/重量任一为空或0则页面不显示，通过 deleted_at 实现）：
+    - 补齐数据的记录：deleted_at 置空恢复显示
+    - 3次重试均为0.0且记录费用不完整：写入 deleted_at 软删除隐藏，待后续重抓有数据时恢复
+    - 已有完整数据的记录：只刷新，绝不清零或误删
+    full=True（手动"重新计算FBA利润"按钮触发）：刷新全部记录，而不只是缺失记录"""
+    import requests
+    from database.database import SessionLocal
+    from sqlalchemy import text
+
+    LOCK_KEY = "product_selection_fees_rescrape"
+    db = SessionLocal()
+    locked = False
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=240):
+            return
+        locked = True
+
+        # 目标集：ids 指定=仅重算勾选记录（强制，仅可见记录）；
+        # full=全部记录刷新；常规=费用不完整记录补抓
+        extra_params: dict = {}
+        if ids:
+            id_list = [int(i) for i in ids if i]
+            if not id_list:
+                logger.info("选品FBA利润重抓：未指定有效记录ID，跳过")
+                return
+            ph = ", ".join(f":rid{i}" for i in range(len(id_list)))
+            where_sql = f"id IN ({ph}) AND deleted_at IS NULL"
+            extra_params = {f"rid{i}": v for i, v in enumerate(id_list)}
+        else:
+            incomplete_cond = """(
+                  (commission IS NULL OR commission = 0)
+               OR (first_leg_cost IS NULL OR first_leg_cost = 0)
+               OR (last_mile_cost IS NULL OR last_mile_cost = 0)
+               OR (weight_kg IS NULL OR weight_kg = 0)
+            )"""
+            where_sql = f"(deleted_at IS NULL OR {incomplete_cond})" if full else incomplete_cond
+        limit_sql = " LIMIT :limit" if limit else ""
+        rows = db.execute(text(f"""
+            SELECT id, site, asin, commission, first_leg_cost, last_mile_cost,
+                   weight_kg, scrape_rate, realtime_rate, deleted_at, price
+            FROM product_selections
+            WHERE asin IS NOT NULL AND asin != '' AND {where_sql}{limit_sql}
+        """), {**extra_params, **({"limit": limit} if limit else {})}).fetchall()
+
+        if not rows:
+            logger.info("选品FBA利润重抓：没有需要处理的记录")
+            return
+
+        logger.info(f"========== 开始选品FBA利润重抓（full={full}）：共 {len(rows)} 条 ==========")
+        fresh_rates = None  # 懒加载：仅当记录缺有效汇率时才抓一次实时汇率
+        updated = hidden = restored = failed = nodata = 0
+
+        # 并行抓取接口数据（网络IO密集，8线程），DB写入仍在主线程串行执行（Session非线程安全）
+        MAX_WORKERS = 8
+
+        def _fetch_fees(marketplace_id: str, asin: str) -> tuple:
+            """调用接口：任一字段为0则重试，最多3次，字段级取重试结果最大值
+            返回 (佣金, 尾程, 重量kg, 售价amount, 是否有有效响应)"""
+            best_referral = best_fba = best_weight_kg = best_amount = 0.0
+            has_valid_response = False
+            for attempt in range(3):
+                try:
+                    resp = requests.get(
+                        TOOL4SELLER_FBA_CALC_URL,
+                        params={"marketplaceId": marketplace_id, "asin": asin, "amount": "0.00"},
+                        timeout=20,
+                        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json() or {}
+                    # status!=1（如限频/错误）视为请求失败，不算"无数据"，避免误隐藏
+                    if payload.get("status") != 1:
+                        raise ValueError(f"接口状态异常: {payload.get('msg') or payload}")
+                    content = payload.get("content") or {}
+                except Exception:
+                    time.sleep(1)
+                    continue
+                has_valid_response = True
+                referral = float(content.get("referralFee") or 0)  # 佣金（站点货币）
+                fba = float(content.get("fbaFee") or 0)            # 尾程配送费（站点货币）
+                unit = (content.get("weightUnits") or "").lower()
+                w = round(float(content.get("weight") or 0)
+                          * WEIGHT_UNIT_TO_KG.get(unit, 1.0), 3)
+                amount = float(content.get("amount") or 0)         # 亚马逊最新售价（站点货币）
+                best_referral = max(best_referral, referral)
+                best_fba = max(best_fba, fba)
+                best_weight_kg = max(best_weight_kg, w)
+                best_amount = max(best_amount, amount)
+                if best_referral > 0 and best_fba > 0 and best_weight_kg > 0 and best_amount > 0:
+                    break  # 已取到完整数据
+                time.sleep(1)  # 0.0可能是限频导致的错误数据，稍候重试
+            return best_referral, best_fba, best_weight_kg, best_amount, has_valid_response
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # 流式抓写：8线程并行调接口（网络IO密集），主线程每收到一个结果立即计算并写库
+        # （Session非线程安全，DB写入只在主线程）。相比"全部抓完再写"：
+        # 1) 写库连接持续活跃不会空闲断连（此前"先抓完再写"曾因~15分钟空闲导致2013 Lost connection，
+        #    pool_pre_ping只在取连接时校验，救不了一直握着死连接的旧Session）
+        # 2) 每200条分批提交，中途失败已提交的不丢
+        write_db = SessionLocal()
+        try:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                futures = {}
+                for row in rows:
+                    marketplace_id, _ = SEL_FEE_MARKETPLACE_MAP[_sel_site_key(row[1])]
+                    futures[pool.submit(_fetch_fees, marketplace_id, row[2])] = row
+                done = 0
+                for fut in as_completed(futures):
+                    row = futures[fut]
+                    done += 1
+                    try:
+                        best_referral, best_fba, best_weight_kg, best_amount, has_valid_response = fut.result()
+                    except Exception as e:
+                        logger.warning(f"选品 {row[0]}（{row[2]}）抓取线程异常: {e}")
+                        failed += 1
+                        continue
+                    if not has_valid_response:
+                        failed += 1  # 网络异常无法确认数据，不写不改
+                        continue
+
+                    key = _sel_site_key(row[1])
+                    currency = SEL_FEE_MARKETPLACE_MAP[key][1]
+                    updates = {}
+                    if best_referral > 0:
+                        updates["commission"] = round(best_referral, 2)
+                    if best_fba > 0:
+                        updates["last_mile_cost"] = round(best_fba, 2)
+                    if best_weight_kg > 0:
+                        updates["weight_kg"] = best_weight_kg
+                    if best_amount > 0:
+                        updates["price"] = round(best_amount, 2)  # 亚马逊最新售价（不参与完整性判断，缺价不隐藏）
+
+                    # 头程自动计算：重量 × 货代费用(元/kg) ÷ 汇率；接口无重量时用库内已有重量
+                    # 有效汇率：1外币兑人民币恒大于1，<=1视为无效/旧方向数据（供头程与进货价上限共用）
+                    rate = next((float(c) for c in (row[8], row[7])
+                                 if c is not None and float(c) > 1), None)
+                    if rate is None:
+                        if fresh_rates is None:
+                            fresh_rates = _fetch_fx_to_cny_rates_safe()
+                        rate = (fresh_rates or {}).get(currency) or None
+                        if rate:
+                            updates["realtime_rate"] = rate  # 记录使用的实时汇率，供后续重算
+                    eff_weight = best_weight_kg if best_weight_kg > 0 else (float(row[6]) if row[6] else 0)
+                    if eff_weight > 0 and rate:
+                        fee_per_kg = 30.0 if key == "us" else 25.0
+                        updates["first_leg_cost"] = round(eff_weight * fee_per_kg / rate, 3)
+
+                    # "进货价（需低于）"：15%假设毛利反推上限（售价/费用变化后同步刷新）
+                    try:
+                        from routers.product_selection import _calc_cost_cap
+                        eff_price = best_amount if best_amount > 0 else (float(row[10]) if row[10] else 0)
+                        eff_comm = best_referral if best_referral > 0 else (float(row[3]) if row[3] else 0)
+                        eff_last = best_fba if best_fba > 0 else (float(row[5]) if row[5] else 0)
+                        eff_first = updates.get("first_leg_cost") or (float(row[4]) if row[4] else 0)
+                        cap = _calc_cost_cap(eff_price, rate, eff_comm, eff_first, eff_last, key)
+                        if cap:
+                            updates["cost_at_15_profit"] = cap
+                    except Exception as cap_err:
+                        logger.warning(f"选品 {row[0]} 进货价上限计算失败: {cap_err}")
+
+                    # 完整性判断：佣金/头程/尾程/重量四项均>0才显示，否则软删除隐藏（待有数据时恢复）
+                    def _eff(col, db_val):
+                        return float(updates[col]) if col in updates else (float(db_val) if db_val is not None else 0.0)
+                    complete = (_eff("commission", row[3]) > 0
+                                and _eff("first_leg_cost", row[4]) > 0
+                                and _eff("last_mile_cost", row[5]) > 0
+                                and _eff("weight_kg", row[6]) > 0)
+
+                    set_parts = [f"{k} = :{k}" for k in updates]
+                    if complete:
+                        set_parts.append("deleted_at = NULL")  # 恢复显示（对未删除记录无影响）
+                        if row[9] is not None:
+                            restored += 1
+                    else:
+                        if best_referral <= 0 and best_fba <= 0 and best_weight_kg <= 0:
+                            nodata += 1  # 3次有效响应均为0.0，确认无数据
+                        set_parts.append("deleted_at = NOW()")  # 软删除隐藏，后续重抓有数据会恢复
+                        if row[9] is None:
+                            hidden += 1
+                    set_parts.append("updated_at = NOW()")
+
+                    write_db.execute(text(
+                        f"UPDATE product_selections SET {', '.join(set_parts)} WHERE id = :id"
+                    ), {**updates, "id": row[0]})
+                    updated += 1
+                    if updated % 200 == 0:
+                        write_db.commit()  # 分批提交，中途失败已提交的不丢
+                    if done % 200 == 0 or done == len(rows):
+                        logger.info(f"FBA利润重抓进度: 已处理 {done}/{len(rows)}，已写入 {updated}")
+            write_db.commit()
+        finally:
+            write_db.close()
+
+        logger.info(
+            f"========== 选品FBA利润重抓完成：更新 {updated}"
+            f"（恢复显示 {restored}，隐藏 {hidden}），确认无数据 {nodata}，请求失败 {failed} =========="
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"选品FBA利润重抓任务失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        if locked:
+            release_distributed_lock(db, LOCK_KEY)
         db.close()
 
 
