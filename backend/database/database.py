@@ -144,6 +144,15 @@ def init_db():
                 ("review_analyses", "departments",
                  "ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL "
                  "COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"),
+                # 发货单表补齐 shipments 路由使用的确认流程/转出库关联列（存量库缺列导致 1054）
+                ("shipment_orders", "confirmed_by",
+                 "ALTER TABLE shipment_orders ADD COLUMN confirmed_by INT NULL COMMENT '确认人'"),
+                ("shipment_orders", "confirmer_name",
+                 "ALTER TABLE shipment_orders ADD COLUMN confirmer_name VARCHAR(100) NULL COMMENT '确认人姓名'"),
+                ("shipment_orders", "confirmed_at",
+                 "ALTER TABLE shipment_orders ADD COLUMN confirmed_at DATETIME NULL COMMENT '确认时间'"),
+                ("shipment_orders", "outbound_order_id",
+                 "ALTER TABLE shipment_orders ADD COLUMN outbound_order_id INT NULL COMMENT '关联出库单ID'"),
             ])
             conn.commit()
         

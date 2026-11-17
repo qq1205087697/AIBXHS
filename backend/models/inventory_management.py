@@ -251,6 +251,12 @@ class ShipmentOrder(BaseModel):
     status = Column(Enum(ShipmentOrderStatus), default=ShipmentOrderStatus.DRAFT, comment="状态")
     notes = Column(Text, nullable=True, comment="备注")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="创建人")
+    # 确认信息（shipments 路由使用的单段确认流程字段；与 warehouse_* 三段式流程列并存）
+    confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="确认人")
+    confirmer_name = Column(String(100), nullable=True, comment="确认人姓名")
+    confirmed_at = Column(DateTime, nullable=True, comment="确认时间")
+    # 转出库单回写关联
+    outbound_order_id = Column(Integer, ForeignKey("outbound_orders.id"), nullable=True, comment="关联出库单ID")
     creator_name = Column(String(100), nullable=True, comment="创建人姓名")
     warehouse_confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="仓库确认人")
     warehouse_confirmer_name = Column(String(100), nullable=True, comment="仓库确认人姓名")
