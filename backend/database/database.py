@@ -153,6 +153,23 @@ def init_db():
                  "ALTER TABLE shipment_orders ADD COLUMN confirmed_at DATETIME NULL COMMENT '确认时间'"),
                 ("shipment_orders", "outbound_order_id",
                  "ALTER TABLE shipment_orders ADD COLUMN outbound_order_id INT NULL COMMENT '关联出库单ID'"),
+                # 采购明细表补齐 purchase 路由使用的列（存量库缺列导致 1054）
+                ("purchase_order_items", "supplier",
+                 "ALTER TABLE purchase_order_items ADD COLUMN supplier VARCHAR(100) NULL COMMENT '供应商名称'"),
+                ("purchase_order_items", "parent_product_id",
+                 "ALTER TABLE purchase_order_items ADD COLUMN parent_product_id INT NULL COMMENT '关联成品ID（配件行）'"),
+                ("purchase_order_items", "store_group_id",
+                 "ALTER TABLE purchase_order_items ADD COLUMN store_group_id INT NULL COMMENT '店铺分组ID（明细级）'"),
+                ("stores", "ozon_client_id",
+                 "ALTER TABLE stores ADD COLUMN ozon_client_id VARCHAR(64) NULL COMMENT 'Ozon Seller API Client-Id'"),
+                ("stores", "ozon_api_key",
+                 "ALTER TABLE stores ADD COLUMN ozon_api_key VARCHAR(255) NULL COMMENT 'Ozon Seller API Api-Key（不回传前端）'"),
+                ("product_selections", "store_group_ids",
+                 "ALTER TABLE product_selections ADD COLUMN store_group_ids TEXT NULL COMMENT '申请店铺分组ID列表(JSON数组)'"),
+                ("inbound_order_items", "shelf_number",
+                 "ALTER TABLE inbound_order_items ADD COLUMN shelf_number VARCHAR(50) NULL COMMENT '货架号'"),
+                ("inbound_order_items", "purchase_order_item_id",
+                 "ALTER TABLE inbound_order_items ADD COLUMN purchase_order_item_id INT NULL COMMENT '关联采购明细ID'"),
             ])
             conn.commit()
         

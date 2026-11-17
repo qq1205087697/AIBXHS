@@ -46,6 +46,7 @@ class OutboundOrderUpdate(BaseModel):
     outbound_date: Optional[str] = None
     store_group_id: Optional[int] = None
     notes: Optional[str] = None
+    items: Optional[List[OutboundItemCreate]] = None
 
 
 @router.get("/")
@@ -291,7 +292,7 @@ async def update_outbound_order(
 ):
     try:
         row = db.execute(text(
-            "SELECT id, order_number, status FROM outbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+            "SELECT id, order_number, status, outbound_type FROM outbound_orders WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
         ), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="出库订单不存在")
@@ -308,6 +309,15 @@ async def update_outbound_order(
             if not group_check:
                 raise HTTPException(status_code=400, detail="指定的店铺分组不存在")
 
+        effective_type = data.outbound_type if data.outbound_type is not None else row[3]
+        if data.items is not None:
+            if len(data.items) == 0:
+                raise HTTPException(status_code=400, detail="请至少添加一条出库明细")
+            if effective_type == "scrap":
+                for item in data.items:
+                    if not item.selected_batch_id:
+                        raise HTTPException(status_code=400, detail="报废类型的出库单必须为每个商品选择指定批次")
+
         updates = []
         params = {"id": order_id}
         for field in ["order_number", "outbound_type", "warehouse", "handler", "outbound_date", "store_group_id", "notes"]:
@@ -318,7 +328,29 @@ async def update_outbound_order(
 
         if updates:
             db.execute(text(f"UPDATE outbound_orders SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id"), params)
-            db.commit()
+
+        # 草稿单未扣减库存，直接替换明细并重算合计（与表头同事务提交）
+        if data.items is not None:
+            total_qty = sum(item.quantity for item in data.items)
+            total_amt = sum((item.quantity * (item.unit_price or 0)) for item in data.items)
+
+            db.execute(text("DELETE FROM outbound_order_items WHERE outbound_order_id = :oid"), {"oid": order_id})
+            for item in data.items:
+                total_price = item.quantity * (item.unit_price or 0)
+                db.execute(text("""
+                    INSERT INTO outbound_order_items (outbound_order_id, product_id, quantity, unit_price, total_price, notes, batch_id, batch_number, created_at, updated_at)
+                    VALUES (:oid, :pid, :qty, :up, :tp, :notes, :bid, :bn, :created_at, :updated_at)
+                """), {
+                    "oid": order_id, "pid": item.product_id, "qty": item.quantity,
+                    "up": item.unit_price, "tp": total_price, "notes": item.notes,
+                    "bid": item.selected_batch_id, "bn": item.selected_batch_number,
+                    "created_at": datetime.now(), "updated_at": datetime.now(),
+                })
+            db.execute(text(
+                "UPDATE outbound_orders SET total_quantity = :tq, total_amount = :ta, updated_at = NOW() WHERE id = :id"
+            ), {"tq": total_qty, "ta": total_amt, "id": order_id})
+
+        db.commit()
 
         log_order_update(db, current_user.tenant_id, current_user.id, current_user.nickname or current_user.username,
                          "outbound", order_id, row[1], before_data,
