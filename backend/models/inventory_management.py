@@ -284,6 +284,8 @@ class ShipmentOrderItem(BaseModel):
     product_code = Column(String(100), nullable=True, comment="产品编码")
     product_name = Column(String(200), nullable=True, comment="产品名称")
     stock_quantity = Column(Integer, nullable=False, default=0, comment="库存数")
+    # SKU（发货明细展示用；存量库缺列由启动补丁补齐）
+    sku = Column(String(100), nullable=True, comment="SKU")
     profit_margin = Column(DECIMAL(10, 2), nullable=True, comment="毛利率(%)")
     red_list = Column(String(50), nullable=True, comment="红单")
     sea_freight = Column(String(50), nullable=True, comment="海运")
