@@ -135,6 +135,18 @@ const ReviewBot: React.FC = () => {
   const [rankingData, setRankingData] = useState<any[]>([])
   const [rankingLoading, setRankingLoading] = useState(false)
 
+  // 低分产品统计弹窗（全店铺 Listing 评分<=3）
+  const [lowStarOpen, setLowStarOpen] = useState(false)
+  const [lowStarLoading, setLowStarLoading] = useState(false)
+  const [lowStarSummary, setLowStarSummary] = useState<any>(null)
+  const [lowStarItems, setLowStarItems] = useState<any[]>([])
+  const [lowStarTotal, setLowStarTotal] = useState(0)
+  const [lowStarPage, setLowStarPage] = useState(1)
+  const [lowStarPageSize, setLowStarPageSize] = useState(50)
+  const [lowStarSid, setLowStarSid] = useState<number | undefined>(undefined)
+  const [lowStarKeyword, setLowStarKeyword] = useState('')
+  const [lowStarQuery, setLowStarQuery] = useState('')
+
   const [importanceStats, setImportanceStats] = useState({
     high: { unviewed: 0, viewed: 0 },
     medium: { unviewed: 0, viewed: 0 },
@@ -229,6 +241,52 @@ const ReviewBot: React.FC = () => {
       setRankingLoading(false)
     }
   }
+
+  const fetchLowStarListings = async (page = lowStarPage, size = lowStarPageSize) => {
+    setLowStarLoading(true)
+    try {
+      const response = await reviewsApi.getLowStarListings({
+        page,
+        page_size: size,
+        sid: lowStarSid,
+        keyword: lowStarQuery || undefined,
+      })
+      if (response.data.success) {
+        setLowStarSummary(response.data.data.summary)
+        setLowStarItems(response.data.data.items)
+        setLowStarTotal(response.data.data.total)
+      }
+    } catch (error: any) {
+      console.error('获取低分产品统计失败:', error)
+      message.error(error?.response?.data?.detail || '获取低分产品统计失败')
+    } finally {
+      setLowStarLoading(false)
+    }
+  }
+
+  const openLowStarModal = () => {
+    setLowStarOpen(true)
+    setLowStarPage(1)
+    setLowStarSid(undefined)
+    setLowStarKeyword('')
+    setLowStarQuery('')
+  }
+
+  // 低分产品关键词搜索防抖（300ms）
+  useEffect(() => {
+    if (!lowStarOpen) return
+    const timer = setTimeout(() => {
+      setLowStarQuery(lowStarKeyword)
+      setLowStarPage(1)
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [lowStarKeyword])
+
+  // 打开弹窗或筛选/翻页变化时拉取（React 批量更新，同一事件只触发一次）
+  useEffect(() => {
+    if (!lowStarOpen) return
+    fetchLowStarListings(lowStarPage, lowStarPageSize)
+  }, [lowStarOpen, lowStarPage, lowStarPageSize, lowStarSid, lowStarQuery])
 
   const fetchReviewData = async () => {
     try {
@@ -645,6 +703,9 @@ const ReviewBot: React.FC = () => {
                 <Button type="primary" ghost onClick={() => { setRankingOpen(true); fetchRanking() }}>
                   半年排行榜
                 </Button>
+                <Button type="primary" ghost onClick={openLowStarModal}>
+                  低分产品统计
+                </Button>
               </Space>
             </Col>
           </Row>
@@ -900,6 +961,95 @@ const ReviewBot: React.FC = () => {
               title: '主要问题板块', dataIndex: 'main_department', key: 'main_department', width: 110, align: 'center',
               render: (v: string) => getDepartmentTag(v),
             },
+          ]}
+        />
+      </Modal>
+
+      {/* 低分产品统计（全店铺 Listing 评分<=3，数据由 lingxing_low_star_stats.py 生成） */}
+      <Modal
+        title="低分产品统计（全店铺 Listing 评分 ≤ 3 星）"
+        open={lowStarOpen}
+        onCancel={() => setLowStarOpen(false)}
+        footer={null}
+        width={res.isMobile ? '95vw' : 1150}
+      >
+        {lowStarSummary && (
+          <>
+            <Row gutter={16} style={{ marginBottom: 8 }}>
+              <Col span={5}><Statistic title="低分 Listing" value={lowStarSummary.matched_total ?? '-'} /></Col>
+              <Col span={5}><Statistic title="唯一 ASIN" value={lowStarSummary.unique_asin ?? '-'} /></Col>
+              <Col span={5}><Statistic title="唯一 MSKU" value={lowStarSummary.unique_msku ?? '-'} /></Col>
+              <Col span={9}>
+                <Statistic
+                  title="数据生成时间"
+                  value={lowStarSummary.generated_at || '-'}
+                  suffix={lowStarSummary.scanned_total ? `/ 扫描 ${lowStarSummary.scanned_total} 条` : ''}
+                />
+              </Col>
+            </Row>
+            <Space size={4} wrap style={{ marginBottom: 12 }}>
+              {Object.entries(lowStarSummary.distribution || {}).map(([k, v]) => (
+                <Tag key={k} color={k === '>3' ? 'green' : k === '无评分' ? 'default' : 'red'} style={{ marginInlineEnd: 0 }}>
+                  {k}: {v as number}
+                </Tag>
+              ))}
+            </Space>
+          </>
+        )}
+        <Space style={{ marginBottom: 12 }} wrap>
+          <Select
+            value={lowStarSid}
+            onChange={(value) => { setLowStarSid(value); setLowStarPage(1) }}
+            style={{ width: 240 }}
+            placeholder="全部店铺"
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            options={(lowStarSummary?.by_store || []).map((s: any) => ({ value: s.sid, label: `${s.name}（${s.count}）` }))}
+          />
+          <Input
+            allowClear
+            value={lowStarKeyword}
+            onChange={(e) => setLowStarKeyword(e.target.value)}
+            placeholder="搜索 ASIN / SKU / 标题"
+            prefix={<Search size={14} />}
+            style={{ width: 240 }}
+          />
+        </Space>
+        <Table
+          dataSource={lowStarItems}
+          loading={lowStarLoading}
+          rowKey={(r: any) => `${r.sid}_${r.seller_sku}`}
+          size="small"
+          scroll={{ y: 420 }}
+          tableLayout="fixed"
+          pagination={{
+            current: lowStarPage,
+            pageSize: lowStarPageSize,
+            total: lowStarTotal,
+            showSizeChanger: true,
+            showTotal: (t: number) => `共 ${t} 条`,
+            onChange: (p: number, s: number) => { setLowStarPage(p); setLowStarPageSize(s) },
+          }}
+          columns={[
+            { title: '店铺', dataIndex: 'store_name', key: 'store_name', width: 120, ellipsis: true },
+            { title: 'MSKU', dataIndex: 'seller_sku', key: 'seller_sku', width: 130, ellipsis: true,
+              render: (v: string) => <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip> },
+            { title: 'ASIN', dataIndex: 'asin', key: 'asin', width: 120, ellipsis: true },
+            { title: '品名', dataIndex: 'product_name', key: 'product_name', width: 150, ellipsis: { showTitle: false },
+              render: (v: string) => v
+                ? <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip>
+                : <span style={{ color: '#999' }}>-</span> },
+            { title: '评分', dataIndex: 'last_star', key: 'last_star', width: 80, align: 'center',
+              render: (v: number) => v === null ? '-'
+                : <Tag color={v <= 1 ? 'red' : v <= 2 ? 'orange' : 'gold'} style={{ marginInlineEnd: 0 }}>{v} 星</Tag> },
+            { title: '价格', dataIndex: 'price', key: 'price', width: 100, align: 'center',
+              render: (v: number, r: any) => v === null ? '-' : `${v} ${r.currency_code || ''}` },
+            { title: '状态', dataIndex: 'status', key: 'status', width: 70, align: 'center',
+              render: (v: number) => v === 1 ? <Tag color="green" style={{ marginInlineEnd: 0 }}>在售</Tag>
+                : <Tag style={{ marginInlineEnd: 0 }}>停售</Tag> },
+            { title: '产品标题', dataIndex: 'item_name', key: 'item_name', ellipsis: { showTitle: false },
+              render: (v: string) => <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip> },
           ]}
         />
       </Modal>

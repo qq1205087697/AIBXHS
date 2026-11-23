@@ -990,19 +990,27 @@ async def import_from_amazon(
     results = []
     for asin in asins:
         url = f"https://{domain}/dp/{asin}"
-        try:
-            resp = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
-            if resp.status_code != 200:
-                results.append({"asin": asin, "ok": False,
-                                "error": f"亚马逊返回 {resp.status_code}（可能被拦截，请稍后重试）"})
-                continue
-            parsed = _parse_amazon_product_page(resp.text)
-        except Exception as e:
-            results.append({"asin": asin, "ok": False, "error": f"抓取失败: {e}"})
-            continue
-        if not parsed.get("product_title"):
+        # 依次尝试：普通商品页 -> 移动端入口 /gp/aw/d/（IP 被验证码拦截时常可用）；
+        # 带 Referer 头可显著降低被拦概率。任一路径解析出标题即采用
+        parsed = None
+        last_err = None
+        for path in (f"/dp/{asin}", f"/gp/aw/d/{asin}"):
+            fetch_url = f"https://{domain}{path}"
+            try:
+                resp = httpx.get(fetch_url, headers={**headers, "Referer": f"https://{domain}/"},
+                                 timeout=30, follow_redirects=True)
+                if resp.status_code != 200:
+                    last_err = f"亚马逊返回 {resp.status_code}（可能被拦截，请稍后重试）"
+                    continue
+                parsed = _parse_amazon_product_page(resp.text)
+                if parsed.get("product_title"):
+                    break
+                last_err = "未解析到商品信息（页面可能被验证码拦截）"
+            except Exception as e:
+                last_err = f"抓取失败: {e}"
+        if not parsed or not parsed.get("product_title"):
             results.append({"asin": asin, "ok": False,
-                            "error": "未解析到商品信息（页面可能被验证码拦截）"})
+                            "error": last_err or "未解析到商品信息（页面可能被验证码拦截）"})
             continue
 
         # 同租户已存在该 ASIN 则跳过

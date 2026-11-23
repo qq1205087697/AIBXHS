@@ -361,6 +361,14 @@ export const reviewsApi = {
   getSectionSubscribers: () => apiClient.get("/reviews/sections/subscribers"),
   updateSectionSubscribers: (payload: Record<string, number[]>) =>
     apiClient.put("/reviews/sections/subscribers", payload),
+  // 低分产品统计（领星全店铺 Listing 评分<=3，lingxing_low_star_stats.py 生成）
+  getLowStarListings: (params?: {
+    page?: number;
+    page_size?: number;
+    sid?: number;
+    keyword?: string;
+    star_max?: number;
+  }) => apiClient.get("/reviews/low-star-listings", { params }),
 };
 
 // ========== Departments API ==========

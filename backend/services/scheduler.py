@@ -190,6 +190,17 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 低分产品统计：每日凌晨拉取领星全店铺 Listing（约8~10分钟），刷新差评机器人弹窗数据源
+    scheduler.add_job(
+        low_star_stats_job,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="low_star_stats_daily",
+        name="低分产品统计任务",
+        replace_existing=True
+    )
+
     # 星拓 MCP 每日定时独立拉取（Q-3 经中间确认：与快照导入解耦，默认凌晨 2 点可配置）
     from config import get_settings
     _pull_hour = get_settings().STARTOP_PULL_HOUR
@@ -271,6 +282,46 @@ def startop_pull_job():
     finally:
         release_distributed_lock(db, LOCK_KEY)
         db.close()
+
+
+def low_star_stats_job():
+    """每日定时拉取领星全店铺 Listing，统计低分产品（差评机器人"低分产品统计"弹窗数据源）
+    生成 low_star_listings.csv / low_star_summary.json 到项目根目录
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+    from database.database import SessionLocal
+    LOCK_KEY = "low_star_stats"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            db.close()
+            return
+        db.close()
+        script = Path(__file__).resolve().parents[2] / "lingxing_low_star_stats.py"
+        if not script.exists():
+            logger.error(f"低分产品统计脚本不存在: {script}")
+            return
+        logger.info("执行低分产品统计任务（预计8~10分钟）...")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), "run"],
+                cwd=str(script.parent), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20 * 60,
+            )
+            if result.returncode == 0:
+                tail = (result.stdout or "").strip().splitlines()[-5:]
+                logger.info("低分产品统计完成:\n" + "\n".join(tail))
+            else:
+                err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-10:]
+                logger.error(f"低分产品统计失败(退出码{result.returncode}):\n" + "\n".join(err_tail))
+        except subprocess.TimeoutExpired:
+            logger.error("低分产品统计超时（>20分钟），已终止")
+        except Exception as e:
+            logger.error(f"低分产品统计执行异常: {e}")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
 
 
 def check_inventory_job():
