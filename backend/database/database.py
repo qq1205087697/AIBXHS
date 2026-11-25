@@ -216,6 +216,8 @@ def init_db():
                  "ALTER TABLE inbound_order_items ADD COLUMN shelf_number VARCHAR(50) NULL COMMENT '货架号'"),
                 ("inbound_order_items", "purchase_order_item_id",
                  "ALTER TABLE inbound_order_items ADD COLUMN purchase_order_item_id INT NULL COMMENT '关联采购明细ID'"),
+                ("shipment_order_items", "sku",
+                 "ALTER TABLE shipment_order_items ADD COLUMN sku VARCHAR(100) NULL COMMENT 'SKU'"),
             ])
             conn.commit()
         

@@ -229,6 +229,17 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 低分产品统计：每日凌晨拉取领星全店铺 Listing（约8~10分钟），刷新差评机器人弹窗数据源
+    scheduler.add_job(
+        low_star_stats_job,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="low_star_stats_daily",
+        name="低分产品统计任务",
+        replace_existing=True
+    )
+
     # 星拓 MCP 每日定时独立拉取（Q-3 经中间确认：与快照导入解耦，默认凌晨 2 点可配置）
     from config import get_settings
     _pull_hour = get_settings().STARTOP_PULL_HOUR
@@ -384,6 +395,44 @@ def startop_pull_job():
         db.close()
 
 
+def low_star_stats_job():
+    """每日定时拉取领星全店铺 Listing，统计低分产品（差评机器人"低分产品统计"弹窗数据源）
+    生成 low_star_listings.csv / low_star_summary.json 到项目根目录
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+    from database.database import SessionLocal
+    LOCK_KEY = "low_star_stats"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            db.close()
+            return
+        db.close()
+        script = Path(__file__).resolve().parents[2] / "lingxing_low_star_stats.py"
+        if not script.exists():
+            logger.error(f"低分产品统计脚本不存在: {script}")
+            return
+        logger.info("执行低分产品统计任务（预计8~10分钟）...")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), "run"],
+                cwd=str(script.parent), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20 * 60,
+            )
+            if result.returncode == 0:
+                tail = (result.stdout or "").strip().splitlines()[-5:]
+                logger.info("低分产品统计完成:\n" + "\n".join(tail))
+            else:
+                err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-10:]
+                logger.error(f"低分产品统计失败(退出码{result.returncode}):\n" + "\n".join(err_tail))
+        except subprocess.TimeoutExpired:
+            logger.error("低分产品统计超时（>20分钟），已终止")
+        except Exception as e:
+            logger.error(f"低分产品统计执行异常: {e}")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
 def overseas_inventory_sync_job():
     """每日定时：飞书海外仓多维表 → overseas_inventories + 库存快照主行
 
@@ -1216,7 +1265,11 @@ def _auto_analyze_selection_task(selection_id: int, tenant_id: int):
 
 
 def recalc_product_selection_scores_job():
-    """每天早上7点兜底：为未计算评分的选品记录补算（正常情况下新抓取入库时已实时计算），并对高分未分析的记录自动触发AI分析"""
+    """定时兜底：为未计算评分的选品记录补算，并对高分未分析的记录自动触发AI分析
+    补算范围：
+    1. traffic_score/result 为 NULL 的新记录（正常情况下新抓取入库时已实时计算）
+    2. traffic_score=0 且 result 为空且 trend 已有值的记录（评分时抓取数据未落库，
+       抢跑算成0分后被条件跳过、永久卡死的记录；trend 为空的重算结果不变，不重试）"""
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
@@ -1224,18 +1277,24 @@ def recalc_product_selection_scores_job():
     LOCK_KEY = "daily_product_selection_recalc"
     db = SessionLocal()
     try:
-        if not acquire_distributed_lock(db, LOCK_KEY):
+        # AI 兜底批次可能持续较久，锁放宽到60分钟（默认30分钟不够）
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=60):
             db.close()
             return
 
         logger.info("========== 开始每日选品数据评分计算 ==========")
 
-        # 查找未计算过评分的记录（traffic_score IS NULL 或 traffic_score_result IS NULL）
+        # 查找待补算评分的记录（NULL新记录 + trend晚到导致的0分记录）
         query = text("""
             SELECT id, rating, review_count, monthly_sales, traffic_trend
             FROM product_selections
             WHERE deleted_at IS NULL
-              AND (traffic_score IS NULL OR traffic_score_result IS NULL)
+              AND (
+                (traffic_score IS NULL OR traffic_score_result IS NULL)
+                OR (traffic_score = 0
+                    AND (traffic_score_result IS NULL OR traffic_score_result = '')
+                    AND traffic_trend IS NOT NULL AND traffic_trend != '')
+              )
         """)
         rows = db.execute(query).fetchall()
 

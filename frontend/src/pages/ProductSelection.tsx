@@ -278,6 +278,7 @@ const ProductSelection: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [analyzingIds, setAnalyzingIds] = useState<Set<number>>(new Set())
   const [recalcing, setRecalcing] = useState(false)
+  const [scoreRecalcing, setScoreRecalcing] = useState(false)
   const [useRealtimeRate, setUseRealtimeRate] = useState(false)
   const [switchingRate, setSwitchingRate] = useState(false)
   const [batchProgress, setBatchProgress] = useState<{ total: number; completed: number; success: number; failed: number; status: string } | null>(null)
@@ -1377,6 +1378,57 @@ const ProductSelection: React.FC = () => {
     }
   }
 
+  // 重算评分：调 /recalc-scores，后端后台执行；ids 为空=全量，否则仅重算指定记录
+  const launchRecalcScores = (ids: number[] | undefined, setBusy?: (v: boolean) => void) => {
+    setBusy?.(true)
+    productSelectionApi.recalcScores(ids)
+      .then(res => {
+        if (res.data.success) {
+          message.success(res.data.message || '评分重算已在后台启动')
+          // 单条/批量秒级完成，延时刷新列表取最新分数；全量需几分钟，请稍后手动刷新
+          if (ids && ids.length > 0) setTimeout(() => fetchData(), 3000)
+        } else {
+          message.error('启动评分重算失败')
+        }
+      })
+      .catch((e: any) => message.error(e.response?.data?.detail || '启动评分重算失败'))
+      .finally(() => setBusy?.(false))
+  }
+
+  // 重算全部评分（顶部按钮）
+  const handleRecalcAllScores = () => {
+    Modal.confirm({
+      title: '重算全部评分',
+      content: '将对全部选品重新计算流量/销量/星级/综合评分（后台执行，约几分钟，完成后请手动刷新列表查看），确定继续吗？',
+      okText: '开始重算',
+      cancelText: '取消',
+      onOk: () => launchRecalcScores(undefined, setScoreRecalcing),
+    })
+  }
+
+  // 批量重算勾选记录的评分
+  const handleBatchRecalcScores = () => {
+    if (selectedRowKeys.length === 0) return
+    Modal.confirm({
+      title: '重算勾选评分',
+      content: `将对勾选的 ${selectedRowKeys.length} 条选品重新计算评分（后台执行，完成后数据自动更新），确定继续吗？`,
+      okText: '开始重算',
+      cancelText: '取消',
+      onOk: () => launchRecalcScores(selectedRowKeys as number[]),
+    })
+  }
+
+  // 单条重算评分
+  const handleRecalcScoreSingle = (record: ProductSelectionItem) => {
+    Modal.confirm({
+      title: '重算评分',
+      content: `将重新计算「${record.product_title || record.asin}」的流量/销量/星级/综合评分（后台执行，完成后数据自动更新），确定继续吗？`,
+      okText: '开始重算',
+      cancelText: '取消',
+      onOk: () => launchRecalcScores([record.id]),
+    })
+  }
+
   // 批量重算FBA利润：勾选时只重算勾选记录，未勾选时确认后全量重算
   const handleBatchRescrapeFba = () => {
     if (selectedRowKeys.length === 0) {
@@ -2006,6 +2058,12 @@ const ProductSelection: React.FC = () => {
             label: 'AI分析',
             onClick: () => handleAnalyze(record.id),
           },
+          {
+            key: 'recalc-score',
+            icon: <SyncOutlined />,
+            label: '重算评分',
+            onClick: () => handleRecalcScoreSingle(record),
+          },
           { key: 'edit', icon: <EditOutlined />, label: '编辑', onClick: () => handleEdit(record) },
         ]
         if (!record.status) {
@@ -2269,6 +2327,13 @@ const ProductSelection: React.FC = () => {
                       onClick: handleBatchRescrapeFba,
                     },
                     {
+                      key: 'batch-recalc-scores',
+                      icon: <SyncOutlined />,
+                      label: '重算评分',
+                      disabled: selectedRowKeys.length === 0,
+                      onClick: handleBatchRecalcScores,
+                    },
+                    {
                       key: 'batch-analyze',
                       icon: <RobotOutlined />,
                       label: batchProgress ? `AI分析中 ${batchProgress.completed}/${batchProgress.total}` : 'AI分析',
@@ -2317,6 +2382,9 @@ const ProductSelection: React.FC = () => {
               </Button>
               <Button onClick={handleRecalcScores} loading={recalcing}>
                 重新计算FBA利润
+              </Button>
+              <Button onClick={handleRecalcAllScores} loading={scoreRecalcing}>
+                重算评分
               </Button>
               <Button
                 onClick={handleSwitchRate}

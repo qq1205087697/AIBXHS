@@ -437,6 +437,14 @@ export const reviewsApi = {
   getSectionSubscribers: () => apiClient.get("/reviews/sections/subscribers"),
   updateSectionSubscribers: (payload: Record<string, number[]>) =>
     apiClient.put("/reviews/sections/subscribers", payload),
+  // 低分产品统计（领星全店铺 Listing 评分<=3，lingxing_low_star_stats.py 生成）
+  getLowStarListings: (params?: {
+    page?: number;
+    page_size?: number;
+    sid?: number;
+    keyword?: string;
+    star_max?: number;
+  }) => apiClient.get("/reviews/low-star-listings", { params }),
 };
 
 // ========== Departments API ==========
@@ -1518,8 +1526,8 @@ export const productSelectionApi = {
     apiClient.post("/product-selection/batch-analyze", ids, { timeout: 30000 }),
   batchAnalyzeProgress: (batchId: string) =>
     apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
-  recalcScores: () =>
-    apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  recalcScores: (ids?: number[]) =>
+    apiClient.post("/product-selection/recalc-scores", ids && ids.length > 0 ? { ids } : {}, { timeout: 60000 }),
   rescrapeFbaFees: (ids?: number[]) =>
     apiClient.post("/product-selection/rescrape-fba-fees", ids && ids.length > 0 ? { ids } : {}, { timeout: 30000 }),
   switchRate: (useRealtime: boolean) =>
