@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, text, event
+﻿from sqlalchemy import create_engine, text, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -92,12 +92,40 @@ def init_db():
         from models.ai_video_task import AIVideoTask
         from models.video_binding_request import VideoBindingRequest
         from models.admin_robot_item import AdminRobotItem
-        
+        from models.oa import OaAnnouncement, OaLeaveRequest, OaSupplyRecord, OaPhoneBinding, OaSmsCode, OaRecruitPosition, OaInterview, OaRecruitCandidate
+
         # 创建所有表
         Base.metadata.create_all(bind=engine)
-        
+
         # 检查并添加缺失的字段
+        from sqlalchemy import text as _sa_text
         with engine.connect() as conn:
+            # OA面试记录表新增候选人关联字段（2026-10-24 面试按人员生成）
+            try:
+                conn.execute(_sa_text("ALTER TABLE oa_interviews ADD COLUMN candidate_id INT NULL COMMENT '关联候选人ID（oa_recruit_candidates.id）' AFTER position_id"))
+            except Exception as e:
+                print(f"添加 oa_interviews.candidate_id 字段失败（可能已存在）: {e}")
+            # OA入职表新增入职资料字段（2026-10-26）
+            onboarding_columns = [
+                ("id_card_url", "TEXT NULL COMMENT '身份证附件URL'"),
+                ("medical_report_url", "TEXT NULL COMMENT '体检报告附件URL'"),
+                ("diploma_url", "TEXT NULL COMMENT '毕业证附件URL'"),
+                ("resignation_cert_url", "TEXT NULL COMMENT '上家公司离职证明附件URL'"),
+                ("bank_card_no", "VARCHAR(50) NULL COMMENT '银行卡卡号'"),
+                ("bank_name", "VARCHAR(100) NULL COMMENT '开户行'"),
+                ("social_security", "VARCHAR(100) NULL COMMENT '社保'"),
+                ("housing_fund", "VARCHAR(100) NULL COMMENT '公积金'"),
+                ("contract_url", "TEXT NULL COMMENT '签署合同附件URL'"),
+                ("contract_status", "VARCHAR(20) NULL DEFAULT '未签署' COMMENT '合同签署状态'"),
+                ("hire_date", "DATE NULL COMMENT '入职时间'"),
+                ("address", "VARCHAR(255) NULL COMMENT '住址'"),
+                ("phone", "VARCHAR(30) NULL COMMENT '电话'"),
+            ]
+            for col_name, col_def in onboarding_columns:
+                try:
+                    conn.execute(_sa_text(f"ALTER TABLE oa_onboardings ADD COLUMN {col_name} {col_def}"))
+                except Exception as e:
+                    print(f"添加 oa_onboardings.{col_name} 字段失败（可能已存在）: {e}")
             tables_to_check = ['product_sales']
             for table in tables_to_check:
                 try:
@@ -119,7 +147,6 @@ def init_db():
         print("数据库表结构创建成功")
         
         # 手动创建 scheduler_locks 和 product_selections 表
-        from sqlalchemy import text
         with engine.connect() as conn:
             # 视频生成任务表新增视频类型字段（口播带货/产品展示，如果不存在）
             try:

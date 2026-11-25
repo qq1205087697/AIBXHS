@@ -333,3 +333,6 @@ code {
 .volume-slider .ant-slider-handle {
   display: none;
 }
+
+/* OA 验证码中心未读行高亮 */
+.oa-sms-unread td { background: #fff7e6; }

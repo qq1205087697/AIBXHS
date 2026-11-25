@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings, admin_robot
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings, admin_robot, oa
 from config import get_settings
 
 settings = get_settings()
@@ -100,6 +100,7 @@ app.include_router(inventory_batch.router)
 app.include_router(operation_logs.router)
 app.include_router(permissions.router)
 app.include_router(admin_robot.router, prefix="/api")
+app.include_router(oa.router, prefix="/api")
 app.include_router(stock_transfer.router)
 app.include_router(warehouses.router)
 app.include_router(product_page_info.router)
@@ -227,13 +228,7 @@ async def startup_event():
     except Exception as e:
         logger.error(f"超分任务恢复失败: {e}")
 
-    try:
-        import asyncio as _asyncio
-        from routers.product_development import auto_migrate_designer_images
-        _asyncio.create_task(auto_migrate_designer_images())
-        logger.info("美工图片 TOS 自动迁移任务已启动")
-    except Exception as e:
-        logger.error(f"启动美工图片自动迁移任务失败: {e}")
+    # 美工图片 TOS 自动迁移任务已于 2026-10-23 移除（存量迁移已完成）
 
 @app.on_event("shutdown")
 async def shutdown_event():

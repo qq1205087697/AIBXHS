@@ -732,6 +732,71 @@ export const adminRobotApi = {
   deleteItem: (id: number) => apiClient.delete(`/admin-robot/items/${id}`),
 };
 
+// ========== OA 独立系统 API ==========
+export const oaApi = {
+  getSummary: () => apiClient.get("/oa/summary"),
+  // 公告
+  listAnnouncements: () => apiClient.get("/oa/announcements"),
+  createAnnouncement: (data: { title: string; content?: string; level?: string }) =>
+    apiClient.post("/oa/announcements", data),
+  deleteAnnouncement: (id: number) => apiClient.delete(`/oa/announcements/${id}`),
+  // 请假
+  listLeaves: (scope: "mine" | "all" = "mine") =>
+    apiClient.get("/oa/leaves", { params: { scope } }),
+  createLeave: (data: { leave_type: string; start_date: string; end_date: string; reason?: string }) =>
+    apiClient.post("/oa/leaves", data),
+  reviewLeave: (id: number, data: { status: "已通过" | "已驳回"; approve_note?: string }) =>
+    apiClient.patch(`/oa/leaves/${id}`, data),
+  deleteLeave: (id: number) => apiClient.delete(`/oa/leaves/${id}`),
+  // 耗材领用
+  listSupplies: () => apiClient.get("/oa/supplies"),
+  createSupply: (data: { item_name: string; quantity: number; note?: string }) =>
+    apiClient.post("/oa/supplies", data),
+  deleteSupply: (id: number) => apiClient.delete(`/oa/supplies/${id}`),
+  // 验证码中心
+  listSms: (params?: { keyword?: string; only_unread?: boolean }) =>
+    apiClient.get("/oa/sms", { params }),
+  markSmsRead: (id: number) => apiClient.patch(`/oa/sms/${id}/read`),
+  markAllSmsRead: () => apiClient.post("/oa/sms/read-all"),
+  deleteSms: (id: number) => apiClient.delete(`/oa/sms/${id}`),
+  listSmsBindings: () => apiClient.get("/oa/sms/bindings"),
+  bindPhone: (data: { phone: string; username?: string }) =>
+    apiClient.post("/oa/sms/bindings", data),
+  unbindPhone: (id: number) => apiClient.delete(`/oa/sms/bindings/${id}`),
+  // OA 招聘（招聘岗位 + 面试）
+  listRecruit: () => apiClient.get("/oa/recruit"),
+  createPosition: (data: {
+    position_name: string;
+    requirement?: string;
+    salary?: string;
+    candidates?: { name: string; resume_url?: string | null }[];
+  }) => apiClient.post("/oa/recruit", data),
+  updatePosition: (id: number, data: Record<string, any>) => apiClient.patch(`/oa/recruit/${id}`, data),
+  replaceCandidates: (positionId: number, candidates: { name: string; resume_url?: string | null }[]) =>
+    apiClient.put(`/oa/recruit/${positionId}/candidates`, { candidates }),
+  deletePosition: (id: number) => apiClient.delete(`/oa/recruit/${id}`),
+  createInterview: (positionId: number, data: { round: number; result?: string; situation?: string }) =>
+    apiClient.post(`/oa/recruit/${positionId}/interviews`, data),
+  updateInterview: (id: number, data: { result?: string; situation?: string }) =>
+    apiClient.patch(`/oa/recruit/interviews/${id}`, data),
+  deleteInterview: (id: number) => apiClient.delete(`/oa/recruit/interviews/${id}`),
+  uploadResume: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return apiClient.post("/oa/recruit/resume", fd, { headers: { "Content-Type": "multipart/form-data" } });
+  },
+  // OA 背景调查 / 入职
+  listBackgroundChecks: () => apiClient.get("/oa/background-checks"),
+  updateBackgroundCheck: (id: number, data: { job_performance?: string; resignation_match?: string; resignation_remark?: string; previous_salary?: string }) =>
+    apiClient.patch(`/oa/background-checks/${id}`, data),
+  passBackgroundCheck: (id: number) => apiClient.post(`/oa/background-checks/${id}/pass`),
+  deleteBackgroundCheck: (id: number) => apiClient.delete(`/oa/background-checks/${id}`),
+  listOnboardings: () => apiClient.get("/oa/onboardings"),
+  updateOnboarding: (id: number, data: { status?: string; note?: string; salary?: string }) =>
+    apiClient.patch(`/oa/onboardings/${id}`, data),
+  deleteOnboarding: (id: number) => apiClient.delete(`/oa/onboardings/${id}`),
+};
+
 // ========== Store Groups API ==========
 export const storeGroupsApi = {
   getList: () => apiClient.get("/store-groups/"),

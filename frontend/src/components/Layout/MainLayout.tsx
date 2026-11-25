@@ -356,9 +356,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         }]
       : []),
     {
-      key: "/admin-robot",
+      key: "/oa",
       icon: <ClipboardList size={20} />,
-      label: "行政机器人",
+      label: "行政OA系统",
       shortLabel: "行政",
     },
     {
@@ -554,6 +554,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/product-selection": "选品机器人",
       "/development": "开发机器人",
       "/admin-robot": "行政机器人",
+      "/oa": "行政OA系统",
       "/development/new": "添加新品",
       '/ai-creation': 'AI视频',
       '/upscale-center': '高清处理',
@@ -743,7 +744,13 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               label: child.label,
             })),
             selectedKeys: [location.pathname],
-            onClick: ({ key }) => navigate(key),
+            onClick: ({ key }) => {
+              if (key === "/oa") {
+                window.open("/oa", "_blank");
+                return;
+              }
+              navigate(key);
+            },
             style: { minWidth: 160 },
           }}
           placement="bottomLeft"
@@ -782,7 +789,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             label={item.label}
             shortLabel={item.shortLabel}
             active={location.pathname.startsWith("/development") ? item.key === "/development" : location.pathname === item.key}
-            onClick={() => navigate(item.key as string)}
+            onClick={() => (item.key === "/oa" ? window.open("/oa", "_blank") : navigate(item.key as string))}
           />
         );
       })}
@@ -890,7 +897,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                 items={filteredMenuItems.map(
                   ({ shortLabel, ...rest }: any) => rest,
                 )}
-                onClick={({ key }) => navigate(key)}
+                onClick={({ key }) => (key === "/oa" ? window.open("/oa", "_blank") : navigate(key))}
                 style={
                   {
                     flex: 1,

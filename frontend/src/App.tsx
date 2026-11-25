@@ -31,6 +31,7 @@ import AllocateShipmentTest from "./pages/Inventory/AllocateShipmentTest";
 import ProductSelection from "./pages/ProductSelection";
 import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
 import AdminRobot from "./pages/AdminRobot";
+import OASystem from "./pages/OASystem";
 import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
@@ -311,6 +312,14 @@ function AppRoutes() {
             <MainLayout>
               <AdminRobot />
             </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/oa"
+        element={
+          <ProtectedRoute>
+            <OASystem />
           </ProtectedRoute>
         }
       />

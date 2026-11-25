@@ -61,6 +61,15 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user._tenant_code = tenant_row[1]
         user._is_personal = bool(tenant_row[2])
 
+    # 兼容直接访问 user.role 的旧代码（如 routers/oa），附加角色 code
+    user.role = None
+    if user.role_id:
+        role_row = db.execute(text(
+            "SELECT code FROM roles WHERE id = :rid AND deleted_at IS NULL"
+        ), {"rid": user.role_id}).fetchone()
+        if role_row:
+            user.role = role_row[0]
+
     return user
 
 
