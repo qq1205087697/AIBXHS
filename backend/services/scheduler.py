@@ -194,8 +194,64 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 商品销量品名回填：每天早上9:00，为 product_name 为空的行按 SKU 从产品档案补填
+    scheduler.add_job(
+        backfill_product_sales_name_job,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        id="product_sales_name_backfill",
+        name="商品销量品名回填",
+        replace_existing=True
+    )
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
+
+
+def backfill_product_sales_name_job():
+    """每天早上9:00：回填 product_sales 中 product_name 为空的行
+    匹配链路：SKU → platform_products.product_id → products.name（品名权威来源）
+    场景：新SKU先同步了销量、之后才在产品管理建档；或上游同步未带品名
+    """
+    from database.database import SessionLocal
+    from sqlalchemy import text
+
+    LOCK_KEY = "product_sales_name_backfill"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            db.close()
+            return
+
+        logger.info("========== 开始商品销量品名回填任务 ==========")
+
+        cur = db.execute(text("SELECT COUNT(*) FROM product_sales WHERE product_name = ''"))
+        empty_total = cur.fetchone()[0]
+        if empty_total == 0:
+            logger.info("没有空品名数据，跳过")
+            return
+
+        result = db.execute(text("""
+            UPDATE product_sales ps
+            INNER JOIN (
+                SELECT pp.sku, MIN(p.name) AS pname
+                FROM platform_products pp
+                INNER JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+                WHERE pp.deleted_at IS NULL AND p.name IS NOT NULL AND p.name != ''
+                GROUP BY pp.sku
+            ) t ON t.sku = ps.sku
+            SET ps.product_name = t.pname
+            WHERE ps.product_name = ''
+        """))
+        db.commit()
+        logger.info(f"========== 品名回填完成：空品名 {empty_total} 行，本轮补填 {result.rowcount} 行（其余为档案无匹配SKU）==========")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"品名回填任务失败: {e}", exc_info=True)
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
 
 
 def startop_pull_job():

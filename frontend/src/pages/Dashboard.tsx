@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Card, Row, Col, Statistic, Table, Tag, Pagination, Modal, DatePicker, message } from 'antd'
+import { Card, Row, Col, Statistic, Table, Tag, Pagination, Modal, DatePicker, message, Spin } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
 import {
   TrendingUp,
@@ -261,6 +261,60 @@ const getHolidayDatesCached = (y: number) => {
 
 const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六']
 
+// 节日倒计日副行提示（跨境电商运营视角，按节日名匹配）
+const FESTIVAL_TIPS: Record<string, string> = {
+  春节: '假期前完成备货入仓，工厂停工提前下单',
+  元宵节: '节庆礼品类可做限时促销引流',
+  清明节: '欧美无假期影响，正常备货发货',
+  端午节: '国内物流时效放缓，提前告知买家',
+  七夕: '礼品美妆类旺季，加大广告投放',
+  中秋节: '礼盒类热销，海外华人市场可主推',
+  重阳节: '关注孝心礼品与保健品类需求',
+  除夕: '物流末班车，务必做好截单提醒',
+  元旦: '制定 Q1 销售计划，新年流量红利可期',
+  情人节: '礼品类目黄金期，提前布局广告素材',
+  妇女节: '美妆女装大促节点，提前备货备券',
+  劳动节: '假期物流波动，注意调整时效承诺',
+  美国独立日: '美区促销节点，户外烧烤用品热卖',
+  返校季开启: '返校季开端，学生用品需求上升',
+  德国统一日: '德国法定假日，末端派送或有延迟',
+  万圣节: 'Cosplay 与装饰用品进入销售高峰',
+  平安夜: '圣诞礼品截单日，关注末端派送时效',
+  圣诞节: '欧美全年最大销售节点，库存广告双保障',
+  节礼日: '清库存好时机，折扣促销冲刺',
+  跨年夜: '盘点全年经营数据，规划新年目标',
+  复活节: '欧美重要假期，注意物流延误与断货',
+  母亲节: '鲜花贺卡礼品类旺季，提前备货',
+  父亲节: '男装工具户外类促销节点',
+  感恩节: '黑五前哨，广告预算提前加码',
+  黑色星期五: '全年最大促销日，库存与客服提前排班',
+  网络星期一: '线上大促收官日，冲刺全年销售目标',
+}
+
+// ===== 任务板块测试数据（任务主体 / 派发任务人 / 任务截止时间 / 任务回复；截止时间相对当天动态生成） =====
+interface DemoTask {
+  id: number
+  subject: string // 任务主题（简短标题）
+  body: string // 任务主体（详细描述）
+  assigner: string
+  priority?: string // 优先级（派发时指定：紧急/重要/普通）
+  deadline: Dayjs
+  status: '未开始' | '进行中' | '已完成' // 三态状态（默认未开始，与回复相互独立）
+  replies: { text: string; time: string }[] // 任务回复记录（空数组 = 暂无回复）
+}
+const DEMO_TASKS: DemoTask[] = [
+  { id: 1, subject: 'Q4选品清单整理', body: '整理Q4旺季选品清单，覆盖家居/户外/数码类目，逐款评估利润率与物流成本，输出推荐SKU名单', assigner: '李经理', deadline: dayjs().add(2, 'day').hour(18).minute(0), status: '进行中', replies: [{ text: '已筛选23款候选SKU，利润率明细明早发您', time: '昨天 17:40' }] },
+  { id: 2, subject: 'A加店Listing整改', body: '排查A加店铺购物车异常Listing，修正价格/库存/类目节点问题，整改后回传截图确认', assigner: '王主管', deadline: dayjs().hour(20).minute(0), status: '未开始', replies: [] },
+  { id: 3, subject: 'B美仓库存核对', body: '核对B美仓差异表与ERP数据，标注差异原因（丢件/错发/在途），回传财务归档', assigner: '李经理', deadline: dayjs().subtract(1, 'day').hour(18).minute(0), status: '未开始', replies: [] },
+  { id: 4, subject: '黑五广告预算方案', body: '撰写黑五大促广告投放预算方案：分站点/分广告活动分配预算，设定ACOS红线与追加机制', assigner: '张总监', deadline: dayjs().add(5, 'day').hour(12).minute(0), status: '进行中', replies: [{ text: '初稿已完成，等待预算审核中', time: '今天 09:15' }] },
+  { id: 5, subject: '欧区差评售后跟进', body: '跟进欧区新增差评买家，发送售后补偿邮件（退款/补发），跟踪差评修改情况', assigner: '陈组长', deadline: dayjs().add(1, 'day').hour(17).minute(30), status: '未开始', replies: [] },
+  { id: 6, subject: 'A欧店主图更新', body: '更新A欧店新品主图与五点描述，突出卖点关键词，同步优化A+页面素材', assigner: '王主管', deadline: dayjs().add(8, 'day').hour(18).minute(0), status: '已完成', replies: [{ text: '主图与五点描述已更新上线', time: '前天 15:20' }] },
+]
+
+// 分页条数：任务卡每页3条、备忘录卡每页4条（与日历卡等高适配，超出内容分页显示）
+const TASK_PAGE_SIZE = 3
+const MEMO_PAGE_SIZE = 4
+
 // ===== 今日待处理配置（点击跳转对应页面板块，数量从各业务API实时获取） =====
 const TASK_CONFIG = [
   { id: 'buybox', icon: <ShoppingCart size={16} />, label: '购物车预警', color: '#fa8c16', to: '/data-alert', section: 'section-buybox' },
@@ -347,6 +401,8 @@ const Dashboard: React.FC = () => {
   const [senderSearch, setSenderSearch] = useState('')
   // 群名筛选（'' = 全部群；选项来自当前已加载消息的群名去重）
   const [noticeGroupFilter, setNoticeGroupFilter] = useState('')
+  // 账户检查：开启后只看「账户状况检查」发送人的消息（标题栏按钮切换）
+  const [acctCheckOnly, setAcctCheckOnly] = useState(false)
   // 消息行 hover 高亮改用纯 CSS（.notice-row:hover），避免 setState 导致整页重渲染卡顿
   const [activeNotice, setActiveNotice] = useState<NoticeItem | null>(null)
   // 消息通知分页（每页10条）
@@ -373,9 +429,59 @@ const Dashboard: React.FC = () => {
   const [memoInput, setMemoInput] = useState('')
   // 快速添加的紧急程度（默认普通，选中后连续添加保持所选级别）
   const [memoQuickLevel, setMemoQuickLevel] = useState<'紧急' | '重要' | '普通'>('普通')
+  // 任务板块：详情弹窗 + 回复草稿（真实用户接 tasks 表；demo 账号保留本地测试数据）
+  const taskDemoMode = memoDemoMode
+  const [demoTasks, setDemoTasks] = useState<DemoTask[]>(taskDemoMode ? DEMO_TASKS : [])
+  const [taskModalId, setTaskModalId] = useState<number | null>(null)
+  const [taskReplyDraft, setTaskReplyDraft] = useState('')
+  const [taskFilter, setTaskFilter] = useState<'all' | 'undone'>('all') // 任务范围筛选：全部 / 未完成
+  const [taskPage, setTaskPage] = useState(1) // 任务列表当前页
+  // 真实用户首屏加载态：接口返回前任务卡显示转圈，避免先空后突然出数据
+  const [taskLoading, setTaskLoading] = useState(!taskDemoMode)
+  const mapTaskRow = (r: any): DemoTask => ({
+    id: r.id,
+    subject: r.subject || '',
+    body: r.body || '',
+    assigner: r.assigner || '未知',
+    priority: r.priority || '普通',
+    deadline: r.deadline ? dayjs(r.deadline) : dayjs().add(7, 'day').hour(18).minute(0),
+    status: r.status || '未开始',
+    replies: (r.replies || []).map((x: any) => ({ text: x.content, time: x.sender_name ? `${x.sender_name} · ${x.time}` : (x.time || '') })),
+  })
+  const loadTasks = async () => {
+    try {
+      const res = await apiClient.get('/tasks')
+      // 首页只显示指派给当前用户的任务（is_assignee），我派发给别人未接收的不出现在这里
+      const rows = (res.data?.data || []).filter((r: any) => r.is_assignee)
+      if (res.data?.success) setDemoTasks(rows.map(mapTaskRow))
+    } catch { /* 接口失败时保持当前列表 */ }
+    finally { setTaskLoading(false) }
+  }
+  useEffect(() => { if (!taskDemoMode) loadTasks() }, [])
+  // 状态跟人走：接收人更新自己行上的状态（乐观更新 + 接口同步）
+  const setTaskStatus = async (id: number, status: DemoTask['status']) => {
+    setDemoTasks(tasks => tasks.map(x => x.id === id ? { ...x, status } : x))
+    if (taskDemoMode) return
+    try {
+      const res = await apiClient.put(`/tasks/${id}/status`, { status })
+      if (!res.data?.success) {
+        message.error(res.data?.message || '状态更新失败')
+        loadTasks()
+      }
+    } catch (e: any) {
+      console.error('更新任务状态失败:', e)
+      message.error(e?.response?.data?.detail || e?.message || '状态更新失败，请检查网络后重试')
+    }
+  }
   // 备忘录筛选（右上角：全部/紧急/重要/普通）与排序（按日期/按紧急程度）
   const [memoLevelFilter, setMemoLevelFilter] = useState<'全部' | '紧急' | '重要' | '普通'>('全部')
   const [memoSortKey, setMemoSortKey] = useState<'date' | 'level'>('date')
+  const [memoPage, setMemoPage] = useState(1) // 备忘录列表当前页
+  // 分页总数（与日历卡等高，超出内容分页显示）
+  const memoFilteredCount = memoLevelFilter === '全部' ? memos.length : memos.filter(m => m.level === memoLevelFilter).length
+  const memoTotalPages = Math.max(1, Math.ceil(memoFilteredCount / MEMO_PAGE_SIZE))
+  const taskFilteredCount = taskFilter === 'all' ? demoTasks.length : demoTasks.filter(t => t.status !== '已完成').length
+  const taskTotalPages = Math.max(1, Math.ceil(taskFilteredCount / TASK_PAGE_SIZE))
   const addMemo = async () => {
     const t = memoInput.trim()
     if (!t) return
@@ -535,7 +641,8 @@ const Dashboard: React.FC = () => {
     const kwOk = noticeKeywords.length === 0 || noticeKeywords.some(k => hay.includes(k))
     const senderOk = !senderKeyword || (n.sender || '').toLowerCase().includes(senderKeyword)
     const groupOk = !noticeGroupFilter || n.group === noticeGroupFilter
-    return kwOk && senderOk && groupOk
+    const acctOk = !acctCheckOnly || (n.sender || '').includes('账户状况检查')
+    return kwOk && senderOk && groupOk && acctOk
   })
 
   useEffect(() => {
@@ -843,7 +950,7 @@ const Dashboard: React.FC = () => {
 
       {/* 节日日历 & 备忘录 */}
       <Row gutter={16} style={{ marginBottom: 24 }}>
-        <Col span={13}>
+        <Col span={10}>
           <div style={{ background: '#ffffff', borderRadius: 12, border: '1px solid #f0f0f0', boxShadow: '0 1px 4px rgba(0, 0, 0, 0.06)', padding: '14px 16px', height: '100%' }}>
             <div style={{ display: 'flex', alignItems: 'center' }}>
               <span style={{ fontSize: 15, fontWeight: 600, color: '#333' }}>📅 日历</span>
@@ -891,34 +998,243 @@ const Dashboard: React.FC = () => {
               })}
             </div>
             {/* 倒计日列表（未来60天内的节日，按倒计天升序；点击跳到对应月份日期格） */}
-            <div style={{ marginTop: 10, borderTop: '1px dashed #f0f0f0', paddingTop: 8 }}>
+            <div style={{ marginTop: 10, borderTop: '1px dashed #f0f0f0', paddingTop: 8, maxHeight: 260, overflowY: 'auto' }}>
               {upcomingHolidays.length === 0 && (
                 <div style={{ textAlign: 'center', fontSize: 12, color: '#bbb', padding: '6px 0' }}>未来60天内暂无节日</div>
               )}
               {upcomingHolidays.map(h => {
                 const days = h.date.diff(todayD, 'day')
+                // 农历描述（换算失败时忽略，不影响主行展示）
+                let lunarText = ''
+                try {
+                  const l = LUNAR.fromDate(h.date.toDate())
+                  lunarText = `农历${l.getMonthInChinese()}月${l.getDayInChinese()}`
+                } catch { /* 忽略 */ }
+                const tip = FESTIVAL_TIPS[h.name] || '提前规划促销活动与库存安排'
+                // 剩余天数配色分级：7天内橙红 / 30天内蓝 / 更远灰
+                const tone = days <= 7 ? ['#d4380d', 'rgba(250, 84, 28, 0.10)'] : days <= 30 ? ['#1677ff', 'rgba(22, 119, 255, 0.08)'] : ['#8c8c8c', '#f5f5f5']
                 return (
                   <div key={`${h.name}-${h.date.format('YYYY-MM-DD')}`} className="countdown-row" title="点击定位到日历对应日期"
                     onClick={() => jumpToHoliday(h.date)}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 4px', fontSize: 12.5, cursor: 'pointer', borderRadius: 6 }}>
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px', cursor: 'pointer', borderRadius: 8 }}>
                     <span style={{ fontSize: 14, flexShrink: 0 }}>{h.icon}</span>
-                    <span style={{ color: days === 0 ? currentTheme.primary : '#444', fontWeight: days === 0 ? 600 : 400 }}>{h.name}</span>
-                    {h.lunar && <span style={{ fontSize: 10, color: '#fa8c16', border: '1px solid rgba(250,140,22,0.4)', borderRadius: 4, padding: '0 4px', lineHeight: '14px', flexShrink: 0 }}>农历</span>}
-                    <span style={{ color: '#bbb', fontSize: 11.5 }}>{h.date.format('MM-DD')} 周{WEEK_CN[h.date.day()]}</span>
-                    <span style={{
-                      marginLeft: 'auto', flexShrink: 0, fontSize: 11, fontWeight: 600, padding: '1px 8px', borderRadius: 10,
-                      background: days === 0 ? currentTheme.primary : (days <= 7 ? 'rgba(250, 84, 28, 0.10)' : (days <= 30 ? 'rgba(22, 119, 255, 0.08)' : '#f5f5f5')),
-                      color: days === 0 ? '#ffffff' : (days <= 7 ? '#d4380d' : (days <= 30 ? '#1677ff' : '#999')),
-                    }}>
-                      {days === 0 ? '🎉 今天' : `D-${days}`}
-                    </span>
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                        <span style={{ color: days === 0 ? currentTheme.primary : '#333', fontWeight: 600 }}>{h.name}</span>
+                        {h.lunar && <span style={{ fontSize: 10, color: '#fa8c16', border: '1px solid rgba(250,140,22,0.4)', borderRadius: 4, padding: '0 4px', lineHeight: '13px', flexShrink: 0 }}>农历</span>}
+                        <span style={{ color: '#bbb', fontSize: 10.5 }}>{h.date.format('MM-DD')} 周{WEEK_CN[h.date.day()]}</span>
+                      </div>
+                      <div style={{ fontSize: 10.5, color: '#999', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {lunarText && <span style={{ color: '#fa8c16', marginRight: 6 }}>{lunarText}</span>}
+                        💡 {tip}
+                      </div>
+                    </div>
+                    {days === 0 ? (
+                      <span style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, padding: '4px 12px', borderRadius: 12, background: currentTheme.primary, color: '#ffffff' }}>
+                        🎉 今天
+                      </span>
+                    ) : (
+                      <span style={{ flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 2, padding: '2px 10px', borderRadius: 12, background: tone[1] }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.3, color: tone[0] }}>{days}</span>
+                        <span style={{ fontSize: 10, fontWeight: 600, color: tone[0] }}>天</span>
+                      </span>
+                    )}
                   </div>
                 )
               })}
             </div>
           </div>
         </Col>
-        <Col span={11}>
+        {/* 任务板块（测试数据演示：任务主体 / 派发人 / 截止时间 / 任务回复；点击卡片查看详情并回复） */}
+        <Col span={7}>
+          <div style={{ background: '#ffffff', borderRadius: 12, border: '1px solid #f0f0f0', boxShadow: '0 1px 4px rgba(0, 0, 0, 0.06)', padding: '14px 16px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={{ fontSize: 15, fontWeight: 600, color: '#333' }}>📋 任务</span>
+              <span style={{ marginLeft: 8, fontSize: 11, color: '#666', background: '#f5f5f5', borderRadius: 10, padding: '2px 10px' }}>
+                未开始 {demoTasks.filter(t => t.status === '未开始').length} · 进行中 {demoTasks.filter(t => t.status === '进行中').length} · 已完成 {demoTasks.filter(t => t.status === '已完成').length}
+              </span>
+              {/* 范围筛选：全部 / 未完成 */}
+              <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                {(['all', 'undone'] as const).map(f => (
+                  <span key={f} onClick={() => { setTaskFilter(f); setTaskPage(1) }}
+                    style={{ fontSize: 11.5, padding: '2px 11px', borderRadius: 999, cursor: 'pointer', userSelect: 'none', fontWeight: 500, transition: 'all 0.15s', background: taskFilter === f ? currentTheme.primary : '#f5f5f5', color: taskFilter === f ? '#ffffff' : '#888' }}>
+                    {f === 'all' ? '全部' : '未完成'}
+                  </span>
+                ))}
+              </span>
+            </div>
+            <div style={{ flex: 1, marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
+              {taskLoading && (
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999', fontSize: 12, gap: 8 }}>
+                  <Spin size="small" /> 加载任务中...
+                </div>
+              )}
+              {!taskLoading && (() => {
+                const now = dayjs()
+                // 分页显示：超出部分翻页查看（页码越界自动收敛）
+                const page = Math.min(taskPage, taskTotalPages)
+                return demoTasks.filter(t => taskFilter === 'all' || t.status !== '已完成').slice((page - 1) * TASK_PAGE_SIZE, page * TASK_PAGE_SIZE).map(t => {
+                  // 状态判定：逾期 > 今日截止 > 已回复 > 进行中
+                  const overdue = now.isAfter(t.deadline)
+                  const dueToday = t.deadline.isSame(now, 'day')
+                  const daysLeft = Math.ceil(t.deadline.diff(now, 'day', true))
+                  // 三态状态：未开始（默认）/ 进行中 / 已完成；逾期与今日截止仅在截止时间文字上标红
+                  const status = t.status === '已完成'
+                    ? { text: '已完成', color: '#52c41a', bg: 'rgba(82, 196, 26, 0.10)' }
+                    : t.status === '进行中'
+                      ? { text: '进行中', color: '#1677ff', bg: 'rgba(22, 119, 255, 0.08)' }
+                      : { text: '未开始', color: '#8c8c8c', bg: '#f5f5f5' }
+                  // 勾选 = 已完成；取消勾选 = 回到未开始
+                  const toggleDone = (id: number) => setTaskStatus(id, t.status === '已完成' ? '未开始' : '已完成')
+                  // 点击状态标签循环切换：未开始 → 进行中 → 已完成 → 未开始
+                  const cycleStatus = (id: number) => setTaskStatus(id, t.status === '未开始' ? '进行中' : t.status === '进行中' ? '已完成' : '未开始')
+                  const latestReply = t.replies.length ? t.replies[t.replies.length - 1] : null
+                  return (
+                    <div key={t.id} onClick={() => { setTaskModalId(t.id); setTaskReplyDraft('') }} title="点击查看详情并回复"
+                      style={{ borderRadius: 10, border: '1px solid #f0f0f0', background: '#fafbfc', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5, cursor: 'pointer', transition: 'box-shadow 0.15s' }}
+                      onMouseEnter={e => (e.currentTarget.style.boxShadow = '0 2px 10px rgba(22, 119, 255, 0.12)')}
+                      onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}>
+                      {/* 主行：完成勾选框 + 任务主题 + 状态标签 */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        {/* 完成勾选框：加粗放大，点击切换完成状态，不打开详情 */}
+                        <span onClick={e => { e.stopPropagation(); toggleDone(t.id) }} title={t.status === '已完成' ? '点击取消完成（回到未开始）' : '点击标记完成'}
+                          style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, lineHeight: 1, color: '#ffffff', background: t.status === '已完成' ? '#52c41a' : '#ffffff', border: t.status === '已完成' ? '1.5px solid #52c41a' : '2px solid #b8b8b8', boxShadow: t.status === '已完成' ? '0 1px 4px rgba(82, 196, 26, 0.4)' : 'none' }}>✔</span>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: t.status === '已完成' ? '#bbb' : '#333', textDecoration: t.status === '已完成' ? 'line-through' : 'none', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.subject}</span>
+                        <span onClick={e => { e.stopPropagation(); cycleStatus(t.id) }} title="点击切换状态（未开始→进行中→已完成）"
+                          style={{ fontSize: 10, color: status.color, background: status.bg, borderRadius: 8, padding: '1px 7px', lineHeight: '15px', flexShrink: 0, cursor: 'pointer' }}>{status.text}</span>
+                      </div>
+                      {/* 主体行：任务详细描述（最多2行截断） */}
+                      <div style={{ fontSize: 11.5, color: t.status === '已完成' ? '#c9c9c9' : '#666', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{t.body}</div>
+                      {/* 副行：派发人 + 截止时间 */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11, color: '#999' }}>
+                        <span style={{ flexShrink: 0 }}>👤 {t.assigner} 派发</span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: overdue || dueToday ? '#d4380d' : '#999' }}>
+                          ⏰ 截止 {t.deadline.format('MM-DD HH:mm')}{!overdue && !dueToday && daysLeft >= 1 ? `（剩 ${daysLeft} 天）` : ''}
+                        </span>
+                      </div>
+                      {/* 回复行：有回复显示最新一条（浅蓝气泡），无回复灰字 */}
+                      {latestReply ? (
+                        <div style={{ fontSize: 11, color: '#1677ff', background: 'rgba(22, 119, 255, 0.06)', borderRadius: 8, padding: '4px 8px', lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>↩ {latestReply.text}</div>
+                      ) : (
+                        <div style={{ fontSize: 11, color: '#ccc' }}>↩ 暂无回复</div>
+                      )}
+                    </div>
+                  )
+                })
+              })()}
+            </div>
+            {/* 分页器：与日历卡等高，超出内容分页显示 */}
+            <div style={{ marginTop: 8, borderTop: '1px dashed #f0f0f0', paddingTop: 6, display: 'flex', alignItems: 'center' }}>
+              <span style={{ fontSize: 11, color: '#ccc' }}>点击卡片查看详情并回复</span>
+              <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
+                <span onClick={() => setTaskPage(p => Math.max(1, p - 1))}
+                  style={{ cursor: taskPage <= 1 ? 'default' : 'pointer', color: taskPage <= 1 ? '#ddd' : currentTheme.primary, fontSize: 16, lineHeight: 1, userSelect: 'none' }}>‹</span>
+                <span style={{ fontSize: 11.5, color: '#888' }}>第 {Math.min(taskPage, taskTotalPages)} / {taskTotalPages} 页 · 共 {taskFilteredCount} 项</span>
+                <span onClick={() => setTaskPage(p => Math.min(taskTotalPages, p + 1))}
+                  style={{ cursor: taskPage >= taskTotalPages ? 'default' : 'pointer', color: taskPage >= taskTotalPages ? '#ddd' : currentTheme.primary, fontSize: 16, lineHeight: 1, userSelect: 'none' }}>›</span>
+              </span>
+            </div>
+          </div>
+        </Col>
+        {/* 任务详情弹窗：完整任务信息 + 回复记录 + 回复输入框（测试数据本地维护） */}
+        {taskModalId !== null && (() => {
+          const t = demoTasks.find(x => x.id === taskModalId)
+          if (!t) return null
+          const now = dayjs()
+          const overdue = now.isAfter(t.deadline)
+          const dueToday = t.deadline.isSame(now, 'day')
+          const daysLeft = Math.ceil(t.deadline.diff(now, 'day', true))
+          // 三态状态：未开始（默认）/ 进行中 / 已完成
+          const status = t.status === '已完成'
+            ? { text: '已完成', color: '#52c41a', bg: 'rgba(82, 196, 26, 0.10)' }
+            : t.status === '进行中'
+              ? { text: '进行中', color: '#1677ff', bg: 'rgba(22, 119, 255, 0.08)' }
+              : { text: '未开始', color: '#8c8c8c', bg: '#f5f5f5' }
+          // 提交回复：demo 本地追加；真实用户写入 task_replies 表（姓名存快照）
+          const submitReply = async () => {
+            const text = taskReplyDraft.trim()
+            if (!text) return
+            if (taskDemoMode) {
+              setDemoTasks(tasks => tasks.map(x => x.id === t.id
+                ? { ...x, replies: [...x.replies, { text, time: dayjs().format('MM-DD HH:mm') }] }
+                : x))
+              setTaskReplyDraft('')
+              return
+            }
+            try {
+              const res = await apiClient.post(`/tasks/${t.id}/replies`, { content: text })
+              if (res.data?.success) {
+                const r = res.data.data || {}
+                setDemoTasks(tasks => tasks.map(x => x.id === t.id
+                  ? { ...x, replies: [...x.replies, { text: r.content || text, time: r.sender_name ? `${r.sender_name} · ${r.time}` : (r.time || '') }] }
+                  : x))
+                setTaskReplyDraft('')
+              } else message.error(res.data?.message || '回复发送失败')
+            } catch (e: any) {
+              console.error('回复任务失败:', e)
+              message.error(e?.response?.data?.detail || e?.message || '回复发送失败，请检查网络后重试')
+            }
+          }
+          return (
+            <div onClick={() => setTaskModalId(null)}
+              style={{ position: 'fixed', inset: 0, zIndex: 2500, background: 'rgba(0, 0, 0, 0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div onClick={e => e.stopPropagation()}
+                style={{ width: 480, maxWidth: '92vw', maxHeight: '80vh', background: '#ffffff', borderRadius: 14, boxShadow: '0 18px 60px rgba(0, 0, 0, 0.3)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                {/* 头部：任务主体 + 状态 + 关闭 */}
+                <div style={{ padding: '14px 18px 10px', borderBottom: '1px solid #f0f0f0' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: '#333', flex: 1, minWidth: 0, lineHeight: 1.45 }}>{t.subject}</span>
+                    <span style={{ fontSize: 11, color: status.color, background: status.bg, borderRadius: 9, padding: '2px 9px', lineHeight: '16px', flexShrink: 0, marginTop: 2 }}>{status.text}</span>
+                    <span onClick={() => setTaskModalId(null)} title="关闭"
+                      style={{ cursor: 'pointer', color: '#bbb', fontSize: 16, lineHeight: 1, flexShrink: 0, marginTop: 2 }}>✕</span>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px', marginTop: 8, fontSize: 12, color: '#888', alignItems: 'center' }}>
+                    <span>👤 派发人：{t.assigner}</span>
+                    {t.priority ? <span>🏷 优先级：{t.priority}</span> : null}
+                    <span style={{ color: overdue || dueToday ? '#d4380d' : '#888' }}>
+                      ⏰ 截止：{t.deadline.format('YYYY-MM-DD HH:mm')}
+                      {overdue ? `（已逾期 ${Math.max(1, -daysLeft)} 天）` : dueToday ? '（今日截止）' : daysLeft >= 1 ? `（剩 ${daysLeft} 天）` : ''}
+                    </span>
+                    {/* 状态切换：未开始 / 进行中 / 已完成（与回复相互独立） */}
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {(['未开始', '进行中', '已完成'] as const).map(s => (
+                        <span key={s} onClick={() => setTaskStatus(t.id, s)}
+                          style={{ fontSize: 11.5, padding: '2px 10px', borderRadius: 999, cursor: 'pointer', userSelect: 'none', fontWeight: 500, transition: 'all 0.15s', background: t.status === s ? status.color : '#f5f5f5', color: t.status === s ? '#ffffff' : '#888' }}>
+                          {s}
+                        </span>
+                      ))}
+                    </span>
+                  </div>
+                  {/* 任务主体：完整详细描述 */}
+                  <div style={{ marginTop: 8, background: '#f8f9fb', border: '1px solid #f0f0f0', borderRadius: 8, padding: '8px 11px', fontSize: 12.5, color: '#555', lineHeight: 1.6 }}>{t.body}</div>
+                </div>
+                {/* 回复记录（普通记录条，按时间顺序；回复不等于完成） */}
+                <div style={{ flex: 1, minHeight: 160, overflowY: 'auto', padding: '12px 18px', display: 'flex', flexDirection: 'column', gap: 8, background: '#fafbfc' }}>
+                  {t.replies.length === 0 ? (
+                    <div style={{ textAlign: 'center', color: '#ccc', fontSize: 12, padding: '24px 0' }}>暂无回复记录，需要反馈时在下方填写</div>
+                  ) : t.replies.map((r, i) => (
+                    <div key={i} style={{ background: '#ffffff', border: '1px solid #f0f0f0', borderLeft: '3px solid #1677ff', borderRadius: 8, padding: '7px 11px' }}>
+                      <div style={{ fontSize: 10.5, color: '#999', marginBottom: 2 }}>{r.time}</div>
+                      <div style={{ fontSize: 12.5, color: '#333', lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{r.text}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* 回复输入区：Enter 发送，Shift+Enter 换行 */}
+                <div style={{ borderTop: '1px solid #f0f0f0', padding: '10px 14px', display: 'flex', gap: 8, alignItems: 'flex-end', background: '#ffffff' }}>
+                  <textarea value={taskReplyDraft} onChange={e => setTaskReplyDraft(e.target.value)} rows={2}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitReply() } }}
+                    placeholder="需要回复时填写反馈…（Enter 发送，Shift+Enter 换行）"
+                    onFocus={e => (e.currentTarget.style.borderColor = currentTheme.primary)}
+                    onBlur={e => (e.currentTarget.style.borderColor = '#e0e0e0')}
+                    style={{ flex: 1, resize: 'none', border: '1px solid #e0e0e0', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, lineHeight: 1.5, outline: 'none', fontFamily: 'inherit' }} />
+                  <span onClick={submitReply}
+                    style={{ cursor: 'pointer', padding: '7px 18px', borderRadius: 8, background: `linear-gradient(135deg, ${currentTheme.primary}, ${currentTheme.primaryDark})`, color: '#ffffff', fontSize: 12.5, fontWeight: 600, flexShrink: 0, userSelect: 'none' }}>发送</span>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
+        <Col span={7}>
           <div style={{ background: '#ffffff', borderRadius: 12, border: '1px solid #f0f0f0', boxShadow: '0 1px 4px rgba(0, 0, 0, 0.06)', padding: '14px 16px', height: '100%', display: 'flex', flexDirection: 'column' }}>
             <div style={{ display: 'flex', alignItems: 'center' }}>
               <span style={{ fontSize: 15, fontWeight: 600, color: '#333' }}>📝 备忘录</span>
@@ -929,7 +1245,7 @@ const Dashboard: React.FC = () => {
                 {(['全部', '紧急', '重要', '普通'] as const).map(k => {
                   const active = memoLevelFilter === k
                   return (
-                    <span key={k} onClick={() => { setMemoLevelFilter(k); setMemoSortKey('date') }}
+                    <span key={k} onClick={() => { setMemoLevelFilter(k); setMemoSortKey('date'); setMemoPage(1) }}
                       style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', lineHeight: '16px',
                         border: `1px solid ${active ? 'transparent' : '#e5e5e5'}`,
                         background: active ? currentTheme.primary : '#fafafa',
@@ -943,7 +1259,7 @@ const Dashboard: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
               <span style={{ fontSize: 11, color: '#bbb' }}>排序</span>
               {([['date', '按日期'], ['level', '按紧急程度']] as const).map(([k, label]) => (
-                <span key={k} onClick={() => setMemoSortKey(k)}
+                <span key={k} onClick={() => { setMemoSortKey(k); setMemoPage(1) }}
                   style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', lineHeight: '16px',
                     border: `1px solid ${memoSortKey === k ? 'transparent' : '#e5e5e5'}`,
                     background: memoSortKey === k ? currentTheme.primaryBg || '#f0f5ff' : '#fafafa',
@@ -978,7 +1294,7 @@ const Dashboard: React.FC = () => {
                 添加
               </button>
             </div>
-            <div style={{ flex: 1, overflowY: 'auto', marginTop: 8, minHeight: 0 }}>
+            <div style={{ flex: 1, marginTop: 8, minHeight: 0 }}>
               {(() => {
                 const LEVEL_RANK: Record<string, number> = { '紧急': 0, '重要': 1, '普通': 2 }
                 let list = [...memos]
@@ -992,10 +1308,13 @@ const Dashboard: React.FC = () => {
                   }
                   return b.date.localeCompare(a.date)  // 按日期：新→旧
                 })
-                if (list.length === 0) {
+                // 分页显示：超出部分翻页查看（页码越界自动收敛）
+                const page = Math.min(memoPage, memoTotalPages)
+                const shown = list.slice((page - 1) * MEMO_PAGE_SIZE, page * MEMO_PAGE_SIZE)
+                if (shown.length === 0) {
                   return <div style={{ textAlign: 'center', color: '#ccc', fontSize: 12.5, padding: '20px 0' }}>该分类下暂无备忘事项</div>
                 }
-                return list.map(m => (
+                return shown.map(m => (
                 <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderBottom: '1px dashed #f5f5f5', background: m.done ? '#fafafa' : 'transparent', borderRadius: 6 }}>
                   <span onClick={() => {
                     if (memoDemoMode) { setMemos(memos.map(x => x.id === m.id ? { ...x, done: !x.done } : x)); return }
@@ -1023,6 +1342,14 @@ const Dashboard: React.FC = () => {
                 </div>
                 ))
               })()}
+            </div>
+            {/* 分页器：与日历卡等高，超出内容分页显示 */}
+            <div style={{ marginTop: 8, borderTop: '1px dashed #f0f0f0', paddingTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14 }}>
+              <span onClick={() => setMemoPage(p => Math.max(1, p - 1))}
+                style={{ cursor: memoPage <= 1 ? 'default' : 'pointer', color: memoPage <= 1 ? '#ddd' : currentTheme.primary, fontSize: 16, lineHeight: 1, userSelect: 'none' }}>‹</span>
+              <span style={{ fontSize: 11.5, color: '#888' }}>第 {Math.min(memoPage, memoTotalPages)} / {memoTotalPages} 页 · 共 {memoFilteredCount} 条</span>
+              <span onClick={() => setMemoPage(p => Math.min(memoTotalPages, p + 1))}
+                style={{ cursor: memoPage >= memoTotalPages ? 'default' : 'pointer', color: memoPage >= memoTotalPages ? '#ddd' : currentTheme.primary, fontSize: 16, lineHeight: 1, userSelect: 'none' }}>›</span>
             </div>
           </div>
         </Col>
@@ -1269,6 +1596,23 @@ const Dashboard: React.FC = () => {
             }}>
               <span style={{ width: 4, height: 16, borderRadius: 2, background: currentTheme.primary, display: 'inline-block' }} />
               消息通知
+              <span
+                onClick={() => { setAcctCheckOnly(!acctCheckOnly); setNoticePage(1) }}
+                title={acctCheckOnly ? '取消账户检查过滤' : '只看「账户状况检查」发送的消息'}
+                style={{
+                  fontSize: 12,
+                  padding: '3px 10px',
+                  borderRadius: 12,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                  transition: 'all 0.2s',
+                  background: acctCheckOnly ? currentTheme.primary : '#f5f5f5',
+                  color: acctCheckOnly ? '#ffffff' : '#666'
+                }}
+              >
+                账户检查
+              </span>
               <span style={{
                 marginLeft: 'auto',
                 fontSize: 12,
@@ -1277,14 +1621,14 @@ const Dashboard: React.FC = () => {
                 borderRadius: 10,
                 padding: '2px 10px'
               }}>
-                {noticeKeywords.length > 0 || senderKeyword || noticeGroupFilter
+                {noticeKeywords.length > 0 || senderKeyword || noticeGroupFilter || acctCheckOnly
                   ? `${filteredNotices.length} / ${notices.length} 条（${noticeRangeLabel}）`
                   : `共 ${notices.length} 条（${noticeRangeLabel}）`}
               </span>
               <div
                 onClick={() => {
                   if (noticeSearchOpen) {
-                    setNoticeSearchOpen(false); setNoticeSearch(''); setSenderSearch(''); setNoticeGroupFilter(''); setNoticeRange(null); setNoticeQuickKey('7d'); setNoticePage(1)
+                    setNoticeSearchOpen(false); setNoticeSearch(''); setSenderSearch(''); setNoticeGroupFilter(''); setAcctCheckOnly(false); setNoticeRange(null); setNoticeQuickKey('7d'); setNoticePage(1)
                     loadNotices()
                   } else { setNoticeSearchOpen(true) }
                 }}

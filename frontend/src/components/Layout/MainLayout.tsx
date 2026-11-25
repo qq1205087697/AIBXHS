@@ -57,6 +57,8 @@ import {
   Film,
   Image as ImageIcon,
   ClipboardCheck,
+  Send,
+  Wallet,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -366,6 +368,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <AlertTriangle size={20} />,
       label: "数据驾驶舱",
     },
+    {
+      key: "/finance",
+      icon: <Wallet size={20} />,
+      label: "财务机器人",
+      shortLabel: "财务",
+    },
     ...(hasPermission("product:view")
       ? [
           {
@@ -493,6 +501,11 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               },
             ]
           : []),
+        {
+          key: "/publish-task",
+          icon: <Send size={18} />,
+          label: "发布任务",
+        },
       ] as any[],
     },
   ].filter((item) => !item.children || item.children.length > 0);
@@ -536,6 +549,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/ads": "广告机器人",
       "/rating-optimization": "页面优化机器人",
       "/data-alert": "数据驾驶舱",
+      "/finance": "财务机器人",
       "/org": "组织管理",
       "/permissions": "权限管理",
       "/stores": "店铺管理",
@@ -558,6 +572,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
       '/video-binding-review': '媒体绑定审核',
+      "/publish-task": "发布任务",
     };
     return pathMap[location.pathname] || "未知页面";
   };

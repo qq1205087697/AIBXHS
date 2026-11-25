@@ -19,6 +19,7 @@ from models.restock import InventorySnapshot, InboundShipmentDetail, Replenishme
 from models.local_inventory import LocalInventory
 from models.ad_product_info import AdProductInfo
 from models.group_message import GroupMessage, GroupsFs, GroupUserPermission
+from models.currency_rate import CurrencyRate
 
 __all__ = [
     "User",
@@ -51,4 +52,5 @@ __all__ = [
     "GroupMessage",
     "GroupsFs",
     "GroupUserPermission",
+    "CurrencyRate",
 ]
