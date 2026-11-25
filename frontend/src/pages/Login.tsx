@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Form, Input, Button, Card, Typography, Alert } from 'antd';
 import { Lock, User, Globe, Package, MessageSquare, Mail } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../contexts/ThemeContext';
 import { useResponsive } from '../hooks/useResponsive';
 
@@ -15,6 +15,9 @@ const Login: React.FC = () => {
   const { currentTheme } = useTheme();
   const res = useResponsive();
   const navigate = useNavigate();
+  const location = useLocation();
+  // 401 拦截器跳转时带 expired=1：区分「登录过期」与「主动退出」
+  const expired = new URLSearchParams(location.search).get('expired') === '1';
 
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true);
@@ -180,6 +183,14 @@ const Login: React.FC = () => {
             </Text>
           </div>
 
+          {!error && expired && (
+            <Alert
+              message="登录已过期，请重新登录"
+              type="warning"
+              showIcon
+              style={{ marginBottom: 20, borderRadius: '8px' }}
+            />
+          )}
           {error && (
             <Alert message={error} type="error" showIcon style={{ marginBottom: 20, borderRadius: '8px' }} />
           )}

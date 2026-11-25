@@ -43,21 +43,70 @@ apiClient.interceptors.request.use(
 );
 
 // 响应拦截器
-apiClient.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // 如果是 401 未授权，清除 token（只有当不是在登录页面时才跳转）
-    if (error.response?.status === 401) {
-      const url = error.config?.url || "";
+// 注意：只对 **401（凭据失效）** 做登出处理。网络错误、5xx、超时都没有
+// `error.response`，绝不能被当成「登录失效」——那会让用户在网络抖动或后端重启时被踢出。
+//
+// 401 二次确认（2026-11-25）：单次 401 不再立即登出——先复核 /api/auth/me，
+// 复核通过则静默重放原请求（用户无感）；复核仍 401 才清 token 跳登录。
+// 防御：后端瞬时故障的伪 401、上游链路误判、token 刚被续期替换的竞态。
+let authRedirecting = false;
 
-      // 只有当不是登录请求且不在登录页面时才跳转
-      if (
-        !url.includes("/auth/login") &&
-        window.location.pathname !== "/login"
-      ) {
-        console.warn("认证过期，跳转到登录页");
-        localStorage.removeItem("token");
-        window.location.href = "/login";
+// 401 诊断留痕：最近 5 条（时间/URL/复核结果）。用户再报「自动退出」时，
+// 在控制台执行 JSON.parse(localStorage.getItem('auth_401_log')) 即可定位触发请求。
+const push401Log = (entry: Record<string, unknown>) => {
+  try {
+    const key = "auth_401_log";
+    const list: unknown[] = JSON.parse(localStorage.getItem(key) || "[]");
+    list.push({ t: new Date().toISOString(), ...entry });
+    localStorage.setItem(key, JSON.stringify(list.slice(-5)));
+  } catch {
+    /* 诊断日志失败不影响主流程 */
+  }
+};
+
+apiClient.interceptors.response.use(
+  (response) => {
+    // 滑动续期：后端在 token 剩不足 2 天时通过该响应头下发新 token，这里自动替换。
+    // 长度校验：防止异常空值/垃圾覆盖真实 token（会导致后续全部请求 401）
+    const renewed = response.headers?.["x-renewed-token"];
+    if (renewed && typeof renewed === "string" && renewed.length > 40) {
+      localStorage.setItem("token", renewed as string);
+    }
+    return response;
+  },
+  async (error) => {
+    const status = error.response?.status;
+    if (status === 401) {
+      const url = error.config?.url || "";
+      // 登录/注册请求的 401 是「账号密码错」，不是会话失效
+      const isAuthEntry = url.includes("/auth/login") || url.includes("/auth/register");
+      if (!isAuthEntry && window.location.pathname !== "/login" && !error.config?._retried401) {
+        try {
+          // 复核：用当前 token 裸 axios 调 me（不走本实例拦截器，避免递归）
+          const token = localStorage.getItem("token");
+          await axios.get("/auth/me", {
+            baseURL: API_BASE,
+            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            timeout: 10000,
+          });
+          // 复核通过 → token 其实有效（瞬时故障/竞态），静默重放原请求
+          push401Log({ url, phase: "recheck-pass", retried: true });
+          error.config._retried401 = true;
+          return apiClient.request(error.config);
+        } catch (reErr: any) {
+          const reStatus = reErr?.response?.status;
+          push401Log({ url, phase: "recheck-failed", recheckStatus: reStatus ?? "network" });
+          if (reStatus === 401 && !authRedirecting) {
+            // 复核确认凭据真的失效才登出；并发多个 401 只跳转一次
+            authRedirecting = true;
+            console.warn("认证过期（复核确认），跳转到登录页");
+            localStorage.removeItem("token");
+            localStorage.removeItem("auth_user_cache");
+            localStorage.removeItem("auth_permissions_cache");
+            window.location.assign("/login?expired=1");
+          }
+          // 复核失败但非 401（网络抖动/5xx）：保留登录态，原错误交由调用方兜底
+        }
       }
     }
     return Promise.reject(error);
@@ -138,7 +187,14 @@ export const inventoryApi = {
     risk_level?: string[];
     account?: string[];
     country?: string[];
+    /** 节日/产品状态筛选（必须与列表同口径转发，否则导出与页面不一致） */
+    holiday_filter?: string;
     fields?: string[];
+    /** 产品库视图：all / missing */
+    product_lib_filter?: "all" | "missing";
+    sales_window?: number;
+    min_sales?: number;
+    exclude_summary?: boolean;
   }) => {
     const searchParams = new URLSearchParams();
     if (params?.keyword) searchParams.append("keyword", params.keyword);
@@ -148,20 +204,40 @@ export const inventoryApi = {
       params.account.forEach((a) => searchParams.append("account", a));
     if (params?.country)
       params.country.forEach((c) => searchParams.append("country", c));
+    if (params?.holiday_filter)
+      searchParams.append("holiday_filter", params.holiday_filter);
     if (params?.fields)
       params.fields.forEach((f) => searchParams.append("fields", f));
+    if (params?.product_lib_filter)
+      searchParams.append("product_lib_filter", params.product_lib_filter);
+    if (params?.sales_window !== undefined)
+      searchParams.append("sales_window", String(params.sales_window));
+    if (params?.min_sales !== undefined)
+      searchParams.append("min_sales", String(params.min_sales));
+    if (params?.exclude_summary !== undefined)
+      searchParams.append("exclude_summary", String(params.exclude_summary));
     return apiClient.get(`/restock/export?${searchParams.toString()}`, {
       responseType: "blob",
     });
   },
   syncFeishuInbound: () => apiClient.post("/restock/sync-feishu-inbound"),
   getSyncFeishuStatus: () => apiClient.get("/restock/sync-feishu-status"),
+  // 海外仓：飞书多维表 → 数据库（按 SKU+品名 去重覆盖，回写主行）
+  syncOverseasInventory: () => apiClient.post("/restock/sync-overseas"),
+  getSyncOverseasStatus: () => apiClient.get("/restock/sync-overseas-status"),
+  getOverseasSummary: () => apiClient.get("/restock/overseas-summary"),
   updateInspectionQuantity: (snapshotId: number, quantity: number) =>
     apiClient.put("/restock/inspection-quantity", null, {
       params: { snapshot_id: snapshotId, inspection_quantity: quantity },
     }),
   getSummaryChildren: (asin: string, account?: string) =>
     apiClient.get("/restock/summary-children", { params: { asin, account } }),
+  // 自动补货启动：最新快照决策 → 进销存补货单（按店铺分组拆单）
+  autoReplenishment: (data: { force?: boolean; group_ids?: number[] | null; skip_existing?: boolean }) =>
+    apiClient.post("/restock/auto-replenishment", data),
+  // 自动补货预检（只读）：可见分组/行数/跳过数/预计单数（网络抖动时 60s 内失败可重试）
+  autoReplenishmentPreview: (data: { group_ids?: number[] | null; skip_existing?: boolean }) =>
+    apiClient.post("/restock/auto-replenishment/preview", data, { timeout: 60000 }),
   markHoliday: (snapshotIds: number[], isHoliday: boolean) =>
     apiClient.post("/restock/mark-holiday", {
       snapshot_ids: snapshotIds,
@@ -2650,7 +2726,7 @@ export const aiCreationApi = {
   analyzeProduct: (files: File[]) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
-    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult }>(
+    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult; text?: string }>(
       "/ai-creation/analyze-product",
       formData,
       {
@@ -2701,6 +2777,44 @@ export interface AIImageResultItem {
   prompt_designed?: boolean;
   /* AI 从参考图清点出的件数清单（如 "red-and-white fishing bobbers x2"） */
   inventory?: string[] | null;
+  /* A+ 该张使用的版式（内置版式 preset:xxx / 上传版式 db:id） */
+  layout?: AIImageLayoutRef | null;
+  /* 品牌A+横幅的品牌名（保留大小写） */
+  brand_name?: string | null;
+}
+
+/** A+ 版式（官方推荐 / 我的 / 收藏） */
+export interface AIImageLayout {
+  /** 标识：preset:<内置id> 或 db:<素材id> */
+  key: string;
+  id: string | number;
+  name: string;
+  desc?: string;
+  /** horizontal / vertical / square */
+  ratio_tag?: string;
+  /** 给模型的分区描述（上传版式为空，改走版式图） */
+  structure?: string;
+  /** 缩略图分区数据（归一化坐标） */
+  zones?: { x: number; y: number; w: number; h: number; t: "img" | "txt" | "band" | "gap" }[];
+  /** 生成用参考图地址（官方模板 / 上传素材） */
+  image_url?: string;
+  /** 列表缩略图地址（<=480px，仅展示，避免 240 张原图拖死首屏） */
+  cover_url?: string;
+  source?: "preset" | "upload" | "official";
+  favorited?: boolean;
+  favorite?: boolean;
+  width?: number | null;
+  height?: number | null;
+}
+
+/** 任务子项里记录的版式快照 */
+export interface AIImageLayoutRef {
+  key?: string;
+  name?: string;
+  source?: string;
+  ratio_tag?: string;
+  structure?: string;
+  image_url?: string;
 }
 
 export interface AIImageTask {
@@ -2734,10 +2848,28 @@ export interface AIImageTask {
     country?: string;
     language?: string;
     platform?: string;
+    /** A+ 画面文字：no_text=不出现文字（默认）/ with_text=允许 AI 排版文案 */
+    text_mode?: string;
+    /** 品牌A+横幅的品牌名（保留大小写） */
+    brand_name?: string;
   } | null;
   cost_seconds: number | null;
   error_message: string | null;
   created_at: string;
+  /** 进行中任务的排队排位（已完成/失败为 null）：排队中到底在等什么 */
+  queue?: {
+    stage: "comfy" | "relay";
+    /** ComfyUI 队列前面还有几个任务 */
+    ahead?: number | null;
+    /** 本任务在 ComfyUI pending 中的排位（1 基） */
+    position?: number | null;
+    /** 同账号用户级队列里前面还有几单 */
+    user_ahead?: number;
+    comfy_running?: number | null;
+    comfy_pending?: number | null;
+    /** 后端拼好的中文说明，前端直接展示 */
+    hint: string;
+  } | null;
 }
 
 export const aiImageApi = {
@@ -2748,14 +2880,29 @@ export const aiImageApi = {
       generation_types: Record<string, string>;
       aspect_ratios: Record<string, string>;
       aspect_ratios_all?: Record<string, string>;
-      aplus_types?: Record<string, { label: string; gen_ratio: string; target_size: number[] }>;
+      /** size/desc 由服务端按 target_size 下发，前端不再写死尺寸与文案 */
+      aplus_types?: Record<
+        string,
+        { label: string; gen_ratio: string; target_size: number[]; size?: string; desc?: string }
+      >;
       main_types?: Record<string, string>;
+      /** 主副图卡片说明（key 与 main_types 对应） */
+      main_type_descriptions?: Record<string, string>;
+      /** 场景图父项 + 两条子路径（不带人物 / 带人物） */
+      scene_group?: {
+        key: string;
+        label: string;
+        hint: string;
+        variants: { key: string; label: string; hint: string }[];
+      };
       brand_options?: {
         countries: string[];
         languages: string[];
         platforms: string[];
         font_styles: string[];
       };
+      /** 品牌默认值（与后端 DEFAULT_BRAND_SETTINGS 同源） */
+      brand_defaults?: { country?: string; language?: string; platform?: string };
       max_ref_images?: number;
       max_sheets_per_task?: number;
       /** 可选生成模型（本地 / 中转站） */
@@ -2791,6 +2938,10 @@ export const aiImageApi = {
       brand_settings?: Record<string, string>;
       /** 生成通道：local=本地 Qwen Image 2.1 / relay=中转站 Nano Banana 2 */
       provider?: "local" | "relay";
+      /** A+ 版式标识（preset:xxx / db:id），空=后端随机官方版式；品牌A+横幅忽略 */
+      layout_ids?: string[];
+      /** 品牌A+横幅必填的英文品牌名（保留大小写，2–20 字符） */
+      brand_name?: string;
     },
     idempotencyKey?: string,
   ) => {
@@ -2812,6 +2963,8 @@ export const aiImageApi = {
     if (params.brand_settings && Object.keys(params.brand_settings).length)
       formData.append("brand_settings", JSON.stringify(params.brand_settings));
     if (params.provider) formData.append("provider", params.provider);
+    formData.append("layout_ids", JSON.stringify(params.layout_ids || []));
+    if (params.brand_name) formData.append("brand_name", params.brand_name);
     return apiClient.post<AIImageTask>("/ai-image/tasks", formData, {
       headers: {
         "Content-Type": "multipart/form-data",
@@ -2820,31 +2973,144 @@ export const aiImageApi = {
       timeout: 300000,
     });
   },
-  /** 套图生成任务列表（分页 + 关键词 + 状态，状态由服务端过滤保证分页自洽） */
-  listTasks: (page = 1, pageSize = 20, keyword = "", status = "") =>
+  /** 套图生成任务列表（分页 + 关键词 + 状态 + 模式，状态/模式由服务端过滤保证分页自洽） */
+  listTasks: (page = 1, pageSize = 20, keyword = "", status = "", mode = "") =>
     apiClient.get<{ items: AIImageTask[]; total: number }>("/ai-image/tasks", {
-      params: { page, page_size: pageSize, keyword, status },
+      params: { page, page_size: pageSize, keyword, status, mode },
     }),
-  /** 单任务详情（轮询单条用，避免整页重复传输） */
-  getTask: (taskId: number) => apiClient.get<AIImageTask>(`/ai-image/tasks/${taskId}`),
+  /** 单任务详情（轮询单条用，避免整页重复传输；mode 用于校验任务属于当前页面） */
+  getTask: (taskId: number, mode = "") =>
+    apiClient.get<AIImageTask>(`/ai-image/tasks/${taskId}`, { params: { mode } }),
   /** 取消排队中/生成中的任务 */
   cancelTask: (taskId: number) =>
     apiClient.post<{ success: boolean; message?: string }>(`/ai-image/tasks/${taskId}/cancel`),
   /** 重试失败子项（indices 缺省=全部失败项） */
-  retryTask: (taskId: number, indices?: number[]) =>
+  retryTask: (taskId: number, indices?: number[], mode = "") =>
     apiClient.post<{ retried: number; failed: string[] }>(
       `/ai-image/tasks/${taskId}/retry`,
       indices && indices.length ? { indices } : {},
+      { params: { mode } },
     ),
   /** 打包下载全部已生成图片 */
-  downloadZip: (taskId: number) =>
+  downloadZip: (taskId: number, mode = "") =>
     apiClient.get<Blob>(`/ai-image/tasks/${taskId}/download.zip`, {
+      params: { mode },
       responseType: "blob",
       timeout: 300000,
     }),
   /** 删除套图生成任务记录 */
   deleteTask: (taskId: number) =>
     apiClient.delete<{ success: boolean }>(`/ai-image/tasks/${taskId}`),
+
+  // ===== A+ 版式（选择排版 → 每种排版生成一张）=====
+  /** 版式库：官方推荐 / 我的 / 收藏 */
+  getLayouts: () =>
+    apiClient.get<{
+      presets: AIImageLayout[];
+      mine: AIImageLayout[];
+      favorites: AIImageLayout[];
+      counts?: { official?: number; structural?: number; mine?: number };
+      limit: number;
+      ratio_tags: { value: string; label: string }[];
+    }>("/ai-image/layouts"),
+  /** 上传自己的版式参考图 */
+  uploadLayout: (file: File, name = "") => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("name", name);
+    return apiClient.post<AIImageLayout>("/ai-image/layouts/upload", fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 120000,
+    });
+  },
+  /** 收藏 / 取消收藏 */
+  favoriteLayout: (key: string, favorite: boolean) =>
+    apiClient.post<{ key: string; favorited: boolean }>("/ai-image/layouts/favorite", {
+      key,
+      favorite,
+    }),
+  /** 删除自己上传的版式 */
+  deleteLayout: (id: number) =>
+    apiClient.delete<{ ok: boolean }>(`/ai-image/layouts/${id}`),
+  /** 保存版式结构描述（分区文字约束，留空=只用参考图） */
+  saveLayoutStructure: (id: number, structure: string) =>
+    apiClient.put<{ id: number; structure: string }>(`/ai-image/layouts/${id}/structure`, {
+      structure,
+    }),
+  /** AI 读版式图生成结构描述草稿（不落库） */
+  suggestLayoutStructure: (id: number) =>
+    apiClient.post<{ id: number; structure: string; name?: string }>(
+      `/ai-image/layouts/${id}/structure/suggest`,
+      {},
+      { timeout: 120000 },
+    ),
+};
+
+
+// ==================== 产品月销量等级池 ====================
+
+export interface GradePoolItem {
+  snapshot_id: number;
+  asin: string;
+  sku?: string;
+  msku?: string;
+  product_name?: string;
+  account?: string;
+  country?: string;
+  summary_flag?: string;
+  grade?: string | null;
+  monthly_sales?: number | null;
+  sales_source?: string | null;
+  prev_grade?: string | null;
+  computed_at?: string | null;
+}
+
+export interface GradePoolResult {
+  items: GradePoolItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  period?: string | null;
+  distribution: Record<string, number>;
+  /** 数据完整性提示（product_sales 覆盖率不足时后端下发） */
+  integrity_warning?: string | null;
+  grade_note?: string | null;
+}
+
+export interface GradeSummary {
+  period?: string | null;
+  distribution: Record<string, number>;
+  total: number;
+  fallback_ratio: number;
+  integrity_warning?: string | null;
+}
+
+export const gradeApi = {
+  /** 等级池列表（可见性=库存页同口径；grade 逗号分隔多选） */
+  getPool: (params: {
+    keyword?: string;
+    grade?: string;
+    account?: string[];
+    country?: string[];
+    holiday_filter?: string;
+    sort_field?: string;
+    sort_order?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get<GradePoolResult>("/grades/pool", { params }),
+  /** 六档统计 + 完整性提示 */
+  getSummary: (params: {
+    keyword?: string;
+    grade?: string;
+    account?: string[];
+    country?: string[];
+    holiday_filter?: string;
+  }) => apiClient.get<GradeSummary>("/grades/summary", { params }),
+  /** 手动重算（仅 admin，同步执行） */
+  recompute: (period?: string) =>
+    apiClient.post<{ ok: boolean; [k: string]: unknown }>("/grades/recompute", period ? { period } : undefined, { timeout: 180000 }),
+  /** 当前等级期与生成时间 */
+  getPeriod: () => apiClient.get<{ period: string | null; computed_at: string | null }>("/grades/period"),
 };
 
 export default apiClient;

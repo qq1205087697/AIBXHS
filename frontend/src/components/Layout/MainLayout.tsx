@@ -57,6 +57,9 @@ import {
   Film,
   Image as ImageIcon,
   UploadCloud,
+  Layers,
+  Trophy,
+  ClipboardCheck,
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -197,6 +200,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   };
 
   const inventoryPaths = [
+    "/grade-pool",
     "/replenishment",
     "/purchase",
     "/inbound",
@@ -214,7 +218,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/tenants",
     "/stores",
   ];
-  const mediaPaths = ["/ai-creation", "/ai-image"];
+  // AI生图是媒体创作中心下的二级菜单（只有分组，本身无路由），A+套图/主副图是三级
+  const imagePaths = ["/ai-image", "/ai-image-aplus", "/ai-image-main"];
+  const mediaPaths = ["/ai-creation", ...imagePaths];
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
@@ -222,6 +228,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     if (inventoryPaths.includes(currentPath)) keys.push("inventory-group");
     if (systemPaths.includes(currentPath)) keys.push("system-group");
     if (mediaPaths.includes(currentPath)) keys.push("media-creation");
+    if (imagePaths.includes(currentPath)) keys.push("ai-image-group");
     return keys;
   });
 
@@ -240,6 +247,10 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       }
       if (mediaPaths.includes(currentPath) && !next.includes("media-creation")) {
         next.push("media-creation");
+      }
+      // 三级菜单：进入 A+套图 / 主副图 时同时展开 AI生图 这一层
+      if (imagePaths.includes(currentPath) && !next.includes("ai-image-group")) {
+        next.push("ai-image-group");
       }
       return next;
     });
@@ -322,30 +333,48 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           icon: <Target size={20} />,
           label: '选品机器人',
         }] : []),
-    ...(hasPermission('ai_video:use')
+    ...(hasPermission('ai_video:use') || hasPermission('ai_image:use')
       ? [{
           key: 'media-creation',
           icon: <Sparkles size={20} />,
           label: '媒体创作中心',
           shortLabel: '媒体',
           children: [
-            {
-              key: '/ai-creation',
-              icon: <Video size={18} />,
-              label: 'AI视频',
-            },
-            ...(hasPermission('ai_image:use')
+            ...(hasPermission('ai_video:use')
               ? [{
-                  key: '/ai-image',
-                  icon: <ImageIcon size={18} />,
-                  label: 'AI生图',
+                  key: '/ai-creation',
+                  icon: <Video size={18} />,
+                  label: 'AI视频',
                 }]
               : []),
-            {
-              key: '/upscale-center',
-              icon: <Film size={18} />,
-              label: '高清处理',
-            },
+            // AI生图有独立权限码：只给美工开生图、不给视频时也要能进。
+            // 结构：媒体创作中心 > AI生图（分组，无路由）> A+套图 / 主副图（共用 ai_image:use）
+            ...(hasPermission('ai_image:use')
+              ? [{
+                  key: 'ai-image-group',
+                  icon: <ImageIcon size={18} />,
+                  label: 'AI生图',
+                  children: [
+                    {
+                      key: '/ai-image-aplus',
+                      icon: <ImageIcon size={16} />,
+                      label: 'A+套图',
+                    },
+                    {
+                      key: '/ai-image-main',
+                      icon: <Layers size={16} />,
+                      label: '主副图',
+                    },
+                  ],
+                }]
+              : []),
+            ...(hasPermission('ai_video:use')
+              ? [{
+                  key: '/upscale-center',
+                  icon: <Film size={18} />,
+                  label: '高清处理',
+                }]
+              : []),
             ...(hasPermission('product:edit') || hasPermission('ai_video:approve')
               ? [{
                   key: '/video-upload',
@@ -387,6 +416,12 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <Boxes size={20} />,
       label: "进销存",
       children: [
+        ...(hasPermission('robot:inventory:view')
+          ? [{
+              key: '/grade-pool',
+              icon: <Trophy size={18} />,
+              label: '等级池',
+            }] : []),
         ...(hasPermission('replenishment:view')
           ? [{
               key: '/replenishment',
@@ -503,32 +538,33 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     },
   ].filter((item) => !item.children || item.children.length > 0);
 
-  // 菜单搜索：按名称过滤菜单项，分组内有命中子项时保留分组并展开
+  // 菜单搜索：按名称过滤菜单项（支持三级：命中三级项保留两级父节点并展开）
   const menuKeyword = menuSearchText.trim().toLowerCase();
   const isMenuSearching = menuKeyword.length > 0;
-  const filteredMenuItems = isMenuSearching
-    ? menuItems
-        .map((item: any) => {
-          if (item.children) {
-            const matchedChildren = item.children.filter((c: any) =>
-              String(c.label || "").toLowerCase().includes(menuKeyword),
-            );
-            if (matchedChildren.length > 0) {
-              return { ...item, children: matchedChildren };
-            }
-            return String(item.label || "").toLowerCase().includes(menuKeyword)
-              ? item
-              : null;
+  const filterMenuByKeyword = (items: any[], kw: string): any[] =>
+    items
+      .map((item: any) => {
+        if (item.children && item.children.length > 0) {
+          const matchedChildren = filterMenuByKeyword(item.children, kw);
+          if (matchedChildren.length > 0) {
+            return { ...item, children: matchedChildren };
           }
-          return String(item.label || "").toLowerCase().includes(menuKeyword)
-            ? item
-            : null;
-        })
-        .filter(Boolean)
-    : menuItems;
-  const searchedOpenKeys = filteredMenuItems
-    .filter((item: any) => item.children)
-    .map((item: any) => item.key);
+          return String(item.label || "").toLowerCase().includes(kw) ? item : null;
+        }
+        return String(item.label || "").toLowerCase().includes(kw) ? item : null;
+      })
+      .filter(Boolean);
+  const filteredMenuItems = isMenuSearching
+    ? filterMenuByKeyword(menuItems as any[], menuKeyword)
+    : (menuItems as any[]);
+  // 收集所有「带子项」的 key（含二级 AI生图），搜索时一并展开
+  const collectSubMenuKeys = (items: any[]): string[] =>
+    items.flatMap((item: any) =>
+      item.children && item.children.length > 0
+        ? [item.key, ...collectSubMenuKeys(item.children)]
+        : [],
+    );
+  const searchedOpenKeys = collectSubMenuKeys(filteredMenuItems);
 
   const getPageTitle = () => {
     const pathMap: Record<string, string> = {
@@ -536,6 +572,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/todo": "KPI",
       "/chat": "AI聊天助手",
       "/inventory": "库存机器人",
+      "/grade-pool": "等级池",
       "/business-settings": "业务设置",
       "/review": "差评机器人",
       "/email": "邮件机器人",
@@ -561,6 +598,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       "/development": "开发机器人",
       "/development/new": "添加新品",
       '/ai-creation': 'AI视频',
+      '/ai-image-aplus': 'A+套图',
+      '/ai-image-main': '主副图',
       '/ai-image': 'AI生图',
       '/upscale-center': '高清处理',
       '/video-binding-review': '媒体绑定审核',
@@ -741,14 +780,29 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     );
 
     if (children) {
+      // 折叠态：一级分组 hover 出 Dropdown；二级子菜单（如 AI生图）渲染成分组标题，
+      // 其三级项（A+套图/主副图）平铺在该标题下，避免 Dropdown 只支持一层的限制
       return (
         <Dropdown
           menu={{
-            items: (children as any[]).map((child) => ({
-              key: child.key,
-              icon: child.icon,
-              label: child.label,
-            })),
+            items: (children as any[]).map((child) =>
+              child.children && child.children.length > 0
+                ? {
+                    type: 'group' as const,
+                    key: child.key,
+                    label: child.label,
+                    children: (child.children as any[]).map((g) => ({
+                      key: g.key,
+                      icon: g.icon,
+                      label: g.label,
+                    })),
+                  }
+                : {
+                    key: child.key,
+                    icon: child.icon,
+                    label: child.label,
+                  },
+            ),
             selectedKeys: [location.pathname],
             onClick: ({ key }) => navigate(key),
             style: { minWidth: 160 },

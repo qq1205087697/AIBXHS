@@ -126,12 +126,19 @@ COUNTRY_SITE_MAP = {
 
 def build_visible_snapshots(db: Session, tenant_id: int, latest, *, keyword=None,
                             holiday_filter=None, account=None, country=None,
-                            user_stores=None):
+                            user_stores=None, missing_ids=None):
     """统一的「可见快照 id」限定（不含 KEEP 语义 —— 那个要引用决策表，见 build_keep_cond）。
 
     覆盖：租户 + 快照日 + 未软删、共享库存/孤儿规则、用户店铺隔离、关键词、
-    节日枚举筛选（快照列 ∪ 行级标签，口径同展示）、店铺 / 国家。
-    返回 Query 或 ``None``（None = 用户无可见店铺）。
+    节日枚举筛选（快照列 ∪ 行级标签，口径同展示）、店铺 / 国家，
+    以及「产品库未收录」行限定（missing_ids，由 product_lib_coverage_service 预先算出）。
+
+    missing_ids 语义：
+      None  → 不限制（默认，全部视图）
+      []    → 无任何未收录行，返回 None（与「用户无可见店铺」同语义）
+      非空  → 仅这些快照 id 可见
+
+    返回 Query 或 ``None``（None = 无可见行）。
     """
     q = db.query(InventorySnapshot.id).filter(
         InventorySnapshot.tenant_id == tenant_id,
@@ -228,6 +235,15 @@ def build_visible_snapshots(db: Session, tenant_id: int, latest, *, keyword=None
                 country_conditions.append(InventorySnapshot.country.like(f"%{code}%"))
         if country_conditions:
             q = q.filter(or_(*country_conditions))
+
+    # 产品库未收录限定（id 集合由 product_lib_coverage_service 在内存比对得出，
+    # 不走 NOT EXISTS 相关子查询 —— 后者在本库会超时，见该模块 docstring）
+    if missing_ids is not None:
+        ids = list(missing_ids)
+        if not ids:
+            return None  # 空集合 = 无可见行（与 user_stores 为空同语义）
+        _chunks = [ids[i:i + 500] for i in range(0, len(ids), 500)]
+        q = q.filter(or_(*[InventorySnapshot.id.in_(c) for c in _chunks]))
     return q
 
 
@@ -516,8 +532,10 @@ def _parse_inbound_details_fast(raw_text: str) -> list:
             pass
         if len(parts) >= 4 and parts[3].strip():
             logistics_method = parts[3].strip()
-        if len(parts) >= 5 and parts[4].strip():
-            transport_method = parts[4].strip()
+        if len(parts) >= 5:
+            # 占位符（如 "-"）统一归一为 None：否则脏值流入 DB，会被补填校验当成"已填"
+            from services.inbound_field_rules import normalize_transport
+            transport_method = normalize_transport(parts[4])
         try:
             if len(parts) >= 6 and parts[5].strip():
                 ship_date = datetime.strptime(parts[5].strip(), "%Y-%m-%d").date()
@@ -1292,7 +1310,9 @@ def _finish_calculate(db: Session, df: pd.DataFrame, snapshot_ids: list, target_
 
 def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, user_role: str = None,
                            keyword: str = None, holiday_filter: str = None,
-                           account: str = None, country: str = None) -> dict:
+                           account: str = None, country: str = None,
+                           sales_window: int = 30, min_sales: float = 0,
+                           exclude_summary: bool = False) -> dict:
     """库存概览（面板卡片 + TOP10）。
 
     **与列表同口径**：过滤一律走 build_visible_snapshots + build_keep_cond + build_inventory_query
@@ -1302,12 +1322,20 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
     latest = db.query(func.max(InventorySnapshot.snapshot_date)).filter(
         InventorySnapshot.tenant_id == tenant_id).scalar()
     empty = {"total_sku": 0, "red_count": 0, "yellow_count": 0, "green_count": 0,
-             "snapshot_date": None, "latest_updated_at": None,
+             "missing_product_count": 0, "missing_by_type": {},
+             "snapshot_date": None, "latest_updated_at": None, "imported_at": None,
              "stockout_top10": [], "overstock_top10": []}
     if not latest:
         return empty
 
     latest_updated_at = db.query(func.max(InventorySnapshot.updated_at)).filter(
+        InventorySnapshot.tenant_id == tenant_id,
+        InventorySnapshot.snapshot_date == latest,
+        InventorySnapshot.deleted_at.is_(None),
+    ).scalar()
+
+    # 该批次最后一次导入落库时间（一天多次导入取最新一次），前端左上角精确到分钟展示
+    imported_at = db.query(func.max(InventorySnapshot.created_at)).filter(
         InventorySnapshot.tenant_id == tenant_id,
         InventorySnapshot.snapshot_date == latest,
         InventorySnapshot.deleted_at.is_(None),
@@ -1321,13 +1349,34 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
     if valid_subquery is None:
         # 用户无可见店铺
         return {**empty, "snapshot_date": latest.isoformat(),
-                "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None}
+                "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None,
+                "imported_at": imported_at.isoformat() if imported_at else None}
 
     keep_cond = build_keep_cond(db, tenant_id, holiday_filter)
     joined = build_inventory_query(db, tenant_id, latest, valid_subquery, keep_cond)
 
     # 总数（= 列表 total 同口径）
     total = joined.count()
+
+    # 产品库未收录计数（与列表同口径：先按当前口径算出未收录 id，再与当前筛选求交）
+    missing_product_count = 0
+    missing_by_type = {}
+    try:
+        from services.product_lib_coverage_service import find_uncovered_snapshots
+        _cov = find_uncovered_snapshots(
+            db, tenant_id, latest, sales_window=sales_window,
+            min_sales=min_sales, exclude_summary=exclude_summary,
+        )
+        _missing_ids = _cov["missing_ids"]
+        if _missing_ids:
+            _chunks = [_missing_ids[i:i + 500] for i in range(0, len(_missing_ids), 500)]
+            missing_product_count = joined.filter(
+                or_(*[InventorySnapshot.id.in_(c) for c in _chunks])
+            ).count()
+        missing_by_type = _cov.get("by_type") or {}
+    except Exception as _e:
+        # 覆盖度统计失败不允许拖垮概览主链路
+        print(f"[inventory_service] 产品库覆盖度统计失败（不影响概览）: {_e}")
 
     # 风险分布：无决策的快照计入「绿」，保证 red+yellow+green = total
     risk_key = func.coalesce(ReplenishmentDecision.risk_level, '绿')
@@ -1396,10 +1445,13 @@ def get_inventory_overview(db: Session, tenant_id: int, user_id: int = None, use
     return {
         "snapshot_date": latest.isoformat(),
         "latest_updated_at": latest_updated_at.isoformat() if latest_updated_at else None,
+        "imported_at": imported_at.isoformat() if imported_at else None,
         "total_sku": total,
         "red_count": red,
         "yellow_count": yellow,
         "green_count": green,
+        "missing_product_count": missing_product_count,
+        "missing_by_type": missing_by_type,
         "stockout_top10": stockout_items,
         "overstock_top10": overstock_top10,
     }
@@ -1437,8 +1489,15 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
                      country: str = None, holiday_filter: str = None,
                      sort_field: str = None, sort_order: str = None,
                      page: int = 1, page_size: int = 20,
-                     user_id: int = None, user_role: str = None) -> dict:
-    """搜索库存"""
+                     user_id: int = None, user_role: str = None,
+                     product_lib_filter: str = "all", sales_window: int = 30,
+                     min_sales: float = 0, exclude_summary: bool = False,
+                     grade=None) -> dict:
+    """搜索库存
+
+    product_lib_filter="missing" 时只返回「有销量但产品库无此产品」的行（口径见
+    services/product_lib_coverage_service.py）；"all"（默认）不付出额外查询成本。
+    """
     # 用户数据隔离：获取用户可见的店铺列表
     user_stores = None
     if user_id and user_role and user_role != "admin":
@@ -1467,9 +1526,36 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
 
     # 1. 可见快照限定（列表 / 概览 / 导出 共用同一实现，避免口径漂移）
     user_stores = visible_store_names(db, tenant_id, user_id, user_role)
+
+    # 产品库覆盖度：两种视图都计算。成本说明：find_uncovered_snapshots 有 60s 结果缓存，
+    # 且概览接口每次都用同一键调用（同缓存），列表复用命中后几乎零成本；
+    # 全部视图用它给「已收录」行补状态，「仅未收录」视图额外用 missing_ids 做行限定。
+    coverage = None
+    _missing_ids = None
+    _scanned_ids: list = []
+    try:
+        from services.product_lib_coverage_service import find_uncovered_snapshots
+        coverage = find_uncovered_snapshots(
+            db, tenant_id, latest,
+            sales_window=sales_window, min_sales=min_sales,
+            exclude_summary=exclude_summary,
+        )
+        _missing_ids = coverage["missing_ids"]
+        _scanned_ids = coverage.get("scanned_ids") or []
+    except Exception as _e:
+        # 降级：产品库键查询/比对失败时，全部视图照常返回（状态列空），
+        # 仅「未收录」视图降级为空列表 + 错误提示，不让整页 500
+        coverage = None
+        _missing_ids = None
+        print(f"[inventory_service] 产品库覆盖度计算失败（降级）: {_e}")
+        if product_lib_filter == "missing":
+            return {"items": [], "total": 0, "page": page, "page_size": page_size,
+                    "product_lib_error": f"产品库覆盖度计算失败: {_e}"}
+
     valid_snapshot_subquery = build_visible_snapshots(
         db, tenant_id, latest, keyword=keyword, holiday_filter=holiday_filter,
         account=account, country=country, user_stores=user_stores,
+        missing_ids=_missing_ids if product_lib_filter == "missing" else None,
     )
     if valid_snapshot_subquery is None:
         # 用户有部门但没有关联店铺，返回空
@@ -1481,6 +1567,39 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
         build_keep_cond(db, tenant_id, holiday_filter),
         risk_level=risk_level, replenishment_status=replenishment_status,
     )
+
+    # 月销量等级筛选（行级 (asin, account) 匹配当前期等级池）：
+    # 关联 EXISTS 走 grades 侧 uk (tenant, period, asin, account) 索引点查，不拖垮主查询。
+    _grade_list = None
+    if grade:
+        # 兼容两种形态：逗号分隔串（Query 参数） / 数组
+        if isinstance(grade, (list, tuple)):
+            _raw = [str(g).strip().upper() for g in grade]
+        else:
+            _raw = [g.strip().upper() for g in str(grade).split(",") if g.strip()]
+        _grade_list = [g for g in _raw if g in ("S", "A", "B", "C", "D", "E")]
+    if _grade_list:
+        try:
+            from models.product_grade import ProductSalesGrade as _PG
+            from services.grade_service import get_current_grade_period as _g_period
+            _cur_period, _ = _g_period(db, tenant_id)
+            if _cur_period:
+                _g_exists = db.query(_PG.id).filter(
+                    _PG.tenant_id == tenant_id,
+                    _PG.period == _cur_period,
+                    _PG.deleted_at.is_(None),
+                    _PG.grade.in_(_grade_list),
+                    _PG.asin == InventorySnapshot.asin,
+                    func.coalesce(_PG.account, "") == func.coalesce(InventorySnapshot.account, ""),
+                ).exists()
+                query = query.filter(_g_exists)
+            else:
+                # 等级池未生成：筛选等级 = 空结果（明确语义，而非忽略筛选）
+                return {"items": [], "total": 0, "page": page, "page_size": page_size,
+                        "product_lib_error": None,
+                        "grade_note": "等级池尚未生成，无法按等级筛选"}
+        except Exception as _e:  # noqa: BLE001 等级筛选失败降级为不过滤，不让整页 500
+            print(f"[inventory_service] 等级筛选失败（降级为不过滤）: {_e}")
 
     if sort_field == 'days_of_supply':
         order_col = ReplenishmentDecision.days_of_supply.desc() if sort_order == 'desc' else ReplenishmentDecision.days_of_supply.asc()
@@ -1588,7 +1707,18 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
     items = []
     _name_img = _page_product_images(
         db, tenant_id, [snap.product_name for snap, _ in results])
+    _lib_classify = (coverage or {}).get("classify") or {}
+    _scanned_id_set = set(_scanned_ids or [])
     for snap, dec in results:
+        _lib_info = _lib_classify.get(snap.id) or {}
+        # 产品库状态三态：未收录（classify 有 issue/action）/ 已收录（参与判定且在映射表命中）/
+        # 空（无销量或无标识，未参与判定——前端显示 -，避免把没判过的行误标成已收录）
+        if _lib_info:
+            _lib_status = _lib_info.get("status", "")
+        elif snap.id in _scanned_id_set:
+            _lib_status = "已收录"
+        else:
+            _lib_status = ""
         risk_map_r = {"红": "red", "黄": "yellow", "绿": "green"}
         local_qty = snap.local_inventory or 0
         if dec is not None:
@@ -1616,6 +1746,14 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
             "risk_level": risk_map_r.get(dec.risk_level, "green") if dec else "green",
             "summary_flag": snap.summary_flag,
             "local_inventory": local_qty,
+            # 海外仓库存：飞书多维表按 (SKU, 品名) 回写到主行，子行恒为 0
+            "overseas_inventory": snap.overseas_inventory or 0,
+            "overseas_max_age": snap.overseas_max_age,
+            # 产品库覆盖度三态（status：未收录 / 已收录 / 空；issue+action 仅未收录行有值）
+            "sales_30d": snap.sales_30d,
+            "product_lib_status": _lib_status,
+            "product_lib_issue": _lib_info.get("issue", ""),
+            "product_lib_action": _lib_info.get("action", ""),
             "suggest_qty": int(dec.suggest_qty) if dec else 0,
             "replenishment_reason": dec.reason if dec else "",
             "inspection_quantity": snap.inspection_quantity or 0,
@@ -1651,7 +1789,16 @@ def search_inventory(db: Session, tenant_id: int, keyword: str = None, risk_leve
                 item["local_inventory"] = child_local
                 item["total_stock"] = float(item.get("fba_stock") or 0) + float(item.get("fba_inbound") or 0) + float(child_local) - float(item.get("inspection_quantity") or 0)
 
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    # 月销量等级（行级，父行=合并口径）：按 (asin, account) 合并到当前页出参；
+    # 等级池未生成/无该行时不写字段（前端显示 -）。不参与此处 SQL 过滤/排序。
+    try:
+        from services.grade_service import attach_grades
+        attach_grades(db, tenant_id, items)
+    except Exception as _e:  # noqa: BLE001 等级合并失败不阻塞库存列表
+        print(f"[inventory_service] 等级合并失败（跳过）: {_e}")
+
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "product_lib_error": None}
 
 
 def get_stockout_top10(db: Session, tenant_id: int, user_id: int = None, user_role: str = None) -> list:
@@ -1966,6 +2113,12 @@ def get_summary_children(db: Session, tenant_id: int, asin: str, parent_account:
             "is_holiday": _merge_holiday_values(
                 c.is_holiday, _child_tags(c).get("holidays", {}).get(c.asin)),
         })
+    # 子行月销量等级（行级逐行评级；展开父合并行时每个子行各自的等级）
+    try:
+        from services.grade_service import attach_grades
+        attach_grades(db, tenant_id, out)
+    except Exception as _e:  # noqa: BLE001 等级合并失败不阻塞子行展开
+        print(f"[inventory_service] 子行等级合并失败（跳过）: {_e}")
     return out
 
 
@@ -2002,8 +2155,9 @@ def export_inventory_to_excel(items: list, fields: list = None):
         "fba_inbound_processing": "入库中",
         "fba_inbound": "在途",
         "local_inventory": "本地仓库存",
+        "overseas_inventory": "海外仓库存",
         "total_stock": "总库存",
-        "gross_margin": "毛利率",
+        "gross_margin": "60天毛利率",
         "return_rate_30d": "30天退货率",
         "return_rate_60d": "60天退货率",
         "is_holiday": "节日类型",
@@ -2014,6 +2168,7 @@ def export_inventory_to_excel(items: list, fields: list = None):
         "daily_sales": "日均销量",
         "sales_7d": "7天销量",
         "sales_14d": "14天销量",
+        "sales_30d": "30天销量",
         "daily_avg_7d": "7日日均销量",
         "daily_avg_14d": "14日日均销量",
         "days_of_supply": "可售天数",
@@ -2022,6 +2177,14 @@ def export_inventory_to_excel(items: list, fields: list = None):
         "suggest_qty": "建议补货数量",
         "replenishment_reason": "补货原因",
         "replenishment_status": "补货状态",
+        # 产品库覆盖度（仅「未收录」视图下有值）
+        "product_lib_status": "产品库状态",
+        "product_lib_issue": "问题类型",
+        "product_lib_action": "建议动作",
+        # 月销量等级（等级池，每月3号更新）
+        "grade": "等级",
+        "monthly_sales": "上月销量",
+        "sales_source": "等级口径",
     }
 
     # 风险等级中文映射
