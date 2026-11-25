@@ -12,6 +12,7 @@ class ProductBuybox(BaseModel):
     product_name = Column(String(500), nullable=True, comment="品名")
     store = Column(String(100), nullable=False, index=True, comment="店铺")
     status = Column(String(50), nullable=True, comment="状态")
+    platform = Column(String(20), nullable=False, default="Amazon", server_default="Amazon", comment="平台")
 
     __table_args__ = (
         Index('ix_pbb_date_store_sku', 'date', 'store', 'sku'),
