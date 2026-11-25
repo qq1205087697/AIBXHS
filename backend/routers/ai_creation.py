@@ -10,6 +10,7 @@ import time
 
 from fastapi.responses import Response, StreamingResponse
 from dependencies import get_current_user
+from config import get_settings
 from models.user import User
 from services.ai_creation_service import (
     analyze_product_images,
@@ -64,41 +65,74 @@ class GeneratePromptsRequest(BaseModel):
     concepts: list
 
 
+class PrioritizeTaskRequest(BaseModel):
+    """排队任务插队方式：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行"""
+    mode: str
+
+
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
-# 代理取图域名白名单（后缀匹配）：TOS 桶未配置 CORS，浏览器 fetch 会被拦截，
-# 由后端代取字节；顺带覆盖亚马逊图片 CDN 以兜底其偶发跨域限制
+# 代理取图静态白名单后缀（后缀匹配）：TOS 历史直连地址 + 自有 CDN + 亚马逊图片 CDN。
+# TOS 侧域名（自定义 CDN 域名 / 桶域名）由 _proxy_image_hosts 动态拼装，
+# .env 的 PROXY_IMAGE_HOST_SUFFIXES 可追加额外域名，避免再改代码。
 PROXY_IMAGE_HOST_SUFFIXES = (
-    "volces.com",             # 火山引擎 TOS
+    "volces.com",             # 火山引擎 TOS（历史直连地址）
+    "bxhsrpa.com",            # 自有 CDN（产品图/生成图）
     "media-amazon.com",       # 亚马逊图片 CDN
     "ssl-images-amazon.com",  # 亚马逊图片 CDN（旧域名）
 )
 PROXY_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 
+def _proxy_image_hosts() -> set:
+    """代理白名单完整主机集合：静态后缀 + .env 追加项 + 当前 TOS 配置的自定义域名 / 桶域名"""
+    hosts = set(PROXY_IMAGE_HOST_SUFFIXES)
+    settings = get_settings()
+    extra = (settings.PROXY_IMAGE_HOST_SUFFIXES or "").strip()
+    if extra:
+        hosts.update(p.strip().lower().lstrip(".") for p in extra.split(",") if p.strip())
+    if settings.TOS_CUSTOM_DOMAIN:
+        host = urlparse(f"https://{settings.TOS_CUSTOM_DOMAIN.strip('/')}").hostname
+        if host:
+            hosts.add(host.lower())
+    if settings.TOS_BUCKET and settings.TOS_ENDPOINT:
+        hosts.add(f"{settings.TOS_BUCKET}.{settings.TOS_ENDPOINT.strip('/')}".lower())
+    return hosts
+
+
 @router.get("/proxy-image")
 async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
     """服务端代取图片字节。
 
-    历史记录编辑回填、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
-    TOS 桶未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
+    历史记录编辑回填/重试、产品库选图等场景前端仅持有图片 URL，需 fetch 下载后转 File 提交；
+    TOS / CDN 未配置 CORS 响应头时浏览器直连 fetch 会被拦截（<img> 预览不受影响），
     此时前端改走本接口由后端下载并回传图片字节。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise HTTPException(status_code=400, detail="无效的图片地址")
     host = parsed.hostname.lower()
-    if not any(host == s or host.endswith("." + s) for s in PROXY_IMAGE_HOST_SUFFIXES):
-        raise HTTPException(status_code=400, detail="该图片域名不在代理白名单内")
+    allowed = _proxy_image_hosts()
+    if not any(host == h or host.endswith("." + h) for h in allowed):
+        raise HTTPException(
+            status_code=400,
+            detail=f"该图片域名不在代理白名单内（{host}），可在 .env 的 PROXY_IMAGE_HOST_SUFFIXES 追加",
+        )
 
     try:
+        from services import tos_service  # 局部导入避免路由层循环依赖
+
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "").split(";")[0].strip()
             if not content_type.startswith("image/"):
-                raise HTTPException(status_code=400, detail="目标地址不是图片")
+                # CDN 对无扩展名对象（TOS 兜底存成 .bin）返回 octet-stream，按魔数嗅探真实格式
+                sniffed = tos_service.sniff_image_content_type(resp.content[:16])
+                if not sniffed:
+                    raise HTTPException(status_code=400, detail="目标地址不是图片")
+                content_type = sniffed
             data = resp.content
     except httpx.HTTPError as e:
         logger.warning(f"[AI创作中心] 代理取图失败: {url}, err={e}")
@@ -378,6 +412,28 @@ async def cancel_upscale_task_endpoint(
     return {"success": True, "message": "任务已取消"}
 
 
+@router.post("/upscale-tasks/{task_id}/prioritize")
+async def prioritize_upscale_task_endpoint(
+    task_id: int,
+    body: PrioritizeTaskRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """超分排队任务插队（mode: interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行）。
+
+    含 ComfyUI 查询/重排与源视频重新下载上传（秒级到分钟级，取决于视频大小），
+    放到线程池执行避免阻塞事件循环。
+    """
+    from services.upscale_service import prioritize_upscale_task, UpscaleError
+
+    try:
+        action, message = await asyncio.to_thread(
+            prioritize_upscale_task, current_user.tenant_id, task_id, body.mode
+        )
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
+
+
 @router.post("/upscale-tasks/{task_id}/retry")
 async def retry_upscale_task_endpoint(
     task_id: int,
@@ -473,20 +529,46 @@ async def cancel_video_task_endpoint(
     return {"success": True, "message": "任务已取消"}
 
 
+@router.post("/video-tasks/{task_id}/prioritize")
+async def prioritize_video_task_endpoint(
+    task_id: int,
+    body: PrioritizeTaskRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """排队任务插队。
+
+    mode="interrupt"：取消当前执行中任务，本任务立即生成；
+    mode="wait"：等待当前执行中任务完成后，本任务立即执行。
+    含 ComfyUI 查询/重排与参考图下载（秒级），放到线程池执行避免阻塞事件循环。
+    """
+    from services.h3_video_service import prioritize_video_task
+
+    try:
+        action, message = await asyncio.to_thread(
+            prioritize_video_task, current_user.tenant_id, task_id, body.mode
+        )
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
+
+
 @router.post("/video-tasks/{task_id}/recover")
 async def recover_video_task_endpoint(
     task_id: int,
     current_user: User = Depends(get_current_user),
 ):
-    """智能恢复失败的视频任务：先查 ComfyUI history/queue，能接续就不重新提交。
+    """智能重试失败的视频任务（原记录重试）。
 
     action="resumed"：已接续原 ComfyUI 任务（后台轮询收片回填原记录）；
-    action="resubmit"：原任务在 ComfyUI 上无记录/从未提交成功，前端需走重新提交流程。
+    action="resubmitted"：服务端已下载历史参考图并复用原记录重新提交生成。
+    含 ComfyUI 查询与参考图下载（秒级），放到线程池执行避免阻塞事件循环。
     """
     from services.h3_video_service import recover_failed_task, H3VideoError
 
     try:
-        action, message = recover_failed_task(current_user.tenant_id, task_id)
+        action, message = await asyncio.to_thread(
+            recover_failed_task, current_user.tenant_id, task_id
+        )
     except H3VideoError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "action": action, "message": message}
@@ -524,9 +606,15 @@ async def analyze_product(
     if not result:
         raise HTTPException(status_code=500, detail="AI 分析结果为空，请稍后重试")
 
+    # 同时返回「已格式化文本」：与 AI 生图中转站自动分析用的是同一个 _card_to_text，
+    # 让前端「AI 分析」按钮与后端自动补全产出同一套字段（含组件/尺寸/使用方式/风格倾向），
+    # 避免前端自己再映射一遍导致两边漂移（2026-10-28：local 曾只有 6 字段、relay 有 11 字段）。
+    from services.ai_image_service import _card_to_text  # 局部导入，规避模块级循环依赖
+
     return {
         "success": True,
         "data": result,
+        "text": _card_to_text(result or {}),
     }
 
 

@@ -2,9 +2,11 @@
 
 封装 TOS 文件上传、删除等操作。配置项见 backend/.env（TOS_ACCESS_KEY 等）。
 """
+import hashlib
 import logging
 import os
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from typing import Optional
 
@@ -14,6 +16,12 @@ logger = logging.getLogger(__name__)
 
 # 全局缓存 TOS 客户端实例（按需懒加载）
 _tos_client = None
+
+# 内容寻址去重：sha256(digest) -> 公网 URL（进程内缓存，省掉重复 HEAD 探测）
+_DEDUP_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_DEDUP_CACHE_MAX = 512
+# 去重对象名的固定前缀，便于删除时识别「可能被多任务共享」的对象
+DEDUP_NAME_PREFIX = "sha256-"
 
 
 def _get_tos_client():
@@ -90,6 +98,36 @@ def _build_public_url(object_key: str) -> str:
     return f"https://{bucket}.{endpoint}/{object_key}"
 
 
+def build_thumbnail_url(url: str, width: int = 128) -> str:
+    """为 TOS 图片 URL 追加缩略图处理参数（x-tos-process=img/resize），非本桶 URL 原样返回。
+
+    :param url: 原图公网 URL
+    :param width: 缩略图宽度（像素）
+    :return: 缩略图 URL；Bucket 未开通图片处理能力时该 URL 会加载失败，调用方需回退原图
+    """
+    if not url or width <= 0:
+        return url or ""
+    settings = get_settings()
+    bucket = (settings.TOS_BUCKET or "").strip().lower()
+    endpoint = (settings.TOS_ENDPOINT or "").strip("/").lower()
+    custom_domain = (settings.TOS_CUSTOM_DOMAIN or "").strip("/").lower()
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return url
+    tos_hosts = set()
+    if bucket and endpoint:
+        tos_hosts.add(f"{bucket}.{endpoint}")
+    if custom_domain:
+        tos_hosts.add(custom_domain)
+    if not host or host not in tos_hosts:
+        return url
+    sep = "&" if parsed.query else "?"
+    return f"{url}{sep}x-tos-process=img/resize,w_{width}"
+
+
 def upload_file(file_bytes: bytes, file_name: str,
                 content_type: Optional[str] = None,
                 subdir: str = "",
@@ -145,8 +183,125 @@ def upload_file(file_bytes: bytes, file_name: str,
         raise RuntimeError(f"文件上传到 TOS 失败: {e}")
 
 
-def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "") -> str:
-    """上传图片到 TOS（images 子目录）"""
+def sniff_image_content_type(data: bytes) -> Optional[str]:
+    """按文件头魔数识别图片真实格式（CDN 对无扩展名/罕见扩展名对象会返回 octet-stream，
+    Content-Type 不可信时以此兜底判断是否图片及实际类型）"""
+    magic_map = [
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"BM", "image/bmp"),
+    ]
+    for magic, ct in magic_map:
+        if data.startswith(magic):
+            return ct
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+_IMAGE_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+
+
+def image_content_type(file_name: str) -> str:
+    """按扩展名推断图片 Content-Type（缺省 image/jpeg）"""
+    _, ext = os.path.splitext(file_name or "")
+    return _IMAGE_CONTENT_TYPES.get(ext.lower(), "image/jpeg")
+
+
+def content_digest(file_bytes: bytes) -> str:
+    """内容指纹（sha256 前 32 位十六进制，够防撞且文件名不过长）"""
+    return hashlib.sha256(file_bytes or b"").hexdigest()[:32]
+
+
+def dedup_object_name(file_bytes: bytes) -> str:
+    """去重对象名（不含扩展名）：sha256-<digest>"""
+    return f"{DEDUP_NAME_PREFIX}{content_digest(file_bytes)}"
+
+
+def _dedup_cache_get(digest: str) -> Optional[str]:
+    url = _DEDUP_CACHE.get(digest)
+    if url:
+        _DEDUP_CACHE.move_to_end(digest)
+    return url
+
+
+def _dedup_cache_set(digest: str, url: str) -> None:
+    _DEDUP_CACHE[digest] = url
+    _DEDUP_CACHE.move_to_end(digest)
+    while len(_DEDUP_CACHE) > _DEDUP_CACHE_MAX:
+        _DEDUP_CACHE.popitem(last=False)
+
+
+def _object_exists(object_key: str) -> bool:
+    """HEAD 探测对象是否已存在；任何异常都按「不存在」处理（继续上传，PUT 幂等）"""
+    try:
+        client = _get_tos_client()
+        settings = get_settings()
+        client.head_object(bucket=settings.TOS_BUCKET, key=object_key)
+        return True
+    except Exception as e:  # noqa: BLE001  TOS 对 404 抛 TosServerError，统一兜底
+        err = str(e).lower()
+        if "404" not in err and "not found" not in err and "nosuchkey" not in err:
+            logger.debug("TOS HEAD 探测异常（按不存在处理）: %s -> %s", object_key, e)
+        return False
+
+
+def upload_file_dedup(file_bytes: bytes, file_name: str,
+                      content_type: Optional[str] = None,
+                      subdir: str = "") -> str:
+    """按内容寻址上传：同一份字节只会在 TOS 存在一个对象。
+
+    - 对象 key = {prefix}/{subdir}/sha256-<digest><ext>，同内容必然同 key
+    - 先查进程内缓存（同一次运行内重复上传零请求），再 HEAD 探测，最后才 PUT
+    - 命中已有对象时直接返回公网 URL，不重复占用存储、不重复传输
+
+    注意：这些对象可能被多个任务共享，删除时必须先确认没有其他任务引用
+    （见 `is_dedup_url` + 调用方的引用检查）。
+    """
+    digest = content_digest(file_bytes)
+    cached = _dedup_cache_get(digest)
+    if cached:
+        return cached
+
+    _, ext = os.path.splitext(file_name or "")
+    ext = ext.lower() or ".bin"
+    settings = get_settings()
+    prefix = settings.TOS_PREFIX or ""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    sub = (subdir.strip("/") + "/") if subdir else ""
+    object_key = f"{prefix}{sub}{DEDUP_NAME_PREFIX}{digest}{ext}"
+    url = _build_public_url(object_key)
+
+    if _object_exists(object_key):
+        logger.info("TOS 去重命中，跳过上传: %s", object_key)
+        _dedup_cache_set(digest, url)
+        return url
+
+    final_url = upload_file(
+        file_bytes, file_name, content_type=content_type, subdir=subdir,
+        custom_name=f"{DEDUP_NAME_PREFIX}{digest}",
+    )
+    _dedup_cache_set(digest, final_url)
+    return final_url
+
+
+def is_dedup_url(url: str) -> bool:
+    """URL 是否指向内容寻址（可能被多任务共享）的对象"""
+    return bool(url) and DEDUP_NAME_PREFIX in url.rsplit("/", 1)[-1]
+
+
+def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "", subdir: str = "images") -> str:
+    """上传图片到 TOS（默认 images 子目录，可指定）"""
     # 根据扩展名推断 content_type
     _, ext = os.path.splitext(file_name)
     ext = ext.lower()
@@ -159,7 +314,7 @@ def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
         ".bmp": "image/bmp",
     }
     content_type = ct_map.get(ext, "image/jpeg")
-    return upload_file(file_bytes, file_name, content_type=content_type, subdir="images", custom_name=custom_name)
+    return upload_file(file_bytes, file_name, content_type=content_type, subdir=subdir, custom_name=custom_name)
 
 
 def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> str:
@@ -179,12 +334,23 @@ def upload_video(file_bytes: bytes, file_name: str, custom_name: str = "") -> st
     return upload_file(file_bytes, file_name, content_type=content_type, subdir="videos", custom_name=custom_name)
 
 
-def rename_file(src_url: str, new_name: str) -> str:
+def bound_video_target_name(product_code: str, seq: int) -> str:
+    """绑定视频的 TOS 目标名「产品编码_序号_时间戳」。
+
+    时间戳成分保证删除视频后重新绑定时 URL 不与历史重复，
+    避免 CDN/浏览器缓存按同名 URL 返回旧视频内容。
+    """
+    return f"{product_code}_{seq}_{int(datetime.now().timestamp())}"
+
+
+def rename_file(src_url: str, new_name: str, subdir: str = "videos") -> str:
     """服务端复制对象为新名称（保留原对象），返回新公网 URL。
 
-    用于 AI视频/高清处理结果绑定产品时改名为「产品编码_序号」：
+    用于 AI视频/高清处理/AI生图 结果绑定产品时改名为「产品编码_序号」：
     仅在桶内复制（CopyObject），不下载上传大文件，也不删除源对象
-    （AI视频/高清处理任务历史仍引用源地址）。复制失败抛异常，由调用方决定回退。
+    （AI 任务历史仍引用源地址）。复制失败抛异常，由调用方决定回退。
+
+    :param subdir: 目标目录，video 用 "videos"、image 用 "images"（与产品直传命名保持一致）
     """
     from urllib.parse import urlparse, unquote
 
@@ -193,10 +359,10 @@ def rename_file(src_url: str, new_name: str) -> str:
 
     src_key = unquote(urlparse(src_url).path.lstrip("/"))
     _, ext = os.path.splitext(src_key)
-    ext = ext.lower() or ".mp4"
+    ext = ext.lower() or (".jpg" if subdir == "images" else ".mp4")
 
     prefix = (settings.TOS_PREFIX or "").strip("/")
-    new_key = f"{prefix}/videos/{new_name}{ext}" if prefix else f"videos/{new_name}{ext}"
+    new_key = f"{prefix}/{subdir}/{new_name}{ext}" if prefix else f"{subdir}/{new_name}{ext}"
 
     try:
         import tos

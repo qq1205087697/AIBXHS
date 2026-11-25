@@ -902,11 +902,16 @@ def analyze_and_save_single_review(db: Session, review_data: Dict[str, Any]) -> 
         """)
 
         dept_str = _normalize_departments(ai_result.get("departments") or ai_result.get("department"))
+        # sentiment 规范化：AI 可能返回中文（负面/中性/正面），统一映射为英文枚举值，防止 ENUM 列写入失败(1265)
+        _senti_raw = str(ai_result.get("sentiment") or "negative").strip().lower()
+        _senti_map = {"负面": "negative", "中性": "neutral", "正面": "positive",
+                      "差评": "negative", "好评": "positive", "中评": "neutral"}
+        sentiment_val = _senti_map.get(_senti_raw, _senti_raw)
         db.execute(insert_query, {
             "tenant_id": review_data.get("tenant_id", 1),
             "review_id": review_id,
             "model": settings.OPENAI_MODEL,
-            "sentiment": ai_result.get("sentiment", "negative"),
+            "sentiment": sentiment_val,
             "sentiment_score": ai_result.get("sentiment_score", 3),
             "key_points": json.dumps(ai_result.get("key_points", [])),
             "topics": json.dumps(ai_result.get("topics", [])),

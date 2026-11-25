@@ -2534,13 +2534,13 @@ async def bind_product_video(
     if len(videos) >= MAX_PRODUCT_VIDEOS:
         raise HTTPException(status_code=400, detail="产品已达到视频上限")
 
-    # 先在 TOS 复制改名为「产品编码_序号」（与产品直接上传视频的命名一致），
+    # 先在 TOS 复制改名为「产品编码_序号_时间戳」（时间戳防删除重绑后 URL 复用命中缓存旧内容），
     # 复制失败则回退绑定原地址，不阻断绑定
     import logging
-    from services.tos_service import rename_file
+    from services.tos_service import bound_video_target_name, rename_file
     final_url = body.video_url.strip()
     try:
-        final_url = rename_file(final_url, f"{row[2]}_{len(videos) + 1}")
+        final_url = rename_file(final_url, bound_video_target_name(row[2], len(videos) + 1))
     except Exception as rename_err:
         logging.getLogger(__name__).warning(
             "绑定视频 TOS 改名失败，回退原地址: %s, err=%s", body.video_url, rename_err

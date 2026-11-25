@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, useLocation } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet, useLocation } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import MainLayout from "./components/Layout/MainLayout";
@@ -33,6 +33,9 @@ import ProductDevelopmentBot from "./pages/ProductDevelopmentBot";
 import ProductDevelopmentCreate from "./pages/ProductDevelopmentCreate";
 import AICreationCenter from './pages/AICreationCenter';
 import UpscaleCenter from './pages/UpscaleCenter';
+import AIImageStudio from './pages/AIImageStudio';
+import VideoUploadCenter from './pages/VideoUploadCenter';
+import GradePool from './pages/GradePool';
 import VideoBindingReview from './pages/VideoBindingReview';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -88,6 +91,18 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <InventoryBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      {/* 标签管理页已下线（后端 /api/tags/* 逻辑保留）；旧链接回落到库存机器人 */}
+      <Route path="/tags" element={<Navigate to="/inventory" replace />} />
+      <Route
+        path="/grade-pool"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <GradePool />
             </MainLayout>
           </ProtectedRoute>
         }
@@ -353,12 +368,38 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      {/* AI生图两页共用同一个布局实例：切换 A+套图 ↔ 主副图 时侧边栏/通知不重挂载，
+          只换页面内容，配合页面进场动效避免生硬跳变 */}
+      <Route
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <Outlet />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      >
+        <Route path="/ai-image-aplus" element={<AIImageStudio mode="aplus" />} />
+        <Route path="/ai-image-main" element={<AIImageStudio mode="main" />} />
+      </Route>
+      {/* 旧路径兼容：书签/探针脚本仍指向 /ai-image */}
+      <Route path="/ai-image" element={<Navigate to="/ai-image-aplus" replace />} />
       <Route
         path="/video-binding-review"
         element={
           <ProtectedRoute>
             <MainLayout>
-              <VideoBindingReview />
+              <VideoUploadCenter initialTab="binding" />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/video-upload"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <VideoUploadCenter />
             </MainLayout>
           </ProtectedRoute>
         }

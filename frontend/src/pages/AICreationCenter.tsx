@@ -20,6 +20,7 @@ import {
   Pagination,
   Image,
   Dropdown,
+  Radio,
 } from 'antd'
 import {
   UploadOutlined,
@@ -40,6 +41,7 @@ import {
   EyeOutlined,
   LinkOutlined,
   PauseCircleOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload'
 import { useTheme } from '../contexts/ThemeContext'
@@ -408,12 +410,8 @@ const MODEL_OPTIONS: { label: string; desc: string; value: VideoModel }[] = [
   { label: 'MiniMax H3', desc: '适合批量测款与日常上新', value: 'minimax-h3' },
 ]
 
-// 视频分辨率档位：0.3 / 0.5 为 megapixels 档位，768P 即 0.98 满画幅
-const RESOLUTION_OPTIONS: { label: string; value: VideoResolution; desc: string }[] = [
-  { label: '0.3（测试/多任务）', value: '0.3', desc: '草稿档，生成最快' },
-  { label: '0.5', value: '0.5', desc: '标准档' },
-  { label: '768P', value: '768P', desc: '满画幅，画质最好' },
-]
+// 分辨率档位已从页面移除选择，统一固定草稿档（0.3，生成最快）
+const H3_FIXED_RESOLUTION: VideoResolution = '0.3'
 
 // MiniMax H3 仅支持 5 / 10 / 15 秒三档时长
 const DURATION_MARKS: Record<number, React.ReactNode> = {
@@ -453,7 +451,6 @@ const AICreationCenter: React.FC = () => {
   const [duration, setDuration] = useState<VideoDuration>(15)
   const [ratio, setRatio] = useState<VideoRatio>('9:16')
   const [model, setModel] = useState<VideoModel>('minimax-h3')
-  const [resolution, setResolution] = useState<VideoResolution>('0.3')
   const [promptText, setPromptText] = useState('')
   const [planModalOpen, setPlanModalOpen] = useState(false)
   const [planRefreshLeft, setPlanRefreshLeft] = useState(2)
@@ -530,11 +527,17 @@ const AICreationCenter: React.FC = () => {
 
   const handleRemoveImage = (uid: string) => {
     invalidatePlans()
-    setFileList((prev) => {
-      const target = prev.find((f) => f.uid === uid)
-      if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
-      return prev.filter((f) => f.uid !== uid)
-    })
+    const target = fileList.find((f) => f.uid === uid)
+    if (target?.thumbUrl?.startsWith('blob:')) URL.revokeObjectURL(target.thumbUrl)
+    const next = fileList.filter((f) => f.uid !== uid)
+    setFileList(next)
+    // 产品图片被移除后同步取消该产品标记，防止下个任务误挂上一个产品编码
+    const remainUrls = new Set(
+      next.map((f) => f.url || f.thumbUrl).filter((u): u is string => !!u),
+    )
+    setSelectedProducts((prev) =>
+      prev.filter((p) => (p.images || []).some((u) => remainUrls.has(u))),
+    )
   }
 
   const handleClear = () => {
@@ -621,6 +624,10 @@ const AICreationCenter: React.FC = () => {
   // 绑定状态页签：all=全部 / unbound=未绑定 / bound=已绑定
   const [historyBindFilter, setHistoryBindFilter] = useState<'all' | 'unbound' | 'bound'>('all')
   const [cancellingId, setCancellingId] = useState<number | null>(null)
+  // 插队弹窗：排队任务选择「取消当前执行中任务」或「等待当前执行中任务完成后执行」
+  const [prioritizeTask, setPrioritizeTask] = useState<AIVideoTask | null>(null)
+  const [prioritizeMode, setPrioritizeMode] = useState<'interrupt' | 'wait'>('interrupt')
+  const [prioritizingId, setPrioritizingId] = useState<number | null>(null)
   const keywordTimerRef = useRef<number | null>(null)
   // 图片缓存恢复完成前禁止写入缓存，防止挂载时空列表先把 IndexedDB 里的图片清掉
   const fileListCacheReadyRef = useRef(false)
@@ -797,21 +804,29 @@ const AICreationCenter: React.FC = () => {
     }
   }
 
-  // 收集所有图片为 File：本地文件直接用，产品图片 URL 需下载转 File
-  const collectFiles = async (): Promise<File[]> => {
-    const files: File[] = []
-    for (const f of fileList) {
+  // 收集所有图片为 File：本地文件直接用，产品图片 URL 并行下载转 File（串行取图会让
+  // 编辑回填场景的提交等待数十秒）
+  const collectFilesFrom = async (items: UploadFile[]): Promise<File[]> => {
+    const results: (File | null)[] = []
+    const urlEntries: { idx: number; url: string; name: string }[] = []
+    items.forEach((f, i) => {
       if (f.originFileObj instanceof File) {
-        files.push(f.originFileObj)
+        results[i] = f.originFileObj
       } else if (f.url || f.thumbUrl) {
-        const blob = await fetchImageBlob(f.url || f.thumbUrl!)
-        if (blob) {
-          files.push(new File([blob], f.name || `image-${f.uid}.jpg`, { type: blob.type || 'image/jpeg' }))
-        }
+        urlEntries.push({ idx: i, url: f.url || f.thumbUrl!, name: f.name || `image-${f.uid}.jpg` })
       }
-    }
-    return files
+    })
+    await Promise.all(
+      urlEntries.map(async ({ idx, url, name }) => {
+        const blob = await fetchImageBlob(url)
+        if (blob) {
+          results[idx] = new File([blob], name, { type: blob.type || 'image/jpeg' })
+        }
+      })
+    )
+    return results.filter((f): f is File => !!f)
   }
+  const collectFiles = (): Promise<File[]> => collectFilesFrom(fileList)
 
   // 复制二次优化后的 H3 提示词
   const copyH3Prompt = async (text: string) => {
@@ -829,17 +844,19 @@ const AICreationCenter: React.FC = () => {
     confirmedCard?: string,
     productForState?: AmazonProductAnalysisResult,
   ) => {
+    // 先置 loading 再取图：URL 图并行下载仍可能耗时数秒，避免按钮无反馈
+    setLoading(true)
     const files = await collectFiles()
 
     if (files.length === 0) {
       message.warning('请先上传商品图片')
+      setLoading(false)
       return
     }
     if (isRefresh && planRefreshLeft <= 0) {
+      setLoading(false)
       return
     }
-
-    setLoading(true)
 
     let reqPromise: InflightPlanPromise | null = null
     try {
@@ -895,17 +912,19 @@ const AICreationCenter: React.FC = () => {
     // 编辑回填后重新生成：沿用原任务的标题与产品信息，避免丢失后落到默认值
     const restored = activeHistoryId ? history.find((h) => h.id === activeHistoryId) : null
     const title = result?.product_name_cn || result?.product_name_en || restored?.title || '视频生成任务'
+    // 先置 loading 再取图：URL 图下载可能耗时数秒，避免按钮无反馈
+    setLoading(true)
     const files = await collectFiles()
     if (files.length === 0) {
       message.warning('参考图片读取失败，请重新上传')
+      setLoading(false)
       return
     }
-    setLoading(true)
     try {
       const resp = await aiCreationApi.generateVideo(files, {
         prompt: promptText,
         duration,
-        resolution,
+        resolution: H3_FIXED_RESOLUTION,
         ratio,
         model,
         market,
@@ -946,7 +965,6 @@ const AICreationCenter: React.FC = () => {
     )
     setMarket(item.market)
     setModel(item.model)
-    setResolution(item.resolution)
     setDuration(item.duration)
     setRatio(item.ratio)
     setVideoType(item.video_type === '产品展示' ? '产品展示' : '口播带货')
@@ -1035,58 +1053,37 @@ const AICreationCenter: React.FC = () => {
     })
   }
 
+  // ===== 排队任务插队：弹窗选择插队方式后调用后端重排 ComfyUI 队列 =====
+  const openPrioritizeModal = (item: AIVideoTask) => {
+    setPrioritizeMode('interrupt')
+    setPrioritizeTask(item)
+  }
+
+  const handlePrioritizeSubmit = async () => {
+    if (!prioritizeTask || prioritizingId != null) return
+    setPrioritizingId(prioritizeTask.id)
+    try {
+      const resp = await aiCreationApi.prioritizeVideoTask(prioritizeTask.id, prioritizeMode)
+      message.success(resp.data.message || '已插队')
+      setPrioritizeTask(null)
+      loadTasks()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '插队失败，请稍后重试')
+    } finally {
+      setPrioritizingId(null)
+    }
+  }
+
   const retryTask = async (item: AIVideoTask) => {
     if (retryingId != null) return
     setRetryingId(item.id)
     try {
-      // 先尝试智能恢复：ComfyUI 上已有成片/仍在生成时接续原任务，不重新提交
-      let needResubmit = true
-      try {
-        const rec = await aiCreationApi.recoverVideoTask(item.id)
-        if (rec.data.action === 'resumed') {
-          message.success(rec.data.message || '已接续原任务，等待收片回填')
-          loadTasks(1)
-          needResubmit = false
-        }
-      } catch {
-        // 恢复检查失败（接口异常等）：回退到原重新提交流程
-      }
-      if (!needResubmit) return
-
-      if (!item.images.length) {
-        message.warning('该任务没有参考图，无法重试，请使用「编辑」重新上传')
-        return
-      }
-      const files: File[] = []
-      for (let i = 0; i < item.images.length; i++) {
-        const blob = await fetchImageBlob(item.images[i])
-        if (blob) {
-          files.push(new File([blob], `ref-${i + 1}.jpg`, { type: blob.type || 'image/jpeg' }))
-        }
-      }
-      if (files.length === 0) {
-        message.error('参考图片读取失败，请使用「编辑」重新上传')
-        return
-      }
-      const storedLang = item.voiceover_language || '自动'
-      const resp = await aiCreationApi.generateVideo(files, {
-        prompt: item.prompt,
-        duration: item.duration,
-        resolution: item.resolution,
-        ratio: item.ratio,
-        model: item.model,
-        market: item.market,
-        voiceover_language: storedLang === '自动' ? 'auto' : (storedLang as VoiceoverLanguage),
-        title: item.title,
-        product_code: item.product_code || '',
-        product_name: item.product_name || '',
-      })
-      const task = resp.data.data
-      // 新任务在最前：跳回第 1 页刷新
-      setHistoryPage(1)
-      loadTasks(1)
-      setActiveHistoryId(task.id)
-      message.success('已重新提交生成任务，排队中')
+      // 原位重试：后端智能恢复（ComfyUI 可接续则接续收片），
+      // 否则服务端直接下载历史参考图并复用原记录重新提交，无需前端取图
+      const resp = await aiCreationApi.recoverVideoTask(item.id)
+      message.success(resp.data.message || '已重新提交生成，排队中')
+      setActiveHistoryId(item.id)
+      loadTasks()
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '重试失败，请稍后再试')
     } finally {
@@ -1801,12 +1798,14 @@ const AICreationCenter: React.FC = () => {
                 <Text strong ellipsis style={{ fontSize: 13, flex: '0 1 auto', minWidth: 0 }}>
                   {item.title}
                 </Text>
-                {/* 排队中/生成中：紧贴标题右侧转圈；失败：红色标签；已完成：紧贴标题右侧显示生成总耗时 */}
+                {/* 排队中/生成中：紧贴标题右侧转圈（排队中带前方任务数）；失败：红色标签；已完成：显示生成总耗时 */}
                 {item.status === '排队中' || item.status === '生成中' ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                     <Spin size="small" />
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {item.status === '排队中' ? '排队中' : '生成中'}
+                      {item.status === '排队中'
+                        ? `排队中${item.queue_ahead != null ? ` · 前方${item.queue_ahead}条任务` : ''}`
+                        : '生成中'}
                     </Text>
                   </span>
                 ) : item.status === '失败' ? (
@@ -1863,6 +1862,17 @@ const AICreationCenter: React.FC = () => {
                               icon: <ThunderboltOutlined />,
                               disabled: !!item.upscale_video_url,
                               onClick: () => openUpscaleModal(item),
+                            },
+                          ]
+                        : []),
+                      ...(item.status === '排队中'
+                        ? [
+                            {
+                              key: 'prioritize',
+                              label: prioritizingId === item.id ? '插队中…' : '插队',
+                              icon: <RocketOutlined />,
+                              disabled: prioritizingId != null,
+                              onClick: () => openPrioritizeModal(item),
                             },
                           ]
                         : []),
@@ -2021,12 +2031,19 @@ const AICreationCenter: React.FC = () => {
             <div
               onMouseEnter={() => setUploadAreaHover(true)}
               onMouseLeave={() => setUploadAreaHover(false)}
+              onClick={(e) => {
+                // 点击空白区域直接选图；缩略图与操作按钮不触发，避免误开文件框
+                const el = e.target as HTMLElement
+                if (el.closest('[data-upload-action]')) return
+                localInputRef.current?.click()
+              }}
               style={{
                 border: `1px dashed ${uploadAreaHover ? currentTheme.primary : '#d9d9d9'}`,
                 borderRadius: 8,
                 background: '#fafafa',
                 padding: '20px 16px 12px',
                 textAlign: 'center',
+                cursor: 'pointer',
               }}
             >
               {fileList.length === 0 && (
@@ -2049,7 +2066,7 @@ const AICreationCenter: React.FC = () => {
               )}
 
               {fileList.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, textAlign: 'left' }}>
+                <div data-upload-action style={{ display: 'flex', flexWrap: 'wrap', gap: 8, textAlign: 'left', cursor: 'default' }}>
                   {fileList.map((f) => (
                     <div key={f.uid} style={{ position: 'relative', width: 80, height: 80 }}>
                       <img
@@ -2071,7 +2088,10 @@ const AICreationCenter: React.FC = () => {
               )}
 
               {/* 固定高度按钮行：悬停时显示，点击区域本身不触发上传 */}
-              <div style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+              <div
+                data-upload-action
+                style={{ height: 32, marginTop: 6, display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'default' }}
+              >
                 {uploadAreaHover && (
                   <Space size={12}>
                     <Button
@@ -2254,22 +2274,6 @@ const AICreationCenter: React.FC = () => {
             }))}
           />
 
-          <Text strong style={{ display: 'block', margin: '16px 0 8px' }}>视频分辨率</Text>
-          <Segmented
-            block
-            value={resolution}
-            onChange={(v) => setResolution(v as VideoResolution)}
-            disabled={loading}
-            options={RESOLUTION_OPTIONS.map((opt) => ({
-              value: opt.value,
-              label: (
-                <Tooltip title={opt.desc}>
-                  <span>{opt.label}</span>
-                </Tooltip>
-              ),
-            }))}
-          />
-
           <Text strong style={{ display: 'block', margin: '16px 0 4px' }}>生成设置</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>视频时长（5 / 10 / 15 秒）</Text>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -2313,7 +2317,7 @@ const AICreationCenter: React.FC = () => {
           >
             立即生成
             <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.85 }}>
-              （预计耗时约 {Math.round(estimateH3CostMinutes(resolution, duration))} 分钟）
+              （预计耗时约 {Math.round(estimateH3CostMinutes(H3_FIXED_RESOLUTION, duration))} 分钟）
             </span>
           </Button>
         </div>
@@ -2326,7 +2330,13 @@ const AICreationCenter: React.FC = () => {
 
       {renderPlanModal()}
       {renderProductModal()}
+    </div>
+  )
 
+// 生成历史通用操作弹窗：在页面根节点渲染，保证历史列表里的
+// 「详情 / 绑定至产品 / 变高清」点击后能正常弹出
+const renderHistoryModals = () => (
+  <>
       {/* 绑定至产品：选择产品后提交绑定申请，审核通过才写入产品详情（无视频小窗） */}
       <BindProductModal
         open={bindModalOpen}
@@ -2414,6 +2424,36 @@ const AICreationCenter: React.FC = () => {
             </Text>
           </div>
         </div>
+      </Modal>
+
+      {/* 排队任务插队：取消当前执行中任务立即执行，或等当前任务完成后立即执行 */}
+      <Modal
+        open={!!prioritizeTask}
+        title={`插队：${prioritizeTask?.title || '排队任务'}`}
+        okText="确定插队"
+        cancelText="取消"
+        centered
+        confirmLoading={prioritizingId != null}
+        onOk={handlePrioritizeSubmit}
+        onCancel={() => setPrioritizeTask(null)}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            本任务当前为「排队中」状态，选择插队方式：
+          </Text>
+        </div>
+        <Radio.Group
+          value={prioritizeMode}
+          onChange={(e) => setPrioritizeMode(e.target.value)}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+        >
+          <Radio value="interrupt">
+            <span style={{ fontSize: 13 }}>取消当前执行中任务，本任务立即开始生成</span>
+          </Radio>
+          <Radio value="wait">
+            <span style={{ fontSize: 13 }}>等待当前执行中任务完成后，本任务立即执行</span>
+          </Radio>
+        </Radio.Group>
       </Modal>
 
       {/* 成片全屏预览：左侧视频，右侧参数 */}
@@ -2562,13 +2602,14 @@ const AICreationCenter: React.FC = () => {
           </div>
         )}
       </Modal>
-    </div>
-  )
+    </>
+)
 
   return (
     // 保留 ai-creation-tabs 类名：复用细滚动条样式
     <div className="ai-creation-tabs" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
       {renderSpeechTab()}
+      {renderHistoryModals()}
     </div>
   )
 }

@@ -145,19 +145,98 @@ async def get_calculation_status(
 
 # ==================== 3. 获取库存概览统计 ====================
 
+class AutoReplenishmentPayload(BaseModel):
+    force: bool = False
+    group_ids: Optional[List[int]] = None
+    skip_existing: bool = True
+
+
+class AutoReplenishmentPreviewPayload(BaseModel):
+    group_ids: Optional[List[int]] = None
+    skip_existing: bool = True
+
+
+@router.post("/auto-replenishment/preview")
+async def preview_auto_replenishment(
+    payload: AutoReplenishmentPreviewPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """自动补货预检（只读）：当前账号可见分组及行数、已存在跳过数、预计单数与明细数"""
+    from services.auto_replenishment_service import preview_auto_replenishment as _preview
+
+    try:
+        result = _preview(db, current_user.tenant_id, current_user.id,
+                          get_user_role_code(current_user, db),
+                          group_ids=payload.group_ids, skip_existing=payload.skip_existing)
+    except Exception as e:
+        logger.error(f"自动补货预检失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"自动补货预检失败: {str(e)}")
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "预检失败")
+    return {"success": True, "data": result}
+
+
+@router.post("/auto-replenishment")
+async def create_auto_replenishment(
+    payload: AutoReplenishmentPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """自动补货启动：最新快照 KEEP 且建议数量>0 的决策行 → 进销存补货单（按店铺分组拆单）
+
+    - 非 admin 按 user_stores 可见店铺隔离（与库存列表同一口径）
+    - group_ids 只补选中分组（0 = 未分组）
+    - skip_existing=True 增量补货（跳过待审批/已审批单中已有的 product_id）
+    """
+    from services.auto_replenishment_service import run_auto_replenishment
+
+    try:
+        result = run_auto_replenishment(
+            db, current_user.tenant_id, current_user.id,
+            user_role=get_user_role_code(current_user, db),
+            group_ids=payload.group_ids, skip_existing=payload.skip_existing,
+            force=payload.force,
+        )
+    except Exception as e:
+        logger.error(f"自动补货生成失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"自动补货生成失败: {str(e)}")
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message") or "自动补货失败")
+    return {"success": True, "data": result}
+
+
 @router.get("/overview")
 async def get_inventory_overview(
+    keyword: Optional[str] = Query(None, description="搜索关键词（与 /search 同口径）"),
+    account: Optional[List[str]] = Query(None, description="店铺账号（与 /search 同口径）"),
+    country: Optional[List[str]] = Query(None, description="国家/站点（与 /search 同口径）"),
+    holiday_filter: Optional[str] = Query(None, description="节日筛选: all/only_holiday/only_non_holiday"),
+    sales_window: int = Query(30, description="销量窗口（天）: 7/14/30/60/90"),
+    min_sales: float = Query(0, description="最小销量阈值（严格大于才算有销量）"),
+    exclude_summary: bool = Query(False, description="是否排除汇总行（summary_flag='是'）"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     获取库存概览统计
-    包含各风险等级数量、快照日期、断货TOP10、冗余库存TOP10
+
+    **与列表同口径**：接受与 /search 相同的筛选参数，面板数字随筛选变化，
+    保证「总SKU数」= 表格该筛选下的条数；「产品库未收录」计数同样随筛选变化。
+
+    包含各风险等级数量、快照日期、断货TOP10、冗余库存TOP10、产品库未收录数
     """
     try:
         from services.inventory_service import get_inventory_overview
 
-        result = get_inventory_overview(db, tenant_id=current_user.tenant_id, user_id=current_user.id, user_role=get_user_role_code(current_user, db))
+        result = get_inventory_overview(
+            db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+            user_role=get_user_role_code(current_user, db),
+            keyword=keyword, holiday_filter=holiday_filter,
+            account=account, country=country,
+            sales_window=sales_window, min_sales=min_sales,
+            exclude_summary=exclude_summary,
+        )
         return {"success": True, "data": result}
 
     except Exception as e:
@@ -180,12 +259,18 @@ async def search_inventory(
     sort_order: Optional[str] = Query(None, description="排序方式: asc/desc"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=500, description="每页数量"),
+    product_lib_filter: str = Query("all", description="产品库视图: all(全部) / missing(仅未收录)"),
+    sales_window: int = Query(30, description="销量窗口（天）: 7/14/30/60/90"),
+    min_sales: float = Query(0, description="最小销量阈值（严格大于才算有销量）"),
+    exclude_summary: bool = Query(False, description="是否排除汇总行（summary_flag='是'）"),
+    grade: Optional[str] = Query(None, description="月销量等级多选，逗号分隔: S,A,B,C,D,E"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     搜索库存数据
-    支持按关键词、风险等级、补货状态、账号、国家、节日筛选，分页返回，支持排序
+    支持按关键词、风险等级、补货状态、账号、国家、节日筛选，分页返回，支持排序；
+    product_lib_filter=missing 时只看「有销量但产品库无此产品」的行。
     """
     try:
         from services.inventory_service import search_inventory
@@ -213,7 +298,12 @@ async def search_inventory(
             page=page,
             page_size=page_size,
             user_id=current_user.id,
-            user_role=get_user_role_code(current_user, db)
+            user_role=get_user_role_code(current_user, db),
+            product_lib_filter=product_lib_filter,
+            sales_window=sales_window,
+            min_sales=min_sales,
+            exclude_summary=exclude_summary,
+            grade=grade,
         )
         return {"success": True, "data": result}
 
@@ -432,11 +522,20 @@ async def export_inventory(
     country: Optional[List[str]] = Query(None),
     sort_field: Optional[str] = Query(None),
     sort_order: Optional[str] = Query(None),
+    holiday_filter: Optional[str] = Query(None, description="节日筛选（与 /search 同口径，导出必须转发）"),
     fields: Optional[List[str]] = Query(None, description="导出字段列表，默认全部"),
+    product_lib_filter: str = Query("all", description="产品库视图: all(全部) / missing(仅未收录)"),
+    sales_window: int = Query(30, description="销量窗口（天）: 7/14/30/60/90"),
+    min_sales: float = Query(0, description="最小销量阈值（严格大于才算有销量）"),
+    exclude_summary: bool = Query(False, description="是否排除汇总行（summary_flag='是'）"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """导出库存数据为Excel"""
+    """导出库存数据为Excel
+
+    筛选参数必须与 /search 完全一致（含 holiday_filter / 产品库视图参数），
+    否则「页面看到的行」与「导出的行」会不一致。
+    """
     from services.inventory_service import search_inventory, export_inventory_to_excel
     import io
 
@@ -445,9 +544,13 @@ async def export_inventory(
         db, tenant_id=current_user.tenant_id, keyword=keyword, risk_level=risk_level,
         replenishment_status=replenishment_status,
         account=account, country=country,
+        holiday_filter=holiday_filter,
         sort_field=sort_field, sort_order=sort_order,
         page=1, page_size=5000,
-        user_id=current_user.id, user_role=get_user_role_code(current_user, db)
+        user_id=current_user.id, user_role=get_user_role_code(current_user, db),
+        product_lib_filter=product_lib_filter,
+        sales_window=sales_window, min_sales=min_sales,
+        exclude_summary=exclude_summary,
     )
 
     items = result["items"]
@@ -504,6 +607,61 @@ async def get_sync_feishu_status(
     except Exception as e:
         logger.error(f"获取同步状态失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取状态失败: {str(e)}")
+
+
+# ==================== 10.1 同步飞书海外仓库存数据 ====================
+
+@router.post("/sync-overseas")
+async def sync_overseas_inventory(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    启动飞书海外仓库存同步（异步）
+
+    同步规则：源表为按日快照，按 (SKU, SKU名称) 去重取最新日期后，
+    覆盖写入 overseas_inventories，并回写最新库存快照的主行。
+    """
+    try:
+        from services.overseas_inventory_service import start_sync_async
+
+        result = start_sync_async(tenant_id=current_user.tenant_id)
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        logger.error(f"启动海外仓同步失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"启动失败: {str(e)}")
+
+
+@router.get("/sync-overseas-status")
+async def get_sync_overseas_status(
+    current_user: User = Depends(get_current_user)
+):
+    """获取飞书海外仓库存同步状态"""
+    try:
+        from services.overseas_inventory_service import get_sync_status
+
+        return {"success": True, "data": get_sync_status()}
+
+    except Exception as e:
+        logger.error(f"获取海外仓同步状态失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取状态失败: {str(e)}")
+
+
+@router.get("/overseas-summary")
+async def get_overseas_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """海外仓库存汇总（已同步 SKU 数 / 总可售 / 数据日期）"""
+    try:
+        from services.overseas_inventory_service import get_overseas_summary as _summary
+
+        return {"success": True, "data": _summary(db, current_user.tenant_id)}
+
+    except Exception as e:
+        logger.error(f"获取海外仓汇总失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取汇总失败: {str(e)}")
 
 
 # ==================== 11. 更新查验货件数量 ====================
@@ -713,10 +871,42 @@ async def mark_product_status(
     }, synchronize_session=False)
 
     db.commit()
+
+    # 标签系统：人工标记变更后刷新决策行展示口径（filter_status/force_replenish，K2/K3）
+    # **只重算本次被标记的行**（all_ids_list 已含汇总行展开出的共享库存子行）——
+    # 全量重算在 5.9 万决策行上约 2000ms，是「点标记很慢」的主因。
+    try:
+        from services.tag_service import apply_tags_to_decisions
+        apply_tags_to_decisions(db, current_user.tenant_id, snapshot_ids=all_ids_list)
+    except Exception as e:
+        logger.warning(f"人工标记后刷新过滤口径失败（不影响标记本身）: {e}")
+
+    # 取消标记还必须清 **product_tags 里的节日标签**：快照列与标签表是两处数据源，
+    # 自动打标写入的节日只存在于 product_tags —— 只清快照列时界面仍显示节日，
+    # 表现为「取消标记去不掉」。按每行 (asin, account) 调 suppress（通配 ∪ 本行）。
+    suppressed = 0
+    if action == "clear":
+        try:
+            from services.tag_service import suppress_holiday_tags
+            rows = db.query(InventorySnapshot.asin, InventorySnapshot.account).filter(
+                InventorySnapshot.id.in_(all_ids_list),
+                InventorySnapshot.tenant_id == current_user.tenant_id,
+            ).all()
+            for _asin, _acct in {(r[0], r[1] or "") for r in rows}:
+                res = suppress_holiday_tags(
+                    db, current_user.tenant_id, _asin, _acct,
+                    operator=current_user.username or f"user_{current_user.id}",
+                    reason="界面取消标记",
+                )
+                suppressed += int(res.get("suppressed") or 0)
+        except Exception as e:
+            logger.warning(f"取消标记时清除节日标签失败（不影响快照标记）: {e}")
+
     return {
         "success": True,
         "data": {
-            "updated_count": len(all_ids_list)
+            "updated_count": len(all_ids_list),
+            "suppressed_tags": suppressed,
         }
     }
 
