@@ -795,6 +795,70 @@ export const oaApi = {
   updateOnboarding: (id: number, data: { status?: string; note?: string; salary?: string }) =>
     apiClient.patch(`/oa/onboardings/${id}`, data),
   deleteOnboarding: (id: number) => apiClient.delete(`/oa/onboardings/${id}`),
+  // 离职通知链路（主管申请 → 管理员；基层 → 主管）
+  offboardNotices: () => apiClient.get("/oa/offboard/notices"),
+  offboardApply: (data: { reason: string; assignee?: string; note?: string; attachment_url?: string; attachment_name?: string }) =>
+    apiClient.post("/oa/offboard/apply", data),
+  offboardRetain: (id: number) => apiClient.post(`/oa/offboard/retain/${id}`),
+  offboardIgnore: (id: number) => apiClient.post(`/oa/offboard/ignore/${id}`),
+  offboardConfirm: (data: { username: string }) => apiClient.post("/oa/offboard/confirm", data),
+  // 请假时长扩展与年假额度
+  listLeaveExt: () => apiClient.get("/oa/leave-ext/list"),
+  saveLeaveExt: (data: { leave_id: number; duration: number; unit?: string; start_at?: string; end_at?: string }) =>
+    apiClient.post("/oa/leave-ext", data),
+  getLeaveQuota: () => apiClient.get("/oa/leave-quota"),
+  setLeaveQuota: (data: { username: string; annual_days: number }) => apiClient.post("/oa/leave-quota", data),
+  // 加班
+  listOvertimes: (scope: "mine" | "all" = "mine") =>
+    apiClient.get("/oa/overtimes", { params: { scope } }),
+  createOvertime: (data: Record<string, any>) => apiClient.post("/oa/overtimes", data),
+  reviewOvertime: (id: number, data: { status: "已通过" | "已驳回"; approve_note?: string }) =>
+    apiClient.post(`/oa/overtimes/${id}/review`, data),
+  // 报销
+  listReimbursements: (scope: "mine" | "all" = "mine") =>
+    apiClient.get("/oa/reimbursements", { params: { scope } }),
+  createReimbursement: (data: Record<string, any>) => apiClient.post("/oa/reimbursements", data),
+  updateReimbursement: (id: number, data: Record<string, any>) => apiClient.put(`/oa/reimbursements/${id}`, data),
+  reviewReimbursement: (id: number, data: { status: "已通过" | "已驳回"; approve_note?: string }) =>
+    apiClient.post(`/oa/reimbursements/${id}/review`, data),
+  // 岗位招新申请
+  listHiringRequests: (scope: "mine" | "all" = "mine") =>
+    apiClient.get("/oa/hiring-requests", { params: { scope } }),
+  createHiringRequest: (data: Record<string, any>) => apiClient.post("/oa/hiring-requests", data),
+  updateHiringRequest: (id: number, data: Record<string, any>) => apiClient.put(`/oa/hiring-requests/${id}`, data),
+  reviewHiringRequest: (id: number, data: { status: "已通过" | "已驳回"; approve_note?: string }) =>
+    apiClient.post(`/oa/hiring-requests/${id}/review`, data),
+  hiringNotices: () => apiClient.get("/oa/hiring-requests/notices"),
+  readHiringNotice: (id: number) => apiClient.post(`/oa/hiring-requests/notices/${id}/read`),
+  // 下午茶：菜单与点单
+  loadTeaMenus: () => apiClient.get("/oa/tea-menus"),
+  refreshTeaMenus: () => apiClient.post("/oa/tea-menus/refresh"),
+  importTeaMenu: (data: { brand: string; url?: string; items?: { name: string; price: number; description?: string }[] }) =>
+    apiClient.post("/oa/tea-menus/import", data),
+  importTeaMenuSmart: (data: { brand: string; url_list: string[] }) =>
+    apiClient.post("/oa/tea-menus/import-smart", data),
+  listTeaOrders: (scope: "mine" | "all" = "mine") =>
+    apiClient.get("/oa/tea-orders", { params: { scope } }),
+  submitTeaOrder: (data: Record<string, any>) => apiClient.post("/oa/tea-orders", data),
+  cancelTeaOrder: (id: number) => apiClient.post(`/oa/tea-orders/${id}/cancel`),
+  finishTeaOrder: (id: number) => apiClient.post(`/oa/tea-orders/${id}/finish`),
+};
+
+// ========== OA 候选人池 / 社保 ==========
+export const candidateApi = {
+  pool: () => apiClient.get("/oa/candidates/pool"),
+  setResult: (id: number, result: string) => apiClient.patch(`/oa/candidates/${id}/result`, { result }),
+  registerOnboarding: (id: number) => apiClient.post(`/oa/onboardings/${id}/register`),
+};
+
+export const socialSecurityApi = {
+  list: (month?: string) => apiClient.get("/oa/social-security", { params: month ? { month } : undefined }),
+  save: (data: { month: string; items: any[] }) => apiClient.post("/oa/social-security", data),
+};
+
+export const socialPriceApi = {
+  get: () => apiClient.get("/oa/social-price"),
+  readChanges: () => apiClient.post("/oa/social-price/changes/read"),
 };
 
 // ========== Store Groups API ==========
