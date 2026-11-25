@@ -1,8 +1,8 @@
 {
   "meta": {
     "name": "亚马逊Listing埋词优化配置",
-    "version": "1.0",
-    "description": "通过流量词和原Listing内容，分析关键词埋词状态，并生成各位置优化方案"
+    "version": "1.2",
+    "description": "通过流量词和原Listing内容，分析关键词埋词状态，并生成各位置优化方案（含后台关键词 + 禁用词约束）"
   },
 
   "market_profiles": {
@@ -12,7 +12,7 @@
       "language": "en-US",
       "spelling": "美式英语",
       "units": ["英寸", "英尺", "磅", "盎司", "华氏度"],
-      "localization_prompt": "使用美式英语拼写（color, center, organizer等）；计量单位用英寸/英尺/磅/盎司/华氏度；场景、节日、人群表达符合美国消费者习惯；避免英式拼写。"
+      "localization_prompt": "使用美式英语拼写（color, center, organizer等）；计量单位用英寸/英尺/磅/盎司/华氏度；场景、节日、人群表达符合美国消费者习惯；避免英式拼写；禁用词约束同样适用于美式表达变体。"
     },
     "uk": {
       "site": "亚马逊英国站",
@@ -20,7 +20,7 @@
       "language": "en-GB",
       "spelling": "英式英语",
       "units": ["厘米", "米", "千克", "摄氏度"],
-      "localization_prompt": "使用英式英语拼写（colour, centre, organiser等）；计量单位用厘米/米/千克/摄氏度；场景、节日、人群表达符合英国消费者习惯；避免美式拼写。"
+      "localization_prompt": "使用英式英语拼写（colour, centre, organiser等）；计量单位用厘米/米/千克/摄氏度；场景、节日、人群表达符合英国消费者习惯；避免美式拼写；禁用词约束同样适用于英式表达变体。"
     },
     "europe": {
       "site": "亚马逊欧洲站",
@@ -48,75 +48,102 @@
           "localization_prompt": "西班牙语；使用当地计量单位；避免英语直译；符合西班牙搜索习惯和合规要求。"
         }
       ],
-      "localization_prompt": "按目标国家输出对应语言；使用当地计量单位；避免英语直译；符合当地搜索习惯和合规要求。建议分国家单独生成，不要用一份英语文案覆盖全欧洲。"
+      "localization_prompt": "按目标国家输出对应语言（德国=德语，法国=法语，意大利=意大利语，西班牙=西班牙语，荷兰=荷兰语等）；使用当地计量单位；避免英语直译；符合当地搜索习惯和合规要求；欧盟市场对食品安全、健康宣称、环保宣称的监管更严，禁用词约束需按当地法规加严（如 EU 食品接触材料法规 EC 1935/2004）；建议分国家单独生成，不要用一份英语文案覆盖全欧洲。"
     }
   },
 
+  "global_constraints": {
+    "forbidden_terms": {
+      "food_safety": [
+        "food grade", "food safe", "edible", "fda approved",
+        "food contact safe", "food-contact", "safe for food",
+        "food grade material", "meets fda", "fda compliant"
+      ],
+      "health_claims": [
+        "non-toxic", "bpa free", "lead free", "phthalate free",
+        "hypoallergenic", "antibacterial", "sterile", "medical grade",
+        "cure", "treat", "prevent", "disinfect", "sanitize"
+      ],
+      "absolute_promo": [
+        "best", "no.1", "#1", "top rated", "guarantee", "100%",
+        "free shipping", "sale", "discount", "cheapest", "lowest price"
+      ],
+      "competitor_brands": [],
+      "missing_components": [],
+      "platform_others": [
+        "eco-friendly", "organic", "natural", "premium"
+      ]
+    },
+
+    "replacement_rules": [
+      { "from": "best", "to": "ideal for" },
+      { "from": "no.1", "to": "" },
+      { "from": "#1", "to": "" },
+      { "from": "guarantee", "to": "designed to" },
+      { "from": "100%", "to": "" },
+      { "from": "food grade", "to": "" },
+      { "from": "food safe", "to": "" },
+      { "from": "edible", "to": "" },
+      { "from": "fda approved", "to": "" },
+      { "from": "non-toxic", "to": "" },
+      { "from": "bpa free", "to": "" },
+      { "from": "eco-friendly", "to": "reusable" },
+      { "from": "free shipping", "to": "" }
+    ],
+
+    "constraint_prompt": "═══════════════════════════════════════\n【禁用词约束 · 最高优先级】\n═══════════════════════════════════════\n\n生成任何字段（标题、五点、描述、A+、后台关键词、QA）时，严禁出现以下词语及其变体、复数、同义表达、拼写变形：\n\n▸ L1 食品安全类（绝对禁用，不得替换，直接删除）\n  food grade, food safe, edible, FDA approved,\n  food contact safe, food-contact, safe for food,\n  food grade material, meets FDA, FDA compliant\n\n▸ L2 健康/安全宣称类（无检测报告时禁用）\n  non-toxic, BPA free, lead free, phthalate free,\n  hypoallergenic, antibacterial, sterile, medical grade,\n  cure, treat, prevent, disinfect, sanitize\n\n▸ L3 绝对化/促销类（亚马逊禁止）\n  best, No.1, #1, top rated, guarantee, 100%,\n  free shipping, sale, discount, cheapest, lowest price\n\n▸ L4 竞品相关\n  任何竞品品牌名、竞品 ASIN\n\n▸ L5 产品实际不含的组件（避免过度宣称）\n  不得添加包装中不存在的物品\n\n▸ L6 平台其他禁词\n  eco-friendly（无认证时）, organic（无认证时）,\n  natural（无认证时）, premium（慎用）\n\n【处理规则】\n1. 若原 Listing 或流量词中包含上述词，必须从生成结果中移除；\n2. 在返回结果的 forbidden_terms_removed 字段中逐条列出：\n   { term, source, category, reason, replacement }\n3. 可用合规表达替换时给出替换词；不可替换时 replacement 留空；\n4. 替换原则：\n   - \"food grade\" / \"food safe\" → 直接删除，不做任何食品接触暗示\n   - \"non-toxic\" / \"BPA free\" → 直接删除（除非有检测报告）\n   - \"best\" → \"ideal for\" / \"great for\" / \"perfect for\"\n   - \"guarantee\" → \"designed to\" / \"made to\"\n   - \"100%\" → 删除或改为具体数字\n   - \"eco-friendly\" → \"reusable\"（若属实）"
+  },
+
   "prompt_templates": {
-    "overall": "你是一名亚马逊Listing埋词优化专家。请严格根据我提供的流量词工作，不要编造搜索量，不要添加我未提供的搜索词（如需补充同义词，请单独标注“建议补充”）。\n目标站点：{{site}}\n目标市场：{{market}}\n语言：{{language}}\n产品信息：{{product_info}}\n原Listing内容：{{original_listing}}\n流量词表：{{traffic_keywords}}\n任务步骤：\n1. 相关性过滤：剔除与产品明显不相关的词，列出剔除词和原因。\n2. 关键词分类：核心大词、精准中词、长尾词、属性词、场景词、痛点词、同义/变体词。\n3. 埋词分析：判断每个关键词是否已存在于原Listing，出现在哪些位置，出现频次。\n4. 分层埋词：标题>五点>描述/A+>Search Terms>QA。标题放核心大词+精准中词；五点放长尾+场景+痛点；描述/A+放属性+次要长尾；Search Terms放未使用的同义/变体/拼写词；QA自然植入长尾。\n5. 输出必须是合法JSON，不要Markdown，不要额外解释。JSON结构参考：keyword_analysis、optimized_listing、placement_mapping、coverage、compliance_check。\n区域本地化要求：{{localization_requirements}}",
+    "overall": "你是一名亚马逊 Listing 埋词优化专家，同时熟悉亚马逊各站点的合规要求。\n\n目标站点：{{site}}\n目标市场：{{market}}\n语言：{{language}}\n产品信息：{{product_info}}\n原Listing内容：{{original_listing}}\n原后台关键词：{{original_backend_keywords}}\n流量词表：{{traffic_keywords}}\n\n{{constraint_prompt}}\n\n═══════════════════════════════════════\n【任务步骤】\n═══════════════════════════════════════\n\nStep 1 · 相关性过滤\n  剔除与产品明显不相关的流量词，列出剔除词及原因。\n\nStep 2 · 关键词分类\n  按以下维度分类：\n  - 流量层级：核心大词 / 精准中词 / 长尾词\n  - 语义类型：属性 / 场景 / 功能 / 痛点 / 同义变体\n  - 转化属性：高转化 / 纯流量\n\nStep 3 · 禁用词扫描\n  对流量词表和原 Listing 做禁用词扫描，列出命中词、所在位置、处理方式。\n\nStep 4 · 埋词分析\n  判断每个关键词是否已存在于原 Listing，出现在哪些位置，出现频次。\n\nStep 5 · 分层埋词（权重从高到低）\n  标题 > 五点 > 描述/A+ > 后台关键词 > QA\n\n  ▸ 标题\n    - 结构：品牌名 + 核心大词 + 精准中词 + 关键属性 + 场景/人群\n    - 前 30-40 字符必须含核心大词\n    - ≤200 字符，同一词根不超过 2 次\n    - 禁用促销词、全大写、特殊符号\n\n  ▸ 五点\n    - 每条首词用长尾词或场景词\n    - 每条围绕一个卖点：功能 / 材质 / 场景 / 差异化 / 售后\n    - 每条自然嵌入 1-2 个流量词，不堆砌\n\n  ▸ 描述 / A+\n    - 埋入标题和五点未覆盖的次要长尾词、属性词、场景词\n    - 自然段落，可含小标题\n\n  ▸ 后台关键词\n    - Search Terms（≤250 字节）：未在前台使用的同义/变体/拼写词\n    - Subject Matter（≤50 字符）\n    - Intended Use（≤50 字符）\n    - Target Audience（≤50 字符）\n    - Other Attributes（≤50 字符）\n    - 不含品牌名、ASIN、促销词、竞品品牌\n\n  ▸ QA\n    - 5-8 组买家问答\n    - 问题围绕痛点、场景、使用疑问，答案自然植入长尾词\n\nStep 6 · 合规校验\n  对生成结果逐字段扫描禁用词，确认零命中。\n\n═══════════════════════════════════════\n【输出要求】\n═══════════════════════════════════════\n\n必须是合法 JSON，不要 Markdown，不要额外解释。\nJSON 结构参考：keyword_analysis、forbidden_terms_removed、optimized_listing、backend_keywords、placement_mapping、coverage、compliance_check。\n\n区域本地化要求：{{localization_requirements}}",
 
-    "title": "你是亚马逊{{site}}标题优化专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原标题：{{original_title}}。请只使用我提供的流量词，生成3个标题方案。结构：核心大词+精准中词+关键属性（尺寸/材质/数量）+适用场景/人群。前30-40字符必须含核心大词；≤200字符；自然通顺；不堆砌；同一词根不超过2次；不用促销词/全大写/特殊符号。输出JSON数组，每项包含text、char_count、embedded_keywords、reason。区域本地化要求：{{localization_requirements}}",
+    "title": "你是亚马逊 {{site}} 标题优化专家。目标市场：{{market}}，语言：{{language}}。\n产品：{{product_info}}\n流量词：{{traffic_keywords}}\n原标题：{{original_title}}\n\n{{constraint_prompt}}\n\n请只使用我提供的流量词，生成 3 个标题方案。\n结构：核心大词 + 精准中词 + 关键属性 + 场景/人群。\n前 30-40 字符必须含核心大词；≤200 字符；自然通顺；不堆砌；\n同一词根不超过 2 次；不用促销词、全大写、特殊符号。\n\n输出 JSON 数组，每项包含：text、char_count、embedded_keywords、forbidden_terms_check、reason。\n\n区域本地化要求：{{localization_requirements}}",
 
-    "bullets": "你是亚马逊{{site}}五点描述优化专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原五点：{{original_bullets}}。请生成5条Bullet Points。每条首词用长尾词/场景词；每条围绕一个卖点：功能、材质/品质、适配场景、差异化、售后/信任；每条自然嵌入1-2个流量词；不堆砌；输出JSON数组，每项包含index、text、embedded_keywords、selling_point。区域本地化要求：{{localization_requirements}}",
+    "bullets": "你是亚马逊 {{site}} 五点描述优化专家。目标市场：{{market}}，语言：{{language}}。\n产品：{{product_info}}\n流量词：{{traffic_keywords}}\n原五点：{{original_bullets}}\n\n{{constraint_prompt}}\n\n请生成 5 条 Bullet Points。\n每条首词用长尾词或场景词；每条围绕一个卖点：功能 / 材质 / 场景 / 差异化 / 售后；\n每条自然嵌入 1-2 个流量词；不堆砌；不夸大；不添加产品不含的组件。\n\n输出 JSON 数组，每项包含：index、text、embedded_keywords、selling_point、forbidden_terms_check。\n\n区域本地化要求：{{localization_requirements}}",
 
-    "description": "你是亚马逊{{site}}描述/A+文案专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原描述：{{original_description}}。请生成产品描述或A+模块文案，不超过100词。埋入标题和五点未覆盖的次要长尾词、属性词、场景词；自然段落；可包含小标题；不堆砌；输出JSON，包含text和embedded_keywords。区域本地化要求：{{localization_requirements}}",
+    "description": "你是亚马逊 {{site}} 描述/A+ 文案专家。目标市场：{{market}}，语言：{{language}}。\n产品：{{product_info}}\n流量词：{{traffic_keywords}}\n原描述：{{original_description}}\n\n{{constraint_prompt}}\n\n请生成产品描述或 A+ 模块文案，80-100 词。\n埋入标题和五点未覆盖的次要长尾词、属性词、场景词；\n自然段落；可含小标题；不堆砌；不夸大。\n\n输出 JSON：{ \"text\": \"...\", \"embedded_keywords\": [\"...\"], \"forbidden_terms_check\": true }\n\n区域本地化要求：{{localization_requirements}}",
 
-    "search_terms": "你是亚马逊后台Search Terms优化专家。目标站点：{{site}}，语言：{{language}}。流量词：{{traffic_keywords}}。原Search Terms：{{original_search_terms}}。请从流量词中筛选未在标题、五点、描述中使用的同义/变体/拼写误差/缩写/小众习惯词；去重；空格分隔；≤250字节；不重复；不含品牌名、ASIN、促销词、竞品品牌。输出JSON，包含text、bytes、included_keywords。区域本地化要求：{{localization_requirements}}",
+    "backend_keywords": "你是亚马逊后台关键词优化专家。目标站点：{{site}}，语言：{{language}}。\n产品：{{product_info}}\n流量词：{{traffic_keywords}}\n前台已使用词：{{used_keywords}}\n原后台配置：{{original_backend_keywords}}\n\n{{constraint_prompt}}\n\n请完成后台关键词优化，覆盖以下字段：\n1. Search Terms（≤250 字节）：未在前台使用的同义/变体/拼写误差/缩写/小众习惯词\n2. Subject Matter（≤50 字符）\n3. Intended Use（≤50 字符）\n4. Target Audience（≤50 字符）\n5. Other Attributes（≤50 字符）\n\n要求：\n- 不重复前台 Listing 已有词\n- 符合目标市场语言和拼写习惯\n- 不做关键词堆砌\n- 每个字段输出文本、字节/字符数、包含词列表\n\n输出合法 JSON，结构：\n{\n  \"search_terms\": { \"text\": \"...\", \"bytes\": 48, \"included_keywords\": [...] },\n  \"subject_matter\": { \"text\": \"...\", \"char_count\": 18, \"included_keywords\": [...] },\n  \"intended_use\": { \"text\": \"...\", \"char_count\": 24, \"included_keywords\": [...] },\n  \"target_audience\": { \"text\": \"...\", \"char_count\": 26, \"included_keywords\": [...] },\n  \"other_attributes\": { \"text\": \"...\", \"char_count\": 30, \"included_keywords\": [...] },\n  \"forbidden_terms_check\": true\n}\n\n区域本地化要求：{{localization_requirements}}",
 
-    "qa": "你是亚马逊QA优化专家。目标市场：{{market}}，语言：{{language}}。产品：{{product_info}}。流量词：{{traffic_keywords}}。原QA：{{original_qa}}。请生成5-8组买家问答。问题围绕痛点、场景、使用疑问；答案自然植入长尾词和场景词；不堆砌；输出JSON数组，每项包含question、answer、embedded_keywords。区域本地化要求：{{localization_requirements}}"
+    "qa": "你是亚马逊 QA 优化专家。目标市场：{{market}}，语言：{{language}}。\n产品：{{product_info}}\n流量词：{{traffic_keywords}}\n原 QA：{{original_qa}}\n\n{{constraint_prompt}}\n\n请生成 5-8 组买家问答。\n问题围绕痛点、场景、使用疑问；\n答案自然植入长尾词和场景词；不堆砌；不做任何健康/安全宣称。\n\n输出 JSON 数组，每项包含：question、answer、embedded_keywords、forbidden_terms_check。\n\n区域本地化要求：{{localization_requirements}}"
   },
 
   "input": {
     "market_profile_key": "north_america",
     "product_info": {
-      "product_name": "无线蓝牙耳机",
-      "category": "电子产品",
-      "core_features": ["降噪", "防水", "长续航"],
-      "material": "ABS+硅胶",
-      "size": "均码",
-      "target_audience": "运动人群、通勤族",
-      "use_scenarios": ["跑步", "健身", "办公", "旅行"]
+      "product_name": "西部牛仔马主题生日派对纸盘和餐巾",
+      "category": "派对用品 / 纸制品",
+      "core_features": ["西部牛仔风格", "马主题", "花卉图案", "一次性纸盘"],
+      "material": "纸质",
+      "size": "9英寸/7英寸纸盘，6.5英寸餐巾",
+      "target_audience": "女孩、儿童、家长",
+      "use_scenarios": ["生日派对", "牛仔主题派对", "马术主题派对"]
     },
     "original_listing": {
-      "title": "原标题内容",
+      "title": "Horse Floral Birthday Decorations Western Horse Paper Plates and Napkins",
       "bullets": [
-        "原五点1",
-        "原五点2",
-        "原五点3",
-        "原五点4",
-        "原五点5"
+        "Package Included: You will receive 1 floral horse happy birthday banner, 20 western 9-inch paper plates, 20 7-inch paper plates, and 20 6.5-inch paper napkins for western party tableware decor set",
+        "Western Design: These western birthday party decorations feature floral horses, cowboy accents, and glitter gold text for a charming rustic aesthetic",
+        "Versatile Occasions: Ideal for rodeo birthday decorations, horse floral birthday decorations, and little pony birthday party tableware decorations, western birthday party supplies",
+        "Cohesive Setup: This cowgirl plates and napkins set creates a unified table decor, perfect for elevating your pink horse birthday decoration setup",
+        "Rustic Vibe: These pink wester paper plates set add a warm playful western touch, making your horse themed cowgirl birthday decoration feel more immersive and fun"
       ],
-      "description": "原产品描述",
-      "a_plus": "原A+内容",
-      "search_terms": "原后台搜索词",
-      "qa": [
-        {
-          "question": "原问题1",
-          "answer": "原答案1"
-        }
-      ]
+      "description": "Horse Party Napkins and Plates Cups Horse Birthday Decor for Western CowCowThemed Birthday Party"
+    },
+    "original_backend_keywords": {
+      "search_terms": "western plates and napkins horse floral plates and napkins horse paper plates horse table decorations tablecloth horse party decorations western theme party decorations rodeo plates and napkins set western birthday decoration rodeo birthday decorations Horse birthday deocoration Little pony birthday decoration",
+      "subject_matter": "",
+      "intended_use": "",
+      "target_audience": "",
+      "other_attributes": ""
     },
     "traffic_keywords": [
-      {
-        "keyword": "wireless earbuds",
-        "search_volume": 120000,
-        "aba_rank": 3500,
-        "traffic_share": 0.18,
-        "ctr": 0.012,
-        "cvr": 0.06,
-        "competition": 0.85,
-        "relevance": null
-      },
-      {
-        "keyword": "bluetooth headphones for running",
-        "search_volume": 30000,
-        "aba_rank": 80000,
-        "traffic_share": 0.07,
-        "ctr": 0.015,
-        "cvr": 0.08,
-        "competition": 0.55,
-        "relevance": null
-      }
+      {"keyword": "cowgirl birthday", "search_volume": 3257, "traffic_share": 0.0, "cvr": 2.08},
+      {"keyword": "cowgirl birthday party decorations", "search_volume": 17710, "traffic_share": 0.0, "cvr": 1.64},
+      {"keyword": "horse birthday decorations", "search_volume": 6888, "traffic_share": 50.0, "cvr": 3.45},
+      {"keyword": "horse birthday decorations for girls", "search_volume": 3396, "traffic_share": 61.9048, "cvr": 3.58},
+      {"keyword": "horse birthday plates", "search_volume": null, "traffic_share": 100.0, "cvr": null},
+      {"keyword": "horse party decorations", "search_volume": 4066, "traffic_share": 100.0, "cvr": 3.52}
     ]
   },
 
@@ -146,17 +173,25 @@
       "bullets": 80,
       "description": 60,
       "a_plus": 50,
-      "search_terms": 40,
+      "backend_keywords": 40,
       "qa": 30
+    },
+    "backend_keywords_limits": {
+      "search_terms_max_bytes": 250,
+      "subject_matter_max_chars": 50,
+      "intended_use_max_chars": 50,
+      "target_audience_max_chars": 50,
+      "other_attributes_max_chars": 50,
+      "no_brand_names": true,
+      "no_asin": true,
+      "no_promotional_words": true,
+      "no_duplicate_with_frontend": true
     },
     "constraints": {
       "title_max_chars": 200,
       "title_front_chars": 40,
-      "search_terms_max_bytes": 250,
       "same_stem_max_occurrences": 2,
-      "no_promotional_words": true,
-      "no_brand_names_in_search_terms": true,
-      "no_asin_in_search_terms": true
+      "no_promotional_words": true
     }
   }
 }

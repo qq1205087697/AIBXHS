@@ -6,6 +6,8 @@ from dependencies import get_current_user
 from models.user import User
 from pydantic import BaseModel, Field
 from typing import Optional
+import ast
+import json
 import logging
 import httpx
 from openai import OpenAI
@@ -81,6 +83,34 @@ IMPORTANCE_LABEL_MAP = {
     "normal": "一般",
 }
 
+
+def parse_mail_context(raw) -> list:
+    """解析 all_mail_content 字段：存储的是 Python repr 风格的列表字符串（单引号字典），转为 [{time, role, content}, ...]"""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        parsed = raw
+    else:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            try:
+                parsed = ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                logger.warning("all_mail_content 解析失败，按原文回退: %s", str(raw)[:100])
+                return []
+    if not isinstance(parsed, list):
+        return []
+    result = []
+    for item in parsed:
+        if isinstance(item, dict):
+            result.append({
+                "time": str(item.get("time") or ""),
+                "role": str(item.get("role") or ""),
+                "content": str(item.get("content") or ""),
+            })
+    return result
+
 class UpdateFollowUpRequest(BaseModel):
     """更新跟进状态请求"""
     follow_up_status: int = Field(..., description="跟进状态：0=未跟进，1=已跟进")
@@ -99,7 +129,7 @@ class UpdateNeedReplyRequest(BaseModel):
 
 class AIReplyRequest(BaseModel):
     """AI生成回复请求"""
-    requirements: str = Field(..., min_length=1, description="自定义回复需求")
+    requirements: Optional[str] = Field(None, description="自定义回复需求（为空则根据邮件上下文自动生成）")
 
 
 @router.get("/")
@@ -182,7 +212,11 @@ async def get_email_messages(
                 e.follow_up_status,
                 e.need_reply,
                 e.reply_text,
-                e.reply_text_time
+                e.reply_text_time,
+                e.all_mail_content,
+                e.order_num,
+                e.ASIN,
+                e.ai_reply_content_tran
             FROM email_messages e
             LEFT JOIN stores s ON e.store_id = s.id
             WHERE {where_clause}
@@ -192,6 +226,11 @@ async def get_email_messages(
 
         result = db.execute(query, params)
         emails = result.fetchall()
+
+        # 复用页面优化机器人的逻辑：按ASIN关联产品库取主图（platform_products -> products.main_image）
+        from routers.product_page_info import get_main_image_map
+        from services.tos_service import build_thumbnail_url
+        image_map = get_main_image_map(db, current_user.tenant_id, [row[18] for row in emails])
 
         email_data = []
         for row in emails:
@@ -212,6 +251,12 @@ async def get_email_messages(
                 "need_reply": row[13] or 0,
                 "reply_text": row[14] or "",
                 "reply_text_time": row[15].strftime("%Y-%m-%d %H:%M:%S") if row[15] is not None else "",
+                "mail_context": parse_mail_context(row[16]),
+                "order_num": row[17] or "",
+                "asin": row[18] or "",
+                "ai_reply_content_tran": row[19] or "",
+                "main_image_url": image_map.get(row[18] or "", ""),
+                "main_image_thumb_url": build_thumbnail_url(image_map.get(row[18] or "", ""), 128),
                 "importance_level": get_importance_level(row[5] or ""),
             })
         
@@ -334,7 +379,7 @@ async def generate_ai_reply(
     try:
         query = text("""
             SELECT e.mail_subject, e.mail_content, e.mail_content_chinese,
-                   e.language, e.site, e.buyer_mail_number
+                   e.language, e.site, e.buyer_mail_number, e.all_mail_content, e.ai_reply_content
             FROM email_messages e
             LEFT JOIN stores s ON e.store_id = s.id
             WHERE e.id = :email_id AND e.tenant_id = :tenant_id
@@ -351,29 +396,44 @@ async def generate_ai_reply(
         language = row[3] or "en"
         site_name = get_site_name(row[4] or "")
         buyer_email = row[5] or ""
+        mail_context = parse_mail_context(row[6])
+        ai_reply_content = row[7] or ""
 
         language_name = get_language_name(language)
 
+        # 将对话记录（all_mail_content 解析结果）整理为多轮上下文文本，无解析结果时回退原文
+        context_lines = []
+        for msg in mail_context:
+            role_name = "买家" if msg["role"] == "customer" else "卖家"
+            context_lines.append(f"[{msg['time']}] {role_name}：\n{msg['content']}")
+        conversation_text = "\n\n".join(context_lines) if context_lines else mail_content
+
         chinese_ref = f"\n\n邮件中文翻译参考：\n{mail_content_chinese}" if mail_content_chinese else ""
         site_info = f"站点：{site_name}" if site_name else ""
-        
+        ai_reply_ref = f"\n\n历史AI回复参考（上次生成的回复，可在此基础上调整）：\n{ai_reply_content}" if ai_reply_content else ""
+
+        requirements = (request.requirements or "").strip()
+        if requirements:
+            req_part = f"3. 以下是用户的自定义需求，请严格按要求回复：\n{requirements}"
+        else:
+            req_part = "3. 未提供自定义需求，请根据对话记录和邮件上下文自动生成合适的回复"
+
         system_prompt = f"""你是专业的跨境电商客服人员。请根据以下邮件内容生成专业、礼貌的回复。
 
 要求：
 1. 回复语言使用{language_name}撰写
 2. 保持专业、友好的语气
-3. 以下是用户的自定义需求，请严格按要求回复：
-{request.requirements}
+{req_part}
 
 请输出纯文本格式的回复内容，不要添加任何说明。"""
 
-        user_prompt = f"""原始邮件主题：{mail_subject}
-原始邮件内容：
-{mail_content}{chinese_ref}
+        user_prompt = f"""邮件主题：{mail_subject}
+完整对话记录：
+{conversation_text}{ai_reply_ref}{chinese_ref}
 {site_info}
 买家邮箱：{buyer_email}"""
 
-        logger.info(f"AI生成回复: 邮件ID={email_id}, 需求={request.requirements[:100]}")
+        logger.info(f"AI生成回复: 邮件ID={email_id}, 需求={requirements[:100] if requirements else '(自动生成)'}")
 
         response = ai_client.chat.completions.create(
             model=settings.OPENAI_MODEL,
@@ -525,7 +585,11 @@ async def get_email_detail(
                 e.follow_up_status,
                 e.need_reply,
                 e.reply_text,
-                e.reply_text_time
+                e.reply_text_time,
+                e.all_mail_content,
+                e.order_num,
+                e.ASIN,
+                e.ai_reply_content_tran
             FROM email_messages e
             LEFT JOIN stores s ON e.store_id = s.id
             WHERE e.id = :email_id AND e.tenant_id = :tenant_id{access_filter}
@@ -540,6 +604,11 @@ async def get_email_detail(
 
         if not row:
             raise HTTPException(status_code=404, detail=f"邮件 {email_id} 不存在")
+
+        # 复用页面优化机器人的逻辑：按ASIN关联产品库取主图
+        from routers.product_page_info import get_main_image_map
+        from services.tos_service import build_thumbnail_url
+        image_map = get_main_image_map(db, current_user.tenant_id, [row[18]])
 
         email_detail = {
             "id": str(row[0]),
@@ -558,6 +627,12 @@ async def get_email_detail(
             "need_reply": row[13] or 0,
             "reply_text": row[14] or "",
             "reply_text_time": row[15].strftime("%Y-%m-%d %H:%M:%S") if row[15] is not None else "",
+            "mail_context": parse_mail_context(row[16]),
+            "order_num": row[17] or "",
+            "asin": row[18] or "",
+            "ai_reply_content_tran": row[19] or "",
+            "main_image_url": image_map.get(row[18] or "", ""),
+            "main_image_thumb_url": build_thumbnail_url(image_map.get(row[18] or "", ""), 128),
             "importance_level": get_importance_level(row[5] or ""),
         }
 

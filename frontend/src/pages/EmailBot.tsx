@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Card, Row, Col, List, Button, Tag, Divider, Space, Avatar, Modal, Pagination, message, Input, Form, Select, Statistic, Checkbox, Dropdown, Empty } from 'antd'
+import { Card, Row, Col, List, Button, Tag, Divider, Space, Avatar, Modal, Pagination, message, Input, Form, Select, Statistic, Checkbox, Dropdown, Empty, Image } from 'antd'
 import type { MenuProps } from 'antd'
 import { Mail, Eye, Search, FileEdit, FileText, XCircle, Repeat, Truck, HelpCircle, Palette, MessageCircle, AlertCircle, ChevronDown } from 'lucide-react'
 import { emailsApi } from '../api'
@@ -17,14 +17,66 @@ interface EmailItem {
   mail_subject: string
   mail_content: string
   mail_content_chinese: string
+  // 邮件完整上下文（all_mail_content 解析后的对话列表，role: customer=买家 / seller=卖家）
+  mail_context: { time: string; role: string; content: string }[]
   buyer_mail_number: string
   ai_reply_content: string
+  order_num: string
+  asin: string
+  ai_reply_content_tran: string
+  main_image_url: string
+  main_image_thumb_url: string
   reply_date: string
   follow_up_status: number
   need_reply: number
   reply_text: string
   reply_text_time: string
   importance_level: string
+}
+
+// 渲染邮件上下文对话气泡（customer=买家 左侧蓝色，seller=卖家 右侧绿色；无解析数据时回退原文）
+const renderMailConversation = (mailContext: EmailItem['mail_context'], fallback: string) => {
+  if (mailContext && mailContext.length > 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {mailContext.map((msg, idx) => {
+          const isCustomer = msg.role === 'customer'
+          return (
+            <div key={idx} style={{ display: 'flex', justifyContent: isCustomer ? 'flex-start' : 'flex-end' }}>
+              <div
+                style={{
+                  maxWidth: '85%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: isCustomer ? 'flex-start' : 'flex-end',
+                }}
+              >
+                <span style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
+                  {isCustomer ? '买家' : '卖家'} · {msg.time || '时间未知'}
+                </span>
+                <div
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: 8,
+                    backgroundColor: isCustomer ? '#e6f4ff' : '#f6ffed',
+                    border: `1px solid ${isCustomer ? '#bae0ff' : '#b7eb8f'}`,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontSize: 14,
+                    lineHeight: 1.6,
+                    color: '#333',
+                  }}
+                >
+                  {msg.content || '（空内容）'}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+  return <div style={{ whiteSpace: 'pre-wrap' }}>{fallback || '暂无内容'}</div>
 }
 
 const EmailBot: React.FC = () => {
@@ -47,10 +99,8 @@ const EmailBot: React.FC = () => {
   const [storeNames, setStoreNames] = useState<string[]>([])
   const [unfollowedCount, setUnfollowedCount] = useState<number>(0)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const [aiReplyModalVisible, setAiReplyModalVisible] = useState(false)
   const [aiReplyGenerating, setAiReplyGenerating] = useState(false)
   const [aiReplyResult, setAiReplyResult] = useState<{ reply_text: string; reply_text_chinese: string } | null>(null)
-  const [aiReplyForm] = Form.useForm()
   const [reRunLoading, setReRunLoading] = useState(false)
 
   const fetchStoreNames = useCallback(async () => {
@@ -201,6 +251,8 @@ const EmailBot: React.FC = () => {
 
   const handleOpenNeedReply = () => {
     form.resetFields()
+    setReplyText('')
+    setAiReplyResult(null)
     setReplyModalVisible(true)
   }
 
@@ -225,36 +277,24 @@ const EmailBot: React.FC = () => {
     }
   }
 
-  const handleOpenAiReplyModal = () => {
-    aiReplyForm.resetFields()
-    setAiReplyResult(null)
-    setAiReplyModalVisible(true)
-  }
-
-  const handleGenerateAiReply = async (values: { aiRequirements: string }) => {
-    if (!selectedEmail) return
+  // 点击AI回复：根据对话记录和邮件上下文自动生成新回复，直接写入回复框，中文翻译显示在右侧
+  const handleGenerateAiReply = async () => {
+    if (!selectedEmail || aiReplyGenerating) return
     setAiReplyGenerating(true)
     try {
-      const response = await emailsApi.aiReply(selectedEmail.id, values.aiRequirements)
+      const response = await emailsApi.aiReply(selectedEmail.id, '')
       if (response.data.success) {
-        setAiReplyResult(response.data.data)
-        message.success('AI回复生成成功')
+        const result = response.data.data
+        setAiReplyResult(result)
+        form.setFieldsValue({ replyText: result.reply_text })
+        setReplyText(result.reply_text)
+        message.success('AI回复已生成并填入')
       }
     } catch (error) {
       console.error('AI生成回复失败:', error)
       message.error('AI生成回复失败，请重试')
     } finally {
       setAiReplyGenerating(false)
-    }
-  }
-
-  const handleAcceptAiReply = () => {
-    if (aiReplyResult?.reply_text) {
-      form.setFieldsValue({ replyText: aiReplyResult.reply_text })
-      setReplyText(aiReplyResult.reply_text)
-      setAiReplyModalVisible(false)
-      setAiReplyResult(null)
-      message.success('已采纳AI回复')
     }
   }
 
@@ -623,6 +663,22 @@ const EmailBot: React.FC = () => {
                 <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>基本信息</h3>
                 <p style={{ margin: '4px 0' }}><strong>账号名称：</strong>{selectedEmail.store_name || '未找到账号'}</p>
                 <p style={{ margin: '4px 0' }}><strong>买家邮箱：</strong>{selectedEmail.buyer_mail_number}</p>
+                <p style={{ margin: '4px 0' }}><strong>邮件主题：</strong>{selectedEmail.mail_subject || '无主题'}</p>
+                <p style={{ margin: '4px 0' }}><strong>订单编号：</strong>{selectedEmail.order_num || '无'}</p>
+                <p style={{ margin: '4px 0', position: 'relative' }}>
+                  <strong>ASIN：</strong>{selectedEmail.asin || '无'}
+                  {selectedEmail.main_image_url && (
+                    <span style={{ position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)' }}>
+                      <Image
+                        src={selectedEmail.main_image_thumb_url || selectedEmail.main_image_url}
+                        fallback={selectedEmail.main_image_url}
+                        width={72}
+                        height={72}
+                        style={{ objectFit: 'cover', borderRadius: 4, flexShrink: 0 }}
+                      />
+                    </span>
+                  )}
+                </p>
                 <p style={{ margin: '4px 0' }}><strong>回复日期：</strong>{dayjs(selectedEmail.reply_date).format('YYYY年MM月DD日')}</p>
               </div>
               <Space direction="vertical" align="end">
@@ -647,13 +703,10 @@ const EmailBot: React.FC = () => {
             <Divider style={{ margin: '8px 0' }} />
 
             <div>
-              <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>邮件主题</h3>
-              <Card type="inner" style={{ padding: '12px' }}>{selectedEmail.mail_subject || '无主题'}</Card>
-            </div>
-
-            <div>
-              <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>邮件内容（原文）</h3>
-              <Card type="inner" style={{ padding: '12px', whiteSpace: 'pre-wrap' }}>{selectedEmail.mail_content || '暂无内容'}</Card>
+              <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>邮件内容（对话记录）</h3>
+              <Card type="inner" style={{ padding: '12px' }}>
+                {renderMailConversation(selectedEmail.mail_context, selectedEmail.mail_content)}
+              </Card>
             </div>
 
             {selectedEmail.mail_content_chinese && (
@@ -671,6 +724,14 @@ const EmailBot: React.FC = () => {
                 <Card type="inner" style={{ padding: '12px', backgroundColor: '#f6ffed', whiteSpace: 'pre-wrap' }}>
                   {selectedEmail.ai_reply_content}
                 </Card>
+                {selectedEmail.ai_reply_content_tran && (
+                  <div style={{ marginTop: 8 }}>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: 14, color: '#666' }}>AI回复中文翻译：</h4>
+                    <Card type="inner" style={{ padding: '12px', backgroundColor: '#fff7e6', whiteSpace: 'pre-wrap', color: '#666' }}>
+                      {selectedEmail.ai_reply_content_tran}
+                    </Card>
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ padding: '12px', background: '#fff7e6', borderRadius: 8 }}>
@@ -682,45 +743,73 @@ const EmailBot: React.FC = () => {
       )}
 
       <Modal
-        title="填写回复"
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 32 }}>
+            <span>填写回复</span>
+            {hasPermission('robot:email:reply') && (
+              <Button
+                type="primary"
+                size="small"
+                loading={aiReplyGenerating}
+                onClick={handleGenerateAiReply}
+              >
+                🤖 AI回复
+              </Button>
+            )}
+          </div>
+        }
         open={replyModalVisible}
         onCancel={() => setReplyModalVisible(false)}
         footer={null}
         zIndex={1060}
-        width={res.isMobile ? '95vw' : 520}
+        width={res.isMobile ? '95vw' : 860}
       >
         <Form
           form={form}
           layout="vertical"
           onFinish={handleSubmitNeedReply}
         >
-          <Form.Item
-            name="replyText"
-            label={
-              <Space>
-                {/* <span>回复备注</span> */}
-                {hasPermission('robot:email:reply') && (
-                  <Button
-                    type="link"
-                    size="small"
-                    icon={<span>🤖</span>}
-                    onClick={handleOpenAiReplyModal}
-                    style={{ padding: 0 }}
-                  >
-                    AI回复
-                  </Button>
-                )}
-              </Space>
-            }
-            rules={[{ required: true, message: '请填写回复内容' }]}
-          >
-            <Input.TextArea
-              rows={4}
-              placeholder="请填写需要回复的内容..."
-              value={replyText}
-              onChange={(e) => setReplyText(e.target.value)}
-            />
-          </Form.Item>
+          <Row gutter={16}>
+            <Col span={14}>
+              <Form.Item
+                name="replyText"
+                label="回复内容"
+                rules={[{ required: true, message: '请填写回复内容' }]}
+              >
+                <Input.TextArea
+                  rows={8}
+                  placeholder="请填写需要回复的内容，或点击右上角「AI回复」自动生成..."
+                  value={replyText}
+                  onChange={(e) => setReplyText(e.target.value)}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item label="中文翻译（参考）">
+                <div
+                  style={{
+                    background: '#fff7e6',
+                    border: '1px solid #ffd591',
+                    borderRadius: 8,
+                    padding: 12,
+                    whiteSpace: 'pre-wrap',
+                    color: '#666',
+                    fontSize: 13,
+                    lineHeight: 1.6,
+                    height: 200,
+                    overflowY: 'auto',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {aiReplyGenerating
+                    ? 'AI正在生成回复，请稍候...'
+                    : aiReplyResult?.reply_text_chinese
+                      ? aiReplyResult.reply_text_chinese
+                      : '点击右上角「AI回复」按钮，将根据对话记录自动生成回复并填入左侧输入框，对应的中文翻译会显示在这里'}
+                </div>
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>
               <Button onClick={() => setReplyModalVisible(false)}>取消</Button>
@@ -728,101 +817,6 @@ const EmailBot: React.FC = () => {
             </Space>
           </Form.Item>
         </Form>
-      </Modal>
-
-      <Modal
-        title="AI生成回复"
-        open={aiReplyModalVisible}
-        onCancel={() => {
-          setAiReplyModalVisible(false)
-          setAiReplyResult(null)
-        }}
-        footer={null}
-        zIndex={1080}
-        width={res.isMobile ? '95vw' : 640}
-      >
-        <Form
-          form={aiReplyForm}
-          layout="vertical"
-          onFinish={handleGenerateAiReply}
-        >
-          <Form.Item
-            name="aiRequirements"
-            label="输入回复需求"
-            rules={[{ required: true, message: '请输入回复需求' }]}
-          >
-            <Input.TextArea
-              rows={3}
-              placeholder="例如：告知客户我们会在3天内发货..."
-              disabled={aiReplyGenerating}
-            />
-          </Form.Item>
-          <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
-            <Space>
-              <Button
-                onClick={() => {
-                  setAiReplyModalVisible(false)
-                  setAiReplyResult(null)
-                }}
-                disabled={aiReplyGenerating}
-              >
-                取消
-              </Button>
-              <Button
-                type="primary"
-                htmlType="submit"
-                loading={aiReplyGenerating}
-              >
-                生成回复
-              </Button>
-            </Space>
-          </Form.Item>
-        </Form>
-
-        {aiReplyResult && (
-          <div style={{ marginTop: 16, borderTop: '1px solid #f0f0f0', paddingTop: 16 }}>
-            <h4 style={{ margin: '0 0 8px 0' }}>🤖 AI生成的回复：</h4>
-            <div style={{
-              background: '#f6ffed',
-              border: '1px solid #b7eb8f',
-              borderRadius: 8,
-              padding: 12,
-              marginBottom: 12,
-              whiteSpace: 'pre-wrap',
-              maxHeight: 300,
-              overflowY: 'auto'
-            }}>
-              {aiReplyResult.reply_text}
-            </div>
-            {aiReplyResult.reply_text_chinese && (
-              <>
-                <h4 style={{ margin: '0 0 8px 0', color: '#666' }}>中文翻译参考：</h4>
-                <div style={{
-                  background: '#fff7e6',
-                  border: '1px solid #ffd591',
-                  borderRadius: 8,
-                  padding: 12,
-                  marginBottom: 12,
-                  whiteSpace: 'pre-wrap',
-                  color: '#666',
-                  maxHeight: 200,
-                  overflowY: 'auto'
-                }}>
-                  {aiReplyResult.reply_text_chinese}
-                </div>
-              </>
-            )}
-            <div style={{ textAlign: 'right' }}>
-              <Button
-                type="primary"
-                icon={<span>✅</span>}
-                onClick={handleAcceptAiReply}
-              >
-                采纳回复
-              </Button>
-            </div>
-          </div>
-        )}
       </Modal>
     </div>
   )
