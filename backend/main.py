@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, group_permissions, memos, base_table, ai_creation, product_development, video_bindings, ai_image, tags, tasks, currency_rate, finance
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, group_permissions, memos, base_table, ai_creation, product_development, video_bindings, ai_image, tags, tasks, currency_rate, finance, media_requests, grade
 from config import get_settings
 
 settings = get_settings()
@@ -70,6 +70,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 滑动续期：后端在 token 临近过期时通过该响应头下发新 token，
+    # 跨域场景下必须显式暴露，前端 axios 才读得到
+    expose_headers=["X-Renewed-Token"],
 )
 
 # 注册路由
@@ -90,6 +93,7 @@ app.include_router(product_selection.router)
 app.include_router(emails.router, prefix="/api")
 app.include_router(data_warnings.router, prefix="/api")
 app.include_router(product_sales.router, prefix="/api")
+app.include_router(grade.router, prefix="/api")
 app.include_router(threshold_settings.router, prefix="/api")
 app.include_router(currency_rate.router, prefix="/api")
 app.include_router(local_inventory.router, prefix="/api")
@@ -115,6 +119,7 @@ app.include_router(upload.router)
 app.include_router(ai_creation.router)
 app.include_router(video_bindings.router)
 app.include_router(ai_image.router)
+app.include_router(media_requests.router)
 app.include_router(base_table.router)
 
 app.include_router(ads.router, prefix="/api")
@@ -245,14 +250,6 @@ async def startup_event():
         logger.info("AI 生图未完成任务已恢复监听")
     except Exception as e:
         logger.error(f"AI 生图任务恢复失败: {e}")
-
-    try:
-        import asyncio as _asyncio
-        from routers.product_development import auto_migrate_designer_images
-        _asyncio.create_task(auto_migrate_designer_images())
-        logger.info("美工图片 TOS 自动迁移任务已启动")
-    except Exception as e:
-        logger.error(f"启动美工图片自动迁移任务失败: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -94,10 +94,14 @@ def _guess_video_name(url: str, product_code: str, sku: str) -> str:
     return f"{safe}{ext}"
 
 
-async def _upload_bitable_attachment(client: "httpx.AsyncClient", auth: dict, name: str, content: bytes) -> str:
+async def _upload_bitable_attachment(
+    client: "httpx.AsyncClient", auth: dict, name: str, content: bytes,
+    parent_node: Optional[str] = None,
+) -> str:
     """上传附件到多维表格（新版 media 分片 API），返回 file_token。
 
-    上传点：parent_type=bitable_file，parent_node=多维表 app_token（实测验证）。
+    上传点：parent_type=bitable_file，parent_node=多维表 app_token（实测验证）；
+    不传 parent_node 时默认挂到视频上传表（兼容旧调用）。
     流程：upload_prepare（4MB/片）→ upload_part（seq 从 0）→ upload_finish 拿 file_token。
     """
     size = len(content)
@@ -107,7 +111,7 @@ async def _upload_bitable_attachment(client: "httpx.AsyncClient", auth: dict, na
         json={
             "file_name": name,
             "parent_type": "bitable_file",
-            "parent_node": settings.FEISHU_VIDEO_BASE_TOKEN,
+            "parent_node": parent_node or settings.FEISHU_VIDEO_BASE_TOKEN,
             "size": size,
         },
         timeout=60,

@@ -9,6 +9,8 @@ build/
 .env
 .env.local
 .env.*.local
+.env.bak*
+*.env.bak*
 
 # IDE
 .vscode/
@@ -56,3 +58,6 @@ backend/static/
 backend/.import_status.json
 backend/.import_status.json.*.tmp
 delivery/
+
+# 领星开放平台运行时令牌缓存（敏感，不入库；凭证统一放 backend/.env）
+.lingxing_token.json

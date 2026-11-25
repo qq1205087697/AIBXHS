@@ -11,6 +11,7 @@ from models.inventory_management import InventoryBatch, OperationLog
 from models.conversation import ConversationHistory
 
 from models.product_sales import ProductSales
+from models.product_grade import ProductSalesGrade
 from models.product_aging_inventory import ProductAgingInventory
 from models.product_buybox import ProductBuybox
 from models.product_shipment_notice import ProductShipmentNotice
@@ -40,6 +41,7 @@ __all__ = [
     "OperationLog",
     "ConversationHistory",
     "ProductSales",
+    "ProductSalesGrade",
     "ProductAgingInventory",
     "ProductBuybox",
     "ProductShipmentNotice",

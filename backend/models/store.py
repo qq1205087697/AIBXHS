@@ -6,6 +6,7 @@ import enum
 
 class Platform(str, enum.Enum):
     AMAZON = "amazon"
+    OZON = "ozon"
     EBAY = "ebay"
     WALMART = "walmart"
     SHOPIFY = "shopify"
@@ -32,6 +33,8 @@ class Store(BaseModel):
     ziniao_account = Column(String(100), nullable=True, comment="紫鸟账号")
     platform = Column(String(20), nullable=False, index=True, comment="平台")
     site = Column(String(50), nullable=True, comment="站点")
+    ozon_client_id = Column(String(64), nullable=True, comment="Ozon Seller API Client-Id")
+    ozon_api_key = Column(String(255), nullable=True, comment="Ozon Seller API Api-Key（不回传前端）")
     status = Column(String(20), default="active", index=True, comment="状态")
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True, index=True, comment="所属部门ID")
     inventory_name = Column(String(100), nullable=True, index=True, comment="库存数据中的店铺名别名")

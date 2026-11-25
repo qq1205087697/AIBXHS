@@ -36,11 +36,23 @@ class Settings(BaseSettings):
     FEISHU_SYNC_APP_SECRET: str = ""
     FEISHU_SYNC_BASE_TOKEN: str = ""
     FEISHU_SYNC_TABLE_ID: str = ""
+    # 飞书多维表 - 海外仓库存表（复用 FBA 同步应用的 APP_ID/APP_SECRET，仅需另配表 ID）
+    FEISHU_OVERSEAS_BASE_TOKEN: str = ""
+    FEISHU_OVERSEAS_TABLE_ID: str = ""
+    # 海外仓库存每日自动同步时刻（小时，默认 8 点；与 FBA 同步共用后台任务与状态机）
+    OVERSEAS_SYNC_HOUR: int = 8
+    # 海外仓定时同步写入的租户（单租户部署保持 1；多租户可按需改成对应租户 ID）
+    OVERSEAS_SYNC_TENANT_ID: int = 1
     # 飞书多维表 - AI视频首绑SKU上传表（产品首条视频绑定后可选直传SKU）
     FEISHU_VIDEO_BASE_TOKEN: str = ""
     FEISHU_VIDEO_TABLE_ID: str = ""
     # 填报人（人员字段）飞书 open_id，留空自动尝试取应用机器人自身身份
     FEISHU_VIDEO_REPORTER_OPEN_ID: str = ""
+    # 飞书多维表 - Amazon 图片上传表（图片素材按 SKU 上传，外部 RPA 消费；字段：SKU/紫鸟账号/店铺名/站点/图片/类型）
+    FEISHU_IMAGE_BASE_TOKEN: str = ""
+    FEISHU_IMAGE_TABLE_ID: str = ""
+    # 飞书多维表 - Ozon 视频上传留痕表（与 Amazon 表共用 FEISHU_VIDEO_BASE_TOKEN，独立数据表）
+    FEISHU_OZON_VIDEO_TABLE_ID: str = ""
     # 紫鸟启动名→紫鸟登录账号映射（JSON 字符串，按顺序取登录账号命中的第一个启动名）
     ZINIAO_ACCOUNT_MAP: str = ""
     # 飞书 webhook - 邮件机器人自动化
@@ -49,10 +61,6 @@ class Settings(BaseSettings):
     FEISHU_PAGE_INFO_WEBHOOK_URL: str = ""
     # 飞书 webhook - 开广告提交地址
     FEISHU_AD_WEBHOOK_URL: str = ""
-    # 美工图片 TOS 自动迁移开关（false 关闭启动时自动迁移）
-    DESIGNER_IMAGE_AUTO_MIGRATE: str = "true"
-    # 六面图 TOS 自动迁移开关（false 关闭启动时自动迁移）
-    SIXFACE_IMAGE_AUTO_MIGRATE: str = "true"
     # 飞书 webhook - 编辑基础信息提交地址
     FEISHU_EDIT_WEBHOOK_URL: str = ""
     # 飞书 webhook - 一键优化提交地址
@@ -103,9 +111,31 @@ class Settings(BaseSettings):
     IMAGE_PROMPT_TEMPLATES_PATH: str = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "prompts", "image_prompt_templates.json"
     )
+    # A+ 提示词通道实验（2026-10-29）：空=走现有链路（PE→497）；
+    # direct=A+ 专用工作流（497 直连 571，跳过 PE）；
+    # append=A+ 专用工作流（PE 输出后再强制拼接版式契约节点 572，PE 改写不到）。
+    # 只影响本地 ComfyUI 的 A+ 子任务；主副图与中转站通道不受影响。
+    IMAGE_APLUS_PROMPT_MODE: str = ""
+    # 品牌A+横幅（970×300）专用工作流：自定义 latent 约 3.2:1，参考图只进 PE、
+    # 不进入 497 图像条件（画面只出现品牌名，不出现商品）。
+    IMAGE_BRAND_BANNER_WORKFLOW_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "workflows", "qwen_image_workflow_banner.json"
+    )
+    # A+ 版式预设库（内置「官方推荐」；用户上传/收藏落 ai_image_layouts 表）
+    IMAGE_LAYOUT_PRESETS_PATH: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "prompts", "aplus_layouts.json"
+    )
+    IMAGE_MAX_LAYOUTS_PER_TASK: int = 8  # 单任务最多选几个版式（每个版式生成一张，对齐官方交互）
     IMAGE_POLL_INTERVAL: int = 2        # 轮询生成进度间隔（秒）：首轮立即查，之后按此间隔
     IMAGE_MAX_WAIT_MINUTES: int = 30    # 单任务最长等待时间（分钟），PE 首载 GGUF 可能 1~3 分钟
     IMAGE_MAX_CONCURRENT_TASKS: int = 2 # 单实例同时轮询的最大任务数（ComfyUI 串行队列，与生视频互让）
+    # 提交背压：ComfyUI 队列（running+pending）超过该深度时先等位，避免多用户并发把队列灌满
+    IMAGE_MAX_QUEUE_DEPTH: int = 8
+    IMAGE_QUEUE_WAIT_SECONDS: int = 60   # 单张提交前最长等待队列回落的秒数（12 张累计不超过整单超时）
+    # 生图优先于超分/视频入队（ComfyUI 无优先级接口，只能在入队前让路）：
+    # false = 完全退回 FIFO；等待上限保证视频不会被生图无限期饿死。
+    COMFY_IMAGE_PRIORITY: bool = True
+    COMFY_IMAGE_PRIORITY_WAIT_SECONDS: int = 180
 
     # 生图中转站：Nano Banana 2（gemini-3.1-flash-image，OpenAI 兼容 /chat/completions）
     IMAGE_RELAY_API_BASE: str = ""
@@ -187,10 +217,49 @@ class Settings(BaseSettings):
             os.path.join(os.path.dirname(__file__), ".env"),
             os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
         ],
-        "env_file_encoding": "utf-8",
+        # 必须用 utf-8-sig：.env 被记事本/Excel 编辑后常带 UTF-8 BOM，
+        # 用 "utf-8" 读会把首行键名变成 "\ufeffPORT"，导致该键静默失效
+        # 回落到默认值（2026-11-03 实测：PORT=8002 读不到，后端起在 8000，
+        # 前端 dev 代理指向 8002 → 登录全部失败）。utf-8-sig 对无 BOM 文件同样适用。
+        "env_file_encoding": "utf-8-sig",
         "extra": "ignore",
     }
 
 
+_ENV_WARNED = False
+
+
+def _warn_env_port_mismatch(settings: "Settings") -> None:
+    """显式校验 .env 里的 PORT 是否真的生效（只提示一次）
+
+    背景：.env 被 PowerShell Set-Content / 记事本等工具重复写入 BOM 时，
+    首行键名会变成 "\\ufeff\\ufeffPORT"，pydantic 的 utf-8-sig 只能去掉一个 BOM，
+    剩下的那个让该键静默失效并回落到默认值 —— 表现为「配置写 8002，后端起在 8000」。
+    这里把这种无声错配变成一条显式告警。
+    """
+    global _ENV_WARNED
+    if _ENV_WARNED:
+        return
+    _ENV_WARNED = True
+    try:
+        import re as _re
+
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if not os.path.isfile(env_path):
+            return
+        with open(env_path, "rb") as fp:
+            text = fp.read().decode("utf-8", "ignore").lstrip("\ufeff")
+        m = _re.search(r"^\s*PORT\s*=\s*(\d+)", text, _re.M)
+        if m and int(m.group(1)) != settings.PORT:
+            print(
+                f"⚠ backend/.env 中 PORT={m.group(1)}，但实际生效 {settings.PORT}；"
+                f"该文件可能带重复 BOM 或编码异常，请用「UTF-8 无 BOM」保存后重启"
+            )
+    except Exception:
+        pass
+
+
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    _warn_env_port_mismatch(settings)
+    return settings

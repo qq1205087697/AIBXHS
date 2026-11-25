@@ -6,12 +6,14 @@ from sqlalchemy import func
 import time
 from database.database import get_db
 from models.data_warning import DataWarning
+from dependencies import PermissionChecker
+from models.user import User
 
 router = APIRouter(prefix="/data-warnings", tags=["data-warnings"])
 
 
 @router.get("/stores", response_model=List[str])
-async def get_stores(db: Session = Depends(get_db)):
+async def get_stores(db: Session = Depends(get_db), current_user: User = Depends(PermissionChecker("data_alert:view"))):
     """获取所有店铺名称"""
     try:
         stores = db.query(DataWarning.store).distinct().all()
@@ -25,7 +27,8 @@ async def get_data_warnings(
     stores: Optional[str] = Query(None),
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("data_alert:view"))
 ):
     """获取预警数据"""
     try:
@@ -97,7 +100,8 @@ async def get_data_warnings(
 async def get_daily_summary(
     stores: Optional[List[str]] = Query(None),
     date: Optional[date] = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(PermissionChecker("data_alert:view"))
 ):
     """获取指定日期的每日汇总数据"""
     try:

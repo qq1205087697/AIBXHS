@@ -26,6 +26,7 @@ import {
   Popconfirm,
   Popover,
   Checkbox,
+  Switch,
   Divider,
   Pagination,
   Radio,
@@ -55,9 +56,11 @@ import {
   Pin,
   PinOff,
   Lock,
+  ShoppingCart,
 } from "lucide-react";
 import { UploadOutlined, DownloadOutlined } from "@ant-design/icons";
 import { inventoryApi, localInventoryApi, tagsApi } from "../api";
+import GradeBadge, { GRADE_LABEL, GRADE_ORDER } from "../components/GradeBadge";
 import { useTheme } from "../contexts/ThemeContext";
 import { useAuth } from "../contexts/AuthContext";
 import { useResponsive } from "../hooks/useResponsive";
@@ -69,8 +72,13 @@ interface OverviewData {
   red_count: number;
   yellow_count: number;
   green_count: number;
+  /** 有销量但产品库未收录的行数（随当前筛选变化） */
+  missing_product_count?: number;
+  /** 未收录按问题类型分组计数 */
+  missing_by_type?: Record<string, number>;
   snapshot_date: string;
   latest_updated_at?: string | null;
+  imported_at?: string | null;
   stockout_top10: StockoutItem[];
   overstock_top10: OverstockItem[];
 }
@@ -133,6 +141,18 @@ interface InventoryItem {
   replenishment_status: string;
   summary_flag: string;
   local_inventory?: number;
+  /** 海外仓可售库存（飞书多维表同步，仅主行有值） */
+  overseas_inventory?: number;
+  /** 海外仓最大库龄（天） */
+  overseas_max_age?: number | null;
+  /** 产品库状态（仅「未收录」视图有值；全部视图为空） */
+  product_lib_status?: string;
+  /** 问题类型：疑似缺平台SKU映射 / 疑似未建档 / 品名歧义待确认 */
+  product_lib_issue?: string;
+  /** 建议动作 */
+  product_lib_action?: string;
+  /** 30 天销量（用于未收录视图排序/展示） */
+  sales_30d?: number;
   inspection_quantity?: number;
   suggest_qty?: number;
   replenishment_reason?: string;
@@ -145,6 +165,12 @@ interface InventoryItem {
   force_replenish?: number;
   filter_status?: string;
   tag_locked?: number;
+  /** 月销量等级（S/A/B/C/D/E，等级池每月 3 号按上月销量定版；父行=合并口径） */
+  grade?: string | null;
+  /** 等级对应的行级月销量 */
+  monthly_sales?: number | null;
+  /** 等级销量口径：product_sales（自然月精确）/ fallback_30d（30天折算）/ no_data */
+  sales_source?: string | null;
 }
 
 interface InboundDetail {
@@ -162,7 +188,19 @@ interface LocalInventorySummary {
   latest_batch_date: string | null;
 }
 
+/** 海外仓同步结果汇总（/restock/overseas-summary） */
+interface OverseasInventorySummary {
+  total_sku: number;
+  total_qty: number;
+  latest_record_date: string | null;
+  last_synced_at: string | null;
+}
+
 // ==================== Helper Functions ====================
+
+/** ISO 时间字符串 → `YYYY-MM-DD HH:mm`；无值返回空串 */
+const formatMinute = (v?: string | null): string =>
+  (v || "").replace("T", " ").slice(0, 16);
 
 const getDaysSupplyColor = (days: number): string => {
   if (days <= 30) return "#cf1322";
@@ -535,13 +573,26 @@ const InventoryBot: React.FC = () => {
   const [importLoading, setImportLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [syncingFeishu, setSyncingFeishu] = useState(false);
-  const [syncButtonLabel, setSyncButtonLabel] = useState("同步FBA在途");
   const [syncProgress, setSyncProgress] = useState(0);
   const [syncStep, setSyncStep] = useState("");
+  // --- 海外仓同步状态（飞书多维表 → 主行） ---
+  const [syncingOverseas, setSyncingOverseas] = useState(false);
+  const [overseasProgress, setOverseasProgress] = useState(0);
+  const overseasPollingRef = useRef(false); // 是否已有一条轮询链在跑，避免并发轮询
+  const overseasMountedRef = useRef(true); // 组件是否仍然挂载，卸载后停止轮询
 
   // --- 补货计算状态（跨页面持久化） ---
   const [calculating, setCalculating] = useState(false);
   const [calcButtonLabel, setCalcButtonLabel] = useState("重新计算");
+  const [autoReplenishLoading, setAutoReplenishLoading] = useState(false);
+  // 自动补货弹窗：可见分组多选 + 增量跳过开关 + 预检统计
+  const [autoPreviewOpen, setAutoPreviewOpen] = useState(false);
+  const [autoPreview, setAutoPreview] = useState<any>(null);
+  const [autoSelectedGroups, setAutoSelectedGroups] = useState<number[]>([]);
+  const [autoSkipExisting, setAutoSkipExisting] = useState(true);
+  const [autoPreviewLoading, setAutoPreviewLoading] = useState(false);
+  const [autoPreviewError, setAutoPreviewError] = useState<string>("");
+  const autoPreviewReqRef = useRef(0);
 
   // --- Export states ---
   const [exportModalVisible, setExportModalVisible] = useState(false);
@@ -578,13 +629,18 @@ const InventoryBot: React.FC = () => {
     { label: "在途", value: "fba_inbound" },
     { label: "查验货件数量", value: "inspection_quantity" },
     { label: "本地仓库存", value: "local_inventory" },
+    { label: "海外仓库存", value: "overseas_inventory" },
     { label: "总库存", value: "total_stock" },
-    { label: "毛利率", value: "gross_margin" },
+    { label: "60天毛利率", value: "gross_margin" },
     { label: "30天退货率", value: "return_rate_30d" },
     { label: "60天退货率", value: "return_rate_60d" },
     { label: "日均销量", value: "daily_sales" },
     { label: "7天销量", value: "sales_7d" },
     { label: "14天销量", value: "sales_14d" },
+    { label: "30天销量", value: "sales_30d" },
+    { label: "产品库状态", value: "product_lib_status" },
+    { label: "问题类型", value: "product_lib_issue" },
+    { label: "建议动作", value: "product_lib_action" },
     { label: "7日日均销量", value: "daily_avg_7d" },
     { label: "14日日均销量", value: "daily_avg_14d" },
     { label: "可售天数", value: "days_of_supply" },
@@ -598,6 +654,8 @@ const InventoryBot: React.FC = () => {
     { label: "强制补货", value: "force_replenish" },
     { label: "人工锁定", value: "tag_locked" },
     { label: "过滤状态", value: "filter_status" },
+    { label: "等级", value: "grade" },
+    { label: "上月销量", value: "monthly_sales" },
   ];
 
   // --- Data states ---
@@ -639,6 +697,25 @@ const InventoryBot: React.FC = () => {
   const [holidayFilter, setHolidayFilter] =
     useState<string>("all");
 
+  // --- 产品库覆盖度（有销量但产品库无此产品） ---
+  const [productLibFilter, setProductLibFilter] = useState<"all" | "missing">(
+    "all",
+  );
+  const [salesWindow, setSalesWindow] = useState<number>(30);
+  const [minSales, setMinSales] = useState<number>(0);
+  const [excludeSummary, setExcludeSummary] = useState<boolean>(false);
+  // 列表请求用 ref 读取口径，避免改动十余处 fetchInventoryList 调用点
+  const productLibRef = useRef({
+    filter: "all" as "all" | "missing",
+    window: 30,
+    minSales: 0,
+    excludeSummary: false,
+  });
+
+  // --- 月销量等级筛选（服务端过滤，参数经 ref 传入 fetchInventoryList） ---
+  const [gradeFilter, setGradeFilter] = useState<string[]>([]);
+  const gradeFilterRef = useRef<string[]>([]);
+
   // --- Modal states ---
   const [inboundModalVisible, setInboundModalVisible] = useState(false);
   const [inboundDetails, setInboundDetails] = useState<InboundDetail[]>([]);
@@ -659,6 +736,10 @@ const InventoryBot: React.FC = () => {
   const [localSummary, setLocalSummary] =
     useState<LocalInventorySummary | null>(null);
   const [localLoading, setLocalLoading] = useState(false);
+
+  // --- Overseas inventory states（飞书海外仓同步结果，用于跨页面展示上次同步结果） ---
+  const [overseasSummary, setOverseasSummary] =
+    useState<OverseasInventorySummary | null>(null);
 
   // --- Inspection editing states ---
   const [editingInspectionId, setEditingInspectionId] = useState<number | null>(
@@ -694,16 +775,18 @@ const InventoryBot: React.FC = () => {
       { key: "asin", label: "ASIN" },
       { key: "sku", label: "SKU" },
       { key: "product_name", label: "品名" },
+      { key: "product_lib_status", label: "产品库状态" },
       { key: "account", label: "店铺" },
       { key: "country", label: "国家" },
       { key: "fba_stock", label: "FBA库存" },
       { key: "fba_inbound", label: "在途" },
       { key: "inspection_quantity", label: "查验货件" },
       { key: "total_stock", label: "总库存" },
-      { key: "gross_margin", label: "毛利率" },
+      { key: "gross_margin", label: "60天毛利率" },
       { key: "return_rate_30d", label: "30天退货率" },
       { key: "return_rate_60d", label: "60天退货率" },
       { key: "local_inventory", label: "本地仓" },
+      { key: "overseas_inventory", label: "海外仓" },
       { key: "daily_sales", label: "日均销量" },
       { key: "sales_7d", label: "7天销量" },
       { key: "sales_14d", label: "14天销量" },
@@ -754,6 +837,11 @@ const InventoryBot: React.FC = () => {
       if (hf) params.holiday_filter = hf;
       if (ac && ac.length > 0) params.account = ac;
       if (co && co.length > 0) params.country = co;
+      // 产品库未收录计数与列表同口径：带上当前销量窗口/阈值/汇总行口径
+      const lib = productLibRef.current;
+      params.sales_window = lib.window;
+      params.min_sales = lib.minSales;
+      params.exclude_summary = lib.excludeSummary;
       const response = await inventoryApi.getOverview(params);
       const data = response.data?.data || response.data;
       if (data) {
@@ -778,6 +866,19 @@ const InventoryBot: React.FC = () => {
       console.error("获取本地仓库存汇总失败:", error);
     } finally {
       setLocalLoading(false);
+    }
+  }, []);
+
+  const fetchOverseasSummary = useCallback(async () => {
+    try {
+      const response = await inventoryApi.getOverseasSummary();
+      const data = response.data?.data || response.data;
+      if (data) {
+        setOverseasSummary(data);
+      }
+    } catch (error) {
+      // 未配置海外仓表时接口可能不可用，静默降级，不打扰用户
+      console.error("获取海外仓汇总失败:", error);
     }
   }, []);
 
@@ -810,12 +911,29 @@ const InventoryBot: React.FC = () => {
         // 始终显式传 holiday_filter（含 "all"）：后端据此区分「全部=不过滤」与「未指定=按 KEEP 过滤」
         if (holiday) params.holiday_filter = holiday;
 
+        // 产品库覆盖度口径（由 ref 提供，避免改动十余处调用点）
+        const lib = productLibRef.current;
+        if (lib.filter === "missing") {
+          params.product_lib_filter = "missing";
+        }
+        params.sales_window = lib.window;
+        params.min_sales = lib.minSales;
+        params.exclude_summary = lib.excludeSummary;
+        // 月销量等级筛选（当前期等级池，行级 (asin, account) 匹配）
+        if (gradeFilterRef.current.length > 0) {
+          params.grade = gradeFilterRef.current.join(",");
+        }
+
         console.log("发送请求参数:", params);
 
         const response = await inventoryApi.search(params);
         const data = response.data?.data || response.data;
         console.log("API响应数据:", data);
         if (data) {
+          // 覆盖度计算失败时后端降级为「空视图 + 错误提示」，不让整页 500
+          if (data.product_lib_error) {
+            messageApi.warning(data.product_lib_error);
+          }
           // 使用后端返回的数据和总数（后端已处理共享库存过滤和分页）
           const items = data.items || data.list || [];
           setInventoryList(Array.isArray(items) ? items : []);
@@ -1011,6 +1129,178 @@ const InventoryBot: React.FC = () => {
       sortOrder,
       holidayFilter,
     );
+  };
+
+  /** 切换「有销量但产品库无此产品」视图（统计卡 / 筛选栏共用） */
+  const applyProductLibFilter = (
+    filter: "all" | "missing",
+    opts?: { window?: number; minSales?: number; excludeSummary?: boolean },
+  ) => {
+    const next = {
+      filter,
+      window: opts?.window ?? salesWindow,
+      minSales: opts?.minSales ?? minSales,
+      excludeSummary: opts?.excludeSummary ?? excludeSummary,
+    };
+    // 先写 ref：fetchInventoryList / fetchOverview 直接从 ref 读口径
+    productLibRef.current = next;
+
+    setProductLibFilter(filter);
+    if (opts?.window !== undefined) setSalesWindow(opts.window);
+    if (opts?.minSales !== undefined) setMinSales(opts.minSales);
+    if (opts?.excludeSummary !== undefined) setExcludeSummary(opts.excludeSummary);
+    setPagination((prev) => ({ ...prev, current: 1 }));
+
+    // 未收录视图默认按 30 天销量降序：让高销量缺档排最前（该列是真实快照列，可排序）
+    const nextSortField = filter === "missing" ? "sales_30d" : sortField;
+    const nextSortOrder = filter === "missing" ? "desc" : sortOrder;
+    if (filter === "missing") {
+      setSortField("sales_30d");
+      setSortOrder("desc");
+    }
+
+    fetchInventoryList(
+      1,
+      pagination.pageSize,
+      searchText,
+      tableRiskFilter,
+      accountFilter,
+      countryFilter,
+      nextSortField,
+      nextSortOrder,
+      holidayFilter,
+    );
+    fetchOverview();
+  };
+
+  /** 自动补货预检（只读）：打开弹窗 / 切换增量开关时调用；勾选变化走本地汇总，不再请求后端 */
+  const loadAutoPreview = async (groupIds: number[] | null, skipExisting: boolean): Promise<void> => {
+    const reqId = ++autoPreviewReqRef.current;
+    setAutoPreviewLoading(true);
+    setAutoPreviewError("");
+    try {
+      const res = await inventoryApi.autoReplenishmentPreview({
+        group_ids: groupIds,
+        skip_existing: skipExisting,
+      });
+      if (reqId !== autoPreviewReqRef.current) return; // 丢弃过期响应
+      const d = res.data?.data;
+      if (res.data?.success && d) {
+        setAutoPreview(d);
+        setAutoSelectedGroups(groupIds ?? (d.visible_groups || []).map((g: any) => g.id));
+      } else {
+        setAutoPreviewError(res.data?.detail || "预检失败");
+      }
+    } catch (e: any) {
+      if (reqId === autoPreviewReqRef.current) {
+        setAutoPreviewError(e?.response?.data?.detail || e?.message || "预检失败，请检查网络后重试");
+      }
+    } finally {
+      if (reqId === autoPreviewReqRef.current) setAutoPreviewLoading(false);
+    }
+  };
+
+  // 勾选变化纯本地汇总（零网络请求）：分组统计由预检一次性返回
+  const autoPreviewStats = useMemo(() => {
+    const all = (autoPreview?.visible_groups || []) as any[];
+    const picked = all.filter((g) => autoSelectedGroups.includes(g.id));
+    return {
+      allIds: all.map((g) => g.id) as number[],
+      orders: picked.length,
+      products: picked.reduce((s, g) => s + (g.products || 0), 0),
+      items: picked.reduce((s, g) => s + (g.items || 0), 0),
+      qty: picked.reduce((s, g) => s + (g.qty || 0), 0),
+    };
+  }, [autoPreview, autoSelectedGroups]);
+
+  // 静默预热自动补货预检：进页面 3 秒后后台跑一次填充服务端缓存，点开弹窗即秒开
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      inventoryApi.autoReplenishmentPreview({ skip_existing: true }).catch(() => {});
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const openAutoReplenish = (): void => {
+    setAutoPreviewOpen(true);
+    setAutoPreview(null);
+    setAutoSkipExisting(true);
+    void loadAutoPreview(null, true);
+  };
+
+  /** 自动补货生成：只补勾选分组；skip_existing 默认增量（跳过待审批/已审批单中已有产品） */
+  const submitAutoReplenish = async (force = false): Promise<void> => {
+    if (autoSelectedGroups.length === 0) {
+      messageApi.warning("请至少选择一个店铺分组");
+      return;
+    }
+    setAutoReplenishLoading(true);
+    try {
+      const res = await inventoryApi.autoReplenishment({
+        force,
+        group_ids: autoSelectedGroups,
+        skip_existing: autoSkipExisting,
+      });
+      const d = res.data?.data;
+      if (!res.data?.success || !d) {
+        messageApi.error(res.data?.detail || "自动补货失败");
+        return;
+      }
+      if (d.need_confirm) {
+        const nums = (d.existing_orders || []).map((o: any) => o.order_number).join("、");
+        Modal.confirm({
+          title: "该快照批次已生成过自动补货单",
+          content: `快照 ${d.snapshot_date} 已存在：${nums}。当前已关闭「跳过已存在产品」，仍要再补一批吗？`,
+          okText: "仍要生成",
+          cancelText: "取消",
+          onOk: () => submitAutoReplenish(true),
+        });
+        return;
+      }
+      setAutoPreviewOpen(false);
+      const orders: Array<{ id: number; order_number: string; group_name: string; item_count: number; total_qty: number }> =
+        d.orders || [];
+      const skippedCount = d.skipped_count || 0;
+      const existingSkipped = d.skipped_existing_count || 0;
+      Modal.success({
+        title: `自动补货完成（快照 ${d.snapshot_date}）`,
+        width: 560,
+        content: (
+          <div style={{ marginTop: 8, fontSize: 13 }}>
+            <div>
+              按店铺分组生成 <b>{orders.length}</b> 张补货单，状态待审批：
+            </div>
+            <div style={{ marginTop: 4 }}>
+              {orders.map((o) => (
+                <div key={o.id}>
+                  · {o.order_number}（{o.group_name}，{o.item_count} 条明细，{o.total_qty} 件）
+                </div>
+              ))}
+            </div>
+            {existingSkipped > 0 && (
+              <div style={{ color: "#666", marginTop: 6 }}>
+                已跳过 {existingSkipped} 行：产品已在待审批/已审批补货单中
+              </div>
+            )}
+            {skippedCount > 0 && (
+              <div style={{ color: "#fa8c16", marginTop: 6 }}>
+                ⚠ {skippedCount} 行匹配不到产品档案已跳过
+                {Array.isArray(d.skipped) && d.skipped.length > 0 &&
+                  `（如 ${d.skipped.slice(0, 5).map((s: any) => s.asin).join("、")}），请先在产品管理补建档`}
+              </div>
+            )}
+          </div>
+        ),
+        okText: "前往补货管理",
+        onOk: () => {
+          window.location.href = "/replenishment";
+        },
+      });
+    } catch (e: any) {
+      messageApi.error(e?.response?.data?.detail || e?.message || "自动补货失败");
+    } finally {
+      setAutoReplenishLoading(false);
+    }
   };
 
   const handleImportData = async () => {
@@ -1234,6 +1524,66 @@ const InventoryBot: React.FC = () => {
       ),
     [displayList, selectedRowKeys],
   );
+
+  /** 批量标记（节日 / 停售）——与单行「标记」同一接口，后端按 snapshot_ids 批量写入并展开汇总行子行 */
+  const batchMark = () => {
+    const recs = selectedRecords;
+    if (!recs.length) return;
+    // 与单行「标记」一致：默认圣诞，可选万圣/跨年/其他/停售
+    let markType = "圣诞";
+    Modal.confirm({
+      title: `批量标记（已选 ${recs.length} 行）`,
+      content: (
+        <div>
+          <p style={{ marginBottom: 6 }}>
+            标记后这些行将从断货风险TOP10、冗余库存TOP10及数量统计中排除。
+          </p>
+          <Radio.Group
+            defaultValue="圣诞"
+            onChange={(e) => (markType = e.target.value)}
+          >
+            <Radio.Button value="圣诞">圣诞</Radio.Button>
+            <Radio.Button value="万圣">万圣</Radio.Button>
+            <Radio.Button value="跨年">跨年</Radio.Button>
+            <Radio.Button value="其他">其他</Radio.Button>
+            <Radio.Button value="__discontinued__">停售</Radio.Button>
+          </Radio.Group>
+          <p
+            style={{
+              marginTop: 6,
+              marginBottom: 0,
+              color: "#999",
+              fontSize: 12,
+            }}
+          >
+            已标有其他节日的行会被覆盖为所选节日；若本行是汇总行，会一并作用于其共享库存子行。
+          </p>
+        </div>
+      ),
+      okText: "确认标记",
+      cancelText: "取消",
+      onOk: async () => {
+        setBatchLoading(true);
+        try {
+          const ids = recs.map((r: any) => r.id);
+          if (markType === "__discontinued__") {
+            await inventoryApi.markProductStatus(ids, "discontinued");
+            messageApi.success(`已批量标记停售 ${ids.length} 行`);
+          } else {
+            await inventoryApi.markProductStatus(ids, "holiday", markType);
+            messageApi.success(`已批量标记为${markType} ${ids.length} 行`);
+          }
+          setSelectedRowKeys([]);
+          refreshInventory();
+        } catch (error: any) {
+          messageApi.error(error?.response?.data?.detail || "批量标记失败");
+          return Promise.reject();
+        } finally {
+          setBatchLoading(false);
+        }
+      },
+    });
+  };
 
   /** 批量取消标记（停售/节日）——后端按 snapshot_ids 批量清并自动覆盖汇总行子行 */
   const batchClearMark = () => {
@@ -1501,6 +1851,13 @@ const InventoryBot: React.FC = () => {
             : undefined,
         account: accountFilter.length > 0 ? accountFilter : undefined,
         country: countryFilter.length > 0 ? countryFilter : undefined,
+        // 导出必须与列表同口径（含节日筛选与产品库视图参数）
+        holiday_filter: holidayFilter || undefined,
+        product_lib_filter:
+          productLibFilter === "missing" ? "missing" : undefined,
+        sales_window: productLibRef.current.window,
+        min_sales: productLibRef.current.minSales,
+        exclude_summary: productLibRef.current.excludeSummary,
         fields:
           selectedExportFields.length > 0 ? selectedExportFields : undefined,
       });
@@ -1582,10 +1939,9 @@ const InventoryBot: React.FC = () => {
       saveSyncStatusToStorage(status);
 
       if (status?.is_running) {
-        // 更新按钮文字显示进度
+        // 进度 → 同步按钮组（底部进度线 + 百分比/步骤）
         const step = status.step || "";
         const progress = status.progress || 0;
-        setSyncButtonLabel(`同步中 ${progress}% - ${step}`);
         setSyncProgress(progress);
         setSyncStep(step);
         // 继续轮询
@@ -1593,7 +1949,6 @@ const InventoryBot: React.FC = () => {
       } else {
         // 同步完成
         setSyncingFeishu(false);
-        setSyncButtonLabel("同步FBA在途");
         setSyncProgress(0);
         setSyncStep("");
         // 清除 localStorage
@@ -1607,12 +1962,150 @@ const InventoryBot: React.FC = () => {
       }
     } catch (error) {
       setSyncingFeishu(false);
-      setSyncButtonLabel("同步FBA在途");
       setSyncProgress(0);
       setSyncStep("");
       messageApi.error("获取同步状态失败");
     }
   };
+
+  // ========== 海外仓同步（飞书多维表 → 数据库 → 主行） ==========
+  // 与 FBA 同步一致：任务在服务端后台线程跑，前端只轮询状态；
+  // 进行中的状态写入 localStorage，切页/刷新回来后自动恢复并继续轮询。
+
+  const OVERSEAS_SYNC_STATUS_KEY = "overseasSyncStatus";
+
+  const saveOverseasStatusToStorage = (status: any) => {
+    localStorage.setItem(
+      OVERSEAS_SYNC_STATUS_KEY,
+      JSON.stringify({ ...status, savedAt: Date.now() }),
+    );
+  };
+
+  const loadOverseasStatusFromStorage = () => {
+    const saved = localStorage.getItem(OVERSEAS_SYNC_STATUS_KEY);
+    if (!saved) return null;
+    try {
+      const status = JSON.parse(saved);
+      // 与 FBA 同步一致的 30 分钟有效期，避免恢复早已结束的任务
+      if (Date.now() - status.savedAt < 30 * 60 * 1000) return status;
+      localStorage.removeItem(OVERSEAS_SYNC_STATUS_KEY);
+    } catch (e) {
+      console.error("解析海外仓同步状态失败", e);
+    }
+    return null;
+  };
+
+  const refreshAfterOverseasSync = () => {
+    fetchInventoryList(
+      pagination.current || 1,
+      pagination.pageSize,
+      searchText,
+      tableRiskFilter,
+      accountFilter,
+      countryFilter,
+      sortField,
+      sortOrder,
+      holidayFilter,
+    );
+    fetchOverseasSummary();
+  };
+
+  const stopOverseasPolling = () => {
+    overseasPollingRef.current = false;
+    setSyncingOverseas(false);
+    setOverseasProgress(0);
+    localStorage.removeItem(OVERSEAS_SYNC_STATUS_KEY);
+  };
+
+  const pollOverseasStatus = async (attempt = 0) => {
+    // 组件已卸载（切走页面）就停掉本条轮询链，回来时靠 localStorage 恢复，
+    // 避免离开页面后仍持续请求后端
+    if (!overseasMountedRef.current) {
+      overseasPollingRef.current = false;
+      return;
+    }
+    // 最长轮询 20 分钟（与后端定时任务的等待上限一致），避免异常时无限轮询
+    const MAX_POLL = 800;
+    if (attempt > MAX_POLL) {
+      stopOverseasPolling();
+      messageApi.warning("海外仓同步耗时过长，已停止轮询，请稍后刷新查看结果");
+      return;
+    }
+    try {
+      const res = await inventoryApi.getSyncOverseasStatus();
+      const status = res.data?.data;
+      if (status?.is_running) {
+        saveOverseasStatusToStorage(status);
+        setSyncingOverseas(true);
+        setOverseasProgress(status.progress || 0);
+        setTimeout(() => pollOverseasStatus(attempt + 1), 1500);
+        return;
+      }
+      stopOverseasPolling();
+      if (status?.error) {
+        messageApi.error(`海外仓同步失败: ${status.error}`);
+      } else if (status?.skipped) {
+        // 源表数据比库中更旧（上游回退/补数），后端主动跳过，不应提示成功
+        messageApi.warning(status.step || "本次同步已跳过");
+      } else if (status?.progress === 100) {
+        messageApi.success(
+          status.step || `海外仓同步完成，写入 ${status.updated || 0} 个 SKU`,
+        );
+        refreshAfterOverseasSync();
+      }
+    } catch (error) {
+      stopOverseasPolling();
+      messageApi.error("获取海外仓同步状态失败");
+    }
+  };
+
+  /** 启动一条轮询链（同一时刻只允许一条，避免手动触发与恢复触发并发轮询） */
+  const startOverseasPolling = () => {
+    if (overseasPollingRef.current) return;
+    overseasPollingRef.current = true;
+    pollOverseasStatus(0);
+  };
+
+  const handleSyncOverseas = async () => {
+    setSyncingOverseas(true);
+    setOverseasProgress(0);
+    try {
+      const res = await inventoryApi.syncOverseasInventory();
+      const data = res.data?.data;
+      if (data?.started) {
+        messageApi.success("海外仓同步任务已启动，请稍候...");
+        startOverseasPolling();
+      } else if (data?.reason === "running") {
+        // 已在运行（如 8:00 定时任务 / 其他标签页触发的任务）→ 接入轮询，不重复启动
+        messageApi.info("海外仓同步任务正在运行中，已接入进度显示");
+        startOverseasPolling();
+      } else {
+        messageApi.warning(data?.message || "海外仓同步未启动");
+        stopOverseasPolling();
+      }
+    } catch (error) {
+      messageApi.error("启动海外仓同步失败");
+      stopOverseasPolling();
+    }
+  };
+
+  // 进入页面时：恢复「进行中」的海外仓任务（含 8:00 定时任务）+ 拉取上次同步结果
+  useEffect(() => {
+    overseasMountedRef.current = true;
+    const saved = loadOverseasStatusFromStorage();
+    if (saved?.is_running) {
+      setSyncingOverseas(true);
+      setOverseasProgress(saved.progress || 0);
+      startOverseasPolling();
+    }
+    fetchOverseasSummary();
+    return () => {
+      // 切走页面：停掉轮询链（任务本身在服务端继续跑），回来时由 localStorage 恢复
+      overseasMountedRef.current = false;
+      overseasPollingRef.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 页面加载时检查是否有保存的同步状态
   useEffect(() => {
@@ -1620,9 +2113,6 @@ const InventoryBot: React.FC = () => {
     if (savedStatus && savedStatus.is_running) {
       // 恢复同步状态
       setSyncingFeishu(true);
-      setSyncButtonLabel(
-        `同步中 ${savedStatus.progress || 0}% - ${savedStatus.step || ""}`,
-      );
       setSyncProgress(savedStatus.progress || 0);
       setSyncStep(savedStatus.step || "");
       // 继续轮询
@@ -1806,6 +2296,85 @@ const InventoryBot: React.FC = () => {
       ),
     },
     {
+      // 月销量等级（等级池，每月 3 号按上月销量更新）：紧贴产品身份信息便于查看。
+      // 父合并行=合并口径等级，子行=行级等级；筛选入口在顶部筛选栏「筛选等级」。
+      title: "等级",
+      dataIndex: "grade",
+      key: "grade",
+      width: 64,
+      render: (_: string | null | undefined, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") {
+          return <span style={{ color: "#999" }}>-</span>;
+        }
+        if (record.grade == null) {
+          return (
+            <GradeBadge
+              grade={null}
+              emptyTip="等级池未生成或该产品上月无数据（每月 3 号按上月销量更新）"
+            />
+          );
+        }
+        const tip = [
+          `月销 ${record.monthly_sales ?? 0} 件 · ${
+            record.sales_source === "fallback_30d"
+              ? "按30天销量折算"
+              : record.sales_source === "no_data"
+                ? "无销量记录"
+                : "自然月精确"
+          }`,
+          "每月 3 号按上月销量更新 · 跨页筛选见「等级池」页",
+        ].join("\n");
+        return (
+          <Tooltip title={<span style={{ whiteSpace: "pre-line" }}>{tip}</span>}>
+            <span>
+              <GradeBadge grade={record.grade} />
+            </span>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      // 计算列（后端按 platform_products 映射判定）：不设 sorter，避免落到快照列排序。
+      // 三态：未收录（带问题类型 Tag）/ 已收录（中性文字）/ 空（未参与判定，如无销量行）
+      title: "产品库状态",
+      dataIndex: "product_lib_status",
+      key: "product_lib_status",
+      width: 135,
+      render: (val: string | undefined, record: InventoryItem) => {
+        if (!val) {
+          return <span style={{ color: "#d9d9d9" }}>-</span>;
+        }
+        if (val === "已收录") {
+          return (
+            <Tooltip title="该产品在产品库（products / platform_products）中已有记录">
+              <Tag color="green" style={{ marginRight: 0 }}>
+                已收录
+              </Tag>
+            </Tooltip>
+          );
+        }
+        const issue = record.product_lib_issue || "";
+        const color =
+          issue === "疑似未建档"
+            ? "red"
+            : issue === "品名歧义待确认"
+              ? "gold"
+              : "orange";
+        const tip = [
+          `问题：${issue || "未收录"}`,
+          `建议：${record.product_lib_action || "-"}`,
+          "处理入口：产品管理页按品名/平台SKU搜索",
+        ].join("\n");
+        return (
+          <Tooltip title={<span style={{ whiteSpace: "pre-line" }}>{tip}</span>}>
+            <Tag color={color} style={{ marginRight: 0 }}>
+              {issue || "未收录"}
+            </Tag>
+          </Tooltip>
+        );
+      },
+    },
+    {
       title: "店铺",
       dataIndex: "account",
       key: "account",
@@ -1923,7 +2492,7 @@ const InventoryBot: React.FC = () => {
                 </tr>
                 <tr>
                   <td style={{ padding: "4px 12px 4px 0", color: "#666" }}>
-                    毛利率
+                    60天毛利率
                   </td>
                   <td
                     style={{
@@ -2114,10 +2683,10 @@ const InventoryBot: React.FC = () => {
       },
     },
     {
-      title: "毛利率",
+      title: "60天毛利率",
       dataIndex: "gross_margin",
       key: "gross_margin",
-      width: 90,
+      width: 110,
       align: "right",
       sorter: true,
       sortOrder:
@@ -2144,7 +2713,7 @@ const InventoryBot: React.FC = () => {
       title: "30天退货率",
       dataIndex: "return_rate_30d",
       key: "return_rate_30d",
-      width: 100,
+      width: 110,
       align: "right",
       sorter: true,
       sortOrder:
@@ -2169,7 +2738,7 @@ const InventoryBot: React.FC = () => {
       title: "60天退货率",
       dataIndex: "return_rate_60d",
       key: "return_rate_60d",
-      width: 100,
+      width: 110,
       align: "right",
       sorter: true,
       sortOrder:
@@ -2214,6 +2783,49 @@ const InventoryBot: React.FC = () => {
               <span
                 style={{
                   color: "#722ed1",
+                  fontWeight: 600,
+                  fontSize: 13,
+                }}
+              >
+                {formatNumber(qty)}
+              </span>
+            </Tooltip>
+          );
+        }
+        return <span style={{ color: "#ccc" }}>0</span>;
+      },
+    },
+    {
+      title: "海外仓",
+      dataIndex: "overseas_inventory",
+      key: "overseas_inventory",
+      width: 95,
+      align: "right",
+      sorter: true,
+      sortOrder:
+        sortField === "overseas_inventory"
+          ? sortOrder === "asc"
+            ? "ascend"
+            : "descend"
+          : undefined,
+      render: (val: number | undefined, record: InventoryItem) => {
+        if (record.summary_flag === "共享库存") {
+          return <span style={{ color: "#999" }}>-</span>;
+        }
+        const qty = val || 0;
+        const age = record.overseas_max_age;
+        const tip = [
+          "来自飞书多维表「海外仓」每日快照",
+          age !== null && age !== undefined ? `最大库龄：${age} 天` : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        if (qty > 0) {
+          return (
+            <Tooltip title={<span style={{ whiteSpace: "pre-line" }}>{tip}</span>}>
+              <span
+                style={{
+                  color: "#08979c",
                   fontWeight: 600,
                   fontSize: 13,
                 }}
@@ -2415,16 +3027,16 @@ const InventoryBot: React.FC = () => {
             : "descend"
           : undefined,
       render: (val: number) => {
-        if (val == null || val === 0)
-          return <span style={{ color: "#d9d9d9" }}>-</span>;
+        // 库龄缺失/0 统一显示 0（原先用 "-" 占位，用户要求改为 0）
+        const n = typeof val === "number" && !Number.isNaN(val) ? val : 0;
         return (
           <span
             style={{
-              color: val > 0 ? "#cf1322" : undefined,
-              fontWeight: val > 0 ? 600 : undefined,
+              color: n > 0 ? "#cf1322" : undefined,
+              fontWeight: n > 0 ? 600 : undefined,
             }}
           >
-            {val.toLocaleString()}
+            {n.toLocaleString()}
           </span>
         );
       },
@@ -2533,6 +3145,8 @@ const InventoryBot: React.FC = () => {
           return null;
         }
         const isSummary = record.summary_flag === "是";
+        // 在途为 0（无货件明细）时「在途详情」不可点，只给提示
+        const noInbound = (record.fba_inbound || 0) <= 0;
         const confirmMessage = (action: string) => {
           let msg = `确定要${action}该商品吗？`;
           if (isSummary) {
@@ -2542,12 +3156,15 @@ const InventoryBot: React.FC = () => {
         };
         return (
           <Space size={4} style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
-            <Tooltip title={(record.fba_inbound || 0) <= 0 ? "无在途货件" : ""}>
+            {/* 与线上版本保持一字不差的实现：Tooltip + disabled（541f01e）。
+                不要额外加 pointer-events:none / span 包一层 —— 那会让「置灰后鼠标悬浮没有高亮反馈」，
+                与线上观感不一致。 */}
+            <Tooltip title={noInbound ? "无在途货件" : ""}>
               <Button
                 type="link"
                 size="small"
                 icon={<Truck size={14} />}
-                disabled={(record.fba_inbound || 0) <= 0}
+                disabled={noInbound}
                 onClick={() => handleViewInbound(record.asin, record.account)}
               >
                 在途详情
@@ -2984,6 +3601,9 @@ const InventoryBot: React.FC = () => {
   // ==================== Render ====================
 
   const snapshotDate = overviewData?.snapshot_date || "";
+  const importedAt = formatMinute(overviewData?.imported_at);
+  const importedTime = importedAt ? importedAt.slice(11) : ""; // HH:mm
+  const overseasSyncedAt = formatMinute(overseasSummary?.last_synced_at);
 
   // 按大区分组：国家筛选面板（级联）
   const countryGroups = useMemo<CascaderGroup[]>(
@@ -3143,10 +3763,36 @@ const InventoryBot: React.FC = () => {
                 borderRadius: 4,
                 padding: "3px 10px",
               }}
-              title="数据日期为库存快照的业务日期"
+              title="数据日期为库存快照的业务日期；时间为该批次最后一次导入落库时刻（精确到分钟）"
             >
-              数据日期: <b>{snapshotDate}</b>
+              数据日期: <b>{snapshotDate}{importedTime ? ` ${importedTime}` : ""}</b>
             </span>
+          )}
+          {/* 海外仓上次同步结果：来自数据库，切页/重启后依然可见（每日 8:00 自动同步） */}
+          {overseasSummary && overseasSummary.total_sku > 0 && (
+            <Tooltip
+              title={
+                <span style={{ whiteSpace: "pre-line" }}>
+                  {`已同步 SKU：${overseasSummary.total_sku} 个\n可售合计：${overseasSummary.total_qty}\n源数据日期：${overseasSummary.latest_record_date || "-"}\n最后同步：${overseasSyncedAt || "-"}`}
+                </span>
+              }
+            >
+              <span
+                style={{
+                  color: "#08979c",
+                  fontSize: 13,
+                  background: "#e6fffb",
+                  border: "1px solid #b5f5ec",
+                  borderRadius: 4,
+                  padding: "3px 10px",
+                }}
+              >
+                海外仓: <b>{overseasSummary.total_sku}</b> 个 ·{" "}
+                {overseasSyncedAt
+                  ? overseasSyncedAt.slice(5)
+                  : (overseasSummary.latest_record_date?.slice(5) || "-")}
+              </span>
+            </Tooltip>
           )}
           <Button
             type="primary"
@@ -3160,6 +3806,14 @@ const InventoryBot: React.FC = () => {
             }}
           >
             {calcButtonLabel}
+          </Button>
+          <Button
+            icon={<ShoppingCart size={15} />}
+            loading={autoReplenishLoading}
+            onClick={openAutoReplenish}
+            style={{ color: currentTheme.primary, borderColor: currentTheme.primary }}
+          >
+            自动补货启动
           </Button>
           {localSummary && localSummary.total_sku > 0 && (
             <Popconfirm
@@ -3199,7 +3853,8 @@ const InventoryBot: React.FC = () => {
 
       {/* ===== 2. Statistics Overview Cards ===== */}
       <Spin spinning={overviewLoading}>
-        <Row gutter={16} style={{ marginBottom: 24 }}>
+        {/* inv-kpi-row：5 张 KPI 卡单行等分（样式见 index.css，宽屏 20%/窄屏 2 列） */}
+        <Row gutter={16} className="inv-kpi-row" style={{ marginBottom: 24 }}>
           <Col xs={12} sm={12} md={6}>
             <Card
               size="small"
@@ -3247,6 +3902,67 @@ const InventoryBot: React.FC = () => {
                   </div>
                 </div>
                 <BarChart3 size={32} color="#1890ff" style={{ opacity: 0.8 }} />
+              </div>
+            </Card>
+          </Col>
+          {/* 产品库未收录：有销量但产品库（products / platform_products）里找不到的行，点击即切换视图 */}
+          <Col xs={12} sm={12} md={6}>
+            <Card
+              size="small"
+              bordered={false}
+              style={{
+                borderRadius: 8,
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+                border:
+                  productLibFilter === "missing"
+                    ? "1px solid #fa8c16"
+                    : "1px solid #f0f0f0",
+                background:
+                  productLibFilter === "missing" ? "#fff7e6" : undefined,
+              }}
+              styles={{ body: { padding: "16px 20px" } }}
+              onClick={() =>
+                applyProductLibFilter(
+                  productLibFilter === "missing" ? "all" : "missing",
+                )
+              }
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = "#fa8c16";
+                e.currentTarget.style.boxShadow =
+                  "0 2px 8px rgba(250, 140, 22, 0.18)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor =
+                  productLibFilter === "missing" ? "#fa8c16" : "#f0f0f0";
+                e.currentTarget.style.boxShadow = "none";
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <div>
+                  <div
+                    style={{ fontSize: 12, color: "#8c8c8c", marginBottom: 4 }}
+                  >
+                    产品库未收录
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 28,
+                      fontWeight: 700,
+                      color: "#fa8c16",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {overviewData?.missing_product_count ?? 0}
+                  </div>
+                </div>
+                <Package size={32} color="#fa8c16" style={{ opacity: 0.8 }} />
               </div>
             </Card>
           </Col>
@@ -3943,7 +4659,7 @@ const InventoryBot: React.FC = () => {
                               borderRadius: 4,
                             }}
                           >
-                            {formatNumber(item.age_12_plus)}件
+                            {(item.age_12_plus ?? 0).toLocaleString()}件
                           </span>
                         </div>
                       </div>
@@ -3992,7 +4708,7 @@ const InventoryBot: React.FC = () => {
                                 12月以上:{" "}
                               </span>
                               <span style={{ color: "#262626" }}>
-                                {formatNumber(item.age_12_plus)}
+                                {(item.age_12_plus ?? 0).toLocaleString()}
                               </span>
                             </div>
                             <div>
@@ -4062,6 +4778,36 @@ const InventoryBot: React.FC = () => {
             groups={storeGroups}
             onChange={handleAccountFilterChange}
           />
+          <Tooltip title="按月销量等级筛选（S 爆款 / A 热销 / B 稳定动销 / C 缓慢动销 / E 微量动销 / D 未动销）；等级池每月 3 号按上月销量更新">
+            <Select
+              mode="multiple"
+              allowClear
+              maxTagCount={2}
+              placeholder="筛选等级"
+              style={{ minWidth: 150 }}
+              value={gradeFilter}
+              options={GRADE_ORDER.map((g) => ({
+                value: g,
+                label: `${g} · ${GRADE_LABEL[g]}`,
+              }))}
+              onChange={(v) => {
+                gradeFilterRef.current = v;
+                setGradeFilter(v);
+                setPagination((prev) => ({ ...prev, current: 1 }));
+                fetchInventoryList(
+                  1,
+                  pagination.pageSize,
+                  searchText,
+                  tableRiskFilter,
+                  accountFilter,
+                  countryFilter,
+                  sortField,
+                  sortOrder,
+                  holidayFilter,
+                );
+              }}
+            />
+          </Tooltip>
           <Tooltip title="标记说明：标记为「节日」或「停售」的商品，将从断货风险TOP10、冗余库存TOP10及数量统计中自动排除。">
             <Select
               placeholder="产品状态"
@@ -4095,32 +4841,63 @@ const InventoryBot: React.FC = () => {
               ]}
             />
           </Tooltip>
-          <Button
-            icon={<RefreshCw size={16} />}
-            onClick={handleSyncFeishu}
-            loading={syncingFeishu}
-          >
-            {syncButtonLabel}
-          </Button>
-          {/* 批量操作：作用于表格勾选的行（表头勾选=全选本页） */}
-          <Button
-            danger
-            disabled={!selectedRecords.length}
-            loading={batchLoading}
-            onClick={batchClearMark}
-          >
-            批量取消标记
-            {selectedRecords.length ? `(${selectedRecords.length})` : ""}
-          </Button>
-          <Button
-            danger
-            disabled={!selectedRecords.length}
-            loading={batchLoading}
-            onClick={batchClearForce}
-          >
-            批量取消强制补货
-            {selectedRecords.length ? `(${selectedRecords.length})` : ""}
-          </Button>
+          {/* 产品库视图：有销量但产品库（products + platform_products）里找不到的行 */}
+          <Tooltip title="是否已收录只看 platform_products 的 SKU / ASIN 映射；products 自身的 asin/sku/product_code 与库存表对不上，不参与判定。">
+            <Select
+              style={{ width: 165 }}
+              value={productLibFilter}
+              onChange={(value: "all" | "missing") =>
+                applyProductLibFilter(value)
+              }
+              options={[
+                { label: "产品库: 全部", value: "all" },
+                { label: "产品库: 仅未收录", value: "missing" },
+              ]}
+            />
+          </Tooltip>
+          {productLibFilter === "missing" && (
+            <>
+              <Select
+                style={{ width: 115 }}
+                value={salesWindow}
+                onChange={(value: number) =>
+                  applyProductLibFilter("missing", { window: value })
+                }
+                options={[
+                  { label: "7天销量", value: 7 },
+                  { label: "14天销量", value: 14 },
+                  { label: "30天销量", value: 30 },
+                  { label: "60天销量", value: 60 },
+                  { label: "90天销量", value: 90 },
+                ]}
+              />
+              <Select
+                style={{ width: 125 }}
+                value={minSales}
+                onChange={(value: number) =>
+                  applyProductLibFilter("missing", { minSales: value })
+                }
+                options={[
+                  { label: "销量不限", value: 0 },
+                  { label: "销量≥1", value: 1 },
+                  { label: "销量≥5", value: 5 },
+                  { label: "销量≥10", value: 10 },
+                ]}
+              />
+              <Tooltip title="汇总行（summary_flag=是）的 SKU 是多个子行拼接值，容易误报；勾选后只看普通主行。">
+                <Checkbox
+                  checked={excludeSummary}
+                  onChange={(e) =>
+                    applyProductLibFilter("missing", {
+                      excludeSummary: e.target.checked,
+                    })
+                  }
+                >
+                  仅普通主行
+                </Checkbox>
+              </Tooltip>
+            </>
+          )}
           {tableRiskFilter && tableRiskFilter.length > 0 && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ fontSize: 12, color: "#8c8c8c" }}>已选:</span>
@@ -4173,6 +4950,125 @@ const InventoryBot: React.FC = () => {
               </Button>
             </div>
           )}
+        </div>
+
+        {/* ===== 操作行：左侧数据同步，右侧批量操作（独立一行，控件尺寸对齐 antd） ===== */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 12,
+            marginTop: 12,
+            paddingTop: 12,
+            borderTop: "1px solid #f0f0f0",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            <span style={{ fontSize: 12, color: "#8c8c8c" }}>数据同步</span>
+            <Tooltip
+              title={
+                syncingFeishu
+                  ? `FBA 在途同步中 ${syncProgress}%${syncStep ? ` · ${syncStep}` : ""}`
+                  : "从飞书同步 FBA 在途数量，写入最新库存快照"
+              }
+            >
+              <Button
+                icon={<RefreshCw size={14} />}
+                loading={syncingFeishu}
+                onClick={handleSyncFeishu}
+                style={{ minWidth: 96 }}
+              >
+                {syncingFeishu ? `${syncProgress}%` : "FBA在途"}
+              </Button>
+            </Tooltip>
+            <Tooltip
+              title={
+                syncingOverseas
+                  ? `海外仓同步中 ${overseasProgress}%`
+                  : "从飞书多维表拉取海外仓最新数据，按 SKU+品名 去重后覆盖写入，并回写到主行「海外仓」列"
+              }
+            >
+              <Button
+                icon={<Warehouse size={14} />}
+                loading={syncingOverseas}
+                onClick={handleSyncOverseas}
+                style={{ minWidth: 96 }}
+              >
+                {syncingOverseas ? `${overseasProgress}%` : "海外仓"}
+              </Button>
+            </Tooltip>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            <span
+              style={{
+                fontSize: 12,
+                color: selectedRecords.length ? "#8c8c8c" : "#bfbfbf",
+              }}
+            >
+              已选{" "}
+              <b
+                style={{
+                  color: selectedRecords.length
+                    ? currentTheme.primary
+                    : "#bfbfbf",
+                }}
+              >
+                {selectedRecords.length}
+              </b>{" "}
+              行
+            </span>
+            <Divider type="vertical" style={{ margin: 0, height: 16 }} />
+            <Button
+              type="primary"
+              disabled={!selectedRecords.length}
+              loading={batchLoading}
+              onClick={batchMark}
+              style={{
+                background: selectedRecords.length
+                  ? currentTheme.primary
+                  : undefined,
+                borderColor: selectedRecords.length
+                  ? currentTheme.primary
+                  : undefined,
+              }}
+            >
+              批量标记
+            </Button>
+            <Tooltip title="清除所选行的节日 / 停售标记（含自动打标写入的节日标签）">
+              <Button
+                disabled={!selectedRecords.length || batchLoading}
+                onClick={batchClearMark}
+              >
+                取消标记
+              </Button>
+            </Tooltip>
+            <Tooltip title="解除所选行的强制补货标签">
+              <Button
+                danger
+                disabled={!selectedRecords.length || batchLoading}
+                onClick={batchClearForce}
+              >
+                取消强制补货
+              </Button>
+            </Tooltip>
+          </div>
         </div>
       </Card>
 
@@ -4943,6 +5839,115 @@ const InventoryBot: React.FC = () => {
         <p style={{ color: "#999", marginTop: 8, marginBottom: 0 }}>
           人工锁定（K5）：自动打标不会覆盖或清除锁定标签；解除后恢复自动管辖。
         </p>
+      </Modal>
+      {/* 自动补货：可见分组多选（全选/反选）+ 增量跳过开关 + 本地统计 */}
+      <Modal
+        title="自动补货启动"
+        open={autoPreviewOpen}
+        onCancel={() => setAutoPreviewOpen(false)}
+        onOk={() => submitAutoReplenish(false)}
+        okText={`生成 ${autoPreviewStats.orders} 张补货单`}
+        cancelText="取消"
+        confirmLoading={autoReplenishLoading}
+        okButtonProps={{
+          disabled: !autoPreview || !!autoPreviewError || autoPreviewLoading || autoSelectedGroups.length === 0,
+        }}
+        width={640}
+        destroyOnClose
+      >
+        <Spin spinning={autoPreviewLoading}>
+          <div style={{ fontSize: 13 }}>
+            <div style={{ marginBottom: 8, color: "#666" }}>
+              快照 {autoPreview?.snapshot_date || "-"} · 负利润默认排除（强制补货标签例外）· 按店铺分组拆单
+              {autoPreview?.exists_auto_orders ? " · 本批次已有自动单" : ""}
+            </div>
+            {autoPreviewLoading && !autoPreview && (
+              <div style={{ color: "#999", padding: "10px 0" }}>正在统计待补明细（首次约 3~6 秒，之后秒开）…</div>
+            )}
+            {autoPreviewError ? (
+              <div style={{ padding: "16px 0", textAlign: "center" }}>
+                <div style={{ color: "#cf1322", marginBottom: 10 }}>{autoPreviewError}</div>
+                <Button size="small" onClick={() => void loadAutoPreview(null, autoSkipExisting)}>
+                  重试
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div
+                  style={{
+                    marginBottom: 6,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <span style={{ fontWeight: 600 }}>选择要补货的店铺分组</span>
+                  <Checkbox
+                    indeterminate={
+                      autoSelectedGroups.length > 0 &&
+                      autoSelectedGroups.length < autoPreviewStats.allIds.length
+                    }
+                    checked={
+                      autoPreviewStats.allIds.length > 0 &&
+                      autoSelectedGroups.length === autoPreviewStats.allIds.length
+                    }
+                    disabled={autoPreviewStats.allIds.length === 0}
+                    onChange={(e) =>
+                      setAutoSelectedGroups(e.target.checked ? autoPreviewStats.allIds : [])
+                    }
+                  >
+                    全选
+                  </Checkbox>
+                </div>
+                {(autoPreview?.visible_groups || []).length === 0 && !autoPreviewLoading && (
+                  <div style={{ color: "#999" }}>当前账号可见分组内没有待补行</div>
+                )}
+                <Checkbox.Group
+                  value={autoSelectedGroups}
+                  onChange={(vals) => setAutoSelectedGroups(vals as number[])}
+                  style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}
+                  options={(autoPreview?.visible_groups || []).map((g: any) => ({
+                    label: `${g.name}（${g.products} 个产品 / ${g.qty} 件）`,
+                    value: g.id,
+                  }))}
+                />
+                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Switch
+                    size="small"
+                    checked={autoSkipExisting}
+                    onChange={(v) => {
+                      setAutoSkipExisting(v);
+                      void loadAutoPreview(autoSelectedGroups, v);
+                    }}
+                  />
+                  <span>跳过已在「待审批 / 已审批」补货单中的产品（增量补货）</span>
+                </div>
+                {autoPreview && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: "8px 10px",
+                      background: "#fafafa",
+                      border: "1px solid #eee",
+                      borderRadius: 4,
+                    }}
+                  >
+                    预计生成 <b>{autoPreviewStats.orders}</b> 张单、<b>{autoPreviewStats.items}</b>{" "}
+                    条明细、<b>{autoPreviewStats.qty}</b> 件
+                    {autoPreview.skipped_existing > 0 && (
+                      <>；全量口径下已跳过 <b>{autoPreview.skipped_existing}</b> 行（产品已在补货单中）</>
+                    )}
+                    {autoPreview.skipped_unmatched > 0 && (
+                      <>
+                        ；<span style={{ color: "#fa8c16" }}>{autoPreview.skipped_unmatched} 行无产品档案</span>
+                      </>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </Spin>
       </Modal>
     </div>
   );
