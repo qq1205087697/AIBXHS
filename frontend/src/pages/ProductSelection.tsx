@@ -570,7 +570,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const targetItems = items.filter(i => ids.includes(i.id))
+    const targetItems = selectedItems.filter(i => ids.includes(i.id))
     setAnalyzeModal({ open: true, mode: 'batch', targetIds: ids, targetItems })
   }
 
@@ -861,12 +861,13 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const emptyIds = items.filter(i => ids.includes(i.id) && !i.status).map(i => i.id)
+    const emptyItems = selectedItems.filter(i => ids.includes(i.id) && !i.status)
+    const emptyIds = emptyItems.map(i => i.id)
     if (emptyIds.length === 0) {
       message.warning('所选选品中没有可申请的产品')
       return
     }
-    const first = items.find(i => i.id === emptyIds[0])
+    const first = emptyItems[0]
     setApplyImgFiles(imgFilesFromItem(first))
     applyUploadSeqRef.current = 0
     setBatchStep(0)
@@ -1116,7 +1117,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const pendingItems = items.filter(i => ids.includes(i.id) && i.status === 'pending')
+    const pendingItems = selectedItems.filter(i => ids.includes(i.id) && i.status === 'pending')
     if (pendingItems.length === 0) {
       message.warning('所选选品中没有待审批状态的记录')
       return
@@ -1268,7 +1269,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const cancelIds = items.filter(i => ids.includes(i.id) && (i.status === 'pending' || i.status === 'grouping')).map(i => i.id)
+    const cancelIds = selectedItems.filter(i => ids.includes(i.id) && (i.status === 'pending' || i.status === 'grouping')).map(i => i.id)
     if (cancelIds.length === 0) {
       message.warning('所选选品中没有待审批或待拼团状态的记录')
       return
@@ -1292,7 +1293,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const approvedIds = items.filter(i => ids.includes(i.id) && i.status === 'approved').map(i => i.id)
+    const approvedIds = selectedItems.filter(i => ids.includes(i.id) && i.status === 'approved').map(i => i.id)
     if (approvedIds.length === 0) {
       message.warning('所选选品中没有已审批状态的记录')
       return
@@ -2157,8 +2158,19 @@ const ProductSelection: React.FC = () => {
     sortOrder: col.sorter && col.key === localSort.field ? localSort.order : col.sortOrder,
   })), [localSort, productTypeMaxWidth, useRealtimeRate, profitSettings])
 
+  // 跨页保留勾选：preserveSelectedRowKeys 让翻页/数据刷新不清除已选 keys；
+  // 勾选缓存记录已选项的完整数据（含非当前页），供批量操作按状态过滤。
+  // 缓存随每次渲染同步（当前页 items 一定最新），历史页条目以最近一次可见时的数据为准，
+  // 批量操作的最终状态校验仍由后端兜底
+  const selectedItemsCacheRef = useRef<Map<number, ProductSelectionItem>>(new Map())
+  items.forEach(i => selectedItemsCacheRef.current.set(i.id, i))
+  const selectedItems = (selectedRowKeys as number[])
+    .map(id => selectedItemsCacheRef.current.get(id))
+    .filter(Boolean) as ProductSelectionItem[]
+
   const rowSelection = {
     selectedRowKeys,
+    preserveSelectedRowKeys: true,
     onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
     getCheckboxProps: () => ({}),
   }
@@ -2276,7 +2288,8 @@ const ProductSelection: React.FC = () => {
               />
               <Button onClick={handleReset}>重置</Button>
             </Space>
-            <Space wrap size={6} style={{ marginLeft: 'auto' }}>
+            {/* 操作按钮独立成行：占满一行强制换行到筛选行下方，靠左对齐 */}
+            <Space wrap size={6} style={{ flexBasis: '100%' }}>
               <Dropdown
                 menu={{
                   items: [
@@ -2284,14 +2297,14 @@ const ProductSelection: React.FC = () => {
                       key: 'batch-submit-approval',
                       icon: <FileTextOutlined />,
                       label: '批量申请选品',
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && !i.status),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => !i.status),
                       onClick: handleBatchSubmitForApproval,
                     },
                     hasPermission('product_selection:approve') && {
                       key: 'batch-approve',
                       icon: <CheckOutlined />,
                       label: '批量审批',
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'pending'),
                       onClick: handleBatchApprove,
                     },
                     hasPermission('product_selection:approve') && {
@@ -2299,7 +2312,7 @@ const ProductSelection: React.FC = () => {
                       icon: <UndoOutlined />,
                       label: '批量撤回审批',
                       danger: true,
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'approved'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'approved'),
                       onClick: handleBatchRevokeApproval,
                     },
                     hasPermission('product_selection:approve') && {
@@ -2307,9 +2320,9 @@ const ProductSelection: React.FC = () => {
                       icon: <CloseOutlined />,
                       label: '批量拒绝',
                       danger: true,
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'pending'),
                       onClick: () => openRejectModal(
-                        items.filter(i => selectedRowKeys.includes(i.id) && i.status === 'pending').map(i => i.id)
+                        selectedItems.filter(i => i.status === 'pending').map(i => i.id)
                       ),
                     },
                     {
@@ -2317,7 +2330,7 @@ const ProductSelection: React.FC = () => {
                       icon: <DeleteOutlined />,
                       label: '批量取消申请',
                       danger: true,
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'pending'),
                       onClick: handleBatchCancelApprovalApplication,
                     },
                     {
@@ -2424,8 +2437,8 @@ const ProductSelection: React.FC = () => {
             columns={columns}
             rowKey="id"
             scroll={{ x: 3545, y: 'calc(100vh - 420px)' }}
-            onChange={(pagination, _, sorter) => {
-              setPagination(prev => ({ ...prev, current: pagination.current, pageSize: pagination.pageSize || 20 }))
+            onChange={(pg, _, sorter) => {
+              setPagination(prev => ({ ...prev, current: pg.current, pageSize: pg.pageSize || 20 }))
               if (sorter && !Array.isArray(sorter) && sorter.columnKey) {
                 const newSort = {
                   field: sorter.columnKey as string,

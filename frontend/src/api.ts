@@ -445,6 +445,9 @@ export const reviewsApi = {
     keyword?: string;
     star_max?: number;
   }) => apiClient.get("/reviews/low-star-listings", { params }),
+  // 手动触发低分产品统计（后台执行8~10分钟，与每日3:30定时任务互斥）
+  runLowStarStats: () => apiClient.post("/reviews/low-star-stats/run"),
+  getLowStarStatsStatus: () => apiClient.get("/reviews/low-star-stats/status"),
 };
 
 // ========== Departments API ==========

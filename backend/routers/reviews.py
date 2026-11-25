@@ -730,6 +730,46 @@ def _match_asin_meta(asin: str, store_name: str) -> Optional[dict]:
     return max(pool, key=lambda e: e.get("review_num") or 0)
 
 
+# 手动触发统计的运行状态（内存态；前端轮询 GET /low-star-stats/status）
+_low_star_run_state: dict = {"running": False, "started_at": None, "finished_at": None, "error": None}
+
+
+@router.post("/low-star-stats/run")
+async def run_low_star_stats(current_user: User = Depends(get_current_user)):
+    """手动触发低分产品统计（后台线程执行，预计8~10分钟）。
+    复用 low_star_stats_job：内部抢 low_star_stats 分布式锁，与每日3:30定时任务互斥"""
+    import threading
+
+    if _low_star_run_state["running"]:
+        return {"success": True, "running": True, "message": "统计已在运行中，请等待完成"}
+
+    def _run():
+        _low_star_run_state.update({
+            "running": True,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "finished_at": None,
+            "error": None,
+        })
+        try:
+            from services.scheduler import low_star_stats_job
+            low_star_stats_job()
+        except Exception as e:
+            _low_star_run_state["error"] = str(e)
+            logger.error(f"手动低分产品统计失败: {e}")
+        finally:
+            _low_star_run_state["running"] = False
+            _low_star_run_state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"success": True, "running": True, "message": "统计已启动，预计8~10分钟，完成后自动刷新"}
+
+
+@router.get("/low-star-stats/status")
+async def get_low_star_stats_status(current_user: User = Depends(get_current_user)):
+    """低分产品统计运行状态（前端轮询用）"""
+    return _low_star_run_state
+
+
 @router.get("/low-star-listings")
 async def get_low_star_listings(
     page: int = Query(1, ge=1),
