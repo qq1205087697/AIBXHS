@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React from "react";
 import {
   Alert,
   Button,
@@ -22,7 +22,7 @@ import {
   Upload,
   message,
 } from "antd";
-import { ArrowLeft, CopyPlus, Download, FileSpreadsheet, ImagePlus, MinusCircle, Plus, PlusCircle, Save } from "lucide-react";
+import { ArrowLeft, CopyPlus, Download, FileSpreadsheet, MinusCircle, Plus, PlusCircle, Save } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import dayjs, { Dayjs } from "dayjs";
 import { developmentBotApi, departmentsApi, storeGroupsApi, productSelectionApi, type DevelopmentProject, type ProductDevelopmentPayload } from "../api";
@@ -70,16 +70,9 @@ const SEASONALITY_OPTIONS = [
   "独立日",
 ].map((value) => ({ label: value, value }));
 
-interface EmployeeItem {
-  nickname?: string | null;
-  username?: string;
-  department_names?: string;
-}
-
-// 采购链接 + 采购图片 + 采购信息按组对应（一组 = 链接框 + 图片框 + 信息框）
+// 采购链接 + 采购信息按组对应（一组 = 链接框 + 信息框）
 interface PurchaseItem {
   link?: string;
-  images?: string[];
   info?: string;
 }
 
@@ -108,7 +101,6 @@ interface ProductFormRow {
   development_date?: Dayjs | null;
   reference_images?: string[];
   warehouse_note?: string;
-  site_owners?: string | string[];
 }
 
 interface FormValues {
@@ -139,18 +131,15 @@ const toPayload = (row: ProductFormRow, developer?: string): ProductDevelopmentP
   purchase_info: row.purchase_info?.trim() || undefined,
   purchase_items: (row.purchase_items || []).map((it) => ({
     link: (it.link || "").trim() || undefined,
-    images: it.images || [],
+    images: [],
     info: (it.info || "").trim() || undefined,
   })),
   de_keywords: row.de_keywords?.trim() || "",
   en_keywords: row.en_keywords?.trim() || "",
   au_keywords: row.au_keywords?.trim() || "",
   development_date: row.development_date ? dayjs(row.development_date).format("YYYY-MM-DD") : "",
-  reference_images: (row.purchase_items || []).flatMap((it) => it.images || []),
+  reference_images: [],
   warehouse_note: row.warehouse_note?.trim() || undefined,
-  site_owners: Array.isArray(row.site_owners)
-    ? row.site_owners.join(",").trim() || undefined
-    : row.site_owners?.trim() || undefined,
 });
 
 const requiredRule = (label: string) => [{ required: true, message: `请输入${label}` }];
@@ -163,7 +152,6 @@ const ProductDevelopmentCreate: React.FC = () => {
   const { user } = useAuth();
   const [form] = Form.useForm<FormValues>();
   const [saving, setSaving] = React.useState(false);
-  const [employees, setEmployees] = React.useState<EmployeeItem[]>([]);
   const [warehouseRecord, setWarehouseRecord] = React.useState<DevelopmentProject | null>(null);
   const [warehouseLoading, setWarehouseLoading] = React.useState(false);
   const [warehouseNotFound, setWarehouseNotFound] = React.useState(false);
@@ -226,9 +214,6 @@ const ProductDevelopmentCreate: React.FC = () => {
         development_date: r.development_date ? dayjs(r.development_date) : dayjs(),
         reference_images: [],
         warehouse_note: r.warehouse_note || "",
-        site_owners: r.site_owners
-          ? String(r.site_owners).split(/[,，、]/).map((s: string) => s.trim()).filter(Boolean)
-          : [],
       }));
       form.setFieldsValue({ products: mapped });
       setImportOpen(false);
@@ -241,35 +226,22 @@ const ProductDevelopmentCreate: React.FC = () => {
     return false; // 阻止 antd Upload 自动上传
   };
   interface StoreNode { id: number; name: string; stores: { id: number; name: string; site?: string | null }[] }
-  interface StoreTreeData { groups: StoreNode[]; owner_sites: Record<string, string[]> }
-  // 店铺分组树（系统设置-店铺管理）+ 站点负责人站点映射
-  const [storeTree, setStoreTree] = React.useState<StoreTreeData>({ groups: [], owner_sites: {} });
-  const productsWatch = Form.useWatch("products", form) as ProductFormRow[] | undefined;
+  // 店铺分组树（系统设置-店铺管理）
+  const [storeTree, setStoreTree] = React.useState<StoreNode[]>([]);
 
   React.useEffect(() => {
     storeGroupsApi
       .getTree()
       .then((res) => {
         const d = res.data?.data;
-        if (d) setStoreTree({ groups: d.groups || [], owner_sites: d.owner_sites || {} });
+        if (d) setStoreTree(d.groups || []);
       })
       .catch(() => {});
   }, []);
 
-  // 按站点负责人员过滤店铺级联选项：取所选负责人名下站点集合，无映射或未选则展示全部
   // 添加新品只需选择店铺分组一级；数量对应分组下所有店铺，保存时存分组名
-  const storeCascaderOptions = (index: number) => {
-    const owners = (productsWatch?.[index]?.site_owners as string[] | undefined) || [];
-    let allowed: Set<string> | null = null;
-    if (owners.length) {
-      allowed = new Set<string>();
-      owners.forEach((o) => (storeTree.owner_sites[o] || []).forEach((s) => allowed!.add(s)));
-      if (allowed.size === 0) allowed = null;
-    }
-    return storeTree.groups
-      .filter((g) => !allowed || g.stores.some((s) => s.site && allowed.has(s.site)))
-      .map((g) => ({ label: g.name, value: g.name }));
-  };
+  const storeCascaderOptions = () =>
+    storeTree.map((g) => ({ label: g.name, value: g.name }));
 
   // 仓库回填模式：加载已有新品记录
   React.useEffect(() => {
@@ -291,41 +263,13 @@ const ProductDevelopmentCreate: React.FC = () => {
       .finally(() => setWarehouseLoading(false));
   }, [warehouseRecordId]);
 
-  // 拉取后台全部员工（按部门分组）；非管理员 403 时降级为当前登录用户
-  React.useEffect(() => {
-    let cancelled = false;
-    departmentsApi
-      .getAllUsers()
-      .then((res) => {
-        if (!cancelled) setEmployees(res.data?.data || []);
-      })
-      .catch(() => {
-        if (!cancelled && user?.nickname) setEmployees([{ nickname: user.nickname }]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [user?.nickname]);
-
-  // 站点负责人员选项：全部员工昵称去重（支持搜索）
-  const siteOwnerOptions = useMemo(() => {
-    const names = new Set<string>();
-    employees.forEach((emp) => {
-      const name = (emp.nickname || emp.username || "").trim();
-      if (name) names.add(name);
-    });
-    return Array.from(names)
-      .sort((a, b) => a.localeCompare(b, "zh"))
-      .map((name) => ({ label: name, value: name }));
-  }, [employees]);
-
   const emptyRow = (): ProductFormRow => ({
     title: "",
     product_title: "",
     product_name_zh: "",
     category: undefined as unknown as string,
     store_rows: [{ path: undefined, quantity: undefined }],
-    purchase_items: [{ link: "", images: [], info: "" }],
+    purchase_items: [{ link: "", info: "" }],
     purchase_info: "",
     urgency: "一般",
     seasonality: "日常",
@@ -338,7 +282,6 @@ const ProductDevelopmentCreate: React.FC = () => {
     development_date: dayjs(),
     reference_images: [],
     warehouse_note: "",
-    site_owners: [],
   });
 
   // 选品审批跳转：加载选品申请信息预填第一行（数量按拼团成员分组汇总，与审批生成补货单同口径）
@@ -526,12 +469,10 @@ const ProductDevelopmentCreate: React.FC = () => {
                             const row: any = form.getFieldValue(["products", field.name]);
                             if (!row) return;
                             const copy: any = { ...row };
-                            if (Array.isArray(copy.site_owners)) copy.site_owners = [...copy.site_owners];
                             if (Array.isArray(copy.store_rows)) copy.store_rows = copy.store_rows.map((r: any) => ({ path: r.path ? [...r.path] : undefined, quantity: r.quantity }));
                             if (Array.isArray(copy.purchase_items)) {
                               copy.purchase_items = copy.purchase_items.map((it: any) => ({
                                 link: it.link,
-                                images: Array.isArray(it.images) ? [...it.images] : [],
                                 info: it.info,
                               }));
                             }
@@ -583,19 +524,6 @@ const ProductDevelopmentCreate: React.FC = () => {
                           <DatePicker style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} md={8}>
-                        <Form.Item name={[field.name, "site_owners"]} label="相关站点负责人员">
-                          <Select
-                            mode="multiple"
-                            showSearch
-                            allowClear
-                            maxTagCount="responsive"
-                            placeholder="选择站点负责人员（可多选，用于数据可见性拆分）"
-                            options={siteOwnerOptions}
-                            optionFilterProp="label"
-                          />
-                        </Form.Item>
-                      </Col>
                     </Row>
 
                     <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 16, marginTop: 2 }}>
@@ -633,13 +561,6 @@ const ProductDevelopmentCreate: React.FC = () => {
                                       <Input placeholder="粘贴采购链接（1688/淘宝等）" allowClear />
                                     </Form.Item>
                                     <Form.Item
-                                      name={[pf.name, "images"]}
-                                      label={<Space size={4}><ImagePlus size={14} /><Text type="secondary" style={{ fontSize: 12 }}>对应采购图片（支持拖拽/粘贴上传）</Text></Space>}
-                                      style={{ marginBottom: 10 }}
-                                    >
-                                      <ImagesUpload maxCount={9} placeholder="上传/拖入/粘贴该链接的采购图片" />
-                                    </Form.Item>
-                                    <Form.Item
                                       name={[pf.name, "info"]}
                                       label={<Text type="secondary" style={{ fontSize: 12 }}>对应采购信息</Text>}
                                       style={{ marginBottom: 10 }}
@@ -659,9 +580,9 @@ const ProductDevelopmentCreate: React.FC = () => {
                                   type="dashed"
                                   size="small"
                                   icon={<PlusCircle size={15} />}
-                                  onClick={() => addItem({ link: "", images: [], info: "" })}
+                                  onClick={() => addItem({ link: "", info: "" })}
                                 >
-                                  添加链接和图片
+                                  添加链接
                                 </Button>
                               </>
                             )}
@@ -672,7 +593,7 @@ const ProductDevelopmentCreate: React.FC = () => {
                         </Col>
                         <Col xs={24} md={10}>
                           <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
-                            关联店铺分组与采购数量（选择分组一级，数量对应分组下所有店铺；可按站点负责人筛选）
+                            关联店铺分组与采购数量（选择分组一级，数量对应分组下所有店铺）
                           </Text>
                           <Form.List name={[field.name, "store_rows"]}>
                             {(storeFields, { add: addStore, remove: removeStore }) => (
@@ -684,7 +605,7 @@ const ProductDevelopmentCreate: React.FC = () => {
                                       style={{ flex: 1, minWidth: 0, marginBottom: 0 }}
                                     >
                                       <Cascader
-                                        options={storeCascaderOptions(field.name)}
+                                        options={storeCascaderOptions()}
                                         showSearch
                                         placeholder="店铺分组"
                                         changeOnSelect={false}
