@@ -14,7 +14,9 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
     pool_timeout=30,
-    pool_recycle=1800,  # 30分钟
+    # 必须小于 MySQL wait_timeout（实测 300s）：否则池中连接已被服务端关闭，
+    # 每次 checkout 都要 pre_ping 重连，网络抖动时会直接抛 2013/10060
+    pool_recycle=280,  # ≈4.5 分钟
     echo=False
 )
 
@@ -23,6 +25,11 @@ engine = create_engine(
 def connect(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'")
+    # DDL 等待 metadata lock 的超时由 lock_wait_timeout 控制，MySQL 默认
+    # 31536000s（约 1 年）。startup 里 init_db() 的 ALTER/CREATE 一旦撞上
+    # 未提交事务就会永久挂起，整个服务起不来且 health 无响应。
+    # 限制到 15s：超时由 init_db 的异常分支记录后继续启动，不阻断服务。
+    cursor.execute("SET SESSION lock_wait_timeout = 15")
     cursor.close()
 
 # 创建会话工厂
@@ -54,6 +61,32 @@ def _column_exists(conn, table: str, column: str) -> bool:
         {"t": table, "c": column},
     ).scalar()
     return bool(row)
+
+
+def _ensure_column_type(conn, table: str, column: str, expected_type: str, ddl: str) -> None:
+    """列类型不符才 ALTER，启动路径不再重复发 DDL 去抢 metadata lock。
+
+    已符合目标时立即 commit 结束只读事务，避免连接带着未提交事务进入
+    Sleep 状态长期持有 MDL 读锁（历史启动僵死的成因之一）。
+    """
+    try:
+        cur = conn.execute(
+            text(
+                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = :t AND COLUMN_NAME = :c"
+            ),
+            {"t": table, "c": column},
+        ).scalar()
+        if cur and cur.strip().lower() == expected_type.lower():
+            conn.commit()
+            return
+        if cur:
+            conn.execute(text(ddl))
+            conn.commit()
+            print(f"列类型已调整：{table}.{column} {cur} -> {expected_type}")
+    except Exception as e:  # noqa: BLE001
+        print(f"列类型检查/调整失败（{table}.{column}）: {e}")
 
 
 def _ensure_columns(conn, specs) -> None:
@@ -115,6 +148,7 @@ def init_db():
         from models.threshold_setting import ThresholdSetting
         from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
         from models.local_inventory import LocalInventory
+        from models.overseas_inventory import OverseasInventory
         from models.inventory_management import PurchaseOrder, PurchaseOrderItem, InboundOrder, InboundOrderItem, OutboundOrder, OutboundOrderItem, InventoryBatch, OperationLog, StockTransferOrder, StockTransferOrderItem, Warehouse, ReplenishmentOrder, ReplenishmentItem, ShipmentOrder, ShipmentOrderItem
         from models.ad_campaign import AdCampaign, AdGroup, AdKeyword, AdTarget, AdProductAd, AdNegativeKeyword
         from models.ad_report import AdReportSnapshot, AdOptimizationRule, AdOptimizationLog
@@ -126,6 +160,7 @@ def init_db():
         )
         from models.ai_video_task import AIVideoTask
         from models.ai_image_task import AIImageTask
+        from models.ai_image_layout import AIImageLayout
         from models.video_binding_request import VideoBindingRequest
 
         # 创建所有表
@@ -144,6 +179,17 @@ def init_db():
                 ("review_analyses", "departments",
                  "ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL "
                  "COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"),
+                # A+ 版式素材：列表用缩略图（原图 1~2MB，240 张直接进列表会把首屏拖死）
+                ("ai_image_layouts", "thumb_url",
+                 "ALTER TABLE ai_image_layouts ADD COLUMN thumb_url VARCHAR(1000) NULL "
+                 "COMMENT '列表缩略图地址（TOS，<=480px，仅展示）'"),
+                # 库存快照海外仓字段（飞书多维表同步写入主行）
+                ("inventory_snapshots", "overseas_inventory",
+                 "ALTER TABLE inventory_snapshots ADD COLUMN overseas_inventory FLOAT NULL DEFAULT 0 "
+                 "COMMENT '海外仓可售库存'"),
+                ("inventory_snapshots", "overseas_max_age",
+                 "ALTER TABLE inventory_snapshots ADD COLUMN overseas_max_age FLOAT NULL "
+                 "COMMENT '海外仓最大库龄（天）'"),
                 # 发货单表补齐 shipments 路由使用的确认流程/转出库关联列（存量库缺列导致 1054）
                 ("shipment_orders", "confirmed_by",
                  "ALTER TABLE shipment_orders ADD COLUMN confirmed_by INT NULL COMMENT '确认人'"),
@@ -174,6 +220,19 @@ def init_db():
             conn.commit()
         
         print("数据库表结构创建成功")
+
+        # 权限种子自查：AI 生图接口全部依赖 ai_image:use（由 migrations/add_ai_image_permission.py 写入）。
+        # 这里只做只读检查 + 告警，不自动授权，避免动到既有权限矩阵。
+        try:
+            with engine.connect() as conn:
+                _has_perm = conn.execute(text(
+                    "SELECT COUNT(*) FROM permissions WHERE code = 'ai_image:use' AND deleted_at IS NULL"
+                )).scalar()
+            if not _has_perm:
+                print("⚠ 未找到权限 ai_image:use，AI 生图页面会返回 403；"
+                      "请在目标库执行 backend/migrations/add_ai_image_permission.py")
+        except Exception as _perm_err:
+            print(f"权限种子自查跳过（权限表可能尚未创建）: {_perm_err}")
         
         # 手动创建 scheduler_locks 和 product_selections 表
         # 注意：text 已在模块顶部导入；函数内再 import 会使 text 变成本地变量，
@@ -445,12 +504,11 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass
-            # 头程改为3位小数（如果需要）
-            try:
-                conn.execute(text("ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'"))
-                conn.commit()
-            except Exception:
-                pass
+            # 头程改为3位小数（仅类型不符时才改，避免每次启动都申请 MDL 写锁）
+            _ensure_column_type(
+                conn, "product_selections", "first_leg_cost", "decimal(12,3)",
+                "ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'",
+            )
 
             # products 表新增无配件标记字段（如果不存在）
             try:
@@ -459,12 +517,12 @@ def init_db():
             except Exception:
                 pass
 
-            # 页面优化机器人表品名字段（与库存快照表品名长度一致，每次启动幂等执行）
-            try:
-                conn.execute(text("ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'"))
-                conn.commit()
-            except Exception:
-                pass
+            # 页面优化机器人表品名字段（与库存快照表品名长度一致，仅类型不符时才改）
+            _ensure_column_type(
+                conn, "product_page_info", "product_name", "varchar(500)",
+                "ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'",
+            )
+
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:

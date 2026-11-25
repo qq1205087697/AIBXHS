@@ -181,6 +181,45 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        fba_infill_notify_job,
+        trigger="cron",
+        hour=9,
+        minute=30,
+        id="fba_infill_notify",
+        name="检查FBA在途信息补填",
+        replace_existing=True
+    )
+
+    # 产品月销量等级池：每月 3 号 06:30 按上月销量定版（幂等重跑），
+    # 当日 18:00 兜底（当期已生成则跳过）。失败走站内通知 admin。
+    scheduler.add_job(
+        grade_refresh_job,
+        trigger="cron",
+        day=3,
+        hour=6,
+        minute=30,
+        id="grade_refresh",
+        name="月销量等级池更新（每月3号）",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        replace_existing=True
+    )
+    scheduler.add_job(
+        grade_refresh_fallback_job,
+        trigger="cron",
+        day=3,
+        hour=18,
+        minute=0,
+        id="grade_refresh_fallback",
+        name="月销量等级池兜底更新（每月3号）",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         cleanup_expired_ad_data_job,
         trigger="cron",
         hour=3,
@@ -203,6 +242,32 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 海外仓库存每日自动同步（默认 8:00，可配置）。与 FBA 同步共用同一套后台线程 + 内存状态机，
+    # 因此定时触发与手动点击产生的是同一种任务，前端可实时看到同一份进度与结果。
+    _overseas_hour = get_settings().OVERSEAS_SYNC_HOUR
+    scheduler.add_job(
+        overseas_inventory_sync_job,
+        trigger="cron",
+        hour=_overseas_hour,
+        minute=0,
+        id="overseas_inventory_sync",
+        name="海外仓库存每日同步（飞书多维表）",
+        replace_existing=True,
+        misfire_grace_time=3600,   # 服务重启错过触发点时，1 小时内仍补跑一次
+        coalesce=True              # 多次错过只补跑一次
+    )
+
+    # 海外仓快照补写：库存快照按天新建行（新行海外仓默认为 0），
+    # 若当天导入发生在 8:00 同步之后，白天页面会显示全 0。
+    # 每小时做一次廉价自查（快照日期未变时只有 2 条 COUNT 查询），必要时按明细表回写主行。
+    scheduler.add_job(
+        overseas_backfill_job,
+        trigger=IntervalTrigger(minutes=60),
+        id="overseas_inventory_backfill",
+        name="海外仓库存快照补写（新快照自动回写主行）",
+        replace_existing=True
+    )
+
     # 拼团超期处理：每小时检查一次，grouping 超过7天期限自动转审批未通过
     scheduler.add_job(
         product_selection_group_expire_job,
@@ -215,6 +280,52 @@ def init_scheduler():
 
     scheduler.start()
     logger.info("定时任务调度器已启动")
+
+    # 启动补跑：服务在 8:00 之后才启动（或当天重启过）时，最近一次同步若早于「最近一个 8:00」，
+    # 延迟 60 秒补跑一次，避免用户上午打开页面看到的是昨天的海外仓数据。
+    try:
+        _schedule_overseas_catch_up()
+    except Exception as e:
+        logger.warning(f"海外仓启动补跑检查失败（不影响启动）: {e}")
+
+
+def _schedule_overseas_catch_up():
+    """启动时判断是否需要补跑当天的海外仓同步（只补一次，不影响定时任务本身）"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import text
+    from config import get_settings
+    from database.database import SessionLocal
+
+    now = datetime.now()
+    boundary = now.replace(
+        hour=get_settings().OVERSEAS_SYNC_HOUR, minute=0, second=0, microsecond=0
+    )
+    if now < boundary:
+        # 今天 8:00 还没到 → 以昨天的 8:00 为基准
+        boundary = boundary - timedelta(days=1)
+
+    db = SessionLocal()
+    try:
+        last_synced = db.execute(
+            text("SELECT MAX(updated_at) FROM overseas_inventories WHERE tenant_id = :tid"),
+            {"tid": get_settings().OVERSEAS_SYNC_TENANT_ID},
+        ).scalar()
+    finally:
+        db.close()
+
+    if last_synced and last_synced >= boundary:
+        return
+
+    logger.info(
+        f"检测到海外仓最近一次同步为 {last_synced or '从未同步'}，早于 {boundary}，60 秒后补跑一次"
+    )
+    scheduler.add_job(
+        overseas_inventory_sync_job,
+        trigger="date",
+        run_date=datetime.now() + timedelta(seconds=60),
+        id="overseas_inventory_sync_catchup",
+        replace_existing=True,
+    )
 
 
 def product_selection_group_expire_job():
@@ -270,6 +381,116 @@ def startop_pull_job():
         logger.error(f"星拓拉取任务异常: {e}", exc_info=True)
     finally:
         release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def overseas_inventory_sync_job():
+    """每日定时：飞书海外仓多维表 → overseas_inventories + 库存快照主行
+
+    与 FBA 同步完全一致的执行模型：
+      1. 起一个后台 daemon 线程跑同步（start_sync_async），不占用调度线程 IO；
+      2. 进度/结果写进程内状态机（get_sync_status），前端轮询同一个接口，
+         因此定时任务与手动点击在页面上表现一致（都能实时看到进度与结果）；
+      3. 页面切换不影响任务 —— 任务归属服务端进程，不归属 HTTP 请求/前端页面。
+
+    这里额外持有分布式锁并在锁内等待任务结束，避免多 worker/多进程重复跑；
+    正常一次约 5 秒，全量兜底扫描约 2 分钟，最长等待 20 分钟。
+    """
+    from database.database import SessionLocal
+    from services.overseas_inventory_service import (
+        get_sync_status,
+        is_configured,
+        start_sync_async,
+    )
+
+    LOCK_KEY = "overseas_inventory_sync"
+    MAX_WAIT_SECONDS = 20 * 60
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            logger.info("其他进程正在同步海外仓，本进程跳过")
+            return
+
+        if not is_configured():
+            logger.warning(
+                "海外仓定时同步跳过：未配置 FEISHU_OVERSEAS_BASE_TOKEN / FEISHU_OVERSEAS_TABLE_ID"
+            )
+            return
+
+        if get_sync_status().get("is_running"):
+            logger.info("海外仓同步任务已在运行（手动触发中），本次定时任务跳过")
+            return
+
+        logger.info("========== 开始海外仓每日定时同步 ==========")
+        from config import get_settings
+        result = start_sync_async(tenant_id=get_settings().OVERSEAS_SYNC_TENANT_ID)
+        if not result.get("started"):
+            logger.warning(f"海外仓定时同步未启动: {result.get('message')}")
+            return
+
+        # 等待后台线程结束，保证锁在整个同步期间有效
+        waited = 0
+        last_step = ""
+        while waited < MAX_WAIT_SECONDS:
+            status = get_sync_status()
+            step = status.get("step") or ""
+            if step != last_step:
+                logger.info(f"海外仓同步进度 {status.get('progress')}% - {step}")
+                last_step = step
+            if not status.get("is_running"):
+                break
+            time.sleep(2)
+            waited += 2
+
+        status = get_sync_status()
+        if status.get("error"):
+            logger.error(f"海外仓定时同步失败: {status.get('error')}")
+        elif status.get("skipped"):
+            logger.warning(f"海外仓定时同步被跳过: {status.get('step')}")
+        elif status.get("is_running"):
+            logger.warning(f"海外仓定时同步超过 {MAX_WAIT_SECONDS}s 仍未结束，停止等待（任务仍在后台运行）")
+        else:
+            logger.info(
+                "海外仓定时同步完成: 源数据日期=%s, SKU=%s, 主行写入=%s, 快照日期=%s",
+                status.get("source_date"), status.get("updated"),
+                status.get("matched"), status.get("snapshot_date"),
+            )
+    except Exception as e:
+        logger.error(f"海外仓定时同步任务异常: {e}", exc_info=True)
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def overseas_backfill_job():
+    """每小时自查：新一天的库存快照导入后，把海外仓值补写到该快照的主行
+
+    与同步任务解耦：不抓飞书、只用库内 overseas_inventories 做一次 JOIN 回写，
+    因此没有新快照时成本仅为 2 条 COUNT 查询，也不会与同步任务互相干扰。
+    """
+    from database.database import SessionLocal
+    from services.overseas_inventory_service import (
+        ensure_latest_snapshot_backfilled,
+        get_sync_status,
+        is_configured,
+    )
+
+    if not is_configured():
+        return
+    if get_sync_status().get("is_running"):
+        # 同步任务正在写主行，跳过本次自查，避免无意义的重复回写
+        return
+
+    from config import get_settings
+
+    db = SessionLocal()
+    try:
+        matched = ensure_latest_snapshot_backfilled(db, tenant_id=get_settings().OVERSEAS_SYNC_TENANT_ID)
+        if matched is not None:
+            logger.info(f"检测到新库存快照，海外仓已补写主行 {matched} 行")
+    except Exception as e:
+        logger.warning(f"海外仓快照补写失败（不影响主流程）: {e}")
+    finally:
         db.close()
 
 
@@ -1339,6 +1560,100 @@ def product_selection_fees_rescrape_job(limit: int = None, full: bool = False, i
         if locked:
             release_distributed_lock(db, LOCK_KEY)
         db.close()
+
+
+def fba_infill_notify_job():
+    """每天 9:30：检查 FBA 在途信息（发货日期/运输方式）缺失并通知仓库角色
+
+    与导入后的即时提醒共用同一实现；按天去重保证两次触发一天只发一条。
+    定时场景没有 feishu_data，文案走中性表述（不区分「飞书无记录」与「字段未填」）。
+    """
+    logger.info("========== 开始检查 FBA 在途信息补填 ==========")
+    try:
+        from services.fba_inbound_fill_notifier import notify_missing_fba_info
+        result = notify_missing_fba_info()
+        logger.info("FBA在途补填通知(定时): %s", result)
+    except Exception as e:
+        logger.warning("FBA在途补填通知(定时)失败: %s", e)
+    logger.info("========== 检查结束 ==========")
+
+
+def grade_refresh_job():
+    """每月 3 号 06:30：按上月销量重算产品等级池（各租户，幂等重跑）
+
+    设计文档：docs/plans/2026-11-24_产品月销量等级体系_完整实现方案.md
+    - 分布式锁防多实例并发；同 period 重跑 = 先删后插，结果幂等。
+    - 失败快速重试 2 次（数据库瞬时抖动），仍失败 → 站内通知 admin + 当日 18:00 兜底。
+    """
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    import time as _time
+    from services.grade_service import (
+        recompute_grades, get_current_period, notify_grade_failure,
+    )
+
+    logger.info("========== 开始月销量等级池更新 ==========")
+    db = SessionLocal()
+    try:
+        period = get_current_period()
+        tenant_ids = [r[0] for r in db.execute(
+            text("SELECT id FROM tenants WHERE deleted_at IS NULL")).fetchall()]
+        for tid in tenant_ids:
+            lock_key = f"grade_recompute_{tid}"
+            if not acquire_distributed_lock(db, lock_key, timeout_minutes=30):
+                logger.warning("等级池更新: 租户 %s 未获取到锁，跳过", tid)
+                continue
+            result = {"ok": False, "error": "未执行"}
+            for attempt in range(3):
+                try:
+                    result = recompute_grades(db, tid, period, computed_by="scheduler")
+                except Exception as e:  # noqa: BLE001
+                    result = {"ok": False, "error": str(e)}
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                if result.get("ok"):
+                    break
+                if attempt < 2:
+                    _time.sleep(10)
+            if result.get("ok"):
+                logger.info("等级池更新: 租户 %s period=%s 行=%s 分布=%s",
+                            tid, period, result.get("rows"), result.get("distribution"))
+            else:
+                logger.error("等级池更新: 租户 %s period=%s 失败: %s（已通知 admin）",
+                             tid, period, result.get("error"))
+                notify_grade_failure(tid, period, result.get("error", "未知错误"))
+            release_distributed_lock(db, lock_key)
+    except Exception as e:  # noqa: BLE001
+        logger.error("等级池更新 job 异常: %s", e)
+    finally:
+        db.close()
+    logger.info("========== 月销量等级池更新结束 ==========")
+
+
+def grade_refresh_fallback_job():
+    """每月 3 号 18:00：等级池兜底重算（当期已生成则直接跳过，避免重复计算）"""
+    from database.database import SessionLocal
+    from services.grade_service import get_current_period, get_current_grade_period
+
+    db = SessionLocal()
+    missing = []
+    try:
+        period = get_current_period()
+        tenant_ids = [r[0] for r in db.execute(
+            text("SELECT id FROM tenants WHERE deleted_at IS NULL")).fetchall()]
+        for tid in tenant_ids:
+            cur, _ = get_current_grade_period(db, tid)
+            if cur != period:
+                missing.append(tid)
+                logger.warning("等级池兜底: 租户 %s 当期 %s 未生成（当前 %s）", tid, period, cur)
+    finally:
+        db.close()
+    if missing:
+        grade_refresh_job()
+    else:
+        logger.info("等级池兜底: 各租户当期均已生成，无需重算")
 
 
 def check_overdue_purchase_orders_job():
