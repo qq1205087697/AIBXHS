@@ -1046,7 +1046,11 @@ def _auto_analyze_selection_task(selection_id: int, tenant_id: int):
 
 
 def recalc_product_selection_scores_job():
-    """每天早上7点兜底：为未计算评分的选品记录补算（正常情况下新抓取入库时已实时计算），并对高分未分析的记录自动触发AI分析"""
+    """定时兜底：为未计算评分的选品记录补算，并对高分未分析的记录自动触发AI分析
+    补算范围：
+    1. traffic_score/result 为 NULL 的新记录（正常情况下新抓取入库时已实时计算）
+    2. traffic_score=0 且 result 为空且 trend 已有值的记录（评分时抓取数据未落库，
+       抢跑算成0分后被条件跳过、永久卡死的记录；trend 为空的重算结果不变，不重试）"""
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
@@ -1054,18 +1058,24 @@ def recalc_product_selection_scores_job():
     LOCK_KEY = "daily_product_selection_recalc"
     db = SessionLocal()
     try:
-        if not acquire_distributed_lock(db, LOCK_KEY):
+        # AI 兜底批次可能持续较久，锁放宽到60分钟（默认30分钟不够）
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=60):
             db.close()
             return
 
         logger.info("========== 开始每日选品数据评分计算 ==========")
 
-        # 查找未计算过评分的记录（traffic_score IS NULL 或 traffic_score_result IS NULL）
+        # 查找待补算评分的记录（NULL新记录 + trend晚到导致的0分记录）
         query = text("""
             SELECT id, rating, review_count, monthly_sales, traffic_trend
             FROM product_selections
             WHERE deleted_at IS NULL
-              AND (traffic_score IS NULL OR traffic_score_result IS NULL)
+              AND (
+                (traffic_score IS NULL OR traffic_score_result IS NULL)
+                OR (traffic_score = 0
+                    AND (traffic_score_result IS NULL OR traffic_score_result = '')
+                    AND traffic_trend IS NOT NULL AND traffic_trend != '')
+              )
         """)
         rows = db.execute(query).fetchall()
 

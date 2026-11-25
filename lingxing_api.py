@@ -175,16 +175,24 @@ def call_api(method: str, path: str, params: Dict[str, Any],
     method = method.upper()
 
     def _request(token: str) -> requests.Response:
-        # 每次请求重新生成 sign（timestamp 已变化）
-        signed = dict(params)
-        signed.update({"access_token": token, "app_key": APP_ID, "timestamp": str(int(time.time()))})
-        # 签名用原始合并串生成，再作为普通参数传递（requests 会自动 URL 编码）
-        sign = make_sign({k: v for k, v in signed.items() if k not in ("access_token", "app_key", "timestamp")}, token)
-        signed["sign"] = sign
+        # 每次请求重新生成 sign（timestamp 已变化）；签名覆盖业务参数 + access_token/app_key/timestamp
+        timestamp = str(int(time.time()))
+        sign = make_sign(params, token)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         if method == "GET":
-            return requests.get(f"{BASE_URL}{path}", params=signed, headers=headers, timeout=60)
-        return requests.post(f"{BASE_URL}{path}", json=signed, headers=headers, timeout=60)
+            # GET：全部参数（含签名）放 URL query
+            query = dict(params)
+            query.update({"access_token": token, "app_key": APP_ID, "timestamp": timestamp, "sign": sign})
+            return requests.get(f"{BASE_URL}{path}", params=query, headers=headers, timeout=60)
+        # POST：业务参数放 JSON body；app_key/timestamp/sign 放 URL query（领星 Listing 类接口要求），
+        # access_token 仅走 Authorization 头
+        return requests.post(
+            f"{BASE_URL}{path}",
+            params={"app_key": APP_ID, "timestamp": timestamp, "sign": sign},
+            json=params,
+            headers=headers,
+            timeout=60,
+        )
 
     token = get_access_token()
     for attempt in range(5):

@@ -27,8 +27,8 @@ CACHE_FILE = os.path.join(OUT_DIR, "low_star_page_cache.jsonl")
 
 # 断点续传只需保留统计用字段
 KEEP_FIELDS = ["sid", "seller_sku", "asin", "parent_asin", "local_sku", "last_star",
-               "price", "currency_code", "status", "item_name", "marketplace",
-               "fulfillment_channel_type"]
+               "review_num", "price", "currency_code", "status", "item_name",
+               "marketplace", "fulfillment_channel_type"]
 
 LISTING_PATH = "/erp/sc/data/mws/listing"
 
@@ -177,6 +177,40 @@ def run():
         by_store[sid]["低分listing数"] += 1
         by_store[sid]["低分ASIN数"].add(it.get("asin"))
 
+    # 全量 ASIN→评分映射（差评机器人详情弹窗展示用；与低分阈值无关）
+    # - 每个 ASIN 存全站点条目列表：后端按差评所属店铺精确匹配市场，避免跨站点错配
+    # - star=0 表示领星未同步评分，保留为 None（前端灰色提示），不丢弃
+    # - 同店铺同 ASIN 可能有多条 MSKU，取评论数最多的一条
+    by_asin_store = {}
+    for it in all_listings:
+        asin = (it.get("asin") or "").strip()
+        store = sid_names.get(str(it.get("sid")), "")
+        if not asin or not store:
+            continue
+        star = parse_star(it.get("last_star"))
+        try:
+            rn = int(float(it.get("review_num") or 0))
+        except (TypeError, ValueError):
+            rn = 0
+        key = (asin, store)
+        cur = by_asin_store.get(key)
+        if cur is None or rn > cur["review_num"]:
+            by_asin_store[key] = {
+                "star": star if (star is not None and star > 0) else None,
+                "review_num": rn,
+                "store": store,
+                "marketplace": it.get("marketplace") or "",
+            }
+    asin_map = {}
+    for (asin, _store), entry in by_asin_store.items():
+        asin_map.setdefault(asin, []).append(entry)
+    # 评论多的排前面（后端兜底匹配时取第一条即为全局最具代表性条目）
+    for entries in asin_map.values():
+        entries.sort(key=lambda e: e.get("review_num") or 0, reverse=True)
+    asin_path = os.path.join(OUT_DIR, "asin_ratings.json")
+    with open(asin_path, "w", encoding="utf-8") as f:
+        json.dump(asin_map, f, ensure_ascii=False, separators=(",", ":"))
+
     # 明细 CSV（Excel 友好）
     csv_path = os.path.join(OUT_DIR, "low_star_listings.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -217,7 +251,7 @@ def run():
     print("\n低分最多的前 10 个店铺:")
     for sid, v in top:
         print(f"  sid={sid}  {v['店铺']}  低分listing {v['低分listing数']} / ASIN {v['低分ASIN数']}")
-    print(f"\n明细: {csv_path}\n汇总: {json_path}")
+    print(f"\n明细: {csv_path}\n汇总: {json_path}\nASIN评分映射: {asin_path}（{len(asin_map)} 个 ASIN）")
 
 
 if __name__ == "__main__":

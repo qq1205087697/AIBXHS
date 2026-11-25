@@ -417,6 +417,14 @@ async def get_reviews(
                 print(f"[DEBUG] 索引10处的退货率值: {row[10] if len(row) > 10 else 'N/A'}")
                 print(f"[DEBUG] 最终 return_rate: {return_rate}")
 
+            # ASIN 当前总评分：按差评所属店铺匹配站点（避免跨市场错配），无数据为 None
+            row_store_name = store_name_map.get(store_meta_map.get(review_id), "")
+            asin_meta = _match_asin_meta(row[1], row_store_name)
+            asin_rating = asin_meta["star"] if asin_meta else None
+            asin_review_num = asin_meta["review_num"] if asin_meta else None
+            asin_store = asin_meta["store"] if asin_meta else ""
+            asin_synced = bool(asin_meta and asin_meta.get("star"))
+
             # 店铺名：直接按 store_id 查店铺表
             review_data.append({
                 "id": str(review_id),
@@ -440,7 +448,11 @@ async def get_reviews(
                 "isNew": is_new,
                 "author": row[2] or "Anonymous",
                 "importanceLevel": importance_level,
-                "returnRate": return_rate
+                "returnRate": return_rate,
+                "asinRating": asin_rating,
+                "asinReviewNum": asin_review_num,
+                "asinRatingStore": asin_store,
+                "asinRatingSynced": asin_synced
             })
 
         return {
@@ -678,6 +690,44 @@ def _find_low_star_files():
                 json_path = base / "low_star_summary.json"
                 return csv_path, json_path if json_path.exists() else None
     return None, None
+
+
+# ASIN→总评分映射缓存（asin_ratings.json 由 lingxing_low_star_stats.py 每天生成，
+# 同一 ASIN 跨店铺取评论数最多的那条；mtime 变化自动重载）
+_asin_ratings_cache: dict = {"mtime": 0.0, "data": {}}
+
+
+def _get_asin_ratings() -> dict:
+    """读取全量 ASIN→评分映射文件，形如 {"B0XXXX": {"star": 4.3, "review_num": 123, ...}}"""
+    for ancestor in Path(__file__).resolve().parents[:5]:
+        p = ancestor / "asin_ratings.json"
+        if p.exists():
+            try:
+                mtime = p.stat().st_mtime
+                if _asin_ratings_cache["mtime"] != mtime:
+                    with open(p, "r", encoding="utf-8") as f:
+                        _asin_ratings_cache["data"] = json.load(f)
+                    _asin_ratings_cache["mtime"] = mtime
+            except (OSError, json.JSONDecodeError):
+                pass  # 文件读取失败时沿用旧缓存
+            break
+    return _asin_ratings_cache["data"]
+
+
+def _match_asin_meta(asin: str, store_name: str) -> Optional[dict]:
+    """按差评所属店铺匹配 ASIN 评分条目（asin_ratings.json 中每 ASIN 存全站点条目列表）。
+
+    匹配优先级：
+      1. 店铺名与差评所属店铺精确一致（同一店铺多 MSKU 时映射已取评论最多）
+      2. 店铺名匹配不到（如 ASIN 未在该店铺同步）→ 取全局评论最多的条目（列表已按评论数降序）
+    返回条目 {"star": float|None, "review_num": int, "store": str, "marketplace": str}，无数据返回 None
+    """
+    entries = _get_asin_ratings().get((asin or "").strip()) or []
+    if not entries:
+        return None
+    same_store = [e for e in entries if e.get("store") == (store_name or "").strip()]
+    pool = same_store or entries
+    return max(pool, key=lambda e: e.get("review_num") or 0)
 
 
 @router.get("/low-star-listings")
@@ -925,6 +975,13 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             "department": analysis_row[4] if analysis_row else "",
             "departments": [d for d in detail_departments_str.split(",") if d]
         }
+
+        # ASIN 当前总评分：按差评所属店铺匹配站点（asin_ratings.json；无数据则为 null）
+        asin_meta = _match_asin_meta(row[1], detail_store_name)
+        review_detail["asinRating"] = asin_meta["star"] if asin_meta else None
+        review_detail["asinReviewNum"] = asin_meta["review_num"] if asin_meta else None
+        review_detail["asinRatingStore"] = asin_meta["store"] if asin_meta else ""
+        review_detail["asinRatingSynced"] = bool(asin_meta and asin_meta.get("star"))
         
         if isinstance(review_detail["keyPoints"], str):
             try:

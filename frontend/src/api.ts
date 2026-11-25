@@ -1450,8 +1450,8 @@ export const productSelectionApi = {
     apiClient.post("/product-selection/batch-analyze", ids, { timeout: 30000 }),
   batchAnalyzeProgress: (batchId: string) =>
     apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
-  recalcScores: () =>
-    apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  recalcScores: (ids?: number[]) =>
+    apiClient.post("/product-selection/recalc-scores", ids && ids.length > 0 ? { ids } : {}, { timeout: 60000 }),
   rescrapeFbaFees: (ids?: number[]) =>
     apiClient.post("/product-selection/rescrape-fba-fees", ids && ids.length > 0 ? { ids } : {}, { timeout: 30000 }),
   switchRate: (useRealtime: boolean) =>

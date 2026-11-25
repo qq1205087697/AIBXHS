@@ -39,6 +39,10 @@ interface ReviewItem {
   isNew?: boolean
   importanceLevel?: string | null
   returnRate?: number
+  asinRating?: number | null
+  asinReviewNum?: number | null
+  asinRatingStore?: string
+  asinRatingSynced?: boolean
   department?: string
   departments?: string[]
   suggestionProcessed?: Record<string, { note: string; by: string; at: string }>
@@ -1071,6 +1075,31 @@ const ReviewBot: React.FC = () => {
                 <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>商品信息</h3>
                 <p style={{ margin: '4px 0' }}><strong>商品：</strong>{selectedReview.productName}</p>
                 <p style={{ margin: '4px 0' }}><strong>ASIN：</strong>{selectedReview.asin}</p>
+                {/* ASIN 当前总评分（按差评所属店铺匹配领星站点；未同步则灰色提示） */}
+                {(() => {
+                  const star = selectedReview.asinRating;
+                  const rn = Number(selectedReview.asinReviewNum) || 0;
+                  const st = selectedReview.asinRatingStore;
+                  if (star !== undefined && star !== null && !isNaN(Number(star))) {
+                    const numStar = Number(star);
+                    const color = numStar < 3 ? 'error' : numStar < 4 ? 'warning' : 'success';
+                    return (
+                      <p key="asin-rating" style={{ margin: '4px 0' }}>
+                        <strong>当前总评分：</strong>
+                        <Tag color={color}>{numStar.toFixed(1)}{rn ? ` · ${rn} 条评论` : ''}{st ? ` · ${st}` : ''}</Tag>
+                      </p>
+                    );
+                  }
+                  if (st) {
+                    return (
+                      <p key="asin-rating" style={{ margin: '4px 0' }}>
+                        <strong>当前总评分：</strong>
+                        <Tag>领星暂未同步评分 · {st}</Tag>
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
                 {selectedReview.storeName && (
                   <p style={{ margin: '4px 0' }}><strong>店铺：</strong>{selectedReview.storeName}</p>
                 )}

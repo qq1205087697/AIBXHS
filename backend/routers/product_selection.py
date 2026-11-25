@@ -1701,55 +1701,82 @@ async def switch_exchange_rate(
         raise HTTPException(status_code=500, detail=f"切换汇率失败: {str(e)}")
 
 
+class RecalcScoresData(BaseModel):
+    """重算评分数据（ids 为空时全量重算）"""
+    ids: Optional[List[int]] = None
+
+
 @router.post("/recalc-scores")
 async def recalc_all_scores(
-    db: Session = Depends(get_db),
+    data: Optional[RecalcScoresData] = None,
     current_user: User = Depends(get_current_user)
 ):
-    """重新计算所有选品记录的评分"""
-    try:
-        rows = db.execute(text("""
-            SELECT id, rating, review_count, monthly_sales, traffic_trend
-            FROM product_selections
-            WHERE tenant_id = :tid AND deleted_at IS NULL
-        """), {"tid": current_user.tenant_id}).fetchall()
+    """手动重算评分（后台执行）：传 ids 仅重算指定记录（单条/批量），否则对当前租户全部选品重算。
+    全量约4000+条、远端DB逐条UPDATE需数分钟，改为后台线程避免HTTP超时（与FBA利润重抓同模式）"""
+    import threading
+    from database.database import SessionLocal
 
-        updated = 0
-        for row in rows:
-            rid = row[0]
-            rating_score = _calc_rating_score(row[1], row[2])
-            sales_score = _calc_sales_score(row[3])
-            penalty_factor = _calc_penalty_factor(rating_score)
-            traffic_score, traffic_result_json = _calc_traffic_score(row[4])
-            composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+    tenant_id = current_user.tenant_id
+    ids = [int(i) for i in ((data.ids if data else None) or []) if i]
 
-            db.execute(text("""
-                UPDATE product_selections SET
-                    traffic_score = :ts,
-                    traffic_score_result = :tsr,
-                    sales_score = :ss,
-                    rating_score = :rs,
-                    penalty_factor = :pf,
-                    composite_score = :cs,
-                    updated_at = NOW()
-                WHERE id = :id
-            """), {
-                "id": rid,
-                "ts": traffic_score,
-                "tsr": traffic_result_json,
-                "ss": sales_score,
-                "rs": rating_score,
-                "pf": penalty_factor,
-                "cs": composite_score,
-            })
-            updated += 1
+    def _run():
+        db = SessionLocal()
+        try:
+            where_sql = "tenant_id = :tid AND deleted_at IS NULL"
+            params: dict = {"tid": tenant_id}
+            if ids:
+                ph = ", ".join(f":rid{i}" for i in range(len(ids)))
+                where_sql += f" AND id IN ({ph})"
+                params.update({f"rid{i}": v for i, v in enumerate(ids)})
+            rows = db.execute(text(f"""
+                SELECT id, rating, review_count, monthly_sales, traffic_trend
+                FROM product_selections
+                WHERE {where_sql}
+            """), params).fetchall()
+            logger.info(f"手动评分重算启动：共 {len(rows)} 条（ids模式={bool(ids)}）")
 
-        db.commit()
-        return {"success": True, "data": updated}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"重新计算评分失败: {e}")
-        raise HTTPException(status_code=500, detail=f"重新计算评分失败: {str(e)}")
+            updated = 0
+            for row in rows:
+                rid = row[0]
+                rating_score = _calc_rating_score(row[1], row[2])
+                sales_score = _calc_sales_score(row[3])
+                penalty_factor = _calc_penalty_factor(rating_score)
+                traffic_score, traffic_result_json = _calc_traffic_score(row[4])
+                composite_score = _calc_composite_score(penalty_factor, traffic_score, sales_score)
+
+                db.execute(text("""
+                    UPDATE product_selections SET
+                        traffic_score = :ts,
+                        traffic_score_result = :tsr,
+                        sales_score = :ss,
+                        rating_score = :rs,
+                        penalty_factor = :pf,
+                        composite_score = :cs,
+                        updated_at = NOW()
+                    WHERE id = :id
+                """), {
+                    "id": rid,
+                    "ts": traffic_score,
+                    "tsr": traffic_result_json,
+                    "ss": sales_score,
+                    "rs": rating_score,
+                    "pf": penalty_factor,
+                    "cs": composite_score,
+                })
+                updated += 1
+                if updated % 200 == 0:
+                    db.commit()
+
+            db.commit()
+            logger.info(f"手动评分重算完成：共更新 {updated} 条记录")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"手动评分重算失败: {e}")
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"success": True, "message": "评分全量重算已在后台启动，完成后数据自动更新"}
 
 
 class RescrapeFbaData(BaseModel):
