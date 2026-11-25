@@ -410,7 +410,6 @@ async def generate_ai_reply(
 
         chinese_ref = f"\n\n邮件中文翻译参考：\n{mail_content_chinese}" if mail_content_chinese else ""
         site_info = f"站点：{site_name}" if site_name else ""
-        ai_reply_ref = f"\n\n历史AI回复参考（上次生成的回复，可在此基础上调整）：\n{ai_reply_content}" if ai_reply_content else ""
 
         requirements = (request.requirements or "").strip()
         if requirements:
@@ -418,7 +417,23 @@ async def generate_ai_reply(
         else:
             req_part = "3. 未提供自定义需求，请根据对话记录和邮件上下文自动生成合适的回复"
 
-        system_prompt = f"""你是专业的跨境电商客服人员。请根据以下邮件内容生成专业、礼貌的回复。
+        if ai_reply_content:
+            # 已回复过的邮件：生成全新的跟进回复，明确禁止重复已发送内容
+            task_desc = "这封邮件此前已经回复过一次。现在买家还没撤回问题或需要再次跟进，请写一封全新的【跟进回复】。"
+            avoid_part = f"""
+
+已发送的回复（买家已经收到过，仅供你了解背景，新回复中严禁重复其中的任何观点、句式或措辞）：
+{ai_reply_content}
+
+新回复的写法要求：
+- 不要复述"已发送回复"里说过的内容（例如价格可能变动、建议关注商品页等已表达过的意思一律换新角度）
+- 从新角度推进沟通，例如：针对买家最初的问题提供补充信息或替代方案、跟进确认问题是否解决、主动提供进一步帮助
+- 开头称呼可以感谢买家的耐心/再次联系，体现这是一封新的跟进邮件而不是重发"""
+        else:
+            task_desc = "请根据完整对话记录生成一封合适的回复邮件。"
+            avoid_part = ""
+
+        system_prompt = f"""你是专业的跨境电商客服人员。{task_desc}
 
 要求：
 1. 回复语言使用{language_name}撰写
@@ -429,7 +444,7 @@ async def generate_ai_reply(
 
         user_prompt = f"""邮件主题：{mail_subject}
 完整对话记录：
-{conversation_text}{ai_reply_ref}{chinese_ref}
+{conversation_text}{avoid_part}{chinese_ref}
 {site_info}
 买家邮箱：{buyer_email}"""
 
