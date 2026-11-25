@@ -4,6 +4,94 @@
 
 ---
 
+## 2026-11-13
+
+### [后端+前端] 库存机器人新增「有销量但产品库无此产品」视图
+- **操作**：按 `docs/plans/2026-11-13_库存机器人_有销量但产品库无此产品_coding文档.md` 实现查看能力，并补齐分类、阈值、导出等配套内容
+- **判定口径（正式库实测后确定）**：
+  - 产品库 = `products` + `platform_products`；实测 `products.asin` 仅 4 行非空、`products.sku` 全空、`product_code` 为系统编码，三者与快照命中率均为 **0%** → 唯一有效通道是 `platform_products.sku`（92.5%）∪ `.asin`（合计 93.1%）
+  - 有销量默认 `sales_30d > 0`（`daily_sales>0` 会混入 668 行日均<1 的噪声）；窗口 7/14/30/60/90 与最小阈值可调
+  - 只统计主行（排除 `summary_flag='共享库存'`）；汇总行默认纳入并可用「仅普通主行」排除
+  - 拼接 SKU（`CA-A-887、USA-A-1188`）按 `、,;` 拆分，任一段命中即算已收录
+  - 问题分类：品名唯一命中→`疑似缺平台SKU映射`；一名多品→`品名歧义待确认`；不命中→`疑似未建档`（品名只做提示，不参与存在性判定）
+- **性能**：避开 `NOT EXISTS + UPPER(TRIM())` 相关子查询（实测超时），改为「产品库键集合 TTL 缓存 + 内存比对 + 未收录 id 回注」，并把销量阈值/有标识条件与列裁剪下推 SQL：首次计算 8.7s → **2.2s**，60s 结果缓存后 0s
+- **实测（2026-11-11 快照）**：主行 18,705；未收录 **659**（缺映射 344 / 未建档 229 / 品名歧义 86）；`exclude_summary` 后 367；窗口 7/14/30/90 → 477/598/659/719
+- **涉及文件**：
+  - `backend/services/product_lib_coverage_service.py`（新增：键集合缓存、归一化、拼接拆分、未收录判定与分类、缓存失效）
+  - `backend/services/inventory_service.py`（`build_visible_snapshots` 增 `missing_ids`；`search_inventory` 增 4 参数并降级；`items` 增 `product_lib_status/issue/action/sales_30d`；`get_inventory_overview` 增 `missing_product_count/missing_by_type`；导出白名单 +4 键）
+  - `backend/routers/restock.py`（`/search`、`/overview`、`/export` 透传；并补上 `/export` 一直漏传的 `holiday_filter`）
+  - `backend/tests/test_product_lib_coverage.py`（新增 11 用例，内存 SQLite）
+  - `frontend/src/pages/InventoryBot.tsx`（第 5 张统计卡「产品库未收录」、筛选栏视图/窗口/阈值/仅普通主行、表格「产品库状态」列 + `COLUMN_META`、导出字段选项）
+  - `frontend/src/api.ts`（`exportInventory` 增 4 参数 + `holiday_filter`）
+- **验证**：新增测试 11 passed；`test_fba_inbound_fill_notifier`(16) + `test_ai_image_pipeline`(90) 回归 117 passed；`npm run build` 通过；`/restock/search`、`/overview`、`/export` 端到端 200 且导出 659 行 7 列
+
+## 2026-11-04
+
+### [后端+前端] 风险整改：导入性能、导出字段、仓库清理、部署健壮性
+- **操作**：按体检结论处理确认项（按要求暂不处理「海外仓展示口径」与「补跑库存导入」）
+- **导入性能（业务等价）**：`fba_inbound` 校验由「`for sid in all_sids` 逐行 2 条 SQL」改为一条 JOIN UPDATE
+  - 覆盖范围（本批次在途快照 all_sids）与判定条件（`old != sum`）保持完全一致
+  - 实测 200 条样本：逐行版与集合式结果 **0 差异**；2833 个有明细的快照配合 ≈5666 次往返降为 1 次
+- **导出**：新增「海外仓库存」列（`inventory_service.all_fields` + 前端导出字段选项），已用 openpyxl 验证表头与数值
+- **仓库清理**：移除合并带入的调试残留 `_pi_*.txt`、`fc_err.txt`、`fc_out.txt`、`_analysis_ref.json`、`frontend/build_exit.txt`、`frontend/build_log.txt`
+- **部署健壮性**：
+  - 新增 `OVERSEAS_SYNC_TENANT_ID`（默认 1），定时同步 / 启动补跑 / 快照补写统一读取
+  - `init_db()` 启动时只读校验 `ai_image:use` 权限，缺失则告警提示执行 `migrations/add_ai_image_permission.py`（不自动授权，避免动权限矩阵）
+  - **前端产物已重新构建并部署到 `backend/static`**（旧入口备份 `index.html.bak_20261104_150322`），线上已可看到海外仓列
+- **澄清**：此前列为 P0 的「4 行在途不一致」经查为**上游数据问题**（Excel「FBA在途」列有值、`FBA在途详情` 文本为空），非代码缺陷，**未改动数据**
+- **涉及文件**：`backend/services/inventory_import_service.py`、`backend/services/inventory_service.py`、`backend/services/scheduler.py`、`backend/database/database.py`、`backend/config.py`、`backend/.env.example`、`frontend/src/pages/InventoryBot.tsx`
+
+### [前端] 修复「在途详情」在途为 0 仍可点击（该修复在 inventory-optimize 分支丢失）
+- **操作**：恢复「在途=0 时按钮置灰不可点 + 悬停提示『无在途货件』」
+- **根因**：该修复由 `541f01e`（feat/ai-image-gen 检查点提交，2026-10-27）引入，但只存在于 `feat/ai-image-gen` / `backup/img-20261027` 分支，`inventory-optimize` 的 HEAD 未包含该改动
+- **实现**：`record.fba_inbound <= 0` 时 `disabled`；Tooltip 外层加 `span` 承接 hover（antd 5 不再自动包裹 disabled 子元素，disabled 控件不派发鼠标事件），按钮 `pointer-events: none` 确保提示始终可见
+- **涉及文件**：`frontend/src/pages/InventoryBot.tsx`（操作列「在途详情」按钮）
+
+## 2026-11-03
+
+### [后端+前端] 海外仓每日 8:00 定时同步 + 任务持久化 + 全量代码审查
+- **操作**：新增每日定时同步，并把「切页不中断、状态实时可见」对齐 FBA 同步机制；随后对海外仓全部改动做完整审查并修复发现的问题
+- **定时任务**（`backend/services/scheduler.py`）：
+  - `overseas_inventory_sync_job`：cron 每天 8:00（`OVERSEAS_SYNC_HOUR` 可配），`misfire_grace_time=3600` + `coalesce=True`
+  - 分布式锁 `overseas_inventory_sync`，锁内等待任务结束（≤20 分钟）→ 多进程/多 worker 不重复跑
+  - `_schedule_overseas_catch_up()`：启动补跑，服务在 8:00 后启动且当天未同步 → 60 秒后自动补一次
+  - `overseas_backfill_job`：每小时自查新快照（新行海外仓为 0）并按明细表回写主行，解决「库存导入晚于 8:00 导致白天显示全 0」
+- **任务持久性**：
+  - 任务在服务端 daemon 线程执行，与 HTTP 请求/页面生命周期解耦 → 切页、关标签、刷新均不中断
+  - 前端 `localStorage`（`overseasSyncStatus`，30 分钟有效）恢复进行中任务并继续轮询，与 FBA 一致
+  - 新增「单轮询链」与「卸载即停」两个守卫，修掉手动+恢复并发轮询、离开页面后仍空转请求的问题
+- **审查修复**：
+  - `matched` 原用 UPDATE rowcount（只统计值变化行）→ 改为 `COUNT(DISTINCT s.id)` 精确统计
+  - 新增陈旧源数据保护：源表日期早于库中最新 → 跳过写入（`skipped=stale_source`），避免用旧数据覆盖新数据
+  - `start_sync_async` 增加 `threading.Lock`，并发 10 请求实测仅 1 个任务启动；返回值新增 `reason`，前端不再靠字符串匹配
+  - 飞书「日期」统一按 UTC+8 解析与过滤，不再依赖服务器时区
+  - 明细写入由逐行 executemany（499 行 19s）改为多行 VALUES（2 次往返）
+  - 主行清零范围收敛到非子行，写放大减半
+- **涉及文件**：`backend/config.py`、`backend/.env.example`、`backend/services/scheduler.py`、`backend/services/overseas_inventory_service.py`、`frontend/src/pages/InventoryBot.tsx`
+
+### [后端+前端] 库存机器人新增「海外仓同步」（飞书多维表 → 数据库 → 主行显示）
+- **操作**：接入海外仓多维表（`GeaRbmErAa5KaHsFoKwc3wQXn4e` / `tblWnRHyxPehIsmE`），按 SKU + 品名同步最新库存并在库存列表主行展示
+- **同步规则（覆盖式，不追加历史）**：
+  - 源表为「按日快照」结构：同一 `(SKU, SKU名称)` 每天一条，21251 条历史记录实际仅 499 个 SKU，故以 `(SKU, SKU名称)` 为唯一键，取「日期」最大的一条
+  - 拉取方式：按「日期」精确过滤逐天取（最近 2 天，每天 1 次请求、约 499 条，约 3s），异常/单日超 500 条时自动回退全表顺序扫描（43 页，约 2 分钟）
+  - 落库方式：先按租户清空 `overseas_inventories` 再写入去重结果（源表消失的 SKU 随之清除，不会残留脏数据）
+  - 展示口径：按 `(sku, product_name)` 回写 `inventory_snapshots` 最新快照的**主行**（`summary_flag != '共享库存'`），子行不落值，避免展开子行重复计数；品名缺失（名称列直接填 SKU）时降级为 SKU 单键匹配
+- **执行详情**：
+  - 新增 `overseas_inventories` 表（唯一键 `tenant_id + sku + product_name`，字段：站点/可售/最大库龄/源日期/飞书 record_id）
+  - `inventory_snapshots` 新增 `overseas_inventory` / `overseas_max_age` 两列（`init_db()` 幂等 ALTER）
+  - 实测：源表 20261103 快照 499 个 SKU、可售合计 22475，命中主行 190 条（含汇总行 56 条 + 普通主行 134 条），子行 0 条
+  - 前端库存机器人新增「海外仓」列（青蓝色数值 + Tooltip 显示最大库龄）与「同步海外仓」按钮（复用 FBA 同步的进度轮询交互）
+- **涉及文件**：
+  - `backend/config.py`（新增 `FEISHU_OVERSEAS_BASE_TOKEN` / `FEISHU_OVERSEAS_TABLE_ID`）
+  - `backend/.env.example`、`backend/.env`（配置海外仓表 ID，复用 `FEISHU_SYNC_APP_ID/SECRET`）
+  - `backend/models/overseas_inventory.py`（新建）
+  - `backend/models/restock.py`（InventorySnapshot 新增 2 列）
+  - `backend/database/database.py`（注册模型 + 幂等 ALTER）
+  - `backend/services/overseas_inventory_service.py`（新建：拉取/去重/覆盖写入/主行回写/状态机）
+  - `backend/routers/restock.py`（`POST /restock/sync-overseas`、`GET /restock/sync-overseas-status`、`GET /restock/overseas-summary`）
+  - `backend/services/inventory_service.py`（`search_inventory` 返回海外仓字段）
+  - `frontend/src/api.ts`、`frontend/src/pages/InventoryBot.tsx`（列 + 按钮 + 轮询）
+
 ## 2026-08-07
 
 ### [文档] 重写 CODE_WIKI.md 为结构化完整版（以真实代码为准）

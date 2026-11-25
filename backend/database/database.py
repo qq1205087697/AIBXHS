@@ -14,7 +14,9 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
     pool_timeout=30,
-    pool_recycle=1800,  # 30分钟
+    # 必须小于 MySQL wait_timeout（实测 300s）：否则池中连接已被服务端关闭，
+    # 每次 checkout 都要 pre_ping 重连，网络抖动时会直接抛 2013/10060
+    pool_recycle=280,  # ≈4.5 分钟
     echo=False
 )
 
@@ -23,6 +25,11 @@ engine = create_engine(
 def connect(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'")
+    # DDL 等待 metadata lock 的超时由 lock_wait_timeout 控制，MySQL 默认
+    # 31536000s（约 1 年）。startup 里 init_db() 的 ALTER/CREATE 一旦撞上
+    # 未提交事务就会永久挂起，整个服务起不来且 health 无响应。
+    # 限制到 15s：超时由 init_db 的异常分支记录后继续启动，不阻断服务。
+    cursor.execute("SET SESSION lock_wait_timeout = 15")
     cursor.close()
 
 # 创建会话工厂
@@ -41,6 +48,64 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    """列是否存在（走 information_schema，不靠 ALTER 抛异常判断）"""
+    row = conn.execute(
+        text(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = :t AND COLUMN_NAME = :c"
+        ),
+        {"t": table, "c": column},
+    ).scalar()
+    return bool(row)
+
+
+def _ensure_column_type(conn, table: str, column: str, expected_type: str, ddl: str) -> None:
+    """列类型不符才 ALTER，启动路径不再重复发 DDL 去抢 metadata lock。
+
+    已符合目标时立即 commit 结束只读事务，避免连接带着未提交事务进入
+    Sleep 状态长期持有 MDL 读锁（历史启动僵死的成因之一）。
+    """
+    try:
+        cur = conn.execute(
+            text(
+                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = :t AND COLUMN_NAME = :c"
+            ),
+            {"t": table, "c": column},
+        ).scalar()
+        if cur and cur.strip().lower() == expected_type.lower():
+            conn.commit()
+            return
+        if cur:
+            conn.execute(text(ddl))
+            conn.commit()
+            print(f"列类型已调整：{table}.{column} {cur} -> {expected_type}")
+    except Exception as e:  # noqa: BLE001
+        print(f"列类型检查/调整失败（{table}.{column}）: {e}")
+
+
+def _ensure_columns(conn, specs) -> None:
+    """幂等补列。specs = [(table, column, ddl_sql), ...]
+
+    先判定再 ALTER，把「已存在跳过 / 新增成功 / 真失败」分成三种日志。
+    原实现靠 try/except 兜「列已存在」，导致任何异常（例如列补丁里
+    text 被函数内 import 遮蔽引发的 UnboundLocalError）都被打印成
+    「添加字段失败（可能已存在）」，真实错误被掩盖。
+    """
+    for table, column, ddl in specs:
+        if _column_exists(conn, table, column):
+            print(f"字段已存在，跳过：{table}.{column}")
+            continue
+        try:
+            conn.execute(text(ddl))
+            print(f"字段已添加：{table}.{column}")
+        except Exception as e:  # noqa: BLE001
+            print(f"添加 {table}.{column} 字段失败: {e}")
 
 
 def init_db():
@@ -64,6 +129,7 @@ def init_db():
         from models import ad_report
         from models import ad_daily
         from models import group_message
+        from models import memo
 
         # 导入所有模型类
         from models.tenant import Tenant
@@ -82,40 +148,93 @@ def init_db():
         from models.threshold_setting import ThresholdSetting
         from models.restock import InventorySnapshot, InboundShipmentDetail, ReplenishmentDecision
         from models.local_inventory import LocalInventory
+        from models.overseas_inventory import OverseasInventory
         from models.inventory_management import PurchaseOrder, PurchaseOrderItem, InboundOrder, InboundOrderItem, OutboundOrder, OutboundOrderItem, InventoryBatch, OperationLog, StockTransferOrder, StockTransferOrderItem, Warehouse, ReplenishmentOrder, ReplenishmentItem, ShipmentOrder, ShipmentOrderItem
         from models.ad_campaign import AdCampaign, AdGroup, AdKeyword, AdTarget, AdProductAd, AdNegativeKeyword
         from models.ad_report import AdReportSnapshot, AdOptimizationRule, AdOptimizationLog
+        from models.group_message import GroupMessage, GroupsFs, GroupUserPermission
+        from models.memo import Memo
         from models.ad_daily import (
             AdCampaignDaily, AdKeywordDaily, AdSearchTermDaily,
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
         )
         from models.ai_video_task import AIVideoTask
+        from models.ai_image_task import AIImageTask
+        from models.ai_image_layout import AIImageLayout
         from models.video_binding_request import VideoBindingRequest
-        
+
         # 创建所有表
         Base.metadata.create_all(bind=engine)
         
-        # 检查并添加缺失的字段
+        # 检查并添加缺失的字段（幂等：已存在则跳过，不再伪造「失败」日志）
         with engine.connect() as conn:
-            tables_to_check = ['product_sales']
-            for table in tables_to_check:
-                try:
-                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN deleted_at DATETIME NULL'))
-                except Exception as e:
-                    print(f"添加 {table}.deleted_at 字段失败（可能已存在）: {e}")
-            # 差评分析表新增部门板块分类字段
-            try:
-                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN department VARCHAR(20) NULL COMMENT '问题板块:operations/purchasing/warehouse/design'"))
-            except Exception as e:
-                print(f"添加 review_analyses.department 字段失败（可能已存在）: {e}")
-            # 差评分析表新增多板块字段（逗号分隔，一条差评可属多个板块）
-            try:
-                conn.execute(text("ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"))
-            except Exception as e:
-                print(f"添加 review_analyses.departments 字段失败（可能已存在）: {e}")
+            _ensure_columns(conn, [
+                ("product_sales", "deleted_at",
+                 "ALTER TABLE product_sales ADD COLUMN deleted_at DATETIME NULL"),
+                # 差评分析表新增部门板块分类字段
+                ("review_analyses", "department",
+                 "ALTER TABLE review_analyses ADD COLUMN department VARCHAR(20) NULL "
+                 "COMMENT '问题板块:operations/purchasing/warehouse/design'"),
+                # 差评分析表新增多板块字段（逗号分隔，一条差评可属多个板块）
+                ("review_analyses", "departments",
+                 "ALTER TABLE review_analyses ADD COLUMN departments VARCHAR(100) NULL "
+                 "COMMENT '问题板块多选，逗号分隔:operations/purchasing/warehouse/design'"),
+                # A+ 版式素材：列表用缩略图（原图 1~2MB，240 张直接进列表会把首屏拖死）
+                ("ai_image_layouts", "thumb_url",
+                 "ALTER TABLE ai_image_layouts ADD COLUMN thumb_url VARCHAR(1000) NULL "
+                 "COMMENT '列表缩略图地址（TOS，<=480px，仅展示）'"),
+                # 库存快照海外仓字段（飞书多维表同步写入主行）
+                ("inventory_snapshots", "overseas_inventory",
+                 "ALTER TABLE inventory_snapshots ADD COLUMN overseas_inventory FLOAT NULL DEFAULT 0 "
+                 "COMMENT '海外仓可售库存'"),
+                ("inventory_snapshots", "overseas_max_age",
+                 "ALTER TABLE inventory_snapshots ADD COLUMN overseas_max_age FLOAT NULL "
+                 "COMMENT '海外仓最大库龄（天）'"),
+                # 发货单表补齐 shipments 路由使用的确认流程/转出库关联列（存量库缺列导致 1054）
+                ("shipment_orders", "confirmed_by",
+                 "ALTER TABLE shipment_orders ADD COLUMN confirmed_by INT NULL COMMENT '确认人'"),
+                ("shipment_orders", "confirmer_name",
+                 "ALTER TABLE shipment_orders ADD COLUMN confirmer_name VARCHAR(100) NULL COMMENT '确认人姓名'"),
+                ("shipment_orders", "confirmed_at",
+                 "ALTER TABLE shipment_orders ADD COLUMN confirmed_at DATETIME NULL COMMENT '确认时间'"),
+                ("shipment_orders", "outbound_order_id",
+                 "ALTER TABLE shipment_orders ADD COLUMN outbound_order_id INT NULL COMMENT '关联出库单ID'"),
+                # 采购明细表补齐 purchase 路由使用的列（存量库缺列导致 1054）
+                ("purchase_order_items", "supplier",
+                 "ALTER TABLE purchase_order_items ADD COLUMN supplier VARCHAR(100) NULL COMMENT '供应商名称'"),
+                ("purchase_order_items", "parent_product_id",
+                 "ALTER TABLE purchase_order_items ADD COLUMN parent_product_id INT NULL COMMENT '关联成品ID（配件行）'"),
+                ("purchase_order_items", "store_group_id",
+                 "ALTER TABLE purchase_order_items ADD COLUMN store_group_id INT NULL COMMENT '店铺分组ID（明细级）'"),
+                ("stores", "ozon_client_id",
+                 "ALTER TABLE stores ADD COLUMN ozon_client_id VARCHAR(64) NULL COMMENT 'Ozon Seller API Client-Id'"),
+                ("stores", "ozon_api_key",
+                 "ALTER TABLE stores ADD COLUMN ozon_api_key VARCHAR(255) NULL COMMENT 'Ozon Seller API Api-Key（不回传前端）'"),
+                ("product_selections", "store_group_ids",
+                 "ALTER TABLE product_selections ADD COLUMN store_group_ids TEXT NULL COMMENT '申请店铺分组ID列表(JSON数组)'"),
+                ("inbound_order_items", "shelf_number",
+                 "ALTER TABLE inbound_order_items ADD COLUMN shelf_number VARCHAR(50) NULL COMMENT '货架号'"),
+                ("inbound_order_items", "purchase_order_item_id",
+                 "ALTER TABLE inbound_order_items ADD COLUMN purchase_order_item_id INT NULL COMMENT '关联采购明细ID'"),
+                ("shipment_order_items", "sku",
+                 "ALTER TABLE shipment_order_items ADD COLUMN sku VARCHAR(100) NULL COMMENT 'SKU'"),
+            ])
             conn.commit()
         
         print("数据库表结构创建成功")
+
+        # 权限种子自查：AI 生图接口全部依赖 ai_image:use（由 migrations/add_ai_image_permission.py 写入）。
+        # 这里只做只读检查 + 告警，不自动授权，避免动到既有权限矩阵。
+        try:
+            with engine.connect() as conn:
+                _has_perm = conn.execute(text(
+                    "SELECT COUNT(*) FROM permissions WHERE code = 'ai_image:use' AND deleted_at IS NULL"
+                )).scalar()
+            if not _has_perm:
+                print("⚠ 未找到权限 ai_image:use，AI 生图页面会返回 403；"
+                      "请在目标库执行 backend/migrations/add_ai_image_permission.py")
+        except Exception as _perm_err:
+            print(f"权限种子自查跳过（权限表可能尚未创建）: {_perm_err}")
         
         # 手动创建 scheduler_locks 和 product_selections 表
         # 注意：text 已在模块顶部导入；函数内再 import 会使 text 变成本地变量，
@@ -212,6 +331,95 @@ def init_db():
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """))
             conn.commit()
+            # 媒体创作中心：需求单据表（运营提报 → 主管审核 → 美工生成 → 内容审核 → 运营确认 → 待上传 → 已上传）
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_requests (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tenant_id INT NOT NULL COMMENT '租户ID',
+                    no INT NOT NULL COMMENT '主单号（审核通过拆单时子单沿用）',
+                    seq VARCHAR(20) NOT NULL COMMENT '单据关联号：1 / 1-1 / 1-2',
+                    parent_id INT NULL COMMENT '子单的父单ID',
+                    product_id INT NOT NULL COMMENT '产品ID',
+                    product_code VARCHAR(100) NULL COMMENT '产品编码',
+                    product_name VARCHAR(300) NULL COMMENT '产品名称',
+                    product_image VARCHAR(1000) NULL COMMENT '产品主图',
+                    platform VARCHAR(20) NULL COMMENT '主平台：amazon/ozon',
+                    platform_items TEXT NULL COMMENT '目标平台 SKU 条目（JSON 数组）',
+                    demand_types TEXT NULL COMMENT '需求类型（JSON 数组）',
+                    demand_type VARCHAR(40) NULL COMMENT '拆单后的单个需求类型',
+                    description TEXT NULL COMMENT '需求描述',
+                    prompt TEXT NULL COMMENT '视频提示词',
+                    plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）',
+                    ref_images TEXT NULL COMMENT '参考图地址（JSON 数组，1~9 张）',
+                    ratio VARCHAR(10) DEFAULT '9:16' COMMENT '视频比例',
+                    resolution VARCHAR(10) DEFAULT '0.3' COMMENT '分辨率档位',
+                    duration INT DEFAULT 15 COMMENT '视频时长（5/10/15）',
+                    video_type VARCHAR(20) DEFAULT '口播带货' COMMENT '视频类型：口播带货/产品展示',
+                    stage VARCHAR(20) NOT NULL DEFAULT '待提交' COMMENT '流转阶段',
+                    gen_status VARCHAR(20) NULL COMMENT '生成状态：生成中/失败',
+                    gen_task_id INT NULL COMMENT 'AI视频任务ID',
+                    gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图',
+                    gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）',
+                    gen_time DATETIME NULL COMMENT '生成时间',
+                    media_url VARCHAR(1000) NULL COMMENT '生成成片地址',
+                    hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败',
+                    hd_task_id INT NULL COMMENT '超分任务ID',
+                    hd_url VARCHAR(1000) NULL COMMENT '高清成片地址',
+                    hd_time DATETIME NULL COMMENT '高清完成时间',
+                    bind_status VARCHAR(20) NULL COMMENT '绑定状态：审核中/已通过/已拒绝',
+                    binding_request_id INT NULL COMMENT '绑定申请ID',
+                    upload_status VARCHAR(20) NULL COMMENT '上传状态',
+                    upload_time DATETIME NULL COMMENT '上传时间',
+                    upload_result TEXT NULL COMMENT '上传结果（JSON）',
+                    submitter_id INT NULL COMMENT '提报人ID',
+                    submitter_name VARCHAR(100) NULL COMMENT '提报人',
+                    submit_time DATETIME NULL COMMENT '提交审核时间',
+                    reviewer_id INT NULL COMMENT '审核人ID',
+                    reviewer_name VARCHAR(100) NULL COMMENT '审核人',
+                    reviewer_at DATETIME NULL COMMENT '最近审核时间',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    deleted_at DATETIME NULL,
+                    INDEX idx_media_tenant_stage (tenant_id, stage),
+                    INDEX idx_media_tenant_no (tenant_id, no),
+                    INDEX idx_media_task (gen_task_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='媒体创作中心需求单据'
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_request_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    tenant_id INT NOT NULL,
+                    request_id INT NOT NULL,
+                    actor_id INT NULL,
+                    actor_name VARCHAR(100) NULL,
+                    action VARCHAR(50) NULL,
+                    note VARCHAR(1000) NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_media_log_request (request_id),
+                    INDEX idx_media_log_tenant (tenant_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='媒体创作中心操作日志'
+            """))
+            conn.commit()
+            # 已存在的 media_requests 表补 plan / 高清 / 绑定门禁字段
+            _media_extra_columns = [
+                ("plan", "ALTER TABLE media_requests ADD COLUMN plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）' AFTER prompt"),
+                ("gen_kind", "ALTER TABLE media_requests ADD COLUMN gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图' AFTER gen_task_id"),
+                ("gen_user_id", "ALTER TABLE media_requests ADD COLUMN gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）' AFTER gen_kind"),
+                ("hd_status", "ALTER TABLE media_requests ADD COLUMN hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败' AFTER media_url"),
+                ("hd_task_id", "ALTER TABLE media_requests ADD COLUMN hd_task_id INT NULL COMMENT '超分任务ID' AFTER hd_status"),
+                ("hd_url", "ALTER TABLE media_requests ADD COLUMN hd_url VARCHAR(1000) NULL COMMENT '高清成片地址' AFTER hd_task_id"),
+                ("hd_time", "ALTER TABLE media_requests ADD COLUMN hd_time DATETIME NULL COMMENT '高清完成时间' AFTER hd_url"),
+                ("bind_status", "ALTER TABLE media_requests ADD COLUMN bind_status VARCHAR(20) NULL COMMENT '绑定状态：审核中/已通过/已拒绝' AFTER hd_time"),
+                ("media_type", "ALTER TABLE media_requests ADD COLUMN media_type VARCHAR(10) NULL COMMENT '成片类型：video=视频/image=图片（已有素材提报时标记）' AFTER binding_request_id"),
+                ("media_style", "ALTER TABLE media_requests ADD COLUMN media_style VARCHAR(20) NULL COMMENT '图片类型：主图/附图/A+（已有素材图片提报时标记）' AFTER media_type"),
+                ("binding_request_id", "ALTER TABLE media_requests ADD COLUMN binding_request_id INT NULL COMMENT '绑定申请ID' AFTER bind_status"),
+            ]
+            for _col, _sql in _media_extra_columns:
+                try:
+                    conn.execute(text(_sql))
+                    conn.commit()
+                except Exception:
+                    pass  # 列已存在则忽略
             # 创建 scheduler_locks 表
             create_lock_table_sql = """
                 CREATE TABLE IF NOT EXISTS scheduler_locks (
@@ -248,11 +456,11 @@ def init_db():
                     product_type VARCHAR(100) NULL COMMENT '类型',
                     site VARCHAR(50) NULL COMMENT '站点',
                     monthly_sales INT NULL COMMENT '近一个月销量',
-                    traffic_trend VARCHAR(200) NULL COMMENT '流量趋势',
+                    traffic_trend TEXT NULL COMMENT '流量趋势(单关键词{月:流量}或多关键词{词:{月:流量}})',
             seasonality TEXT NULL COMMENT '季节性判断',
             infringement_analysis TEXT NULL COMMENT '侵权分析',
             infringement_conclusion VARCHAR(500) NULL COMMENT '侵权分析结论',
-            traffic_score_result VARCHAR(500) NULL COMMENT '流量评分结果',
+            traffic_score_result TEXT NULL COMMENT '流量评分结果(多关键词时含最优关键词标注)',
             traffic_score FLOAT NULL COMMENT '流量评分',
             sales_score FLOAT NULL COMMENT '销量评分',
             rating_score FLOAT NULL COMMENT '星级评分',
@@ -277,12 +485,12 @@ def init_db():
                 pass  # 列已存在则忽略
             # 为已存在的表添加汇率列（如果不存在）
             try:
-                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1人民币兑外币)' AFTER cost_at_15_profit"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN scrape_rate DECIMAL(12, 6) NULL COMMENT '抓取时汇率(1外币兑人民币)' AFTER cost_at_15_profit"))
                 conn.commit()
             except Exception:
                 pass
             try:
-                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1人民币兑外币)' AFTER scrape_rate"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN realtime_rate DECIMAL(12, 6) NULL COMMENT '实时汇率(1外币兑人民币)' AFTER scrape_rate"))
                 conn.commit()
             except Exception:
                 pass
@@ -292,12 +500,17 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass
-            # 头程改为3位小数（如果需要）
+            # 多选店铺分组（合并为一条申请时记录全部分组，JSON数组）
             try:
-                conn.execute(text("ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'"))
+                conn.execute(text("ALTER TABLE product_selections ADD COLUMN store_group_ids TEXT NULL COMMENT '申请店铺分组ID列表(JSON数组)' AFTER store_group_id"))
                 conn.commit()
             except Exception:
                 pass
+            # 头程改为3位小数（仅类型不符时才改，避免每次启动都申请 MDL 写锁）
+            _ensure_column_type(
+                conn, "product_selections", "first_leg_cost", "decimal(12,3)",
+                "ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'",
+            )
 
             # products 表新增无配件标记字段（如果不存在）
             try:
@@ -306,12 +519,12 @@ def init_db():
             except Exception:
                 pass
 
-            # 页面优化机器人表品名字段（与库存快照表品名长度一致，每次启动幂等执行）
-            try:
-                conn.execute(text("ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'"))
-                conn.commit()
-            except Exception:
-                pass
+            # 页面优化机器人表品名字段（与库存快照表品名长度一致，仅类型不符时才改）
+            _ensure_column_type(
+                conn, "product_page_info", "product_name", "varchar(500)",
+                "ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'",
+            )
+
         print("scheduler_locks 和 product_selections 表创建成功")
         
     except Exception as e:

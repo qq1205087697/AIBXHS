@@ -105,8 +105,8 @@ interface SkuSalesRecord {
 
 // 图表颜色列表
 const CHART_COLORS = [
-  '#1890ff', '#52c41a', '#faad14', '#f5222d', '#722ed1',
-  '#13c2c2', '#eb2f96', '#fa8c16', '#2f54eb', '#10239e'
+  '#1890ff', '#52c41a', '#722ed1', '#13c2c2', '#2f54eb',
+  '#eb2f96', '#36cfc9', '#9254de', '#531dab', '#10239e'
 ];
 
 // --- 购物车预警记录（product_buybox）
@@ -280,11 +280,15 @@ const computeSkuAnomalyMetrics = (
   let maxAbsChange = 0;  // 最大绝对变化（通道A+B）
   let anomalyDayCount = 0;
   let latestRateAbs = 0; // 最新趋势变化率绝对值（%）
-  const daily: SkuAnomalyDailyItem[] = recordedSales.map((sales, i) => {
+  // 用 for 循环递增构建（不能用 map+回调自引用 daily，const 初始化完成前访问会触发 TDZ ReferenceError）
+  const daily: SkuAnomalyDailyItem[] = [];
+  for (let i = 0; i < recordedSales.length; i++) {
+    const sales = recordedSales[i];
     const date = fullDates[i];
     // 无记录日期：标记 dataMissing，不参与环比
     if (sales === null) {
-      return { date, sales: null, prevSales: null, changeRate: null, absChange: null, direction: null, isAnomaly: false, dataMissing: true, channel: null };
+      daily.push({ date, sales: null, prevSales: null, changeRate: null, absChange: null, direction: null, isAnomaly: false, dataMissing: true, channel: null });
+      continue;
     }
     const prevItem = i > 0 ? daily[i - 1] : null;
     const prevSales = prevItem && !prevItem.dataMissing ? prevItem.sales : null;
@@ -316,8 +320,8 @@ const computeSkuAnomalyMetrics = (
         if (Math.abs(absChange) > maxAbsChange) maxAbsChange = Math.abs(absChange);
       }
     }
-    return { date, sales, prevSales, changeRate, absChange, direction, isAnomaly, dataMissing: false, channel };
-  });
+    daily.push({ date, sales, prevSales, changeRate, absChange, direction, isAnomaly, dataMissing: false, channel });
+  }
 
   // 连续有效异动日合并为事件，并定级 P0/P1/P2
   const events: SkuAnomalyEvent[] = [];
@@ -752,6 +756,8 @@ const DataAlertBot: React.FC = () => {
   });
 
   const [showSkuAnomalyThresholdModal, setShowSkuAnomalyThresholdModal] = useState(false);
+  // 异动评分筛选：只展示评分≥该值的SKU（默认70，聚焦强信号；0=全部）
+  const [skuAnomalyScoreFilter, setSkuAnomalyScoreFilter] = useState<number>(70);
   const [editingSkuStoreId, setEditingSkuStoreId] = useState<string | null>(null);
   const [skuEditFormValues, setSkuEditFormValues] = useState<{ overallTrend: number; latestTrend: number }>({
     overallTrend: 15,
@@ -1161,7 +1167,7 @@ const DataAlertBot: React.FC = () => {
   // SKU异动检测结果：最近3天有事件→按事件方向分组，否则按总体趋势方向分组（只保留观察池口径）
   const skuAnomalyGroups = useMemo(() => {
     const selectedStoreNames = STORES.filter(s => displayStoreIds.includes(s.id)).map(s => s.name);
-    const filtered = skuAnomalyTestData.filter(item => item.isMonitored && (selectedStoreNames.length === 0 || selectedStoreNames.includes(item.store)));
+    const filtered = skuAnomalyTestData.filter(item => item.isMonitored && item.anomalyScore >= skuAnomalyScoreFilter && (selectedStoreNames.length === 0 || selectedStoreNames.includes(item.store)));
     const severityOrder: Record<string, number> = { P0: 3, P1: 2, P2: 1 };
     const sortFn = (a: typeof filtered[0], b: typeof filtered[0]) => {
       const sa = a.severity ? severityOrder[a.severity] : 0;
@@ -1178,19 +1184,19 @@ const DataAlertBot: React.FC = () => {
       groups[dir].sort(sortFn);
     });
     return groups;
-  }, [skuAnomalyTestData, selectedStoreIds, STORES]);
+  }, [skuAnomalyTestData, selectedStoreIds, STORES, skuAnomalyScoreFilter]);
 
-  // P0/P1/P2 统计（标题徽章用）
+  // P0/P1/P2 统计（标题徽章用，跟随评分筛选）
   const skuAnomalySeverityStats = useMemo(() => {
     const selectedStoreNames = STORES.filter(s => displayStoreIds.includes(s.id)).map(s => s.name);
     const stats = { P0: 0, P1: 0, P2: 0 };
     skuAnomalyTestData.forEach(item => {
-      if (item.isMonitored && item.severity && (selectedStoreNames.length === 0 || selectedStoreNames.includes(item.store))) {
+      if (item.isMonitored && item.severity && item.anomalyScore >= skuAnomalyScoreFilter && (selectedStoreNames.length === 0 || selectedStoreNames.includes(item.store))) {
         stats[item.severity]++;
       }
     });
     return stats;
-  }, [skuAnomalyTestData, selectedStoreIds, STORES]);
+  }, [skuAnomalyTestData, selectedStoreIds, STORES, skuAnomalyScoreFilter]);
 
   // --- 商品销量数据（从数据库获取，显示累计销量前10个SKU）
   const skuSalesData = useMemo(() => {
@@ -3151,7 +3157,7 @@ const DataAlertBot: React.FC = () => {
       }}>
         {/* 订单量 */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="orders"
           onClick={() => setPinnedKpi(prev => prev === 'orders' ? null : 'orders')}
           onMouseEnter={() => setHoveredKpi('orders')}
@@ -3162,8 +3168,10 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              minHeight: 'auto', 
-              height: 'auto',
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0,
               backgroundColor: '#f5efe0'
             }} 
             hoverable
@@ -3181,7 +3189,7 @@ const DataAlertBot: React.FC = () => {
                     const p = pctChange(prev);
                     const dateLabel = dateStr.slice(5).replace('-', '/');
                     return (
-                      <div key={label} style={{ fontSize: '11px', lineHeight: 1.6, marginTop: '2px', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                      <div key={label} style={{ fontSize: '11px', lineHeight: 1.6, marginTop: '2px', display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
                         <span style={{ color: '#8c8c8c' }}>{label}</span>
                         {p === null ? (
                           <span style={{ color: '#8c8c8c' }}>{dateLabel}：{prev.toLocaleString()}单</span>
@@ -3211,7 +3219,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* GMV */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="gmv"
           onClick={() => setPinnedKpi(prev => prev === 'gmv' ? null : 'gmv')}
           onMouseEnter={() => setHoveredKpi('gmv')}
@@ -3222,8 +3230,10 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              minHeight: 'auto', 
-              height: 'auto',
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0,
               backgroundColor: '#e6f0eb'
             }} 
             hoverable
@@ -3243,7 +3253,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* 平均客单价 */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="avgOrderPrice"
           onClick={() => setPinnedKpi(prev => prev === 'avgOrderPrice' ? null : 'avgOrderPrice')}
           onMouseEnter={() => setHoveredKpi('avgOrderPrice')}
@@ -3254,8 +3264,10 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              minHeight: 'auto', 
-              height: 'auto',
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0,
               backgroundColor: '#f6ffed'
             }} 
             hoverable
@@ -3275,7 +3287,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* 毛利润 */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="grossProfit"
           onClick={() => setPinnedKpi(prev => prev === 'grossProfit' ? null : 'grossProfit')}
           onMouseEnter={() => setHoveredKpi('grossProfit')}
@@ -3286,8 +3298,10 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              minHeight: 'auto', 
-              height: 'auto',
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0,
               backgroundColor: '#e6f7ff'
             }} 
             hoverable
@@ -3307,7 +3321,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* 广告占比 */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="adRatio"
           onClick={() => setPinnedKpi(prev => prev === 'adRatio' ? null : 'adRatio')}
           onMouseEnter={() => setHoveredKpi('adRatio')}
@@ -3318,9 +3332,11 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              ...getCardStyle(getMetricStatus('adRatio', currentMetrics.adRatio)), 
-              minHeight: 'auto', 
-              height: 'auto'
+              ...getCardStyle(getMetricStatus('adRatio', currentMetrics.adRatio)),
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0
             }} 
             hoverable
           >
@@ -3345,7 +3361,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* 仓储占比 */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="storageRatio"
           onClick={() => setPinnedKpi(prev => prev === 'storageRatio' ? null : 'storageRatio')}
           onMouseEnter={() => setHoveredKpi('storageRatio')}
@@ -3356,9 +3372,11 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              ...getCardStyle(getMetricStatus('storageRatio', currentMetrics.storageRatio)), 
-              minHeight: 'auto', 
-              height: 'auto'
+              ...getCardStyle(getMetricStatus('storageRatio', currentMetrics.storageRatio)),
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0
             }} 
             hoverable
           >
@@ -3383,7 +3401,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* ACOS */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="acos"
           onClick={() => setPinnedKpi(prev => prev === 'acos' ? null : 'acos')}
           onMouseEnter={() => setHoveredKpi('acos')}
@@ -3394,9 +3412,11 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              ...getCardStyle(getMetricStatus('acos', acosCard.value)), 
-              minHeight: 'auto', 
-              height: 'auto'
+              ...getCardStyle(getMetricStatus('acos', acosCard.value)),
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0
             }} 
             hoverable
           >
@@ -3421,7 +3441,7 @@ const DataAlertBot: React.FC = () => {
 
         {/* FBA总库存 */}
         <div 
-          style={{ flex: 1, position: 'relative' }}
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
           data-kpi-card="fbaTotalStock"
           onClick={() => setPinnedKpi(prev => prev === 'fbaTotalStock' ? null : 'fbaTotalStock')}
           onMouseEnter={() => setHoveredKpi('fbaTotalStock')}
@@ -3432,8 +3452,10 @@ const DataAlertBot: React.FC = () => {
             bordered 
             bodyStyle={{ padding: '8px 12px' }} 
             style={{ 
-              minHeight: 'auto', 
-              height: 'auto',
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0,
               backgroundColor: '#f0fff0'
             }} 
             hoverable
@@ -4177,7 +4199,7 @@ const DataAlertBot: React.FC = () => {
               const skusToShow = selectedSkusForTrend.length > 0 
                 ? selectedSkusForTrend 
                 : skuSalesData.slice(0, 10).map(s => s.sku);
-              const colors = ['#1890ff', '#52c41a', '#faad14', '#ff4d4f', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16', '#a0d911', '#531dab'];
+              const colors = ['#1890ff', '#52c41a', '#36cfc9', '#2f54eb', '#722ed1', '#13c2c2', '#eb2f96', '#9254de', '#5cdbd3', '#531dab'];
               return skusToShow.map((sku, index) => (
                 <Line
                   key={sku}
@@ -4201,6 +4223,20 @@ const DataAlertBot: React.FC = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               🔔 SKU销量异动检测
+              <Select
+                size="small"
+                value={skuAnomalyScoreFilter}
+                onChange={(v) => setSkuAnomalyScoreFilter(v)}
+                style={{ minWidth: 110 }}
+                popupMatchSelectWidth={false}
+                options={[
+                  { value: 70, label: '评分 ≥ 70' },
+                  { value: 60, label: '评分 ≥ 60' },
+                  { value: 50, label: '评分 ≥ 50' },
+                  { value: 40, label: '评分 ≥ 40' },
+                  { value: 0, label: '全部评分' },
+                ]}
+              />
               <Tag color="red" style={{ marginLeft: 4 }}>P0 ×{skuAnomalySeverityStats.P0}</Tag>
               <Tag color="orange">P1 ×{skuAnomalySeverityStats.P1}</Tag>
               <Tag color="blue">P2 ×{skuAnomalySeverityStats.P2}</Tag>
@@ -4550,9 +4586,9 @@ const DataAlertBot: React.FC = () => {
       >
         {productAgingExpanded && (() => {
           const bucketLabels = [
-            { key: 'aging_181_270', label: '181-270天', color: '#faad14' },
-            { key: 'aging_271_365', label: '271-365天', color: '#fa8c16' },
-            { key: 'aging_366_455', label: '366-455天', color: '#f5222d' },
+            { key: 'aging_181_270', label: '181-270天', color: '#36cfc9' },
+            { key: 'aging_271_365', label: '271-365天', color: '#2f54eb' },
+            { key: 'aging_366_455', label: '366-455天', color: '#531dab' },
             { key: 'aging_456_plus', label: '456天+', color: '#722ed1' },
           ];
 
@@ -4867,7 +4903,7 @@ const DataAlertBot: React.FC = () => {
                 {/* 左Y轴：广告花费 */}
                 <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#1890ff' }} tickFormatter={v => `¥${(v / 1000).toFixed(0)}k`} />
                 {/* 右Y轴：广告占比 */}
-                <YAxis yAxisId="right" orientation="right" domain={[0, 35]} tick={{ fontSize: 11, fill: '#fa8c16' }} tickFormatter={v => `${v}%`} />
+                <YAxis yAxisId="right" orientation="right" domain={[0, 35]} tick={{ fontSize: 11, fill: '#722ed1' }} tickFormatter={v => `${v}%`} />
                 <RechartsTooltip
                   wrapperStyle={{ zIndex: 1000 }}
                   content={({ active, payload, label }) => {
@@ -4877,8 +4913,8 @@ const DataAlertBot: React.FC = () => {
                       <div style={{ background: '#fff', border: '1px solid #e8e8e8', borderRadius: 6, padding: '8px 12px', fontSize: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.15)' }}>
                         <div style={{ fontWeight: 600, marginBottom: 4 }}>{row?.adDate}</div>
                         <div style={{ color: '#1890ff' }}>💵 广告花费：¥{row?.ad?.toLocaleString()}</div>
-                        <div style={{ color: '#fa8c16' }}>📊 销售额：¥{row?.sales?.toLocaleString()}</div>
-                        <div style={{ color: row?.over ? '#f5222d' : '#333', fontWeight: 600 }}>
+                        <div style={{ color: '#722ed1' }}>📊 销售额：¥{row?.sales?.toLocaleString()}</div>
+                        <div style={{ color: row?.over ? '#531dab' : '#333', fontWeight: 600 }}>
                           广告占比：{row?.ratio}% {row?.over ? '⚠️ 超标' : ''}
                         </div>
                       </div>
@@ -4887,23 +4923,23 @@ const DataAlertBot: React.FC = () => {
                 />
                 {/* 柱状图：广告花费（左Y轴） */}
                 <Bar yAxisId="left" dataKey="ad" name="广告花费" fill="#1890ff" radius={[3, 3, 0, 0]} barSize={16} />
-                {/* 折线图：广告占比（右Y轴），超标点染红色 */}
+                {/* 折线图：广告占比（右Y轴），超标点加深 */}
                 <Line
                   yAxisId="right"
                   type="monotone"
                   dataKey="ratio"
                   name="广告占比"
-                  stroke="#fa8c16"
+                  stroke="#722ed1"
                   strokeWidth={2}
                   dot={(props: any) => {
                     const { cx, cy, payload } = props;
-                    const color = payload.over ? '#f5222d' : '#fa8c16';
+                    const color = payload.over ? '#531dab' : '#722ed1';
                     return <circle cx={cx} cy={cy} r={payload.over ? 5 : 3} fill={color} stroke="#fff" strokeWidth={1.5} />;
                   }}
                   activeDot={{ r: 6 }}
                 />
-                {/* 红色虚线：15% 阈值线 */}
-                <ReferenceLine yAxisId="right" y={adRatioDailyChartData.TH} stroke="#f5222d" strokeDasharray="5 5" strokeWidth={1.5} label={{ value: `${adRatioDailyChartData.TH}%阈值`, fill: '#f5222d', fontSize: 11, position: 'right' }} />
+                {/* 阈值虚线 */}
+                <ReferenceLine yAxisId="right" y={adRatioDailyChartData.TH} stroke="#531dab" strokeDasharray="5 5" strokeWidth={1.5} label={{ value: `${adRatioDailyChartData.TH}%阈值`, fill: '#531dab', fontSize: 11, position: 'right' }} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>

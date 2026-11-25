@@ -15,6 +15,7 @@
 - de_keywords      -> 德语关键词
 - development_date -> 采购日期
 """
+import asyncio
 import json
 import logging
 import random
@@ -32,6 +33,8 @@ from database.database import get_db
 from dependencies import get_current_user, get_current_admin_user
 from models.ad_product_info import AdProductInfo
 from models.user import User
+from services.operation_log import log_order_create, log_product_create
+from utils.order_number import generate_replenishment_order_number
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,8 @@ class ProductDevelopmentPayload(BaseModel):
     purchase_items: Optional[List[dict]] = None
     # 关联店铺采购数量对应：[{store, quantity}]
     store_quantities: Optional[List[dict]] = None
+    # 来自选品审批：保存新品后自动创建产品与补货单，并将选品标记为已审批
+    selection_id: Optional[int] = None
 
 
 class BatchPayload(BaseModel):
@@ -1077,6 +1082,130 @@ async def import_projects_parse(
     return {"success": True, "data": {"rows": rows, "failed": len(errors), "errors": errors}}
 
 
+def _approve_selection_from_development(db: Session, tenant_id: int, operator: User,
+                                        selection_id: int, product_name: str,
+                                        purchase_price, main_image) -> bool:
+    """开发机器人保存新品后联动选品审批：
+    创建成品（BXHS-CP-#####）+ 按拼团成员分组汇总数量生成补货单（与选品审批端点同口径），
+    并将选品标记为已审批。整体在同一事务中，失败随新品一起回滚。
+    返回是否执行了联动审批：选品已审批/不存在时跳过（防止重复建品），新品本身正常保存"""
+    from routers.product_selection import _resolve_group_quantities
+
+    row = db.execute(text(
+        "SELECT status, product_title, image_url, asin, purchase_price, purchase_quantity, applicant_id, "
+        "store_group_id, store_group_ids, group_members FROM product_selections "
+        "WHERE id = :id AND tenant_id = :tid AND deleted_at IS NULL"
+    ), {"id": selection_id, "tid": tenant_id}).fetchone()
+    if not row:
+        logger.warning(f"选品审批联动：选品 {selection_id} 不存在，跳过联动")
+        return False
+    status = row[0] or ""
+    if status not in ("pending", "grouping"):
+        logger.warning(f"选品审批联动：选品 {selection_id} 状态为 {status}（已审批过），跳过联动防止重复创建")
+        return False
+
+    _, product_title, sel_image, asin, sel_price, purchase_quantity, applicant_id, \
+        store_group_id, sg_ids_raw, members_raw = row
+
+    name = (product_name or "").strip() or (product_title or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写产品中文名称（联动审批时用于创建成品）")
+
+    now = datetime.now()
+    prefix = "BXHS-CP-"
+    code_row = db.execute(text("""
+        SELECT product_code FROM products
+        WHERE tenant_id = :tid AND product_code LIKE :pat
+        ORDER BY CAST(SUBSTRING(product_code, :pl) AS UNSIGNED) DESC
+        LIMIT 1
+    """), {"tid": tenant_id, "pat": f"{prefix}%", "pl": len(prefix) + 1}).fetchone()
+    next_num = 1
+    if code_row and code_row[0]:
+        digits = "".join(ch for ch in str(code_row[0])[len(prefix):] if ch.isdigit())
+        if digits:
+            next_num = int(digits) + 1
+    product_code = f"{prefix}{next_num:05d}"
+
+    result = db.execute(text("""
+        INSERT INTO products (tenant_id, product_code, name, product_type, product_attribute,
+            purchase_price, main_image, asin, status, is_robot_monitored, no_accessory, local_quantity,
+            created_at, updated_at)
+        VALUES (:tenant_id, :product_code, :name, 'finished', 'general',
+            :purchase_price, :main_image, :asin, 'active', 1, 0, 0,
+            :created_at, :updated_at)
+    """), {
+        "tenant_id": tenant_id,
+        "product_code": product_code,
+        "name": name,
+        "purchase_price": purchase_price if purchase_price is not None else sel_price,
+        "main_image": main_image or sel_image,
+        "asin": asin,
+        "created_at": now,
+        "updated_at": now,
+    })
+    product_id = result.lastrowid
+    log_product_create(
+        db, tenant_id, operator.id, operator.nickname or operator.username,
+        product_id, product_code, name,
+        {"product_code": product_code, "name": name, "product_type": "finished",
+         "purchase_price": float(purchase_price) if purchase_price is not None else None,
+         "来源": "开发机器人选品审批"}
+    )
+
+    group_qty_list = _resolve_group_quantities(members_raw, sg_ids_raw, purchase_quantity)
+    for gid, qty, creator_id in group_qty_list:
+        if not gid:
+            logger.warning(f"选品 {selection_id} 存在无分组归属的拼团数量 {qty}，未生成补货单")
+            continue
+        sg = db.execute(text(
+            "SELECT name FROM store_groups WHERE id = :gid AND tenant_id = :tid AND deleted_at IS NULL"
+        ), {"gid": gid, "tid": tenant_id}).fetchone()
+        if not sg:
+            logger.warning(f"选品 {selection_id} 补货分组 {gid} 不存在，跳过")
+            continue
+        order_number = generate_replenishment_order_number()
+        db.execute(text("""
+            INSERT INTO replenishment_orders (tenant_id, order_number, store_group_id, status, notes,
+                created_by, created_at, updated_at)
+            VALUES (:tenant_id, :order_number, :store_group_id, 'pending', :notes,
+                :created_by, :created_at, :updated_at)
+        """), {
+            "tenant_id": tenant_id,
+            "order_number": order_number,
+            "store_group_id": gid,
+            "notes": f"由选品审批生成（{name}）",
+            "created_by": creator_id or applicant_id or operator.id,
+            "created_at": now,
+            "updated_at": now,
+        })
+        order_id = db.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+        db.execute(text("""
+            INSERT INTO replenishment_items (tenant_id, replenishment_order_id, product_id, quantity, notes,
+                created_at, updated_at)
+            VALUES (:tenant_id, :replenishment_order_id, :product_id, :quantity, :notes,
+                :created_at, :updated_at)
+        """), {
+            "tenant_id": tenant_id,
+            "replenishment_order_id": order_id,
+            "product_id": product_id,
+            "quantity": qty,
+            "notes": f"来源选品：{product_title or ''}",
+            "created_at": now,
+            "updated_at": now,
+        })
+        log_order_create(
+            db, tenant_id, operator.id, operator.nickname or operator.username,
+            "replenishment", order_id, order_number,
+            {"单号": order_number, "店铺分组": sg[0], "数量": qty,
+             "来源": "开发机器人选品审批"}
+        )
+
+    db.execute(text(
+        "UPDATE product_selections SET status = 'approved', updated_at = NOW() WHERE id = :id"
+    ), {"id": selection_id})
+    return True
+
+
 @router.post("/projects")
 async def create_project(
     payload: ProductDevelopmentPayload,
@@ -1085,12 +1214,26 @@ async def create_project(
 ):
     """新增一条开发新品记录"""
     try:
+        logger.info(f"[选品联动] 创建新品：selection_id={payload.selection_id}，品名={payload.product_name_zh}")
         item = _create_one(db, current_user.tenant_id, payload)
+        db.flush()
+        selection_approved = False
+        if payload.selection_id:
+            # 选品审批联动：保存新品后自动创建产品与补货单，选品置为已审批
+            # 选品已审批过时跳过联动（防止重复建品），新品本身正常保存
+            selection_approved = _approve_selection_from_development(
+                db, current_user.tenant_id, current_user, payload.selection_id,
+                payload.product_name_zh or "", payload.purchase_price,
+                (payload.reference_images or [None])[0] if payload.reference_images else None,
+            )
+            logger.info(f"[选品联动] 联动结果 selection_approved={selection_approved}")
         db.commit()
         db.refresh(item)
         _notify_new_product(db, current_user.tenant_id, item)
         db.commit()
-        return {"success": True, "data": _serialize(item)}
+        data = _serialize(item)
+        data["selection_approved"] = selection_approved
+        return {"success": True, "data": data}
     except HTTPException:
         raise
     except Exception as e:
@@ -1790,7 +1933,7 @@ async def get_attachment_image(table_id: str, file_token: str):
         raise HTTPException(status_code=500, detail=f"下载附件图片失败: {str(e)}")
 
 
-# ==================== 飞书多维表回传 / 美工图片迁移 TOS ====================
+# ==================== 飞书多维表回传 ====================
 
 # 开发新品多维表（配置从 .env 读取，避免在业务代码中暴露）
 from config import get_settings as _get_settings
@@ -2001,231 +2144,3 @@ async def push_project_to_feishu(
             "images_attached": attached,
         },
     }
-
-
-_MIGRATE_RUNNING: dict = {}  # 按迁移列记录运行状态，避免美工图/六面图任务互斥
-
-
-def _safe_image_name(name: str) -> str:
-    """文件名安全化（清洗非法字符）"""
-    return re.sub(r"[\\/:*?\"<>|\s,，;；]", "", name or "").strip()[:40]
-
-
-async def _migrate_designer_batch(batch: int = 100, column: str = "designer_image", name_prefix: str = "新品") -> dict:
-    """把多维表同步来的图片（代理 URL）批量转存到 TOS（并发加速版）。
-    column 支持 designer_image（美工图）与 six_face_image（六面图）；
-    文件名格式：{前缀}_中文产品名_日期_序号"""
-    from database.database import SessionLocal
-    from services.tos_service import upload_image
-    import httpx as _httpx
-
-    if column not in ("designer_image", "six_face_image"):
-        raise ValueError(f"不支持的迁移列: {column}")
-
-    db = SessionLocal()
-    try:
-        remaining_q = text(
-            f"SELECT COUNT(*) FROM ad_product_info WHERE {column} IS NOT NULL AND {column} LIKE '%attachment-image%'"
-        )
-        total_remaining = db.execute(remaining_q).scalar() or 0
-        if total_remaining == 0:
-            return {"remaining": 0, "scanned": 0, "migrated": 0, "failed": 0, "done": True}
-
-        rows = db.execute(text(
-            f"SELECT id, record_id, product_name_zh, purchase_date, {column} FROM ad_product_info "
-            f"WHERE {column} IS NOT NULL AND {column} LIKE '%attachment-image%' LIMIT :lim"
-        ), {"lim": batch}).fetchall()
-
-        token_holder = {"token": None}
-        sem = asyncio.Semaphore(8)  # 最多 8 张图片并发下载/上传
-
-        async def migrate_one(table_id: str, file_token: str, custom_name: str) -> Optional[str]:
-            """下载单张飞书附件并上传 TOS（在线程池执行阻塞上传），失败返回 None"""
-            async with sem:
-                try:
-                    if token_holder["token"] is None:
-                        token_holder["token"] = await get_access_token()
-                    headers = {"Authorization": f"Bearer {token_holder['token']}"}
-                    extra = json.dumps({"bitablePerm": {"tableId": table_id}})
-                    resp = await client.get(
-                        f"{FEISHU_API_BASE}/drive/v1/medias/{file_token}/download",
-                        headers=headers, params={"extra": extra},
-                    )
-                    if resp.status_code != 200:
-                        return None
-                    return await asyncio.to_thread(
-                        upload_image, resp.content, f"{file_token}.jpg", custom_name
-                    )
-                except Exception as e:
-                    logger.warning(f"美工图迁移单张失败 {file_token}: {e}")
-                    return None
-
-        scanned = migrated = failed = 0
-
-        async def migrate_record(row) -> tuple:
-            """处理一条记录的全部代理图片，返回 (pid, new_urls, changed, migrated, failed)"""
-            pid, rid, name_zh, purchase_date, blob = row
-            try:
-                if isinstance(blob, bytes):
-                    blob = blob.decode("utf-8", errors="ignore")
-                urls = [u.strip() for u in str(blob).split(",") if u.strip()]
-            except Exception:
-                return pid, None, False, 0, 0
-            date_part = str(purchase_date or "").replace("-", "")[:8] or datetime.now().strftime("%Y%m%d")
-            safe = _safe_image_name(name_zh) or rid
-            tasks, proxy_index = [], []
-            for i, u in enumerate(urls):
-                m = re.search(r"/attachment-image/(tbl[A-Za-z0-9]+)/([A-Za-z0-9]+)", u)
-                if m:
-                    tasks.append(migrate_one(m.group(1), m.group(2), f"{name_prefix}_{safe}_{date_part}_{i + 1}"))
-                    proxy_index.append(i)
-                # 非代理 URL 直接保留
-            results = await asyncio.gather(*tasks) if tasks else []
-            new_urls = list(urls)
-            rec_migrated = rec_failed = 0
-            for idx, new_url in zip(proxy_index, results):
-                if new_url:
-                    new_urls[idx] = new_url
-                    rec_migrated += 1
-                else:
-                    rec_failed += 1
-            return pid, new_urls, rec_migrated > 0, rec_migrated, rec_failed
-
-        async with _httpx.AsyncClient(timeout=60) as client:
-            results = await asyncio.gather(*(migrate_record(row) for row in rows))
-
-        for (pid, new_urls, changed, rec_migrated, rec_failed), row in zip(results, rows):
-            scanned += 1
-            migrated += rec_migrated
-            failed += rec_failed
-            if changed and new_urls:
-                db.execute(text(f"UPDATE ad_product_info SET {column} = :img WHERE id = :pid"),
-                           {"img": ",".join(new_urls), "pid": pid})
-                db.commit()
-
-        remaining = db.execute(remaining_q).scalar() or 0
-        return {"remaining": remaining, "scanned": scanned, "migrated": migrated, "failed": failed, "done": remaining == 0}
-    finally:
-        db.close()
-
-
-async def auto_migrate_designer_images(column: str = "designer_image", name_prefix: str = "新品", env_key: str = "DESIGNER_IMAGE_AUTO_MIGRATE", label: str = "美工图片"):
-    """服务启动后自动后台迁移多维表图片到 TOS，循环执行直到全部完成。
-
-    可通过环境变量（env_key）=false 关闭；连续两批无进展时自动停止。
-    """
-    global _MIGRATE_RUNNING
-    import os
-    if _MIGRATE_RUNNING.get(column):
-        return
-    from config import get_settings
-    if getattr(get_settings(), env_key, "true").strip().lower() in ("false", "0", "no"):
-        logger.info(f"{label} TOS 自动迁移已通过环境变量关闭")
-        return
-    _MIGRATE_RUNNING[column] = True
-    try:
-        await asyncio.sleep(5)  # 等服务与 DB 就绪
-        no_progress_rounds = 0
-        while True:
-            try:
-                result = await _migrate_designer_batch(100, column=column, name_prefix=name_prefix)
-            except Exception as e:
-                logger.warning(f"{label}自动迁移异常，60 秒后重试: {e}")
-                await asyncio.sleep(60)
-                continue
-            if result.get("done"):
-                logger.info(f"{label}已全部迁移到 TOS（最后一批迁移 {result.get('migrated', 0)} 张，失败 {result.get('failed', 0)} 张）")
-                break
-            if result.get("migrated", 0) == 0:
-                no_progress_rounds += 1
-                if no_progress_rounds >= 2:
-                    logger.warning(f"{label}迁移连续 {no_progress_rounds} 批无进展，剩余 {result.get('remaining')} 条（均为无法下载的失效附件），自动任务已停止；可查看失败链接或手动处理")
-                    break
-            else:
-                no_progress_rounds = 0
-            logger.info(f"{label}自动迁移进行中：剩余 {result.get('remaining')} 条")
-            await asyncio.sleep(1)
-    finally:
-        _MIGRATE_RUNNING[column] = False
-
-
-async def auto_migrate_sixface_images():
-    """六面图 TOS 自动迁移（复用美工图迁移逻辑，列=six_face_image）"""
-    await auto_migrate_designer_images(
-        column="six_face_image", name_prefix="六面图",
-        env_key="SIXFACE_IMAGE_AUTO_MIGRATE", label="六面图",
-    )
-
-
-@router.post("/designer-images/migrate-to-tos")
-async def migrate_designer_images_to_tos(
-    batch: int = Query(100, ge=1, le=500, description="每批处理的记录数"),
-    current_user: User = Depends(get_current_admin_user),
-):
-    """手动触发一批美工图片迁移（自动迁移已在服务启动时后台执行）"""
-    return {"success": True, "data": await _migrate_designer_batch(batch)}
-
-
-@router.get("/designer-images/migrate-status")
-async def designer_migrate_status(current_user: User = Depends(get_current_admin_user)):
-    """美工图片 TOS 迁移进度（管理员）：剩余未迁移 / 总记录数"""
-    from database.database import SessionLocal
-    db = SessionLocal()
-    try:
-        row = db.execute(text(
-            "SELECT COUNT(*) AS total, "
-            "SUM(designer_image LIKE '%attachment-image%') AS remaining, "
-            "SUM(designer_image LIKE '%tos-%') AS migrated "
-            "FROM ad_product_info WHERE designer_image IS NOT NULL AND designer_image != ''"
-        )).fetchone()
-        total = int(row[0] or 0)
-        remaining = int(row[1] or 0)
-        migrated = int(row[2] or 0)
-        return {
-            "success": True,
-            "data": {
-                "total": total,
-                "remaining": remaining,
-                "migrated": migrated,
-                "done": remaining == 0,
-            },
-        }
-    finally:
-        db.close()
-
-
-@router.post("/six-face-images/migrate-to-tos")
-async def migrate_sixface_images_to_tos(
-    batch: int = Query(100, ge=1, le=500, description="每批处理的记录数"),
-    current_user: User = Depends(get_current_admin_user),
-):
-    """手动触发一批六面图迁移（自动迁移已在服务启动时后台执行）"""
-    return {"success": True, "data": await _migrate_designer_batch(batch, column="six_face_image", name_prefix="六面图")}
-
-
-@router.get("/six-face-images/migrate-status")
-async def sixface_migrate_status(current_user: User = Depends(get_current_admin_user)):
-    """六面图 TOS 迁移进度（管理员）：剩余未迁移 / 总记录数"""
-    from database.database import SessionLocal
-    db = SessionLocal()
-    try:
-        row = db.execute(text(
-            "SELECT COUNT(*) AS total, "
-            "SUM(six_face_image LIKE '%attachment-image%') AS remaining, "
-            "SUM(six_face_image LIKE '%tos-%') AS migrated "
-            "FROM ad_product_info WHERE six_face_image IS NOT NULL AND six_face_image != ''"
-        )).fetchone()
-        total = int(row[0] or 0)
-        remaining = int(row[1] or 0)
-        migrated = int(row[2] or 0)
-        return {
-            "success": True,
-            "data": {
-                "total": total,
-                "remaining": remaining,
-                "migrated": migrated,
-                "done": remaining == 0,
-            },
-        }
-    finally:
-        db.close()

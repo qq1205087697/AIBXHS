@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, Select, message,
   Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination, Dropdown, Menu,
-  Spin, Empty, Tooltip,
+  Spin, Empty, Tooltip, Checkbox,
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -26,6 +26,9 @@ interface Store {
   group_id: number | null
   group_name: string
   created_at: string
+  ozon_client_id?: string
+  ozon_api_key_masked?: string
+  has_ozon_api_key?: boolean
 }
 
 interface StoreGroup {
@@ -88,9 +91,12 @@ const StoreManagement: React.FC = () => {
   const [allStores, setAllStores] = useState<Store[]>([])
   const [customPlatforms, setCustomPlatforms] = useState<string[]>(() => loadCustomPlatforms())
   const watchPlatform = Form.useWatch('platform', form)
+  // Ozon 平台判定（大小写不敏感：历史数据可能存为 'Ozon'）
+  const isOzonPlatform = (watchPlatform || '').trim().toLowerCase() === 'ozon'
 
   const platformOptions = [
     { label: 'Amazon', value: 'amazon' },
+    { label: 'Ozon', value: 'ozon' },
     { label: 'eBay', value: 'ebay' },
     { label: 'Walmart', value: 'walmart' },
     { label: 'Shopify', value: 'shopify' },
@@ -108,6 +114,7 @@ const StoreManagement: React.FC = () => {
 
   const platformLabelMap: Record<string, string> = {
     amazon: 'Amazon',
+    ozon: 'Ozon',
     ebay: 'eBay',
     walmart: 'Walmart',
     shopify: 'Shopify',
@@ -315,11 +322,15 @@ const StoreManagement: React.FC = () => {
       name: store.name,
       inventory_name: store.inventory_name,
       ziniao_account: store.ziniao_account,
-      platform: store.platform,
+      platform: (store.platform || '').trim().toLowerCase() === 'ozon' ? 'ozon' : store.platform,
       site: store.site,
       shop_abbr: (store as any).shop_abbr,
       group_id: store.group_id,
       status: store.status,
+      // Ozon 凭证：Client-Id 回填，Api-Key 永不明文回填（留空表示保持原值）
+      ozon_client_id: store.ozon_client_id || undefined,
+      ozon_api_key: undefined,
+      clear_ozon_api_key: false,
     })
     setModalOpen(true)
   }
@@ -334,6 +345,15 @@ const StoreManagement: React.FC = () => {
         setCustomPlatforms(saveCustomPlatform(name))
       }
       delete values.custom_platform_name
+      // 非 Ozon 平台不提交 Ozon 凭证字段（Form.Item unmount 后 preserve 仍可能残留旧值）
+      if (values.platform !== 'ozon') {
+        delete values.ozon_client_id
+        delete values.ozon_api_key
+        delete values.clear_ozon_api_key
+      } else if (!values.ozon_api_key) {
+        // Api-Key 留空 = 保持原值，不传空串覆盖
+        delete values.ozon_api_key
+      }
       if (editingStore) {
         await storesApi.update(editingStore.id, values)
         message.success('店铺更新成功')
@@ -923,6 +943,28 @@ const StoreManagement: React.FC = () => {
           <Form.Item name="site" label="站点">
             <Input placeholder="请输入站点，如US、UK等" />
           </Form.Item>
+          {isOzonPlatform && (
+            <>
+              <Form.Item name="ozon_client_id" label="Ozon Client-Id">
+                <Input placeholder="Ozon 卖家后台生成的 Client-Id（数字）" maxLength={64} />
+              </Form.Item>
+              <Form.Item
+                name="ozon_api_key"
+                label="Ozon Api-Key"
+                extra={editingStore?.has_ozon_api_key ? `已配置（${editingStore.ozon_api_key_masked || '••••'}），留空表示保持原值` : '用于视频直传等 Seller API 调用，保存后不再明文显示'}
+              >
+                <Input.Password
+                  placeholder={editingStore?.has_ozon_api_key ? '留空保持原 Api-Key，输入新值则覆盖' : 'Ozon 卖家后台生成的 Api-Key'}
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+              {editingStore?.has_ozon_api_key && (
+                <Form.Item name="clear_ozon_api_key" valuePropName="checked" style={{ marginTop: -12 }}>
+                  <Checkbox>清除已配置的 Ozon Api-Key</Checkbox>
+                </Form.Item>
+              )}
+            </>
+          )}
           <Form.Item name="shop_abbr" label="店铺简称" rules={[{ required: true, message: '请输入店铺简称' }]}>
             <Input placeholder="请输入店铺简称" />
           </Form.Item>

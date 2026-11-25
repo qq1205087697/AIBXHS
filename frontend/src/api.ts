@@ -43,21 +43,70 @@ apiClient.interceptors.request.use(
 );
 
 // 响应拦截器
-apiClient.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // 如果是 401 未授权，清除 token（只有当不是在登录页面时才跳转）
-    if (error.response?.status === 401) {
-      const url = error.config?.url || "";
+// 注意：只对 **401（凭据失效）** 做登出处理。网络错误、5xx、超时都没有
+// `error.response`，绝不能被当成「登录失效」——那会让用户在网络抖动或后端重启时被踢出。
+//
+// 401 二次确认（2026-11-25）：单次 401 不再立即登出——先复核 /api/auth/me，
+// 复核通过则静默重放原请求（用户无感）；复核仍 401 才清 token 跳登录。
+// 防御：后端瞬时故障的伪 401、上游链路误判、token 刚被续期替换的竞态。
+let authRedirecting = false;
 
-      // 只有当不是登录请求且不在登录页面时才跳转
-      if (
-        !url.includes("/auth/login") &&
-        window.location.pathname !== "/login"
-      ) {
-        console.warn("认证过期，跳转到登录页");
-        localStorage.removeItem("token");
-        window.location.href = "/login";
+// 401 诊断留痕：最近 5 条（时间/URL/复核结果）。用户再报「自动退出」时，
+// 在控制台执行 JSON.parse(localStorage.getItem('auth_401_log')) 即可定位触发请求。
+const push401Log = (entry: Record<string, unknown>) => {
+  try {
+    const key = "auth_401_log";
+    const list: unknown[] = JSON.parse(localStorage.getItem(key) || "[]");
+    list.push({ t: new Date().toISOString(), ...entry });
+    localStorage.setItem(key, JSON.stringify(list.slice(-5)));
+  } catch {
+    /* 诊断日志失败不影响主流程 */
+  }
+};
+
+apiClient.interceptors.response.use(
+  (response) => {
+    // 滑动续期：后端在 token 剩不足 2 天时通过该响应头下发新 token，这里自动替换。
+    // 长度校验：防止异常空值/垃圾覆盖真实 token（会导致后续全部请求 401）
+    const renewed = response.headers?.["x-renewed-token"];
+    if (renewed && typeof renewed === "string" && renewed.length > 40) {
+      localStorage.setItem("token", renewed as string);
+    }
+    return response;
+  },
+  async (error) => {
+    const status = error.response?.status;
+    if (status === 401) {
+      const url = error.config?.url || "";
+      // 登录/注册请求的 401 是「账号密码错」，不是会话失效
+      const isAuthEntry = url.includes("/auth/login") || url.includes("/auth/register");
+      if (!isAuthEntry && window.location.pathname !== "/login" && !error.config?._retried401) {
+        try {
+          // 复核：用当前 token 裸 axios 调 me（不走本实例拦截器，避免递归）
+          const token = localStorage.getItem("token");
+          await axios.get("/auth/me", {
+            baseURL: API_BASE,
+            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            timeout: 10000,
+          });
+          // 复核通过 → token 其实有效（瞬时故障/竞态），静默重放原请求
+          push401Log({ url, phase: "recheck-pass", retried: true });
+          error.config._retried401 = true;
+          return apiClient.request(error.config);
+        } catch (reErr: any) {
+          const reStatus = reErr?.response?.status;
+          push401Log({ url, phase: "recheck-failed", recheckStatus: reStatus ?? "network" });
+          if (reStatus === 401 && !authRedirecting) {
+            // 复核确认凭据真的失效才登出；并发多个 401 只跳转一次
+            authRedirecting = true;
+            console.warn("认证过期（复核确认），跳转到登录页");
+            localStorage.removeItem("token");
+            localStorage.removeItem("auth_user_cache");
+            localStorage.removeItem("auth_permissions_cache");
+            window.location.assign("/login?expired=1");
+          }
+          // 复核失败但非 401（网络抖动/5xx）：保留登录态，原错误交由调用方兜底
+        }
       }
     }
     return Promise.reject(error);
@@ -108,7 +157,13 @@ export const inventoryApi = {
     apiClient.put(`/inventory/${id}`, data),
 
   // ========== Restock (补货) API ==========
-  getOverview: () => apiClient.get("/restock/overview"),
+  // 概览与列表同口径：接受与 /restock/search 相同的筛选参数
+  getOverview: (params?: {
+    keyword?: string;
+    holiday_filter?: string;
+    account?: string[];
+    country?: string[];
+  }) => apiClient.get("/restock/overview", { params }),
   calculate: (params?: { snapshot_ids?: string }) =>
     apiClient.post("/restock/calculate", params),
   getCalculateStatus: (taskId: string) =>
@@ -132,7 +187,14 @@ export const inventoryApi = {
     risk_level?: string[];
     account?: string[];
     country?: string[];
+    /** 节日/产品状态筛选（必须与列表同口径转发，否则导出与页面不一致） */
+    holiday_filter?: string;
     fields?: string[];
+    /** 产品库视图：all / missing */
+    product_lib_filter?: "all" | "missing";
+    sales_window?: number;
+    min_sales?: number;
+    exclude_summary?: boolean;
   }) => {
     const searchParams = new URLSearchParams();
     if (params?.keyword) searchParams.append("keyword", params.keyword);
@@ -142,20 +204,40 @@ export const inventoryApi = {
       params.account.forEach((a) => searchParams.append("account", a));
     if (params?.country)
       params.country.forEach((c) => searchParams.append("country", c));
+    if (params?.holiday_filter)
+      searchParams.append("holiday_filter", params.holiday_filter);
     if (params?.fields)
       params.fields.forEach((f) => searchParams.append("fields", f));
+    if (params?.product_lib_filter)
+      searchParams.append("product_lib_filter", params.product_lib_filter);
+    if (params?.sales_window !== undefined)
+      searchParams.append("sales_window", String(params.sales_window));
+    if (params?.min_sales !== undefined)
+      searchParams.append("min_sales", String(params.min_sales));
+    if (params?.exclude_summary !== undefined)
+      searchParams.append("exclude_summary", String(params.exclude_summary));
     return apiClient.get(`/restock/export?${searchParams.toString()}`, {
       responseType: "blob",
     });
   },
   syncFeishuInbound: () => apiClient.post("/restock/sync-feishu-inbound"),
   getSyncFeishuStatus: () => apiClient.get("/restock/sync-feishu-status"),
+  // 海外仓：飞书多维表 → 数据库（按 SKU+品名 去重覆盖，回写主行）
+  syncOverseasInventory: () => apiClient.post("/restock/sync-overseas"),
+  getSyncOverseasStatus: () => apiClient.get("/restock/sync-overseas-status"),
+  getOverseasSummary: () => apiClient.get("/restock/overseas-summary"),
   updateInspectionQuantity: (snapshotId: number, quantity: number) =>
     apiClient.put("/restock/inspection-quantity", null, {
       params: { snapshot_id: snapshotId, inspection_quantity: quantity },
     }),
   getSummaryChildren: (asin: string, account?: string) =>
     apiClient.get("/restock/summary-children", { params: { asin, account } }),
+  // 自动补货启动：最新快照决策 → 进销存补货单（按店铺分组拆单）
+  autoReplenishment: (data: { force?: boolean; group_ids?: number[] | null; skip_existing?: boolean }) =>
+    apiClient.post("/restock/auto-replenishment", data),
+  // 自动补货预检（只读）：可见分组/行数/跳过数/预计单数（网络抖动时 60s 内失败可重试）
+  autoReplenishmentPreview: (data: { group_ids?: number[] | null; skip_existing?: boolean }) =>
+    apiClient.post("/restock/auto-replenishment/preview", data, { timeout: 60000 }),
   markHoliday: (snapshotIds: number[], isHoliday: boolean) =>
     apiClient.post("/restock/mark-holiday", {
       snapshot_ids: snapshotIds,
@@ -211,6 +293,106 @@ export const localInventoryApi = {
     }),
 };
 
+// ========== Tags API（标签管理：节日/强制补货/词库/审计/星拓拉取） ==========
+export const tagsApi = {
+  list: (params?: {
+    asin?: string;
+    account?: string;
+    tag_type?: string;
+    keyword?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/tags", { params }),
+  // 行级作用域：account 指定店铺行（汇总行会展开到其共享库存子行）；空串=该 ASIN 全部店铺
+  setForceReplenish: (asin: string, reason: string, sku?: string, account?: string) =>
+    apiClient.post("/tags/force-replenish", {
+      asin,
+      reason,
+      sku: sku || "",
+      account: account || "",
+    }),
+  clearForceReplenish: (asin: string, account?: string) =>
+    apiClient.delete(`/tags/force-replenish/${encodeURIComponent(asin)}`, {
+      params: { account: account || "" },
+    }),
+  setHoliday: (asin: string, holidayValue: string, sku?: string, account?: string) =>
+    apiClient.post("/tags/holiday", {
+      asin,
+      holiday_value: holidayValue,
+      sku: sku || "",
+      account: account || "",
+    }),
+  unlockHoliday: (
+    asin: string,
+    holidayValue: string,
+    clear?: boolean,
+    account?: string,
+  ) =>
+    apiClient.post("/tags/holiday/unlock", {
+      asin,
+      holiday_value: holidayValue,
+      clear: !!clear,
+      account: account || "",
+    }),
+  runAutoTagging: () => apiClient.post("/tags/auto-tagging/run"),
+  previewMatch: (asin?: string, keywords?: string[]) =>
+    apiClient.post("/tags/preview", { asin, keywords }),
+  listLexicon: (params?: {
+    holiday_name?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/tags/lexicon", { params }),
+  addLexicon: (body: {
+    holiday_name: string;
+    keyword: string;
+    match_type?: string;
+    window_start?: string | null;
+    window_end?: string | null;
+  }) => apiClient.post("/tags/lexicon", body),
+  // US-4 AC2：修改词库条目（只传需要改的字段；未传字段保持原值）
+  updateLexicon: (
+    entryId: number,
+    body: {
+      holiday_name?: string;
+      keyword?: string;
+      match_type?: string;
+      site?: string;
+      window_start?: string | null;
+      window_end?: string | null;
+      status?: number;
+      remark?: string;
+    },
+  ) => apiClient.put(`/tags/lexicon/${entryId}`, body),
+  deleteLexicon: (entryId: number) =>
+    apiClient.delete(`/tags/lexicon/${entryId}`),
+  listAudit: (params?: {
+    asin?: string;
+    source?: string;
+    tag_type?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get("/tags/audit", { params }),
+  getStartopStatus: () => apiClient.get("/tags/startop/status"),
+  pullStartop: (beginDate?: string, endDate?: string) =>
+    apiClient.post("/tags/startop/pull", {
+      begin_date: beginDate,
+      end_date: endDate,
+    }),
+  // F10 兜底通道：上传星拓定时报告导入词数据（幂等：文件哈希去重；仅 admin）
+  importStartopReport: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post("/tags/startop/report-import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  },
+  getFilterConfig: () => apiClient.get("/tags/filter-config"),
+  saveFilterConfig: (config: {
+    negative_margin_threshold: number;
+    tag_window_days: number;
+  }) => apiClient.post("/tags/filter-config", config),
+};
+
 // ========== Reviews API ==========
 export const reviewsApi = {
   getList: (params?: {
@@ -255,6 +437,14 @@ export const reviewsApi = {
   getSectionSubscribers: () => apiClient.get("/reviews/sections/subscribers"),
   updateSectionSubscribers: (payload: Record<string, number[]>) =>
     apiClient.put("/reviews/sections/subscribers", payload),
+  // 低分产品统计（领星全店铺 Listing 评分<=3，lingxing_low_star_stats.py 生成）
+  getLowStarListings: (params?: {
+    page?: number;
+    page_size?: number;
+    sid?: number;
+    keyword?: string;
+    star_max?: number;
+  }) => apiClient.get("/reviews/low-star-listings", { params }),
 };
 
 // ========== Departments API ==========
@@ -688,10 +878,11 @@ export const productsApi = {
 
 // ========== Upload API (火山引擎 TOS) ==========
 export const uploadApi = {
-  uploadImage: (file: File, customName?: string) => {
+  uploadImage: (file: File, customName?: string, subdir?: string) => {
     const formData = new FormData();
     formData.append("file", file);
     if (customName) formData.append("custom_name", customName);
+    if (subdir) formData.append("subdir", subdir);
     return apiClient.post("/upload/image", formData, {
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 60000,
@@ -877,6 +1068,15 @@ export const outboundOrdersApi = {
       handler?: string;
       outbound_date?: string;
       notes?: string;
+      store_group_id?: number | null;
+      items?: {
+        product_id: number;
+        quantity: number;
+        unit_price?: number;
+        notes?: string;
+        selected_batch_id?: number | null;
+        selected_batch_number?: string;
+      }[];
     },
   ) => apiClient.put(`/outbound-orders/${id}`, data),
   confirm: (id: number) => apiClient.put(`/outbound-orders/${id}/confirm`),
@@ -1221,7 +1421,7 @@ export const productBindingsApi = {
 
 // ========== Product Selection API ==========
 export const productSelectionApi = {
-  getTypes: () => apiClient.get("/product-selection/types"),
+  getTypes: (site?: string) => apiClient.get("/product-selection/types", { params: site ? { site } : {} }),
   getDates: (site?: string) => apiClient.get("/product-selection/dates", { params: site ? { site } : {} }),
   getSites: () => apiClient.get("/product-selection/sites"),
   getList: (params?: {
@@ -1231,6 +1431,8 @@ export const productSelectionApi = {
     product_type?: string;
     site?: string;
     date_filter?: string;
+    start_date?: string;
+    end_date?: string;
     status?: string[];
     sort_by?: string;
     sort_order?: string;
@@ -1239,11 +1441,18 @@ export const productSelectionApi = {
   getById: (id: number) => apiClient.get(`/product-selection/${id}`),
   submitForApproval: (id: number, data?: {
     ali_1688_url?: string;
+    ali_1688_urls?: string[];
     purchase_price?: number;
     purchase_quantity?: number;
     store_group_id?: number;
+    store_group_ids?: number[];
+    apply_remark?: string;
+    apply_images?: string[];
+    moq?: number;
   }) =>
     apiClient.post(`/product-selection/${id}/submit-for-approval`, data || {}),
+  groupBuy: (id: number, quantity: number) =>
+    apiClient.post(`/product-selection/${id}/group-buy`, { quantity }),
   getProfitSettings: () => apiClient.get("/product-selection/profit-settings"),
   saveProfitSettings: (data: {
     site: string;
@@ -1286,6 +1495,8 @@ export const productSelectionApi = {
     traffic_trend?: string;
     category?: string[];
   }) => apiClient.post("/product-selection/", data),
+  importFromAmazon: (data: { site: string; asins: string[] }) =>
+    apiClient.post("/product-selection/import-from-amazon", data, { timeout: 300000 }),
   update: (
     id: number,
     data: {
@@ -1315,8 +1526,10 @@ export const productSelectionApi = {
     apiClient.post("/product-selection/batch-analyze", ids, { timeout: 30000 }),
   batchAnalyzeProgress: (batchId: string) =>
     apiClient.get(`/product-selection/batch-analyze/progress/${batchId}`),
-  recalcScores: () =>
-    apiClient.post("/product-selection/recalc-scores", {}, { timeout: 60000 }),
+  recalcScores: (ids?: number[]) =>
+    apiClient.post("/product-selection/recalc-scores", ids && ids.length > 0 ? { ids } : {}, { timeout: 60000 }),
+  rescrapeFbaFees: (ids?: number[]) =>
+    apiClient.post("/product-selection/rescrape-fba-fees", ids && ids.length > 0 ? { ids } : {}, { timeout: 30000 }),
   switchRate: (useRealtime: boolean) =>
     apiClient.post(
       "/product-selection/switch-rate",
@@ -1589,6 +1802,8 @@ export interface ProductDevelopmentPayload {
   purchase_items?: { link?: string; images?: string[]; info?: string }[];
   // 关联店铺采购数量对应：[{store, quantity}]
   store_quantities?: { store: string; quantity: number }[];
+  // 来自选品审批：保存新品后自动创建产品与补货单，并将选品标记为已审批
+  selection_id?: number;
 }
 
 export interface DevelopmentProject
@@ -1863,6 +2078,8 @@ export interface AIVideoTask {
   bound?: boolean;
   /** ComfyUI 任务 ID */
   h3_prompt_id: string;
+  /** 排队位置：前方还有几条任务（仅排队中任务，后端按 ComfyUI 实际队列计算附加） */
+  queue_ahead?: number | null;
   /** 生成总耗时（秒），未完成为 null */
   cost_seconds: number | null;
   error_message: string | null;
@@ -1901,6 +2118,8 @@ export interface VideoUpscaleTask {
   video_url?: string;
   /** 绑定状态：成片或源视频已通过审核绑定至产品（后端附加） */
   bound?: boolean;
+  /** 排队位置：前方还有几条任务（仅排队中任务，后端按 ComfyUI 实际队列计算附加） */
+  queue_ahead?: number | null;
   created_at: string;
   cost_seconds?: number | null;
 }
@@ -1909,10 +2128,15 @@ export interface VideoUpscaleTask {
 export interface VideoBindingRequest {
   id: number;
   video_url: string;
+  /** 与 video_url 同值，语义化别名（兼容图片） */
+  media_url?: string;
+  /** video=视频（写 products.videos）/ image=图片（写 products.images） */
+  media_type?: "video" | "image";
+  media_type_label?: string;
   product_id: number;
   product_code?: string;
   product_name?: string;
-  source: "ai_video" | "upscale";
+  source: "ai_video" | "upscale" | "ai_image";
   source_label?: string;
   task_title?: string;
   status: "pending" | "approved" | "rejected";
@@ -1936,9 +2160,270 @@ export interface AmazonSkuEntry {
   ziniao_start_name: string;
 }
 
+/** 统一上传用的平台 SKU 条目（Amazon 含 ASIN/紫鸟，Ozon 含凭证可用性标记） */
+export interface PlatformSkuEntry {
+  pp_id: number;
+  store_id: number;
+  platform: "amazon" | "ozon" | string;
+  sku: string;
+  store_name: string;
+  site: string;
+  // amazon 专属
+  asin?: string;
+  has_asin?: boolean;
+  ziniao_account?: string;
+  ziniao_start_name?: string;
+  // ozon 专属
+  has_offer_id?: boolean;
+  has_credentials?: boolean;
+  ozon_product_id?: string;
+}
+
+/** Ozon 上传结果（每个店铺一条） */
+export interface OzonUploadResult {
+  store_id: number;
+  store_name: string;
+  task_id?: number;
+  offer_ids: string[];
+  ok: boolean;
+  error?: string;
+}
+
+/** Ozon 任务状态查询结果（每店铺一条） */
+export interface OzonTaskStatusResult {
+  store_id: number;
+  task_id: number;
+  status?: string;
+  error_text?: string;
+  items?: { offer_id?: string; product_id?: number; status?: string; errors?: unknown[] }[];
+  error?: string;
+}
+
+/** ==================== 媒体创作中心 · 视频需求流转 ==================== */
+export type MediaStage =
+  | "待提交" | "待审核" | "待生成" | "已生成" | "待确认"
+  | "待高清" | "待绑定" | "待上传" | "已上传";
+
+/** 提报时选中的目标平台 SKU（后端落库的展示字段） */
+export interface MediaPlatformItem {
+  pp_id: number;
+  store_id: number;
+  platform: string;
+  sku: string;
+  store_name: string;
+  site: string;
+  asin?: string;
+  offer_id?: string;
+  has_asin?: boolean;
+  has_credentials?: boolean;
+}
+
+export interface MediaPlanShot {
+  timestamp: string;
+  shot_purpose?: string;
+  description?: string;
+  voiceover?: string;
+}
+
+export interface MediaPlan {
+  concept_title: string;
+  marketing_goal?: string;
+  story?: string;
+  character?: string;
+  environment?: string;
+  music?: string;
+  storyboard: MediaPlanShot[];
+  video_type?: string;
+  duration?: number;
+  ratio?: string;
+  language?: string;
+  generated_at?: string;
+}
+
+export interface MediaRequestItem {
+  id: number;
+  no: number;
+  seq: string;
+  parent_id?: number | null;
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  product_image?: string | null;
+  platform?: string | null;
+  platform_items: MediaPlatformItem[];
+  demand_types: string[];
+  demand_type?: string | null;
+  description?: string | null;
+  prompt?: string | null;
+  plan?: MediaPlan | null;
+  ref_images: string[];
+  ratio: string;
+  resolution: string;
+  duration: number;
+  video_type?: string | null;
+  stage: MediaStage;
+  gen_status?: string | null;
+  gen_task_id?: number | null;
+  gen_time?: string | null;
+  media_url?: string | null;
+  /** 成片类型：video=视频 / image=图片（已有素材提报时标记） */
+  media_type?: string | null;
+  /** 图片素材用途：主图 / 附图 / A+ */
+  media_style?: string | null;
+  hd_status?: string | null;
+  hd_task_id?: number | null;
+  hd_url?: string | null;
+  hd_time?: string | null;
+  bind_status?: string | null;
+  binding_request_id?: number | null;
+  upload_status?: string | null;
+  upload_time?: string | null;
+  upload_result?: Record<string, unknown> | null;
+  submitter_name?: string | null;
+  submit_time?: string | null;
+  reviewer_name?: string | null;
+  reviewer_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  logs?: MediaRequestLog[];
+}
+
+export interface MediaRequestLog {
+  id: number;
+  actor_name: string;
+  action: string;
+  note: string;
+  created_at: string;
+}
+
+/** 提报弹窗：跨产品的平台 SKU×店铺条目 */
+export interface ProductSkuEntry {
+  pp_id: number;
+  store_id: number;
+  product_id: number;
+  platform: string;
+  sku: string;
+  asin: string;
+  store_name: string;
+  site: string;
+  usable: boolean;
+  unusable_reason?: string | null;
+}
+
+/** 提报弹窗：按产品分组（可展开选择具体店铺/SKU） */
+export interface ProductSkuGroup {
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  product_image?: string | null;
+  entries: ProductSkuEntry[];
+}
+
+export const mediaRequestApi = {
+  /** 按阶段查询单据（顺带同步 AI 生成状态） */
+  list: (params: {
+    stage: MediaStage;
+    op?: string;
+    platform?: string;
+    keyword?: string;
+    page?: number;
+    page_size?: number;
+  }) =>
+    apiClient.get<{
+      success: boolean;
+      data: { items: MediaRequestItem[]; total: number; counts: Record<string, number> };
+    }>("/media-requests", { params }),
+  /** 单据详情（含操作日志时间线） */
+  get: (id: number) =>
+    apiClient.get<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`),
+  /** 各阶段数量（「待绑定」数量由绑定审核接口单独提供） */
+  counts: () =>
+    apiClient.get<{ success: boolean; data: Record<string, number> }>("/media-requests/counts"),
+  /** 提报弹窗数据源：按产品分组的平台 SKU×店铺条目（含可上传性标记） */
+  listProductSkus: (params: { keyword?: string; platform?: string; page?: number; page_size?: number }) =>
+    apiClient.get<{ success: boolean; data: { items: ProductSkuGroup[]; total: number } }>(
+      "/media-requests/product-skus",
+      { params },
+    ),
+  /** 运营提报（待提交页签）；待绑定/待上传页签可传 media_url+media_kind 直接上传已有素材（落待绑定） */
+  create: (data: {
+    product_id: number;
+    demand_types: string[];
+    description?: string;
+    prompt?: string;
+    ref_images?: string[];
+    platform_items: { pp_id: number; store_id: number }[];
+    media_url?: string;
+    media_kind?: 'video' | 'image';
+    /** 图片素材用途：主图 / 附图 / A+（写 Amazon 图片表「类型」字段） */
+    media_style?: string;
+  }) => apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>("/media-requests", data),
+  /** 待提交改需求描述/类型；待生成改提示词/参考图/参数 */
+  update: (
+    id: number,
+    data: {
+      description?: string;
+      demand_types?: string[];
+      prompt?: string;
+      ref_images?: string[];
+      ratio?: string;
+      resolution?: string;
+      duration?: number;
+    },
+  ) => apiClient.patch<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`, data),
+  /** 待提交 → 待审核 */
+  submit: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/submit`),
+  /** 删除单据（软删，不可恢复）：待提交页签=「取消」，其余页签=「删除」，任意阶段可用 */
+  remove: (id: number) =>
+    apiClient.delete<{ success: boolean; message: string }>(`/media-requests/${id}`),
+  /** 运营主管审核（通过时按需求类型拆单） */
+  review: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/review`, data),
+  /** 美工点击生成：提交真实 AI 视频任务 */
+  generate: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate`),
+  /** 图片类需求：待生成页直接提交 AI 生图（复用 AI生图 服务），完成后自动进入已生成 */
+  generateImage: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/generate-image`),
+  /** 待生成页「AI 生成方案」：只生成 1 套方案并回填提示词（大模型耗时较长，单独放宽超时） */
+  generatePlan: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: { prompt: string; plan: MediaPlan } }>(
+      `/media-requests/${id}/generate-plan`,
+      undefined,
+      { timeout: 600000 },
+    ),
+  /** 美工审核成片 → 待确认 / 退回待生成 */
+  genReview: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/gen-review`, data),
+  /** 运营二次审核 → 待高清 / 退回待生成 */
+  confirm: (id: number, data: { passed: boolean; reason?: string }) =>
+    apiClient.post<{ success: boolean; message: string }>(`/media-requests/${id}/confirm`, data),
+  /** 待高清 → 提交超分任务（强制高清门禁，scale 1.0~4.0x），完成后自动进入待绑定 */
+  upscale: (id: number, scale?: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(
+      `/media-requests/${id}/upscale`,
+      scale ? { scale } : undefined,
+    ),
+  /** 待绑定 → 提交绑定至产品申请（上传前门禁），审核通过后进入待上传 */
+  bind: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/bind`),
+  /** 待上传 → 真实调用 Amazon（飞书 RPA）/ Ozon（Seller API）上传 */
+  upload: (id: number) =>
+    apiClient.post<{ success: boolean; message: string; data?: Record<string, unknown>; item?: MediaRequestItem }>(
+      `/media-requests/${id}/upload`,
+    ),
+};
+
 export const videoBindingApi = {
-  /** 提交绑定申请（ai_video:use） */
-  submit: (data: { product_id: number; video_url: string; source?: string; task_title?: string }) =>
+  /** 提交绑定申请（ai_video:use）；media_type=image 时绑定的是图片 */
+  submit: (data: {
+    product_id: number;
+    video_url: string;
+    source?: string;
+    media_type?: "video" | "image";
+    task_title?: string;
+  }) =>
     apiClient.post<{ success: boolean; message: string }>("/video-bindings", data),
   /** 申请列表（ai_video:approve），status 不传查全部；status_counts 为各状态计数（页签括号展示） */
   getList: (params: { status?: string; search?: string; page?: number; page_size?: number }) =>
@@ -1982,6 +2467,43 @@ export const videoBindingApi = {
       message: string;
       data?: { success: number; failed: number; errors: string[] };
     }>("/video-bindings/feishu-sku-upload", data),
+  /** 产品 AMAZON+OZON 平台 SKU×店铺列表（视频统一上传数据源，分平台返回） */
+  getPlatformSkus: (productId: number) =>
+    apiClient.get<{
+      success: boolean;
+      data: {
+        amazon: PlatformSkuEntry[];
+        ozon: PlatformSkuEntry[];
+        feishu_video_configured: boolean;
+        ozon_trace_configured: boolean;
+      };
+    }>("/video-bindings/platform-skus", { params: { product_id: productId } }),
+  /** 视频统一上传：按勾选 SKU 平台自动路由（amazon→飞书RPA，ozon→attributes/update+飞书留痕） */
+  uploadSkuVideos: (data: {
+    product_id: number;
+    video_url?: string;
+    video_urls?: string[];
+    items: { pp_id: number; store_id: number }[];
+  }) =>
+    apiClient.post<{
+      success: boolean;
+      message: string;
+      data?: {
+        amazon?: { success?: number; failed?: number; errors?: string[]; error?: string } | null;
+        ozon?: {
+          results?: OzonUploadResult[];
+          batch_no?: string;
+          feishu_traced?: boolean;
+          trace?: { success?: number; failed?: number; errors?: string[] } | null;
+        } | null;
+      };
+    }>("/video-bindings/sku-video-upload", data),
+  /** 查询 Ozon 视频任务处理结果（终态时自动回写飞书留痕表） */
+  getOzonUploadStatus: (tasks: { store_id: number; task_id: number; batch_no?: string }[]) =>
+    apiClient.post<{ success: boolean; data: { results: OzonTaskStatusResult[] } }>(
+      "/video-bindings/ozon-upload-status",
+      { tasks },
+    ),
 };
 
 export const aiCreationApi = {
@@ -2132,6 +2654,12 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/video-tasks/${taskId}/cancel`,
     ),
+  /** 排队任务插队：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行 */
+  prioritizeVideoTask: (taskId: number, mode: "interrupt" | "wait") =>
+    apiClient.post<{ success: boolean; action: string; message: string }>(
+      `/ai-creation/video-tasks/${taskId}/prioritize`,
+      { mode },
+    ),
   /** 智能重试失败的视频任务（原记录重试）：能接续 ComfyUI 就接续收片，
    *  否则服务端直接取历史参考图原位重新提交，无需前端取图 */
   recoverVideoTask: (taskId: number) =>
@@ -2170,6 +2698,12 @@ export const aiCreationApi = {
     apiClient.post<{ success: boolean; message: string }>(
       `/ai-creation/upscale-tasks/${taskId}/cancel`,
     ),
+  /** 超分排队任务插队：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行 */
+  prioritizeUpscaleTask: (taskId: number, mode: "interrupt" | "wait") =>
+    apiClient.post<{ success: boolean; action: string; message: string }>(
+      `/ai-creation/upscale-tasks/${taskId}/prioritize`,
+      { mode },
+    ),
   /** 重试失败的超分任务：在原记录上重置状态并重新入队 */
   retryUpscaleTask: (taskId: number) =>
     apiClient.post<{ success: boolean; message: string; data: VideoUpscaleTask }>(
@@ -2192,7 +2726,7 @@ export const aiCreationApi = {
   analyzeProduct: (files: File[]) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
-    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult }>(
+    return apiClient.post<{ success: boolean; data: AmazonProductAnalysisResult; text?: string }>(
       "/ai-creation/analyze-product",
       formData,
       {
@@ -2219,6 +2753,364 @@ export const aiCreationApi = {
       { product_profile, concepts },
       { timeout: 300000 },
     ),
+};
+
+// ========== AI 生图（商品套图） ==========
+export interface AIImageResultItem {
+  type: string;
+  label: string;
+  seq: number;
+  status: "排队中" | "生成中" | "已完成" | "失败" | "已取消";
+  url: string | null;
+  error: string | null;
+  /* A+ 类型的目标尺寸 [宽, 高]（主图类型为 null） */
+  target_size?: number[] | null;
+  /* 本次提交对应的 ComfyUI 工作流 prompt_id（旧记录可能没有） */
+  prompt_id?: string;
+  /* 生图时实际提交的完整提示词（落库，ComfyUI /history 过期后仍可查看） */
+  final_prompt?: string | null;
+  /* 本地 PE 优化后的提示词（生成完成时落库；中转站无此项） */
+  enhanced_prompt?: string | null;
+  /* 中文对照（中转站：AI 设计时一并产出，仅供阅读） */
+  prompt_cn?: string | null;
+  /* 提示词是否为 AI 按产品定制（false = 模板回退） */
+  prompt_designed?: boolean;
+  /* AI 从参考图清点出的件数清单（如 "red-and-white fishing bobbers x2"） */
+  inventory?: string[] | null;
+  /* A+ 该张使用的版式（内置版式 preset:xxx / 上传版式 db:id） */
+  layout?: AIImageLayoutRef | null;
+  /* 品牌A+横幅的品牌名（保留大小写） */
+  brand_name?: string | null;
+}
+
+/** A+ 版式（官方推荐 / 我的 / 收藏） */
+export interface AIImageLayout {
+  /** 标识：preset:<内置id> 或 db:<素材id> */
+  key: string;
+  id: string | number;
+  name: string;
+  desc?: string;
+  /** horizontal / vertical / square */
+  ratio_tag?: string;
+  /** 给模型的分区描述（上传版式为空，改走版式图） */
+  structure?: string;
+  /** 缩略图分区数据（归一化坐标） */
+  zones?: { x: number; y: number; w: number; h: number; t: "img" | "txt" | "band" | "gap" }[];
+  /** 生成用参考图地址（官方模板 / 上传素材） */
+  image_url?: string;
+  /** 列表缩略图地址（<=480px，仅展示，避免 240 张原图拖死首屏） */
+  cover_url?: string;
+  source?: "preset" | "upload" | "official";
+  favorited?: boolean;
+  favorite?: boolean;
+  width?: number | null;
+  height?: number | null;
+}
+
+/** 任务子项里记录的版式快照 */
+export interface AIImageLayoutRef {
+  key?: string;
+  name?: string;
+  source?: string;
+  ratio_tag?: string;
+  structure?: string;
+  image_url?: string;
+}
+
+export interface AIImageTask {
+  id: number;
+  title: string;
+  status: "排队中" | "生成中" | "已完成" | "部分完成" | "失败" | "已取消";
+  creator_name: string;
+  generation_types: string[];
+  aspect_ratio: string;
+  image_count: number;
+  product_info: string;
+  prompt: string;
+  product_code: string;
+  product_name: string;
+  images: string[];
+  result_images: AIImageResultItem[];
+  /* 与 result_images 按下标一一对应的 ComfyUI prompt_id（旧记录兜底用） */
+  comfy_prompt_ids?: string[];
+  /* v2 分组参数 + 品牌设置 */
+  aplus_type?: string | null;
+  /* v2 为类型数组；v2.1 起为 {类型: 张数} 对象，前端两种形态都要兼容 */
+  main_types?: string[] | Record<string, number>;
+  main_aspect_ratio?: string | null;
+  /** 生成通道：local=本地 Qwen Image 2.1 / relay=中转站 Nano Banana 2 */
+  provider?: "local" | "relay";
+  provider_label?: string;
+  brand_settings?: {
+    main_color?: string;
+    font_style?: string;
+    custom_text?: string;
+    country?: string;
+    language?: string;
+    platform?: string;
+    /** A+ 画面文字：no_text=不出现文字（默认）/ with_text=允许 AI 排版文案 */
+    text_mode?: string;
+    /** 品牌A+横幅的品牌名（保留大小写） */
+    brand_name?: string;
+  } | null;
+  cost_seconds: number | null;
+  error_message: string | null;
+  created_at: string;
+  /** 进行中任务的排队排位（已完成/失败为 null）：排队中到底在等什么 */
+  queue?: {
+    stage: "comfy" | "relay";
+    /** ComfyUI 队列前面还有几个任务 */
+    ahead?: number | null;
+    /** 本任务在 ComfyUI pending 中的排位（1 基） */
+    position?: number | null;
+    /** 同账号用户级队列里前面还有几单 */
+    user_ahead?: number;
+    comfy_running?: number | null;
+    comfy_pending?: number | null;
+    /** 后端拼好的中文说明，前端直接展示 */
+    hint: string;
+  } | null;
+}
+
+export const aiImageApi = {
+  /** 生成类型与比例选项（比例以 ComfyUI 实时能力为准） */
+  getOptions: () =>
+    apiClient.get<{
+      success?: boolean;
+      generation_types: Record<string, string>;
+      aspect_ratios: Record<string, string>;
+      aspect_ratios_all?: Record<string, string>;
+      /** size/desc 由服务端按 target_size 下发，前端不再写死尺寸与文案 */
+      aplus_types?: Record<
+        string,
+        { label: string; gen_ratio: string; target_size: number[]; size?: string; desc?: string }
+      >;
+      main_types?: Record<string, string>;
+      /** 主副图卡片说明（key 与 main_types 对应） */
+      main_type_descriptions?: Record<string, string>;
+      /** 场景图父项 + 两条子路径（不带人物 / 带人物） */
+      scene_group?: {
+        key: string;
+        label: string;
+        hint: string;
+        variants: { key: string; label: string; hint: string }[];
+      };
+      brand_options?: {
+        countries: string[];
+        languages: string[];
+        platforms: string[];
+        font_styles: string[];
+      };
+      /** 品牌默认值（与后端 DEFAULT_BRAND_SETTINGS 同源） */
+      brand_defaults?: { country?: string; language?: string; platform?: string };
+      max_ref_images?: number;
+      max_sheets_per_task?: number;
+      /** 可选生成模型（本地 / 中转站） */
+      providers?: { value: string; label: string; desc?: string; configured?: string }[];
+      h3_base_url?: string;
+    }>("/ai-image/options"),
+  /** 按 prompt_id 查 ComfyUI 执行历史（原始提示词 + PE 优化后提示词） */
+  getComfyHistory: (promptId: string) =>
+    apiClient.get<{
+      success?: boolean;
+      prompt_id: string;
+      found: boolean;
+      original_prompt: string;
+      enhanced_prompt: string;
+    }>(`/ai-image/comfy-history/${promptId}`),
+  /** 提交商品套图生成任务（后台生成，立即返回任务记录）
+   *  idempotencyKey：同一份表单复用同一个 key，重复点击/重试不会产生第二单 */
+  createTask: (
+    files: File[],
+    params: {
+      title: string;
+      generation_types?: string[];
+      aspect_ratio?: string;
+      image_count: number;
+      product_info: string;
+      prompt: string;
+      product_code?: string;
+      product_name?: string;
+      /* v2 分组参数 */
+      aplus_type?: string;
+      main_types?: string[] | Record<string, number>;
+      main_aspect_ratio?: string;
+      brand_settings?: Record<string, string>;
+      /** 生成通道：local=本地 Qwen Image 2.1 / relay=中转站 Nano Banana 2 */
+      provider?: "local" | "relay";
+      /** A+ 版式标识（preset:xxx / db:id），空=后端随机官方版式；品牌A+横幅忽略 */
+      layout_ids?: string[];
+      /** 品牌A+横幅必填的英文品牌名（保留大小写，2–20 字符） */
+      brand_name?: string;
+    },
+    idempotencyKey?: string,
+  ) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    formData.append("title", params.title);
+    formData.append("generation_types", JSON.stringify(params.generation_types || []));
+    formData.append("aspect_ratio", params.aspect_ratio || "1:1");
+    formData.append("image_count", String(params.image_count));
+    formData.append("product_info", params.product_info);
+    formData.append("prompt", params.prompt);
+    formData.append("product_code", params.product_code || "");
+    formData.append("product_name", params.product_name || "");
+    if (params.aplus_type) formData.append("aplus_type", params.aplus_type);
+    if (params.main_types && Object.keys(params.main_types).length > 0)
+      formData.append("main_types", JSON.stringify(params.main_types));
+    if (params.main_aspect_ratio)
+      formData.append("main_aspect_ratio", params.main_aspect_ratio);
+    if (params.brand_settings && Object.keys(params.brand_settings).length)
+      formData.append("brand_settings", JSON.stringify(params.brand_settings));
+    if (params.provider) formData.append("provider", params.provider);
+    formData.append("layout_ids", JSON.stringify(params.layout_ids || []));
+    if (params.brand_name) formData.append("brand_name", params.brand_name);
+    return apiClient.post<AIImageTask>("/ai-image/tasks", formData, {
+      headers: {
+        "Content-Type": "multipart/form-data",
+        ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
+      timeout: 300000,
+    });
+  },
+  /** 套图生成任务列表（分页 + 关键词 + 状态 + 模式，状态/模式由服务端过滤保证分页自洽） */
+  listTasks: (page = 1, pageSize = 20, keyword = "", status = "", mode = "") =>
+    apiClient.get<{ items: AIImageTask[]; total: number }>("/ai-image/tasks", {
+      params: { page, page_size: pageSize, keyword, status, mode },
+    }),
+  /** 单任务详情（轮询单条用，避免整页重复传输；mode 用于校验任务属于当前页面） */
+  getTask: (taskId: number, mode = "") =>
+    apiClient.get<AIImageTask>(`/ai-image/tasks/${taskId}`, { params: { mode } }),
+  /** 取消排队中/生成中的任务 */
+  cancelTask: (taskId: number) =>
+    apiClient.post<{ success: boolean; message?: string }>(`/ai-image/tasks/${taskId}/cancel`),
+  /** 重试失败子项（indices 缺省=全部失败项） */
+  retryTask: (taskId: number, indices?: number[], mode = "") =>
+    apiClient.post<{ retried: number; failed: string[] }>(
+      `/ai-image/tasks/${taskId}/retry`,
+      indices && indices.length ? { indices } : {},
+      { params: { mode } },
+    ),
+  /** 打包下载全部已生成图片 */
+  downloadZip: (taskId: number, mode = "") =>
+    apiClient.get<Blob>(`/ai-image/tasks/${taskId}/download.zip`, {
+      params: { mode },
+      responseType: "blob",
+      timeout: 300000,
+    }),
+  /** 删除套图生成任务记录 */
+  deleteTask: (taskId: number) =>
+    apiClient.delete<{ success: boolean }>(`/ai-image/tasks/${taskId}`),
+
+  // ===== A+ 版式（选择排版 → 每种排版生成一张）=====
+  /** 版式库：官方推荐 / 我的 / 收藏 */
+  getLayouts: () =>
+    apiClient.get<{
+      presets: AIImageLayout[];
+      mine: AIImageLayout[];
+      favorites: AIImageLayout[];
+      counts?: { official?: number; structural?: number; mine?: number };
+      limit: number;
+      ratio_tags: { value: string; label: string }[];
+    }>("/ai-image/layouts"),
+  /** 上传自己的版式参考图 */
+  uploadLayout: (file: File, name = "") => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("name", name);
+    return apiClient.post<AIImageLayout>("/ai-image/layouts/upload", fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 120000,
+    });
+  },
+  /** 收藏 / 取消收藏 */
+  favoriteLayout: (key: string, favorite: boolean) =>
+    apiClient.post<{ key: string; favorited: boolean }>("/ai-image/layouts/favorite", {
+      key,
+      favorite,
+    }),
+  /** 删除自己上传的版式 */
+  deleteLayout: (id: number) =>
+    apiClient.delete<{ ok: boolean }>(`/ai-image/layouts/${id}`),
+  /** 保存版式结构描述（分区文字约束，留空=只用参考图） */
+  saveLayoutStructure: (id: number, structure: string) =>
+    apiClient.put<{ id: number; structure: string }>(`/ai-image/layouts/${id}/structure`, {
+      structure,
+    }),
+  /** AI 读版式图生成结构描述草稿（不落库） */
+  suggestLayoutStructure: (id: number) =>
+    apiClient.post<{ id: number; structure: string; name?: string }>(
+      `/ai-image/layouts/${id}/structure/suggest`,
+      {},
+      { timeout: 120000 },
+    ),
+};
+
+
+// ==================== 产品月销量等级池 ====================
+
+export interface GradePoolItem {
+  snapshot_id: number;
+  asin: string;
+  sku?: string;
+  msku?: string;
+  product_name?: string;
+  account?: string;
+  country?: string;
+  summary_flag?: string;
+  grade?: string | null;
+  monthly_sales?: number | null;
+  sales_source?: string | null;
+  prev_grade?: string | null;
+  computed_at?: string | null;
+}
+
+export interface GradePoolResult {
+  items: GradePoolItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  period?: string | null;
+  distribution: Record<string, number>;
+  /** 数据完整性提示（product_sales 覆盖率不足时后端下发） */
+  integrity_warning?: string | null;
+  grade_note?: string | null;
+}
+
+export interface GradeSummary {
+  period?: string | null;
+  distribution: Record<string, number>;
+  total: number;
+  fallback_ratio: number;
+  integrity_warning?: string | null;
+}
+
+export const gradeApi = {
+  /** 等级池列表（可见性=库存页同口径；grade 逗号分隔多选） */
+  getPool: (params: {
+    keyword?: string;
+    grade?: string;
+    account?: string[];
+    country?: string[];
+    holiday_filter?: string;
+    sort_field?: string;
+    sort_order?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get<GradePoolResult>("/grades/pool", { params }),
+  /** 六档统计 + 完整性提示 */
+  getSummary: (params: {
+    keyword?: string;
+    grade?: string;
+    account?: string[];
+    country?: string[];
+    holiday_filter?: string;
+  }) => apiClient.get<GradeSummary>("/grades/summary", { params }),
+  /** 手动重算（仅 admin，同步执行） */
+  recompute: (period?: string) =>
+    apiClient.post<{ ok: boolean; [k: string]: unknown }>("/grades/recompute", period ? { period } : undefined, { timeout: 180000 }),
+  /** 当前等级期与生成时间 */
+  getPeriod: () => apiClient.get<{ period: string | null; computed_at: string | null }>("/grades/period"),
 };
 
 export default apiClient;

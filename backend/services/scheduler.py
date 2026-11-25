@@ -161,6 +161,15 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 选品费用字段重抓：佣金/头程/尾程/重量为空或0的记录自动调卖家精灵接口补抓（每2小时）
+    scheduler.add_job(
+        product_selection_fees_rescrape_job,
+        trigger=IntervalTrigger(hours=2),
+        id="product_selection_fees_rescrape",
+        name="选品费用字段重抓（佣金/头程/尾程/重量）",
+        replace_existing=True
+    )
+
     scheduler.add_job(
         check_overdue_purchase_orders_job,
         trigger="cron",
@@ -168,6 +177,45 @@ def init_scheduler():
         minute=0,
         id="overdue_purchase_check",
         name="检查超期未入库采购单",
+        replace_existing=True
+    )
+
+    scheduler.add_job(
+        fba_infill_notify_job,
+        trigger="cron",
+        hour=9,
+        minute=30,
+        id="fba_infill_notify",
+        name="检查FBA在途信息补填",
+        replace_existing=True
+    )
+
+    # 产品月销量等级池：每月 3 号 06:30 按上月销量定版（幂等重跑），
+    # 当日 18:00 兜底（当期已生成则跳过）。失败走站内通知 admin。
+    scheduler.add_job(
+        grade_refresh_job,
+        trigger="cron",
+        day=3,
+        hour=6,
+        minute=30,
+        id="grade_refresh",
+        name="月销量等级池更新（每月3号）",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        replace_existing=True
+    )
+    scheduler.add_job(
+        grade_refresh_fallback_job,
+        trigger="cron",
+        day=3,
+        hour=18,
+        minute=0,
+        id="grade_refresh_fallback",
+        name="月销量等级池兜底更新（每月3号）",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
         replace_existing=True
     )
 
@@ -181,8 +229,318 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 低分产品统计：每日凌晨拉取领星全店铺 Listing（约8~10分钟），刷新差评机器人弹窗数据源
+    scheduler.add_job(
+        low_star_stats_job,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="low_star_stats_daily",
+        name="低分产品统计任务",
+        replace_existing=True
+    )
+
+    # 星拓 MCP 每日定时独立拉取（Q-3 经中间确认：与快照导入解耦，默认凌晨 2 点可配置）
+    from config import get_settings
+    _pull_hour = get_settings().STARTOP_PULL_HOUR
+    scheduler.add_job(
+        startop_pull_job,
+        trigger="cron",
+        hour=_pull_hour,
+        minute=0,
+        id="startop_word_pull",
+        name="星拓搜索词拉取与自动打标",
+        replace_existing=True
+    )
+
+    # 海外仓库存每日自动同步（默认 8:00，可配置）。与 FBA 同步共用同一套后台线程 + 内存状态机，
+    # 因此定时触发与手动点击产生的是同一种任务，前端可实时看到同一份进度与结果。
+    _overseas_hour = get_settings().OVERSEAS_SYNC_HOUR
+    scheduler.add_job(
+        overseas_inventory_sync_job,
+        trigger="cron",
+        hour=_overseas_hour,
+        minute=0,
+        id="overseas_inventory_sync",
+        name="海外仓库存每日同步（飞书多维表）",
+        replace_existing=True,
+        misfire_grace_time=3600,   # 服务重启错过触发点时，1 小时内仍补跑一次
+        coalesce=True              # 多次错过只补跑一次
+    )
+
+    # 海外仓快照补写：库存快照按天新建行（新行海外仓默认为 0），
+    # 若当天导入发生在 8:00 同步之后，白天页面会显示全 0。
+    # 每小时做一次廉价自查（快照日期未变时只有 2 条 COUNT 查询），必要时按明细表回写主行。
+    scheduler.add_job(
+        overseas_backfill_job,
+        trigger=IntervalTrigger(minutes=60),
+        id="overseas_inventory_backfill",
+        name="海外仓库存快照补写（新快照自动回写主行）",
+        replace_existing=True
+    )
+
+    # 拼团超期处理：每小时检查一次，grouping 超过7天期限自动转审批未通过
+    scheduler.add_job(
+        product_selection_group_expire_job,
+        trigger="interval",
+        hours=1,
+        id="product_selection_group_expire",
+        name="选品拼团超期处理",
+        replace_existing=True
+    )
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
+
+    # 启动补跑：服务在 8:00 之后才启动（或当天重启过）时，最近一次同步若早于「最近一个 8:00」，
+    # 延迟 60 秒补跑一次，避免用户上午打开页面看到的是昨天的海外仓数据。
+    try:
+        _schedule_overseas_catch_up()
+    except Exception as e:
+        logger.warning(f"海外仓启动补跑检查失败（不影响启动）: {e}")
+
+
+def _schedule_overseas_catch_up():
+    """启动时判断是否需要补跑当天的海外仓同步（只补一次，不影响定时任务本身）"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import text
+    from config import get_settings
+    from database.database import SessionLocal
+
+    now = datetime.now()
+    boundary = now.replace(
+        hour=get_settings().OVERSEAS_SYNC_HOUR, minute=0, second=0, microsecond=0
+    )
+    if now < boundary:
+        # 今天 8:00 还没到 → 以昨天的 8:00 为基准
+        boundary = boundary - timedelta(days=1)
+
+    db = SessionLocal()
+    try:
+        last_synced = db.execute(
+            text("SELECT MAX(updated_at) FROM overseas_inventories WHERE tenant_id = :tid"),
+            {"tid": get_settings().OVERSEAS_SYNC_TENANT_ID},
+        ).scalar()
+    finally:
+        db.close()
+
+    if last_synced and last_synced >= boundary:
+        return
+
+    logger.info(
+        f"检测到海外仓最近一次同步为 {last_synced or '从未同步'}，早于 {boundary}，60 秒后补跑一次"
+    )
+    scheduler.add_job(
+        overseas_inventory_sync_job,
+        trigger="date",
+        run_date=datetime.now() + timedelta(seconds=60),
+        id="overseas_inventory_sync_catchup",
+        replace_existing=True,
+    )
+
+
+def product_selection_group_expire_job():
+    """拼团超期处理：grouping 状态超过7天期限未达起订量的记录，自动转为审批未通过"""
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        result = db.execute(text(
+            "UPDATE product_selections SET status = 'rejected', "
+            "reject_reason = '拼团超期（7天未达起订量），自动关闭', "
+            "group_deadline = NULL, updated_at = NOW() "
+            "WHERE status = 'grouping' AND group_deadline IS NOT NULL AND group_deadline < NOW() AND deleted_at IS NULL"
+        ))
+        db.commit()
+        if result.rowcount > 0:
+            logger.info(f"拼团超期处理：{result.rowcount} 条待拼团记录已超期自动关闭")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"拼团超期处理失败: {e}")
+    finally:
+        db.close()
+
+
+def startop_pull_job():
+    """每日定时：星拓 MCP 拉取搜索词 → 自动打标（拉取完成后触发重算，与导入互不阻塞）"""
+    from database.database import SessionLocal
+    from services.startop_client import pull_words_to_db, StartopMCPError
+    from services.tag_service import run_auto_tagging
+
+    LOCK_KEY = "startop_word_pull"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=60):
+            db.close()
+            return
+        logger.info("========== 开始星拓搜索词拉取任务 ==========")
+        try:
+            result = pull_words_to_db(db)
+            logger.info(f"星拓拉取完成: {result}")
+        except StartopMCPError as e:
+            # 拉取失败：流水已记录 FAILED_FALLBACK_READY，等待兜底报告导入；不抛出阻断
+            logger.error(f"星拓拉取失败（兜底通道就绪标记已写入流水）: {e}")
+            db.rollback()
+            return
+        # 拉取完成后触发自动打标重算（US-5 §5.5.4⑤）
+        try:
+            tag_result = run_auto_tagging(db, tenant_id=1)
+            logger.info(f"自动打标完成: {tag_result}")
+        except Exception as e:
+            logger.error(f"自动打标失败: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"星拓拉取任务异常: {e}", exc_info=True)
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def low_star_stats_job():
+    """每日定时拉取领星全店铺 Listing，统计低分产品（差评机器人"低分产品统计"弹窗数据源）
+    生成 low_star_listings.csv / low_star_summary.json 到项目根目录
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+    from database.database import SessionLocal
+    LOCK_KEY = "low_star_stats"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            db.close()
+            return
+        db.close()
+        script = Path(__file__).resolve().parents[2] / "lingxing_low_star_stats.py"
+        if not script.exists():
+            logger.error(f"低分产品统计脚本不存在: {script}")
+            return
+        logger.info("执行低分产品统计任务（预计8~10分钟）...")
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), "run"],
+                cwd=str(script.parent), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20 * 60,
+            )
+            if result.returncode == 0:
+                tail = (result.stdout or "").strip().splitlines()[-5:]
+                logger.info("低分产品统计完成:\n" + "\n".join(tail))
+            else:
+                err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-10:]
+                logger.error(f"低分产品统计失败(退出码{result.returncode}):\n" + "\n".join(err_tail))
+        except subprocess.TimeoutExpired:
+            logger.error("低分产品统计超时（>20分钟），已终止")
+        except Exception as e:
+            logger.error(f"低分产品统计执行异常: {e}")
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+def overseas_inventory_sync_job():
+    """每日定时：飞书海外仓多维表 → overseas_inventories + 库存快照主行
+
+    与 FBA 同步完全一致的执行模型：
+      1. 起一个后台 daemon 线程跑同步（start_sync_async），不占用调度线程 IO；
+      2. 进度/结果写进程内状态机（get_sync_status），前端轮询同一个接口，
+         因此定时任务与手动点击在页面上表现一致（都能实时看到进度与结果）；
+      3. 页面切换不影响任务 —— 任务归属服务端进程，不归属 HTTP 请求/前端页面。
+
+    这里额外持有分布式锁并在锁内等待任务结束，避免多 worker/多进程重复跑；
+    正常一次约 5 秒，全量兜底扫描约 2 分钟，最长等待 20 分钟。
+    """
+    from database.database import SessionLocal
+    from services.overseas_inventory_service import (
+        get_sync_status,
+        is_configured,
+        start_sync_async,
+    )
+
+    LOCK_KEY = "overseas_inventory_sync"
+    MAX_WAIT_SECONDS = 20 * 60
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            logger.info("其他进程正在同步海外仓，本进程跳过")
+            return
+
+        if not is_configured():
+            logger.warning(
+                "海外仓定时同步跳过：未配置 FEISHU_OVERSEAS_BASE_TOKEN / FEISHU_OVERSEAS_TABLE_ID"
+            )
+            return
+
+        if get_sync_status().get("is_running"):
+            logger.info("海外仓同步任务已在运行（手动触发中），本次定时任务跳过")
+            return
+
+        logger.info("========== 开始海外仓每日定时同步 ==========")
+        from config import get_settings
+        result = start_sync_async(tenant_id=get_settings().OVERSEAS_SYNC_TENANT_ID)
+        if not result.get("started"):
+            logger.warning(f"海外仓定时同步未启动: {result.get('message')}")
+            return
+
+        # 等待后台线程结束，保证锁在整个同步期间有效
+        waited = 0
+        last_step = ""
+        while waited < MAX_WAIT_SECONDS:
+            status = get_sync_status()
+            step = status.get("step") or ""
+            if step != last_step:
+                logger.info(f"海外仓同步进度 {status.get('progress')}% - {step}")
+                last_step = step
+            if not status.get("is_running"):
+                break
+            time.sleep(2)
+            waited += 2
+
+        status = get_sync_status()
+        if status.get("error"):
+            logger.error(f"海外仓定时同步失败: {status.get('error')}")
+        elif status.get("skipped"):
+            logger.warning(f"海外仓定时同步被跳过: {status.get('step')}")
+        elif status.get("is_running"):
+            logger.warning(f"海外仓定时同步超过 {MAX_WAIT_SECONDS}s 仍未结束，停止等待（任务仍在后台运行）")
+        else:
+            logger.info(
+                "海外仓定时同步完成: 源数据日期=%s, SKU=%s, 主行写入=%s, 快照日期=%s",
+                status.get("source_date"), status.get("updated"),
+                status.get("matched"), status.get("snapshot_date"),
+            )
+    except Exception as e:
+        logger.error(f"海外仓定时同步任务异常: {e}", exc_info=True)
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def overseas_backfill_job():
+    """每小时自查：新一天的库存快照导入后，把海外仓值补写到该快照的主行
+
+    与同步任务解耦：不抓飞书、只用库内 overseas_inventories 做一次 JOIN 回写，
+    因此没有新快照时成本仅为 2 条 COUNT 查询，也不会与同步任务互相干扰。
+    """
+    from database.database import SessionLocal
+    from services.overseas_inventory_service import (
+        ensure_latest_snapshot_backfilled,
+        get_sync_status,
+        is_configured,
+    )
+
+    if not is_configured():
+        return
+    if get_sync_status().get("is_running"):
+        # 同步任务正在写主行，跳过本次自查，避免无意义的重复回写
+        return
+
+    from config import get_settings
+
+    db = SessionLocal()
+    try:
+        matched = ensure_latest_snapshot_backfilled(db, tenant_id=get_settings().OVERSEAS_SYNC_TENANT_ID)
+        if matched is not None:
+            logger.info(f"检测到新库存快照，海外仓已补写主行 {matched} 行")
+    except Exception as e:
+        logger.warning(f"海外仓快照补写失败（不影响主流程）: {e}")
+    finally:
+        db.close()
 
 
 def check_inventory_job():
@@ -736,6 +1094,19 @@ def _sel_calc_traffic(traffic_trend_str):
     if not isinstance(month_volume, dict) or not month_volume:
         return 0.0, ""
 
+    # 多关键词嵌套格式 {关键词: {月份: 流量}}：每个关键词单独评分，取最优分作为商品流量分
+    if any(isinstance(v, dict) for v in month_volume.values()):
+        best_score, best_result, best_kw = 0.0, "", ""
+        for kw, sub_series in month_volume.items():
+            if not isinstance(sub_series, dict) or not sub_series:
+                continue
+            s, sr = _sel_calc_traffic(str(sub_series))
+            if s > best_score:
+                best_score, best_result, best_kw = s, sr, kw
+        if not best_kw:
+            return 0.0, ""
+        return best_score, f"最优关键词[{best_kw}] {best_result}"
+
     values = [v for v in month_volume.values() if isinstance(v, (int, float))]
     n = len(values)
     if n == 0:
@@ -894,7 +1265,11 @@ def _auto_analyze_selection_task(selection_id: int, tenant_id: int):
 
 
 def recalc_product_selection_scores_job():
-    """每天早上7点兜底：为未计算评分的选品记录补算（正常情况下新抓取入库时已实时计算），并对高分未分析的记录自动触发AI分析"""
+    """定时兜底：为未计算评分的选品记录补算，并对高分未分析的记录自动触发AI分析
+    补算范围：
+    1. traffic_score/result 为 NULL 的新记录（正常情况下新抓取入库时已实时计算）
+    2. traffic_score=0 且 result 为空且 trend 已有值的记录（评分时抓取数据未落库，
+       抢跑算成0分后被条件跳过、永久卡死的记录；trend 为空的重算结果不变，不重试）"""
     from database.database import SessionLocal
     from sqlalchemy import text
     import json
@@ -902,18 +1277,24 @@ def recalc_product_selection_scores_job():
     LOCK_KEY = "daily_product_selection_recalc"
     db = SessionLocal()
     try:
-        if not acquire_distributed_lock(db, LOCK_KEY):
+        # AI 兜底批次可能持续较久，锁放宽到60分钟（默认30分钟不够）
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=60):
             db.close()
             return
 
         logger.info("========== 开始每日选品数据评分计算 ==========")
 
-        # 查找未计算过评分的记录（traffic_score IS NULL 或 traffic_score_result IS NULL）
+        # 查找待补算评分的记录（NULL新记录 + trend晚到导致的0分记录）
         query = text("""
             SELECT id, rating, review_count, monthly_sales, traffic_trend
             FROM product_selections
             WHERE deleted_at IS NULL
-              AND (traffic_score IS NULL OR traffic_score_result IS NULL)
+              AND (
+                (traffic_score IS NULL OR traffic_score_result IS NULL)
+                OR (traffic_score = 0
+                    AND (traffic_score_result IS NULL OR traffic_score_result = '')
+                    AND traffic_trend IS NOT NULL AND traffic_trend != '')
+              )
         """)
         rows = db.execute(query).fetchall()
 
@@ -984,6 +1365,354 @@ def recalc_product_selection_scores_job():
     finally:
         release_distributed_lock(db, LOCK_KEY)
         db.close()
+
+
+# ========== 选品费用字段重抓（佣金/头程/尾程/重量） ==========
+# 卖家精灵利润计算接口：按站点市场ID查询ASIN的佣金(referralFee)/尾程(fbaFee)/重量
+TOOL4SELLER_FBA_CALC_URL = "https://das-server.tool4seller.cn/ap/fba/calculate"
+# 站点 -> (利润计算店铺marketplaceId, 币种)
+SEL_FEE_MARKETPLACE_MAP = {
+    "us": ("ATVPDKIKX0DER", "USD"),
+    "de": ("A1PA6795UKMFR9", "EUR"),
+    "uk": ("A1F83G8C2ARO7P", "GBP"),
+}
+# 亚马逊重量单位 -> kg 换算系数
+WEIGHT_UNIT_TO_KG = {
+    "kilograms": 1.0,
+    "grams": 0.001,
+    "pounds": 0.45359237,
+    "ounces": 0.0283495231,
+}
+
+
+def _sel_site_key(site) -> str:
+    """站点字符串归一化为 us/de/uk（与路由端 _normalize_site_key 一致）"""
+    s = (site or "").lower()
+    if "德" in (site or "") or "de" in s:
+        return "de"
+    if "英" in (site or "") or "uk" in s or "gb" in s:
+        return "uk"
+    return "us"
+
+
+def _fetch_fx_to_cny_rates_safe() -> dict:
+    """获取实时汇率（1外币兑人民币），失败返回空dict（复用路由端实现）"""
+    try:
+        from routers.product_selection import _get_cny_rates
+        return _get_cny_rates() or {}
+    except Exception as e:
+        logger.warning(f"获取实时汇率失败，头程将跳过计算: {e}")
+        return {}
+
+
+def product_selection_fees_rescrape_job(limit: int = None, full: bool = False, ids: list = None):
+    """重抓选品FBA利润字段（佣金/头程/尾程/重量）：
+    - ids 指定时：仅重算指定记录（批量勾选触发，强制重算可见记录）
+    - 否则：费用为空或为0的记录
+    调用卖家精灵利润计算接口，接口频繁调用可能返回错误的0.0，因此任一字段为0时自动重试（最多3次，
+    字段级取重试结果最大值）；重量按单位换算为kg，头程按公式自动计算
+    （头程 = 重量 × 货代费用(元/kg) ÷ 汇率，汇率方向为 1外币 = X人民币）。
+
+    显示规则（佣金/头程/尾程/重量任一为空或0则页面不显示，通过 deleted_at 实现）：
+    - 补齐数据的记录：deleted_at 置空恢复显示
+    - 3次重试均为0.0且记录费用不完整：写入 deleted_at 软删除隐藏，待后续重抓有数据时恢复
+    - 已有完整数据的记录：只刷新，绝不清零或误删
+    full=True（手动"重新计算FBA利润"按钮触发）：刷新全部记录，而不只是缺失记录"""
+    import requests
+    from database.database import SessionLocal
+    from sqlalchemy import text
+
+    LOCK_KEY = "product_selection_fees_rescrape"
+    db = SessionLocal()
+    locked = False
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=240):
+            return
+        locked = True
+
+        # 目标集：ids 指定=仅重算勾选记录（强制，仅可见记录）；
+        # full=全部记录刷新；常规=费用不完整记录补抓
+        extra_params: dict = {}
+        if ids:
+            id_list = [int(i) for i in ids if i]
+            if not id_list:
+                logger.info("选品FBA利润重抓：未指定有效记录ID，跳过")
+                return
+            ph = ", ".join(f":rid{i}" for i in range(len(id_list)))
+            where_sql = f"id IN ({ph}) AND deleted_at IS NULL"
+            extra_params = {f"rid{i}": v for i, v in enumerate(id_list)}
+        else:
+            incomplete_cond = """(
+                  (commission IS NULL OR commission = 0)
+               OR (first_leg_cost IS NULL OR first_leg_cost = 0)
+               OR (last_mile_cost IS NULL OR last_mile_cost = 0)
+               OR (weight_kg IS NULL OR weight_kg = 0)
+            )"""
+            where_sql = f"(deleted_at IS NULL OR {incomplete_cond})" if full else incomplete_cond
+        limit_sql = " LIMIT :limit" if limit else ""
+        rows = db.execute(text(f"""
+            SELECT id, site, asin, commission, first_leg_cost, last_mile_cost,
+                   weight_kg, scrape_rate, realtime_rate, deleted_at, price
+            FROM product_selections
+            WHERE asin IS NOT NULL AND asin != '' AND {where_sql}{limit_sql}
+        """), {**extra_params, **({"limit": limit} if limit else {})}).fetchall()
+
+        if not rows:
+            logger.info("选品FBA利润重抓：没有需要处理的记录")
+            return
+
+        logger.info(f"========== 开始选品FBA利润重抓（full={full}）：共 {len(rows)} 条 ==========")
+        fresh_rates = None  # 懒加载：仅当记录缺有效汇率时才抓一次实时汇率
+        updated = hidden = restored = failed = nodata = 0
+
+        # 并行抓取接口数据（网络IO密集，8线程），DB写入仍在主线程串行执行（Session非线程安全）
+        MAX_WORKERS = 8
+
+        def _fetch_fees(marketplace_id: str, asin: str) -> tuple:
+            """调用接口：任一字段为0则重试，最多3次，字段级取重试结果最大值
+            返回 (佣金, 尾程, 重量kg, 售价amount, 是否有有效响应)"""
+            best_referral = best_fba = best_weight_kg = best_amount = 0.0
+            has_valid_response = False
+            for attempt in range(3):
+                try:
+                    resp = requests.get(
+                        TOOL4SELLER_FBA_CALC_URL,
+                        params={"marketplaceId": marketplace_id, "asin": asin, "amount": "0.00"},
+                        timeout=20,
+                        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json() or {}
+                    # status!=1（如限频/错误）视为请求失败，不算"无数据"，避免误隐藏
+                    if payload.get("status") != 1:
+                        raise ValueError(f"接口状态异常: {payload.get('msg') or payload}")
+                    content = payload.get("content") or {}
+                except Exception:
+                    time.sleep(1)
+                    continue
+                has_valid_response = True
+                referral = float(content.get("referralFee") or 0)  # 佣金（站点货币）
+                fba = float(content.get("fbaFee") or 0)            # 尾程配送费（站点货币）
+                unit = (content.get("weightUnits") or "").lower()
+                w = round(float(content.get("weight") or 0)
+                          * WEIGHT_UNIT_TO_KG.get(unit, 1.0), 3)
+                amount = float(content.get("amount") or 0)         # 亚马逊最新售价（站点货币）
+                best_referral = max(best_referral, referral)
+                best_fba = max(best_fba, fba)
+                best_weight_kg = max(best_weight_kg, w)
+                best_amount = max(best_amount, amount)
+                if best_referral > 0 and best_fba > 0 and best_weight_kg > 0 and best_amount > 0:
+                    break  # 已取到完整数据
+                time.sleep(1)  # 0.0可能是限频导致的错误数据，稍候重试
+            return best_referral, best_fba, best_weight_kg, best_amount, has_valid_response
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # 流式抓写：8线程并行调接口（网络IO密集），主线程每收到一个结果立即计算并写库
+        # （Session非线程安全，DB写入只在主线程）。相比"全部抓完再写"：
+        # 1) 写库连接持续活跃不会空闲断连（此前"先抓完再写"曾因~15分钟空闲导致2013 Lost connection，
+        #    pool_pre_ping只在取连接时校验，救不了一直握着死连接的旧Session）
+        # 2) 每200条分批提交，中途失败已提交的不丢
+        write_db = SessionLocal()
+        try:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                futures = {}
+                for row in rows:
+                    marketplace_id, _ = SEL_FEE_MARKETPLACE_MAP[_sel_site_key(row[1])]
+                    futures[pool.submit(_fetch_fees, marketplace_id, row[2])] = row
+                done = 0
+                for fut in as_completed(futures):
+                    row = futures[fut]
+                    done += 1
+                    try:
+                        best_referral, best_fba, best_weight_kg, best_amount, has_valid_response = fut.result()
+                    except Exception as e:
+                        logger.warning(f"选品 {row[0]}（{row[2]}）抓取线程异常: {e}")
+                        failed += 1
+                        continue
+                    if not has_valid_response:
+                        failed += 1  # 网络异常无法确认数据，不写不改
+                        continue
+
+                    key = _sel_site_key(row[1])
+                    currency = SEL_FEE_MARKETPLACE_MAP[key][1]
+                    updates = {}
+                    if best_referral > 0:
+                        updates["commission"] = round(best_referral, 2)
+                    if best_fba > 0:
+                        updates["last_mile_cost"] = round(best_fba, 2)
+                    if best_weight_kg > 0:
+                        updates["weight_kg"] = best_weight_kg
+                    if best_amount > 0:
+                        updates["price"] = round(best_amount, 2)  # 亚马逊最新售价（不参与完整性判断，缺价不隐藏）
+
+                    # 头程自动计算：重量 × 货代费用(元/kg) ÷ 汇率；接口无重量时用库内已有重量
+                    # 有效汇率：1外币兑人民币恒大于1，<=1视为无效/旧方向数据（供头程与进货价上限共用）
+                    rate = next((float(c) for c in (row[8], row[7])
+                                 if c is not None and float(c) > 1), None)
+                    if rate is None:
+                        if fresh_rates is None:
+                            fresh_rates = _fetch_fx_to_cny_rates_safe()
+                        rate = (fresh_rates or {}).get(currency) or None
+                        if rate:
+                            updates["realtime_rate"] = rate  # 记录使用的实时汇率，供后续重算
+                    eff_weight = best_weight_kg if best_weight_kg > 0 else (float(row[6]) if row[6] else 0)
+                    if eff_weight > 0 and rate:
+                        fee_per_kg = 30.0 if key == "us" else 25.0
+                        updates["first_leg_cost"] = round(eff_weight * fee_per_kg / rate, 3)
+
+                    # "进货价（需低于）"：15%假设毛利反推上限（售价/费用变化后同步刷新）
+                    try:
+                        from routers.product_selection import _calc_cost_cap
+                        eff_price = best_amount if best_amount > 0 else (float(row[10]) if row[10] else 0)
+                        eff_comm = best_referral if best_referral > 0 else (float(row[3]) if row[3] else 0)
+                        eff_last = best_fba if best_fba > 0 else (float(row[5]) if row[5] else 0)
+                        eff_first = updates.get("first_leg_cost") or (float(row[4]) if row[4] else 0)
+                        cap = _calc_cost_cap(eff_price, rate, eff_comm, eff_first, eff_last, key)
+                        if cap:
+                            updates["cost_at_15_profit"] = cap
+                    except Exception as cap_err:
+                        logger.warning(f"选品 {row[0]} 进货价上限计算失败: {cap_err}")
+
+                    # 完整性判断：佣金/头程/尾程/重量四项均>0才显示，否则软删除隐藏（待有数据时恢复）
+                    def _eff(col, db_val):
+                        return float(updates[col]) if col in updates else (float(db_val) if db_val is not None else 0.0)
+                    complete = (_eff("commission", row[3]) > 0
+                                and _eff("first_leg_cost", row[4]) > 0
+                                and _eff("last_mile_cost", row[5]) > 0
+                                and _eff("weight_kg", row[6]) > 0)
+
+                    set_parts = [f"{k} = :{k}" for k in updates]
+                    if complete:
+                        set_parts.append("deleted_at = NULL")  # 恢复显示（对未删除记录无影响）
+                        if row[9] is not None:
+                            restored += 1
+                    else:
+                        if best_referral <= 0 and best_fba <= 0 and best_weight_kg <= 0:
+                            nodata += 1  # 3次有效响应均为0.0，确认无数据
+                        set_parts.append("deleted_at = NOW()")  # 软删除隐藏，后续重抓有数据会恢复
+                        if row[9] is None:
+                            hidden += 1
+                    set_parts.append("updated_at = NOW()")
+
+                    write_db.execute(text(
+                        f"UPDATE product_selections SET {', '.join(set_parts)} WHERE id = :id"
+                    ), {**updates, "id": row[0]})
+                    updated += 1
+                    if updated % 200 == 0:
+                        write_db.commit()  # 分批提交，中途失败已提交的不丢
+                    if done % 200 == 0 or done == len(rows):
+                        logger.info(f"FBA利润重抓进度: 已处理 {done}/{len(rows)}，已写入 {updated}")
+            write_db.commit()
+        finally:
+            write_db.close()
+
+        logger.info(
+            f"========== 选品FBA利润重抓完成：更新 {updated}"
+            f"（恢复显示 {restored}，隐藏 {hidden}），确认无数据 {nodata}，请求失败 {failed} =========="
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"选品FBA利润重抓任务失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        if locked:
+            release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
+def fba_infill_notify_job():
+    """每天 9:30：检查 FBA 在途信息（发货日期/运输方式）缺失并通知仓库角色
+
+    与导入后的即时提醒共用同一实现；按天去重保证两次触发一天只发一条。
+    定时场景没有 feishu_data，文案走中性表述（不区分「飞书无记录」与「字段未填」）。
+    """
+    logger.info("========== 开始检查 FBA 在途信息补填 ==========")
+    try:
+        from services.fba_inbound_fill_notifier import notify_missing_fba_info
+        result = notify_missing_fba_info()
+        logger.info("FBA在途补填通知(定时): %s", result)
+    except Exception as e:
+        logger.warning("FBA在途补填通知(定时)失败: %s", e)
+    logger.info("========== 检查结束 ==========")
+
+
+def grade_refresh_job():
+    """每月 3 号 06:30：按上月销量重算产品等级池（各租户，幂等重跑）
+
+    设计文档：docs/plans/2026-11-24_产品月销量等级体系_完整实现方案.md
+    - 分布式锁防多实例并发；同 period 重跑 = 先删后插，结果幂等。
+    - 失败快速重试 2 次（数据库瞬时抖动），仍失败 → 站内通知 admin + 当日 18:00 兜底。
+    """
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    import time as _time
+    from services.grade_service import (
+        recompute_grades, get_current_period, notify_grade_failure,
+    )
+
+    logger.info("========== 开始月销量等级池更新 ==========")
+    db = SessionLocal()
+    try:
+        period = get_current_period()
+        tenant_ids = [r[0] for r in db.execute(
+            text("SELECT id FROM tenants WHERE deleted_at IS NULL")).fetchall()]
+        for tid in tenant_ids:
+            lock_key = f"grade_recompute_{tid}"
+            if not acquire_distributed_lock(db, lock_key, timeout_minutes=30):
+                logger.warning("等级池更新: 租户 %s 未获取到锁，跳过", tid)
+                continue
+            result = {"ok": False, "error": "未执行"}
+            for attempt in range(3):
+                try:
+                    result = recompute_grades(db, tid, period, computed_by="scheduler")
+                except Exception as e:  # noqa: BLE001
+                    result = {"ok": False, "error": str(e)}
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                if result.get("ok"):
+                    break
+                if attempt < 2:
+                    _time.sleep(10)
+            if result.get("ok"):
+                logger.info("等级池更新: 租户 %s period=%s 行=%s 分布=%s",
+                            tid, period, result.get("rows"), result.get("distribution"))
+            else:
+                logger.error("等级池更新: 租户 %s period=%s 失败: %s（已通知 admin）",
+                             tid, period, result.get("error"))
+                notify_grade_failure(tid, period, result.get("error", "未知错误"))
+            release_distributed_lock(db, lock_key)
+    except Exception as e:  # noqa: BLE001
+        logger.error("等级池更新 job 异常: %s", e)
+    finally:
+        db.close()
+    logger.info("========== 月销量等级池更新结束 ==========")
+
+
+def grade_refresh_fallback_job():
+    """每月 3 号 18:00：等级池兜底重算（当期已生成则直接跳过，避免重复计算）"""
+    from database.database import SessionLocal
+    from services.grade_service import get_current_period, get_current_grade_period
+
+    db = SessionLocal()
+    missing = []
+    try:
+        period = get_current_period()
+        tenant_ids = [r[0] for r in db.execute(
+            text("SELECT id FROM tenants WHERE deleted_at IS NULL")).fetchall()]
+        for tid in tenant_ids:
+            cur, _ = get_current_grade_period(db, tid)
+            if cur != period:
+                missing.append(tid)
+                logger.warning("等级池兜底: 租户 %s 当期 %s 未生成（当前 %s）", tid, period, cur)
+    finally:
+        db.close()
+    if missing:
+        grade_refresh_job()
+    else:
+        logger.info("等级池兜底: 各租户当期均已生成，无需重算")
 
 
 def check_overdue_purchase_orders_job():

@@ -49,10 +49,10 @@ logger = logging.getLogger(__name__)
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, base_table, ai_creation, product_development, video_bindings
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, memos, base_table, ai_creation, product_development, video_bindings, ai_image, tags, media_requests, grade
 from config import get_settings
 
 settings = get_settings()
@@ -70,6 +70,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 滑动续期：后端在 token 临近过期时通过该响应头下发新 token，
+    # 跨域场景下必须显式暴露，前端 axios 才读得到
+    expose_headers=["X-Renewed-Token"],
 )
 
 # 注册路由
@@ -77,6 +80,7 @@ app.include_router(inventory.router, prefix="/api")
 app.include_router(reviews.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(restock.router, prefix="/api")
+app.include_router(tags.router, prefix="/api")
 app.include_router(chat.router)
 app.include_router(auth.router)
 app.include_router(departments.router)
@@ -89,6 +93,7 @@ app.include_router(product_selection.router)
 app.include_router(emails.router, prefix="/api")
 app.include_router(data_warnings.router, prefix="/api")
 app.include_router(product_sales.router, prefix="/api")
+app.include_router(grade.router, prefix="/api")
 app.include_router(threshold_settings.router, prefix="/api")
 app.include_router(local_inventory.router, prefix="/api")
 app.include_router(business_settings.router)
@@ -112,6 +117,8 @@ app.include_router(suppliers.router)
 app.include_router(upload.router)
 app.include_router(ai_creation.router)
 app.include_router(video_bindings.router)
+app.include_router(ai_image.router)
+app.include_router(media_requests.router)
 app.include_router(base_table.router)
 
 app.include_router(ads.router, prefix="/api")
@@ -122,6 +129,7 @@ app.include_router(product_aging.router, prefix="/api")
 app.include_router(product_buybox.router, prefix="/api")
 app.include_router(product_shipment_notice.router, prefix="/api")
 app.include_router(group_messages.router, prefix="/api")
+app.include_router(memos.router, prefix="/api")
 app.include_router(product_development.router, prefix="/api")
 
 @app.get("/api/health")
@@ -232,6 +240,13 @@ async def startup_event():
     except Exception as e:
         logger.error(f"超分任务恢复失败: {e}")
 
+    try:
+        from services.ai_image_service import resume_pending_tasks as resume_image_tasks
+        resume_image_tasks()
+        logger.info("AI 生图未完成任务已恢复监听")
+    except Exception as e:
+        logger.error(f"AI 生图任务恢复失败: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭事件"""
@@ -242,11 +257,23 @@ static_dir = os.path.join(os.path.dirname(__file__), "static")
 # SPA 不需要缓存的入口文件
 _NO_CACHE_EXTS = {".html", ".htm"}
 
+# 静态资源扩展名：未命中时返回 404，不回退 index.html（见下方 SPA fallback 注释）
+_STATIC_EXTS = {
+    ".js", ".mjs", ".cjs", ".css", ".map",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp4", ".webm", ".mp3", ".wav",
+    ".json", ".txt", ".xml", ".pdf",
+}
+
 @app.middleware("http")
 async def serve_static_middleware(request: Request, call_next):
     path = request.url.path
     
-    if path.startswith("/api/") or path.startswith("/docs") or path.startswith("/redoc"):
+    # /openapi.json 必须放行：它是 Swagger/ReDoc 的数据源。若交给下方静态
+    # 处理逻辑，文件不存在会命中 SPA fallback 返回 index.html（HTML），
+    # Swagger UI 解析失败并报 “does not specify a valid version field”。
+    if path.startswith(("/api/", "/docs", "/redoc", "/openapi.json")):
         return await call_next(request)
     
     file_path = os.path.join(static_dir, path.lstrip("/"))
@@ -272,6 +299,19 @@ async def serve_static_middleware(request: Request, call_next):
             return FileResponse(file_path)
     
     index_path = os.path.join(static_dir, "index.html")
+
+    # 静态资源未命中必须返回 404，绝不能回退 index.html：
+    # 浏览器对 <script type="module"> 强制校验 MIME，拿到 HTML 会报
+    # "Failed to load module script ... MIME type of text/html" 并整页白屏
+    # （典型场景：浏览器缓存了旧 index.html，引用了已删除的旧 hash 产物）。
+    ext = os.path.splitext(path)[1].lower()
+    if path.startswith("/assets/") or ext in _STATIC_EXTS:
+        return JSONResponse(
+            {"detail": "Not Found", "path": path},
+            status_code=404,
+            headers={"Cache-Control": "no-store"},
+        )
+
     if os.path.isfile(index_path):
         # SPA fallback 也强制 no-cache
         response = FileResponse(index_path)
