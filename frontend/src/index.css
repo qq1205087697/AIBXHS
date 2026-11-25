@@ -886,3 +886,58 @@ code {
   color: #374151;
   margin-bottom: 8px;
 }
+
+/* 库存机器人 KPI 统计卡：5 张卡单行等分（宽屏各 20%；≤992px 两列；≤576px 单列）
+   antd Col 的 md={6} 只能排 4 张/行，第 5 张会掉到第二行，这里用 flex 覆盖。 */
+.inv-kpi-row > .ant-col {
+  flex: 1 1 20%;
+  max-width: 20%;
+}
+
+@media (max-width: 992px) {
+  .inv-kpi-row > .ant-col {
+    flex: 1 1 50%;
+    max-width: 50%;
+  }
+}
+
+@media (max-width: 576px) {
+  .inv-kpi-row > .ant-col {
+    flex: 1 1 100%;
+    max-width: 100%;
+  }
+}
+
+/* ===== AI生图：A+套图 ↔ 主副图 切换动效 =====
+   两页共用同一路由布局（切换时不重挂载侧边栏），页面进场用「整页淡入 + 左右栏错位滑入」，
+   让切换有明确视觉反馈，而不是硬跳。 */
+@keyframes pageSwitchFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes pageSwitchFromLeft {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes pageSwitchFromRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.page-switch-enter {
+  animation: pageSwitchFade 200ms ease-out both;
+}
+.page-switch-enter > .ant-row > .ant-col:first-child {
+  animation: pageSwitchFromLeft 300ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.page-switch-enter > .ant-row > .ant-col:last-child {
+  animation: pageSwitchFromRight 300ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-switch-enter,
+  .page-switch-enter > .ant-row > .ant-col:first-child,
+  .page-switch-enter > .ant-row > .ant-col:last-child {
+    animation: none !important;
+  }
+}

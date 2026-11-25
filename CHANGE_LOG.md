@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-11-13
+
+### [后端+前端] 库存机器人新增「有销量但产品库无此产品」视图
+- **操作**：按 `docs/plans/2026-11-13_库存机器人_有销量但产品库无此产品_coding文档.md` 实现查看能力，并补齐分类、阈值、导出等配套内容
+- **判定口径（正式库实测后确定）**：
+  - 产品库 = `products` + `platform_products`；实测 `products.asin` 仅 4 行非空、`products.sku` 全空、`product_code` 为系统编码，三者与快照命中率均为 **0%** → 唯一有效通道是 `platform_products.sku`（92.5%）∪ `.asin`（合计 93.1%）
+  - 有销量默认 `sales_30d > 0`（`daily_sales>0` 会混入 668 行日均<1 的噪声）；窗口 7/14/30/60/90 与最小阈值可调
+  - 只统计主行（排除 `summary_flag='共享库存'`）；汇总行默认纳入并可用「仅普通主行」排除
+  - 拼接 SKU（`CA-A-887、USA-A-1188`）按 `、,;` 拆分，任一段命中即算已收录
+  - 问题分类：品名唯一命中→`疑似缺平台SKU映射`；一名多品→`品名歧义待确认`；不命中→`疑似未建档`（品名只做提示，不参与存在性判定）
+- **性能**：避开 `NOT EXISTS + UPPER(TRIM())` 相关子查询（实测超时），改为「产品库键集合 TTL 缓存 + 内存比对 + 未收录 id 回注」，并把销量阈值/有标识条件与列裁剪下推 SQL：首次计算 8.7s → **2.2s**，60s 结果缓存后 0s
+- **实测（2026-11-11 快照）**：主行 18,705；未收录 **659**（缺映射 344 / 未建档 229 / 品名歧义 86）；`exclude_summary` 后 367；窗口 7/14/30/90 → 477/598/659/719
+- **涉及文件**：
+  - `backend/services/product_lib_coverage_service.py`（新增：键集合缓存、归一化、拼接拆分、未收录判定与分类、缓存失效）
+  - `backend/services/inventory_service.py`（`build_visible_snapshots` 增 `missing_ids`；`search_inventory` 增 4 参数并降级；`items` 增 `product_lib_status/issue/action/sales_30d`；`get_inventory_overview` 增 `missing_product_count/missing_by_type`；导出白名单 +4 键）
+  - `backend/routers/restock.py`（`/search`、`/overview`、`/export` 透传；并补上 `/export` 一直漏传的 `holiday_filter`）
+  - `backend/tests/test_product_lib_coverage.py`（新增 11 用例，内存 SQLite）
+  - `frontend/src/pages/InventoryBot.tsx`（第 5 张统计卡「产品库未收录」、筛选栏视图/窗口/阈值/仅普通主行、表格「产品库状态」列 + `COLUMN_META`、导出字段选项）
+  - `frontend/src/api.ts`（`exportInventory` 增 4 参数 + `holiday_filter`）
+- **验证**：新增测试 11 passed；`test_fba_inbound_fill_notifier`(16) + `test_ai_image_pipeline`(90) 回归 117 passed；`npm run build` 通过；`/restock/search`、`/overview`、`/export` 端到端 200 且导出 659 行 7 列
+
 ## 2026-11-04
 
 ### [后端+前端] 风险整改：导入性能、导出字段、仓库清理、部署健壮性

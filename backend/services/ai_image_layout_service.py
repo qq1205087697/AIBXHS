@@ -377,8 +377,12 @@ def add_upload(user_id: int, tenant_id: int, user_name: str,
         ratio_tag = "square"
 
     try:
-        url = tos_service.upload_file(content, file_name or "layout.png",
-                                      subdir="ai-image-layouts")
+        # 内容寻址：同一张版式图重复上传只占一个对象（删除版式不清理 TOS，共享无副作用）
+        url = tos_service.upload_file_dedup(
+            content, file_name or "layout.png",
+            content_type=tos_service.image_content_type(file_name or "layout.png"),
+            subdir="ai-image-layouts",
+        )
     except Exception as e:
         logger.error(f"[版式] 上传 TOS 失败: {e}")
         raise LayoutError(f"版式图上传失败: {e}")

@@ -43,21 +43,70 @@ apiClient.interceptors.request.use(
 );
 
 // 响应拦截器
-apiClient.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // 如果是 401 未授权，清除 token（只有当不是在登录页面时才跳转）
-    if (error.response?.status === 401) {
-      const url = error.config?.url || "";
+// 注意：只对 **401（凭据失效）** 做登出处理。网络错误、5xx、超时都没有
+// `error.response`，绝不能被当成「登录失效」——那会让用户在网络抖动或后端重启时被踢出。
+//
+// 401 二次确认（2026-11-25）：单次 401 不再立即登出——先复核 /api/auth/me，
+// 复核通过则静默重放原请求（用户无感）；复核仍 401 才清 token 跳登录。
+// 防御：后端瞬时故障的伪 401、上游链路误判、token 刚被续期替换的竞态。
+let authRedirecting = false;
 
-      // 只有当不是登录请求且不在登录页面时才跳转
-      if (
-        !url.includes("/auth/login") &&
-        window.location.pathname !== "/login"
-      ) {
-        console.warn("认证过期，跳转到登录页");
-        localStorage.removeItem("token");
-        window.location.href = "/login";
+// 401 诊断留痕：最近 5 条（时间/URL/复核结果）。用户再报「自动退出」时，
+// 在控制台执行 JSON.parse(localStorage.getItem('auth_401_log')) 即可定位触发请求。
+const push401Log = (entry: Record<string, unknown>) => {
+  try {
+    const key = "auth_401_log";
+    const list: unknown[] = JSON.parse(localStorage.getItem(key) || "[]");
+    list.push({ t: new Date().toISOString(), ...entry });
+    localStorage.setItem(key, JSON.stringify(list.slice(-5)));
+  } catch {
+    /* 诊断日志失败不影响主流程 */
+  }
+};
+
+apiClient.interceptors.response.use(
+  (response) => {
+    // 滑动续期：后端在 token 剩不足 2 天时通过该响应头下发新 token，这里自动替换。
+    // 长度校验：防止异常空值/垃圾覆盖真实 token（会导致后续全部请求 401）
+    const renewed = response.headers?.["x-renewed-token"];
+    if (renewed && typeof renewed === "string" && renewed.length > 40) {
+      localStorage.setItem("token", renewed as string);
+    }
+    return response;
+  },
+  async (error) => {
+    const status = error.response?.status;
+    if (status === 401) {
+      const url = error.config?.url || "";
+      // 登录/注册请求的 401 是「账号密码错」，不是会话失效
+      const isAuthEntry = url.includes("/auth/login") || url.includes("/auth/register");
+      if (!isAuthEntry && window.location.pathname !== "/login" && !error.config?._retried401) {
+        try {
+          // 复核：用当前 token 裸 axios 调 me（不走本实例拦截器，避免递归）
+          const token = localStorage.getItem("token");
+          await axios.get("/auth/me", {
+            baseURL: API_BASE,
+            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            timeout: 10000,
+          });
+          // 复核通过 → token 其实有效（瞬时故障/竞态），静默重放原请求
+          push401Log({ url, phase: "recheck-pass", retried: true });
+          error.config._retried401 = true;
+          return apiClient.request(error.config);
+        } catch (reErr: any) {
+          const reStatus = reErr?.response?.status;
+          push401Log({ url, phase: "recheck-failed", recheckStatus: reStatus ?? "network" });
+          if (reStatus === 401 && !authRedirecting) {
+            // 复核确认凭据真的失效才登出；并发多个 401 只跳转一次
+            authRedirecting = true;
+            console.warn("认证过期（复核确认），跳转到登录页");
+            localStorage.removeItem("token");
+            localStorage.removeItem("auth_user_cache");
+            localStorage.removeItem("auth_permissions_cache");
+            window.location.assign("/login?expired=1");
+          }
+          // 复核失败但非 401（网络抖动/5xx）：保留登录态，原错误交由调用方兜底
+        }
       }
     }
     return Promise.reject(error);
@@ -138,7 +187,14 @@ export const inventoryApi = {
     risk_level?: string[];
     account?: string[];
     country?: string[];
+    /** 节日/产品状态筛选（必须与列表同口径转发，否则导出与页面不一致） */
+    holiday_filter?: string;
     fields?: string[];
+    /** 产品库视图：all / missing */
+    product_lib_filter?: "all" | "missing";
+    sales_window?: number;
+    min_sales?: number;
+    exclude_summary?: boolean;
   }) => {
     const searchParams = new URLSearchParams();
     if (params?.keyword) searchParams.append("keyword", params.keyword);
@@ -148,8 +204,18 @@ export const inventoryApi = {
       params.account.forEach((a) => searchParams.append("account", a));
     if (params?.country)
       params.country.forEach((c) => searchParams.append("country", c));
+    if (params?.holiday_filter)
+      searchParams.append("holiday_filter", params.holiday_filter);
     if (params?.fields)
       params.fields.forEach((f) => searchParams.append("fields", f));
+    if (params?.product_lib_filter)
+      searchParams.append("product_lib_filter", params.product_lib_filter);
+    if (params?.sales_window !== undefined)
+      searchParams.append("sales_window", String(params.sales_window));
+    if (params?.min_sales !== undefined)
+      searchParams.append("min_sales", String(params.min_sales));
+    if (params?.exclude_summary !== undefined)
+      searchParams.append("exclude_summary", String(params.exclude_summary));
     return apiClient.get(`/restock/export?${searchParams.toString()}`, {
       responseType: "blob",
     });
@@ -166,6 +232,12 @@ export const inventoryApi = {
     }),
   getSummaryChildren: (asin: string, account?: string) =>
     apiClient.get("/restock/summary-children", { params: { asin, account } }),
+  // 自动补货启动：最新快照决策 → 进销存补货单（按店铺分组拆单）
+  autoReplenishment: (data: { force?: boolean; group_ids?: number[] | null; skip_existing?: boolean }) =>
+    apiClient.post("/restock/auto-replenishment", data),
+  // 自动补货预检（只读）：可见分组/行数/跳过数/预计单数（网络抖动时 60s 内失败可重试）
+  autoReplenishmentPreview: (data: { group_ids?: number[] | null; skip_existing?: boolean }) =>
+    apiClient.post("/restock/auto-replenishment/preview", data, { timeout: 60000 }),
   markHoliday: (snapshotIds: number[], isHoliday: boolean) =>
     apiClient.post("/restock/mark-holiday", {
       snapshot_ids: snapshotIds,
@@ -2893,25 +2965,28 @@ export const aiImageApi = {
       timeout: 300000,
     });
   },
-  /** 套图生成任务列表（分页 + 关键词 + 状态，状态由服务端过滤保证分页自洽） */
-  listTasks: (page = 1, pageSize = 20, keyword = "", status = "") =>
+  /** 套图生成任务列表（分页 + 关键词 + 状态 + 模式，状态/模式由服务端过滤保证分页自洽） */
+  listTasks: (page = 1, pageSize = 20, keyword = "", status = "", mode = "") =>
     apiClient.get<{ items: AIImageTask[]; total: number }>("/ai-image/tasks", {
-      params: { page, page_size: pageSize, keyword, status },
+      params: { page, page_size: pageSize, keyword, status, mode },
     }),
-  /** 单任务详情（轮询单条用，避免整页重复传输） */
-  getTask: (taskId: number) => apiClient.get<AIImageTask>(`/ai-image/tasks/${taskId}`),
+  /** 单任务详情（轮询单条用，避免整页重复传输；mode 用于校验任务属于当前页面） */
+  getTask: (taskId: number, mode = "") =>
+    apiClient.get<AIImageTask>(`/ai-image/tasks/${taskId}`, { params: { mode } }),
   /** 取消排队中/生成中的任务 */
   cancelTask: (taskId: number) =>
     apiClient.post<{ success: boolean; message?: string }>(`/ai-image/tasks/${taskId}/cancel`),
   /** 重试失败子项（indices 缺省=全部失败项） */
-  retryTask: (taskId: number, indices?: number[]) =>
+  retryTask: (taskId: number, indices?: number[], mode = "") =>
     apiClient.post<{ retried: number; failed: string[] }>(
       `/ai-image/tasks/${taskId}/retry`,
       indices && indices.length ? { indices } : {},
+      { params: { mode } },
     ),
   /** 打包下载全部已生成图片 */
-  downloadZip: (taskId: number) =>
+  downloadZip: (taskId: number, mode = "") =>
     apiClient.get<Blob>(`/ai-image/tasks/${taskId}/download.zip`, {
+      params: { mode },
       responseType: "blob",
       timeout: 300000,
     }),
@@ -2961,6 +3036,73 @@ export const aiImageApi = {
       {},
       { timeout: 120000 },
     ),
+};
+
+
+// ==================== 产品月销量等级池 ====================
+
+export interface GradePoolItem {
+  snapshot_id: number;
+  asin: string;
+  sku?: string;
+  msku?: string;
+  product_name?: string;
+  account?: string;
+  country?: string;
+  summary_flag?: string;
+  grade?: string | null;
+  monthly_sales?: number | null;
+  sales_source?: string | null;
+  prev_grade?: string | null;
+  computed_at?: string | null;
+}
+
+export interface GradePoolResult {
+  items: GradePoolItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  period?: string | null;
+  distribution: Record<string, number>;
+  /** 数据完整性提示（product_sales 覆盖率不足时后端下发） */
+  integrity_warning?: string | null;
+  grade_note?: string | null;
+}
+
+export interface GradeSummary {
+  period?: string | null;
+  distribution: Record<string, number>;
+  total: number;
+  fallback_ratio: number;
+  integrity_warning?: string | null;
+}
+
+export const gradeApi = {
+  /** 等级池列表（可见性=库存页同口径；grade 逗号分隔多选） */
+  getPool: (params: {
+    keyword?: string;
+    grade?: string;
+    account?: string[];
+    country?: string[];
+    holiday_filter?: string;
+    sort_field?: string;
+    sort_order?: string;
+    page?: number;
+    page_size?: number;
+  }) => apiClient.get<GradePoolResult>("/grades/pool", { params }),
+  /** 六档统计 + 完整性提示 */
+  getSummary: (params: {
+    keyword?: string;
+    grade?: string;
+    account?: string[];
+    country?: string[];
+    holiday_filter?: string;
+  }) => apiClient.get<GradeSummary>("/grades/summary", { params }),
+  /** 手动重算（仅 admin，同步执行） */
+  recompute: (period?: string) =>
+    apiClient.post<{ ok: boolean; [k: string]: unknown }>("/grades/recompute", period ? { period } : undefined, { timeout: 180000 }),
+  /** 当前等级期与生成时间 */
+  getPeriod: () => apiClient.get<{ period: string | null; computed_at: string | null }>("/grades/period"),
 };
 
 export default apiClient;

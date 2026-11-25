@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Card,
   Button,
@@ -156,7 +156,40 @@ const fileExt = (url?: string | null): string => {
   return (m?.[1] || 'png').toLowerCase()
 }
 
-const AIImageStudio: React.FC = () => {
+// 服务端能力/下拉项在一个会话内不变：A+套图 ↔ 主副图 切换时不重复拉取，减少切换卡顿
+let optionsPromise: Promise<any> | null = null
+const loadOptions = (): Promise<any> =>
+  (optionsPromise ??= aiImageApi
+    .getOptions()
+    .then((r) => r.data)
+    .catch((e) => {
+      optionsPromise = null // 失败不缓存，下次进入可重试
+      throw e
+    }))
+
+/**
+ * 两页各自最近一次的记录列表快照。A+ / 主副图是同一条路由位置上的同一个组件实例，
+ * 切页时 state 不会重建；先把目标页快照同步换上去，再后台静默刷新，
+ * 避免「上一页的记录停留一下才变换」。
+ */
+type TaskListSnapshot = {
+  items: AIImageTask[]
+  total: number
+  page: number
+  keyword: string
+  status: string
+  ts: number
+}
+const TASK_LIST_CACHE: Record<'aplus' | 'main', TaskListSnapshot | undefined> = {
+  aplus: undefined,
+  main: undefined,
+}
+/** 另一页列表预热是否已做过（每页只预热一次，失败允许重试） */
+const TASK_LIST_PREFETCHED: Record<'aplus' | 'main', boolean> = { aplus: false, main: false }
+
+/** mode：aplus=只看 A+ 套图，main=只看主副图。两页共用同一实现，生成与提交逻辑完全一致 */
+const AIImageStudio: React.FC<{ mode?: 'aplus' | 'main' }> = ({ mode = 'aplus' }) => {
+  const isAplus = mode === 'aplus'
   // 主题色：上传区/类型卡片等自绘边框必须跟 antd token 走，不能写死紫色
   const { token } = theme.useToken()
   // ===== 左栏表单状态 =====
@@ -192,7 +225,8 @@ const AIImageStudio: React.FC = () => {
   // A+ 版式：选中的排版（每种生成一张；空=后端随机官方版式）
   const [layouts, setLayouts] = useState<AIImageLayout[]>([])
   const [layoutOpen, setLayoutOpen] = useState(false)
-  const [mainEnabled, setMainEnabled] = useState(true)
+  // A+ 页默认不生成主副图（提交时 main_types 自然为空）；主副图页默认开启
+  const [mainEnabled, setMainEnabled] = useState(mode !== 'aplus')
   const [selectedMainTypes, setSelectedMainTypes] = useState<string[]>([
     'white_background',
     'scene',
@@ -240,40 +274,110 @@ const AIImageStudio: React.FC = () => {
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** 进行中的任务 id（轮询用 ref，避免定时器闭包读到旧列表） */
   const activeIdsRef = useRef<number[]>([])
+  /** 当前列表归属的页面（切页时在 layoutEffect 里先更新，用于丢弃旧页请求） */
+  const modeRef = useRef(mode)
+  /** 列表请求序号：切页/改筛选后旧请求迟到的结果一律丢弃 */
+  const taskReqRef = useRef(0)
 
   const pageSize = 10
 
   const fetchTasks = useCallback(
     async (silent = false, override?: { page?: number; keyword?: string; status?: string }) => {
+      const reqMode = mode
+      const reqId = ++taskReqRef.current
+      const effPage = override?.page ?? page
+      const effKeyword = override?.keyword !== undefined ? override.keyword : keyword
+      const effStatus = override?.status !== undefined ? override.status : statusFilter
       if (!silent) setLoading(true)
       try {
-        const { data } = await aiImageApi.listTasks(
-          override?.page ?? page,
-          pageSize,
-          override?.keyword !== undefined ? override.keyword : keyword,
-          override?.status !== undefined ? override.status : statusFilter,
-        )
-        setTasks(data.items || [])
+        const { data } = await aiImageApi.listTasks(effPage, pageSize, effKeyword, effStatus, reqMode)
+        // 期间切了页面或又发了新请求 → 这份结果属于旧页面，直接丢弃
+        if (reqId !== taskReqRef.current || reqMode !== modeRef.current) return
+        const items = data.items || []
+        setTasks(items)
         setTotal(data.total || 0)
+        TASK_LIST_CACHE[reqMode] = {
+          items,
+          total: data.total || 0,
+          page: effPage,
+          keyword: effKeyword,
+          status: effStatus,
+          ts: Date.now(),
+        }
       } catch (e: any) {
-        if (!silent) message.error(e?.response?.data?.detail || '获取任务列表失败')
+        if (!silent && reqId === taskReqRef.current) {
+          message.error(e?.response?.data?.detail || '获取任务列表失败')
+        }
       } finally {
-        if (!silent) setLoading(false)
+        if (!silent && reqId === taskReqRef.current) setLoading(false)
       }
     },
-    [page, keyword, statusFilter],
+    [page, keyword, statusFilter, mode],
   )
 
+  // 切 A+ / 主副图：在浏览器绘制前把列表换成目标页快照。
+  // 命中缓存就直接出数据（后台再静默对齐），未命中立刻转骨架，不会先留一屏旧记录。
+  useLayoutEffect(() => {
+    if (modeRef.current === mode) return
+    modeRef.current = mode
+    taskReqRef.current++ // 作废旧页面仍在飞的请求
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current)
+      searchTimerRef.current = null
+    }
+    const snap = TASK_LIST_CACHE[mode]
+    setPage(snap?.page ?? 1)
+    setKeyword(snap?.keyword ?? '')
+    setStatusFilter(snap?.status ?? '')
+    setTasks(snap?.items ?? [])
+    setTotal(snap?.total ?? 0)
+    setLoading(!snap)
+    // 属于单条记录的浮层/高亮不要跨页残留
+    setResultDetail(null)
+    setActiveHistoryId(null)
+    setHoverId(null)
+  }, [mode])
+
   useEffect(() => {
-    fetchTasks()
+    if (mode !== modeRef.current) return // 上一个 commit 遗留的 effect，页面已切换
+    const snap = TASK_LIST_CACHE[mode]
+    const canSilent =
+      !!snap && snap.page === page && snap.keyword === keyword && snap.status === statusFilter
+    fetchTasks(canSilent)
+    // fetchTasks 已依赖 page/keyword/statusFilter/mode
   }, [fetchTasks])
+
+  // 预热另一页的记录列表：切过去也能瞬间出数据（每页只做一次，600ms 后不挤首屏）
+  useEffect(() => {
+    const other: 'aplus' | 'main' = mode === 'aplus' ? 'main' : 'aplus'
+    if (TASK_LIST_PREFETCHED[other] || TASK_LIST_CACHE[other]) return
+    const timer = setTimeout(() => {
+      TASK_LIST_PREFETCHED[other] = true
+      aiImageApi
+        .listTasks(1, pageSize, '', '', other)
+        .then(({ data }) => {
+          if (TASK_LIST_CACHE[other]) return // 用户已手动进过该页，别用预热结果覆盖
+          TASK_LIST_CACHE[other] = {
+            items: data.items || [],
+            total: data.total || 0,
+            page: 1,
+            keyword: '',
+            status: '',
+            ts: Date.now(),
+          }
+        })
+        .catch(() => {
+          TASK_LIST_PREFETCHED[other] = false
+        })
+    }, 600)
+    return () => clearTimeout(timer)
+  }, [mode])
 
   // 一次性拉取服务端能力：ComfyUI 地址、参考图/张数上限、真实可用比例、
   // A+/主副图类型与品牌下拉（类型标签与尺寸文案以服务端为准，前端不再各存一份）
   useEffect(() => {
-    aiImageApi
-      .getOptions()
-      .then(({ data }) => {
+    loadOptions()
+      .then((data) => {
         setH3BaseUrl(data?.h3_base_url || '')
         if (data?.max_ref_images) setMaxImages(data.max_ref_images)
         if (data?.max_sheets_per_task) setMaxSheets(data.max_sheets_per_task)
@@ -285,7 +389,7 @@ const AIImageStudio: React.FC = () => {
         }
         if (data?.aplus_types) {
           setAplusOptions(
-            Object.entries(data.aplus_types).map(([value, o]) => ({
+            Object.entries(data.aplus_types as Record<string, any>).map(([value, o]) => ({
               value,
               label: o.label,
               // 老版本服务端只有 target_size，按它拼展示文案，避免出现空尺寸
@@ -409,11 +513,16 @@ const AIImageStudio: React.FC = () => {
   }
 
   // 维护「进行中任务」id 列表（轮询只拉这几条，降流量）
+  // 同时把轮询/取消带来的单条变化回写快照，切页回来不会先闪一屏过期状态
   useEffect(() => {
     activeIdsRef.current = tasks
       .filter((t) => t.status === '排队中' || t.status === '生成中')
       .map((t) => t.id)
-  }, [tasks])
+    const snap = TASK_LIST_CACHE[mode]
+    if (snap && mode === modeRef.current && snap.items !== tasks) {
+      TASK_LIST_CACHE[mode] = { ...snap, items: tasks, ts: Date.now() }
+    }
+  }, [tasks, mode])
 
   // 有进行中任务时 5 秒轮询单任务：只替换变化的那几条，不再整页重拉。
   // 页面不可见时暂停（后台标签页不必空转），切回来立即补一轮。
@@ -424,7 +533,7 @@ const AIImageStudio: React.FC = () => {
       const ids = activeIdsRef.current
       if (!ids.length) return
       try {
-        const res = await Promise.all(ids.map((id) => aiImageApi.getTask(id)))
+        const res = await Promise.all(ids.map((id) => aiImageApi.getTask(id, mode)))
         const fresh = new Map(res.map((r) => [r.data.id, r.data]))
         setTasks((prev) => prev.map((t) => fresh.get(t.id) ?? t))
       } catch {
@@ -456,7 +565,7 @@ const AIImageStudio: React.FC = () => {
       stop()
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [])
+  }, [mode])
 
   // ===== 上传辅助（对齐 AI 生视频） =====
   const appendFiles = (files: File[]) => {
@@ -674,7 +783,6 @@ const AIImageStudio: React.FC = () => {
   }
 
   // ===== 提交生成任务（v2 分组参数）=====
-  const activeMainTypeCount = mainEnabled ? selectedMainTypes.length : 0
   // A+ 张数：选了版式时每种版式一张（版式数即张数），未选时按张数输入；
   // 品牌横幅不使用版式，张数完全由用户自选。
   const aplusSheets = aplusType
@@ -722,8 +830,12 @@ const AIImageStudio: React.FC = () => {
       }
       if (failed.length) message.warning(`${failed.length} 张参考图读取失败，已跳过`)
       const activeMainTypes = mainEnabled ? selectedMainTypes : []
-      if (!aplusType && !activeMainTypes.length) {
-        message.warning('请在「A+图设置」或「主副图设置」中至少选择一种类型')
+      if (isAplus && !aplusType) {
+        message.warning('请先选择 A+ 图类型')
+        return
+      }
+      if (!isAplus && !activeMainTypes.length) {
+        message.warning('请至少选择一种主副图类型')
         return
       }
       if (aplusType === 'aplus_banner') {
@@ -816,7 +928,7 @@ const AIImageStudio: React.FC = () => {
   /** 重试失败子项（复用已上传参考图，不要求重新上传） */
   const handleRetry = async (taskId: number, indices?: number[]) => {
     try {
-      const { data } = await aiImageApi.retryTask(taskId, indices)
+      const { data } = await aiImageApi.retryTask(taskId, indices, mode)
       message.success(
         data?.retried ? `已重新提交 ${data.retried} 张，正在生成` : '已提交重试',
       )
@@ -830,7 +942,7 @@ const AIImageStudio: React.FC = () => {
   const handleDownloadAll = async (task: AIImageTask) => {
     const hide = message.loading('正在打包图片…', 0)
     try {
-      const { data } = await aiImageApi.downloadZip(task.id)
+      const { data } = await aiImageApi.downloadZip(task.id, mode)
       const url = URL.createObjectURL(data)
       const a = document.createElement('a')
       a.href = url
@@ -861,52 +973,55 @@ const AIImageStudio: React.FC = () => {
         thumbUrl: url,
       })),
     )
-    if (task.aplus_type) setAplusType(task.aplus_type)
-    else setAplusType('')
-    setAplusCount(task.image_count || 1)
-    // 版式回填：从子项里取（同 key 去重），让「编辑/再做一单」保持同一批排版
-    {
-      const seen = new Set<string>()
-      const restored: AIImageLayout[] = []
-      ;(task.result_images || []).forEach((it) => {
-        const lay = it.layout
-        if (!lay?.key || seen.has(lay.key)) return
-        seen.add(lay.key)
-        restored.push({
-          key: lay.key,
-          id: lay.key.replace(/^\w+:/, ''),
-          name: lay.name || lay.key,
-          source: lay.source === 'upload' ? 'upload' : 'preset',
-          ratio_tag: lay.ratio_tag,
-          image_url: lay.image_url || undefined,
+    if (isAplus) {
+      if (task.aplus_type) setAplusType(task.aplus_type)
+      else setAplusType('')
+      setAplusCount(task.image_count || 1)
+      // 版式回填：从子项里取（同 key 去重），让「编辑/再做一单」保持同一批排版
+      {
+        const seen = new Set<string>()
+        const restored: AIImageLayout[] = []
+        ;(task.result_images || []).forEach((it) => {
+          const lay = it.layout
+          if (!lay?.key || seen.has(lay.key)) return
+          seen.add(lay.key)
+          restored.push({
+            key: lay.key,
+            id: lay.key.replace(/^\w+:/, ''),
+            name: lay.name || lay.key,
+            source: lay.source === 'upload' ? 'upload' : 'preset',
+            ratio_tag: lay.ratio_tag,
+            image_url: lay.image_url || undefined,
+          })
         })
-      })
-      setLayouts(restored)
+        setLayouts(restored)
+      }
     }
-    if (Array.isArray(task.main_types)) {
-      const typeList = task.main_types
-      setSelectedMainTypes(typeList)
-      setMainCounts((m) => {
-        const next = { ...m }
-        for (const t of typeList) if (next[t] == null) next[t] = 1
-        return next
-      })
-    } else if (task.main_types && typeof task.main_types === 'object') {
-      const keys = Object.keys(task.main_types)
-      setSelectedMainTypes(keys)
-      setMainCounts((m) => {
-        const next = { ...m }
-        for (const [t, c] of Object.entries(Object(task.main_types) as Record<string, number>))
-          next[t] = c
-        return next
-      })
+    if (!isAplus) {
+      if (Array.isArray(task.main_types)) {
+        const typeList = task.main_types
+        setSelectedMainTypes(typeList)
+        setMainCounts((m) => {
+          const next = { ...m }
+          for (const t of typeList) if (next[t] == null) next[t] = 1
+          return next
+        })
+      } else if (task.main_types && typeof task.main_types === 'object') {
+        const keys = Object.keys(task.main_types)
+        setSelectedMainTypes(keys)
+        setMainCounts((m) => {
+          const next = { ...m }
+          for (const [t, c] of Object.entries(Object(task.main_types) as Record<string, number>))
+            next[t] = c
+          return next
+        })
+      } else if (!task.aplus_type) {
+        // v1 旧记录：generation_types 里除 aplus 之外都是主副图类型（不再依赖前端标签表做白名单）
+        const legacy = (task.generation_types || []).filter((t) => t !== 'aplus')
+        setSelectedMainTypes(legacy.length ? legacy : ['white_background', 'scene'])
+      }
+      setMainAspectRatio(task.main_aspect_ratio || task.aspect_ratio || '1:1')
     }
-    else if (!task.aplus_type) {
-      // v1 旧记录：generation_types 里除 aplus 之外都是主副图类型（不再依赖前端标签表做白名单）
-      const legacy = (task.generation_types || []).filter((t) => t !== 'aplus')
-      setSelectedMainTypes(legacy.length ? legacy : ['white_background', 'scene'])
-    }
-    setMainAspectRatio(task.main_aspect_ratio || task.aspect_ratio || '1:1')
     if (task.brand_settings) setBrand({ ...BRAND_DEFAULTS, ...task.brand_settings })
     setBrandName(task.brand_settings?.brand_name || '')
     setProductInfo(task.product_info || '')
@@ -1130,7 +1245,11 @@ const AIImageStudio: React.FC = () => {
         }
       `}
     </style>
-    <div className="ai-thin-scrollbar" style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}>
+    <div
+      key={mode}
+      className={`ai-thin-scrollbar page-switch-enter page-switch-${mode}`}
+      style={{ height: '100%', overflow: 'hidden', padding: 24, boxSizing: 'border-box' }}
+    >
       <Row gutter={16} style={{ height: '100%', alignItems: 'stretch' }}>
         {/* 左栏：生成表单（栏内独立滚动，AICreationCenter 同模式） */}
         <Col
@@ -1144,7 +1263,7 @@ const AIImageStudio: React.FC = () => {
             title={
               <Space>
                 <PictureOutlined />
-                <span>商品套图生成</span>
+                <span>{isAplus ? 'A+ 套图生成' : '主副图生成'}</span>
               </Space>
             }
             styles={{ body: { padding: '16px 16px 6px' } }}
@@ -1383,7 +1502,8 @@ const AIImageStudio: React.FC = () => {
                 </Col>
               </Row>
 
-              {/* ===== A+图设置（单选） ===== */}
+              {/* ===== A+图设置（单选）— 仅 A+ 页 ===== */}
+              {isAplus && (
               <Card
                 size="small"
                 type="inner"
@@ -1550,8 +1670,10 @@ const AIImageStudio: React.FC = () => {
                   </div>
                 )}
               </Card>
+              )}
 
-              {/* ===== 主副图设置（开关 + 行式勾选 + 每类型独立张数 + 比例按钮组） ===== */}
+              {/* ===== 主副图设置（开关 + 行式勾选 + 每类型独立张数 + 比例按钮组）— 仅主副图页 ===== */}
+              {!isAplus && (
               <Card
                 size="small"
                 type="inner"
@@ -1774,6 +1896,7 @@ const AIImageStudio: React.FC = () => {
                   </div>
                 )}
               </Card>
+              )}
 
               <div>
                 <Text strong>附加要求（可选）</Text>
@@ -1801,15 +1924,10 @@ const AIImageStudio: React.FC = () => {
             disabled={totalSheets === 0}
           >
             {totalSheets > 0
-              ? `立即生成（共 ${totalSheets} 张：${
-                  [
-                    aplusType && `A+×${aplusSheets}`,
-                    mainEnabled && activeMainTypeCount > 0 && `主副图×${totalSheets - (aplusType ? aplusCount : 0)}`,
-                  ]
-                    .filter(Boolean)
-                    .join(' + ')
-                }）`
-              : '立即生成（请先选择生成类型）'}
+              ? (isAplus
+                  ? `立即生成（共 ${totalSheets} 张：A+×${aplusSheets}）`
+                  : `立即生成（共 ${totalSheets} 张：主副图×${totalSheets}）`)
+              : (isAplus ? '立即生成（请先选择 A+ 图类型）' : '立即生成（请先选择主副图类型）')}
           </Button>
           {totalSheets > maxSheets && (
             <div style={{ marginTop: 4 }}>

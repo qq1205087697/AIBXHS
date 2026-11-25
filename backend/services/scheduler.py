@@ -181,6 +181,45 @@ def init_scheduler():
     )
 
     scheduler.add_job(
+        fba_infill_notify_job,
+        trigger="cron",
+        hour=9,
+        minute=30,
+        id="fba_infill_notify",
+        name="检查FBA在途信息补填",
+        replace_existing=True
+    )
+
+    # 产品月销量等级池：每月 3 号 06:30 按上月销量定版（幂等重跑），
+    # 当日 18:00 兜底（当期已生成则跳过）。失败走站内通知 admin。
+    scheduler.add_job(
+        grade_refresh_job,
+        trigger="cron",
+        day=3,
+        hour=6,
+        minute=30,
+        id="grade_refresh",
+        name="月销量等级池更新（每月3号）",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        replace_existing=True
+    )
+    scheduler.add_job(
+        grade_refresh_fallback_job,
+        trigger="cron",
+        day=3,
+        hour=18,
+        minute=0,
+        id="grade_refresh_fallback",
+        name="月销量等级池兜底更新（每月3号）",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        replace_existing=True
+    )
+
+    scheduler.add_job(
         cleanup_expired_ad_data_job,
         trigger="cron",
         hour=3,
@@ -1521,6 +1560,100 @@ def product_selection_fees_rescrape_job(limit: int = None, full: bool = False, i
         if locked:
             release_distributed_lock(db, LOCK_KEY)
         db.close()
+
+
+def fba_infill_notify_job():
+    """每天 9:30：检查 FBA 在途信息（发货日期/运输方式）缺失并通知仓库角色
+
+    与导入后的即时提醒共用同一实现；按天去重保证两次触发一天只发一条。
+    定时场景没有 feishu_data，文案走中性表述（不区分「飞书无记录」与「字段未填」）。
+    """
+    logger.info("========== 开始检查 FBA 在途信息补填 ==========")
+    try:
+        from services.fba_inbound_fill_notifier import notify_missing_fba_info
+        result = notify_missing_fba_info()
+        logger.info("FBA在途补填通知(定时): %s", result)
+    except Exception as e:
+        logger.warning("FBA在途补填通知(定时)失败: %s", e)
+    logger.info("========== 检查结束 ==========")
+
+
+def grade_refresh_job():
+    """每月 3 号 06:30：按上月销量重算产品等级池（各租户，幂等重跑）
+
+    设计文档：docs/plans/2026-11-24_产品月销量等级体系_完整实现方案.md
+    - 分布式锁防多实例并发；同 period 重跑 = 先删后插，结果幂等。
+    - 失败快速重试 2 次（数据库瞬时抖动），仍失败 → 站内通知 admin + 当日 18:00 兜底。
+    """
+    from database.database import SessionLocal
+    from sqlalchemy import text
+    import time as _time
+    from services.grade_service import (
+        recompute_grades, get_current_period, notify_grade_failure,
+    )
+
+    logger.info("========== 开始月销量等级池更新 ==========")
+    db = SessionLocal()
+    try:
+        period = get_current_period()
+        tenant_ids = [r[0] for r in db.execute(
+            text("SELECT id FROM tenants WHERE deleted_at IS NULL")).fetchall()]
+        for tid in tenant_ids:
+            lock_key = f"grade_recompute_{tid}"
+            if not acquire_distributed_lock(db, lock_key, timeout_minutes=30):
+                logger.warning("等级池更新: 租户 %s 未获取到锁，跳过", tid)
+                continue
+            result = {"ok": False, "error": "未执行"}
+            for attempt in range(3):
+                try:
+                    result = recompute_grades(db, tid, period, computed_by="scheduler")
+                except Exception as e:  # noqa: BLE001
+                    result = {"ok": False, "error": str(e)}
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                if result.get("ok"):
+                    break
+                if attempt < 2:
+                    _time.sleep(10)
+            if result.get("ok"):
+                logger.info("等级池更新: 租户 %s period=%s 行=%s 分布=%s",
+                            tid, period, result.get("rows"), result.get("distribution"))
+            else:
+                logger.error("等级池更新: 租户 %s period=%s 失败: %s（已通知 admin）",
+                             tid, period, result.get("error"))
+                notify_grade_failure(tid, period, result.get("error", "未知错误"))
+            release_distributed_lock(db, lock_key)
+    except Exception as e:  # noqa: BLE001
+        logger.error("等级池更新 job 异常: %s", e)
+    finally:
+        db.close()
+    logger.info("========== 月销量等级池更新结束 ==========")
+
+
+def grade_refresh_fallback_job():
+    """每月 3 号 18:00：等级池兜底重算（当期已生成则直接跳过，避免重复计算）"""
+    from database.database import SessionLocal
+    from services.grade_service import get_current_period, get_current_grade_period
+
+    db = SessionLocal()
+    missing = []
+    try:
+        period = get_current_period()
+        tenant_ids = [r[0] for r in db.execute(
+            text("SELECT id FROM tenants WHERE deleted_at IS NULL")).fetchall()]
+        for tid in tenant_ids:
+            cur, _ = get_current_grade_period(db, tid)
+            if cur != period:
+                missing.append(tid)
+                logger.warning("等级池兜底: 租户 %s 当期 %s 未生成（当前 %s）", tid, period, cur)
+    finally:
+        db.close()
+    if missing:
+        grade_refresh_job()
+    else:
+        logger.info("等级池兜底: 各租户当期均已生成，无需重算")
 
 
 def check_overdue_purchase_orders_job():

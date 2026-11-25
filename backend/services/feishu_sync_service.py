@@ -185,6 +185,7 @@ def _do_sync():
     from database.database import SessionLocal
     db = SessionLocal()
     sync_ok = False  # 仅「正常结束」（含飞书返回 0 条）才置 True，收尾据此决定是否发补填通知
+    feishu_data: list = []  # 提前初始化：异常时 finally 里的通知调用仍可引用（空列表=中性文案）
 
     try:
         # 初始化状态
@@ -274,7 +275,7 @@ def _do_sync():
         if sync_ok:
             try:
                 from services.fba_inbound_fill_notifier import notify_missing_fba_info
-                logger.info("FBA在途补填通知: %s", notify_missing_fba_info())
+                logger.info("FBA在途补填通知: %s", notify_missing_fba_info(feishu_data=feishu_data))
             except Exception as e:
                 logger.warning("FBA在途补填通知失败（不阻塞同步）: %s", e)
         _sync_status["is_running"] = False

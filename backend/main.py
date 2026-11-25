@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import os
 
-from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, memos, base_table, ai_creation, product_development, video_bindings, ai_image, tags, media_requests
+from routers import inventory, reviews, dashboard, chat, auth, restock, departments, notifications, stores, products, tenants, store_groups, inbound, outbound, purchase, inventory_batch, operation_logs, permissions, warehouses, stock_transfer, local_inventory, business_settings, store_mapping, emails, inventory_count, product_bindings, ads, ad_rules, ad_suggestions, ad_execution_logs, replenishment, shipments, data_warnings, product_sales, threshold_settings, product_page_info, suppliers, upload, product_selection, product_aging, product_buybox, product_shipment_notice, group_messages, memos, base_table, ai_creation, product_development, video_bindings, ai_image, tags, media_requests, grade
 from config import get_settings
 
 settings = get_settings()
@@ -70,6 +70,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 滑动续期：后端在 token 临近过期时通过该响应头下发新 token，
+    # 跨域场景下必须显式暴露，前端 axios 才读得到
+    expose_headers=["X-Renewed-Token"],
 )
 
 # 注册路由
@@ -90,6 +93,7 @@ app.include_router(product_selection.router)
 app.include_router(emails.router, prefix="/api")
 app.include_router(data_warnings.router, prefix="/api")
 app.include_router(product_sales.router, prefix="/api")
+app.include_router(grade.router, prefix="/api")
 app.include_router(threshold_settings.router, prefix="/api")
 app.include_router(local_inventory.router, prefix="/api")
 app.include_router(business_settings.router)

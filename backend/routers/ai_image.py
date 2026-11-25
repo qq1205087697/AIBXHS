@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Body, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Body, Response, Query
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 import io
@@ -430,22 +430,28 @@ async def list_tasks(
     page_size: int = 10,
     keyword: str = "",
     status: str = "",
+    mode: str = Query("", description="生成模式：aplus=只看A+套图，main=只看主副图，空=全部"),
     current_user: User = Depends(PermissionChecker("ai_image:use")),
 ):
-    """套图生成任务列表（分页，按时间倒序；status 由服务端过滤，保证分页自洽）"""
+    """套图生成任务列表（分页，按时间倒序；status/mode 由服务端过滤，保证分页自洽）"""
     try:
         return list_image_tasks(
-            current_user.tenant_id, page=page, page_size=page_size, keyword=keyword, status=status
+            current_user.tenant_id, page=page, page_size=page_size,
+            keyword=keyword, status=status, mode=mode,
         )
     except AIImageError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/tasks/{task_id}")
-async def get_task(task_id: int, current_user: User = Depends(PermissionChecker("ai_image:use"))):
+async def get_task(
+    task_id: int,
+    mode: str = Query("", description="生成模式：aplus/main 非空时校验任务归属该模式"),
+    current_user: User = Depends(PermissionChecker("ai_image:use")),
+):
     """单任务详情（前端轮询用：只拉当前页仍在生成的单条，避免整页重复传输）"""
     try:
-        return get_image_task(current_user.tenant_id, task_id)
+        return get_image_task(current_user.tenant_id, task_id, mode=mode)
     except AIImageError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -473,6 +479,7 @@ async def cancel_task(task_id: int, current_user: User = Depends(PermissionCheck
 async def retry_task(
     task_id: int,
     payload: Optional[Dict[str, Any]] = Body(default=None),
+    mode: str = Query("", description="生成模式：aplus/main 非空时校验任务归属该模式"),
     current_user: User = Depends(PermissionChecker("ai_image:use")),
 ):
     """重试失败子项：body 可带 {"indices": [0, 2]}，缺省重试全部失败项"""
@@ -484,16 +491,20 @@ async def retry_task(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="indices 必须是整数数组")
     try:
-        return retry_image_items(current_user.tenant_id, task_id, wanted)
+        return retry_image_items(current_user.tenant_id, task_id, wanted, mode=mode)
     except AIImageError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/tasks/{task_id}/download.zip")
-async def download_zip(task_id: int, current_user: User = Depends(PermissionChecker("ai_image:use"))):
+async def download_zip(
+    task_id: int,
+    mode: str = Query("", description="生成模式：aplus/main 非空时校验任务归属该模式"),
+    current_user: User = Depends(PermissionChecker("ai_image:use")),
+):
     """打包下载该任务全部已生成的图片"""
     try:
-        data, filename = build_task_zip(current_user.tenant_id, task_id)
+        data, filename = build_task_zip(current_user.tenant_id, task_id, mode=mode)
     except AIImageError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return Response(

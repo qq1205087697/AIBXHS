@@ -2447,7 +2447,10 @@ def _prepare_and_run_relay(
         def _to_tos(item: Tuple[str, bytes]) -> Optional[str]:
             name, content = item
             try:
-                return tos_service.upload_file(content, name, subdir="ai-image")
+                # 内容寻址：同一张图重复提交只占一个 TOS 对象（命中则跳过上传）
+                return tos_service.upload_file_dedup(
+                    content, name, content_type=tos_service.image_content_type(name), subdir="ai-image",
+                )
             except Exception as e:
                 logger.warning(f"[AI生图] 参考图上传 TOS 失败（不影响生成）: {e}")
                 return None
@@ -2906,7 +2909,10 @@ def _prepare_and_run(
         def _to_tos(item: Tuple[str, bytes]) -> Optional[str]:
             name, content = item
             try:
-                return tos_service.upload_file(content, name, subdir="ai-image")
+                # 内容寻址：同一张图重复提交只占一个 TOS 对象（命中则跳过上传）
+                return tos_service.upload_file_dedup(
+                    content, name, content_type=tos_service.image_content_type(name), subdir="ai-image",
+                )
             except Exception as e:
                 logger.warning(f"[AI生图] 参考图上传 TOS 失败（不影响生成）: {e}")
                 return None
@@ -3233,11 +3239,54 @@ def get_comfy_prompt_history(prompt_id: str) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# 生成模式（A+套图 / 主副图）：列表、单条详情、重试、打包下载共用同一份归类条件，
+# 避免「列表看不到但拿 id 能读/能重试」的视图与权限口径不一致。
+# ---------------------------------------------------------------------------
+IMAGE_MODES = ("aplus", "main")
+
+
+def _normalize_mode(mode: str) -> str:
+    """白名单校验并归一；非法值直接 400（截断回显，避免原样反射任意长度入参）"""
+    m = (mode or "").strip().lower()
+    if m and m not in IMAGE_MODES:
+        raise AIImageError(f"不支持的生成模式: {m[:20]}")
+    return m
+
+
+def _mode_clause(mode: str):
+    """A+ / 主副图 的归类条件（mode 为空返回 None）
+
+    新任务：aplus_type 非空 → A+；main_types 非 ('','[]','{}') → 主副图；
+    旧任务（两组新字段都为空）按 generation_types 兜底归类，避免拆分后记录消失。
+    """
+    if not mode:
+        return None
+    from sqlalchemy import and_, func, or_
+    from models.ai_image_task import AIImageTask
+
+    has_aplus = and_(AIImageTask.aplus_type.isnot(None), AIImageTask.aplus_type != "")
+    has_main = and_(
+        AIImageTask.main_types.isnot(None),
+        ~AIImageTask.main_types.in_(("", "[]", "{}")),
+    )
+    legacy = and_(~has_aplus, ~has_main)
+    gen = func.coalesce(AIImageTask.generation_types, "")
+    if mode == "aplus":
+        return or_(has_aplus, and_(legacy, gen.like("%aplus%")))
+    return or_(has_main, and_(legacy, ~gen.like("%aplus%")))
+
+
 def list_image_tasks(
     tenant_id: int, page: int = 1, page_size: int = 10, keyword: str = "",
-    status: str = "",
+    status: str = "", mode: str = "",
 ) -> Dict[str, Any]:
-    """租户的套图生成任务列表（按时间倒序）。keyword 模糊匹配产品编码/品名/标题"""
+    """租户的套图生成任务列表（按时间倒序）。keyword 模糊匹配产品编码/品名/标题
+
+    mode: 'aplus' 只看 A+ 任务，'main' 只看主副图任务，空=全部。
+    A+/主副图同时存在的任务两个模式都会命中；仅旧版 generation_types 的历史任务
+    用该字段兜底归类，避免拆分后「消失」。
+    """
     _ensure_models_loaded()
     from database.database import SessionLocal
     from models.ai_image_task import AIImageTask
@@ -3251,6 +3300,10 @@ def list_image_tasks(
             AIImageTask.tenant_id == tenant_id,
             AIImageTask.deleted_at.is_(None),
         )
+        mode = _normalize_mode(mode)
+        clause = _mode_clause(mode)
+        if clause is not None:
+            query = query.filter(clause)
         status = (status or "").strip()
         if status:
             # 白名单：直接拼进 WHERE 前先限定为已知状态值（须与前端下拉/STATUS_COLORS 完全对齐）
@@ -3283,24 +3336,26 @@ def list_image_tasks(
         db.close()
 
 
-def get_image_task(tenant_id: int, task_id: int) -> Dict[str, Any]:
-    """单任务详情（带租户隔离）"""
+def get_image_task(tenant_id: int, task_id: int, mode: str = "") -> Dict[str, Any]:
+    """单任务详情（带租户隔离；mode 非空时同时校验该任务属于当前页面模式）"""
     _ensure_models_loaded()
     from database.database import SessionLocal
     from models.ai_image_task import AIImageTask
 
+    mode = _normalize_mode(mode)
     db = SessionLocal()
     try:
-        row = (
-            db.query(AIImageTask)
-            .filter(
-                AIImageTask.id == task_id,
-                AIImageTask.tenant_id == tenant_id,
-                AIImageTask.deleted_at.is_(None),
-            )
-            .first()
+        query = db.query(AIImageTask).filter(
+            AIImageTask.id == task_id,
+            AIImageTask.tenant_id == tenant_id,
+            AIImageTask.deleted_at.is_(None),
         )
+        clause = _mode_clause(mode)
+        if clause is not None:
+            query = query.filter(clause)
+        row = query.first()
         if not row:
+            # 不区分「不存在」与「不属于本模式」，避免探测同租户另一模式的 task_id
             raise AIImageError("任务不存在或已删除")
         return _serialize(row)
     finally:
@@ -3341,24 +3396,56 @@ def prompt_belongs_to_tenant(tenant_id: int, prompt_id: str) -> bool:
         db.close()
 
 
+def _url_shared_by_other_task(db, task_id: int, url: str) -> bool:
+    """该 URL 是否仍被其他未删除任务引用（内容寻址的参考图会被多任务共享）"""
+    from models.ai_image_task import AIImageTask
+    from sqlalchemy import or_
+
+    # URL 里常含 _ / %（如亚马逊缩略图 _SL75_），必须转义后才当 LIKE 字面量
+    esc = url.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like = f"%{esc}%"
+    return db.query(AIImageTask.id).filter(
+        AIImageTask.id != task_id,
+        AIImageTask.deleted_at.is_(None),
+        or_(
+            AIImageTask.images.like(like, escape="\\"),
+            AIImageTask.result_images.like(like, escape="\\"),
+        ),
+    ).first() is not None
+
+
 def _delete_task_tos_objects(task_id: int, urls: List[str]) -> None:
-    """后台清理任务图片（TOS 删除是网络调用，不能阻塞删除接口）"""
+    """后台清理任务图片（TOS 删除是网络调用，不能阻塞删除接口）
+
+    去重后的参考图（sha256-*）可能被其他任务共用：只剩本任务引用时才真正删除，
+    否则直接跳过，避免删掉别人还在用的图。
+    """
     if not urls:
         return
     from services import tos_service
+    from database.database import SessionLocal
 
     removed = 0
     failed = 0
-    for url in dict.fromkeys(urls):
-        try:
-            if tos_service.delete_file(url):
-                removed += 1
-            else:
+    shared = 0
+    db = SessionLocal()
+    try:
+        for url in dict.fromkeys(urls):
+            try:
+                if tos_service.is_dedup_url(url) and _url_shared_by_other_task(db, task_id, url):
+                    shared += 1
+                    continue
+                if tos_service.delete_file(url):
+                    removed += 1
+                else:
+                    failed += 1
+            except Exception as e:
                 failed += 1
-        except Exception as e:
-            failed += 1
-            logger.warning(f"[AI生图] 任务 {task_id} TOS 清理失败: {url} ({e})")
-    logger.info(f"[AI生图] 任务 {task_id} TOS 清理完成：删除 {removed} 个，跳过/失败 {failed} 个")
+                logger.warning(f"[AI生图] 任务 {task_id} TOS 清理失败: {url} ({e})")
+    finally:
+        db.close()
+    logger.info(f"[AI生图] 任务 {task_id} TOS 清理完成：删除 {removed} 个，共享保留 {shared} 个，"
+                f"跳过/失败 {failed} 个")
 
 
 def delete_image_task(tenant_id: int, task_id: int) -> None:
@@ -3698,26 +3785,29 @@ def _run_relay_retry(
 
 
 def retry_image_items(tenant_id: int, task_id: int,
-                      indices: Optional[List[int]] = None) -> Dict[str, Any]:
+                      indices: Optional[List[int]] = None,
+                      mode: str = "") -> Dict[str, Any]:
     """重试失败子项（复用已存参考图，不要求用户重新上传）。
 
     :param indices: 指定子项下标；为空则重试全部失败项
+    :param mode: 非空时校验任务属于该页面模式（aplus/main），防止跨模式重试
     """
     _ensure_models_loaded()
     from database.database import SessionLocal
     from models.ai_image_task import AIImageTask
 
+    mode = _normalize_mode(mode)
     db = SessionLocal()
     try:
-        task = (
-            db.query(AIImageTask)
-            .filter(
-                AIImageTask.id == task_id,
-                AIImageTask.tenant_id == tenant_id,
-                AIImageTask.deleted_at.is_(None),
-            )
-            .first()
+        query = db.query(AIImageTask).filter(
+            AIImageTask.id == task_id,
+            AIImageTask.tenant_id == tenant_id,
+            AIImageTask.deleted_at.is_(None),
         )
+        clause = _mode_clause(mode)
+        if clause is not None:
+            query = query.filter(clause)
+        task = query.first()
         if not task:
             raise AIImageError("任务不存在或已删除")
         if task.status in ("排队中", "生成中"):
@@ -3925,7 +4015,7 @@ def retry_image_items(tenant_id: int, task_id: int,
             _release_task_slot(task_id)
 
 
-def build_task_zip(tenant_id: int, task_id: int) -> Tuple[bytes, str]:
+def build_task_zip(tenant_id: int, task_id: int, mode: str = "") -> Tuple[bytes, str]:
     """把任务已生成的图片打包成 zip（服务端拉取，规避逐张点击与跨域）"""
     import re
     import zipfile
@@ -3934,17 +4024,18 @@ def build_task_zip(tenant_id: int, task_id: int) -> Tuple[bytes, str]:
     from database.database import SessionLocal
     from models.ai_image_task import AIImageTask
 
+    mode = _normalize_mode(mode)
     db = SessionLocal()
     try:
-        task = (
-            db.query(AIImageTask)
-            .filter(
-                AIImageTask.id == task_id,
-                AIImageTask.tenant_id == tenant_id,
-                AIImageTask.deleted_at.is_(None),
-            )
-            .first()
+        query = db.query(AIImageTask).filter(
+            AIImageTask.id == task_id,
+            AIImageTask.tenant_id == tenant_id,
+            AIImageTask.deleted_at.is_(None),
         )
+        clause = _mode_clause(mode)
+        if clause is not None:
+            query = query.filter(clause)
+        task = query.first()
         if not task:
             raise AIImageError("任务不存在或已删除")
         items = [

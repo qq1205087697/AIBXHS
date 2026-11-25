@@ -2,9 +2,11 @@
 
 封装 TOS 文件上传、删除等操作。配置项见 backend/.env（TOS_ACCESS_KEY 等）。
 """
+import hashlib
 import logging
 import os
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from typing import Optional
 
@@ -14,6 +16,12 @@ logger = logging.getLogger(__name__)
 
 # 全局缓存 TOS 客户端实例（按需懒加载）
 _tos_client = None
+
+# 内容寻址去重：sha256(digest) -> 公网 URL（进程内缓存，省掉重复 HEAD 探测）
+_DEDUP_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_DEDUP_CACHE_MAX = 512
+# 去重对象名的固定前缀，便于删除时识别「可能被多任务共享」的对象
+DEDUP_NAME_PREFIX = "sha256-"
 
 
 def _get_tos_client():
@@ -191,6 +199,105 @@ def sniff_image_content_type(data: bytes) -> Optional[str]:
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+_IMAGE_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+
+
+def image_content_type(file_name: str) -> str:
+    """按扩展名推断图片 Content-Type（缺省 image/jpeg）"""
+    _, ext = os.path.splitext(file_name or "")
+    return _IMAGE_CONTENT_TYPES.get(ext.lower(), "image/jpeg")
+
+
+def content_digest(file_bytes: bytes) -> str:
+    """内容指纹（sha256 前 32 位十六进制，够防撞且文件名不过长）"""
+    return hashlib.sha256(file_bytes or b"").hexdigest()[:32]
+
+
+def dedup_object_name(file_bytes: bytes) -> str:
+    """去重对象名（不含扩展名）：sha256-<digest>"""
+    return f"{DEDUP_NAME_PREFIX}{content_digest(file_bytes)}"
+
+
+def _dedup_cache_get(digest: str) -> Optional[str]:
+    url = _DEDUP_CACHE.get(digest)
+    if url:
+        _DEDUP_CACHE.move_to_end(digest)
+    return url
+
+
+def _dedup_cache_set(digest: str, url: str) -> None:
+    _DEDUP_CACHE[digest] = url
+    _DEDUP_CACHE.move_to_end(digest)
+    while len(_DEDUP_CACHE) > _DEDUP_CACHE_MAX:
+        _DEDUP_CACHE.popitem(last=False)
+
+
+def _object_exists(object_key: str) -> bool:
+    """HEAD 探测对象是否已存在；任何异常都按「不存在」处理（继续上传，PUT 幂等）"""
+    try:
+        client = _get_tos_client()
+        settings = get_settings()
+        client.head_object(bucket=settings.TOS_BUCKET, key=object_key)
+        return True
+    except Exception as e:  # noqa: BLE001  TOS 对 404 抛 TosServerError，统一兜底
+        err = str(e).lower()
+        if "404" not in err and "not found" not in err and "nosuchkey" not in err:
+            logger.debug("TOS HEAD 探测异常（按不存在处理）: %s -> %s", object_key, e)
+        return False
+
+
+def upload_file_dedup(file_bytes: bytes, file_name: str,
+                      content_type: Optional[str] = None,
+                      subdir: str = "") -> str:
+    """按内容寻址上传：同一份字节只会在 TOS 存在一个对象。
+
+    - 对象 key = {prefix}/{subdir}/sha256-<digest><ext>，同内容必然同 key
+    - 先查进程内缓存（同一次运行内重复上传零请求），再 HEAD 探测，最后才 PUT
+    - 命中已有对象时直接返回公网 URL，不重复占用存储、不重复传输
+
+    注意：这些对象可能被多个任务共享，删除时必须先确认没有其他任务引用
+    （见 `is_dedup_url` + 调用方的引用检查）。
+    """
+    digest = content_digest(file_bytes)
+    cached = _dedup_cache_get(digest)
+    if cached:
+        return cached
+
+    _, ext = os.path.splitext(file_name or "")
+    ext = ext.lower() or ".bin"
+    settings = get_settings()
+    prefix = settings.TOS_PREFIX or ""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    sub = (subdir.strip("/") + "/") if subdir else ""
+    object_key = f"{prefix}{sub}{DEDUP_NAME_PREFIX}{digest}{ext}"
+    url = _build_public_url(object_key)
+
+    if _object_exists(object_key):
+        logger.info("TOS 去重命中，跳过上传: %s", object_key)
+        _dedup_cache_set(digest, url)
+        return url
+
+    final_url = upload_file(
+        file_bytes, file_name, content_type=content_type, subdir=subdir,
+        custom_name=f"{DEDUP_NAME_PREFIX}{digest}",
+    )
+    _dedup_cache_set(digest, final_url)
+    return final_url
+
+
+def is_dedup_url(url: str) -> bool:
+    """URL 是否指向内容寻址（可能被多任务共享）的对象"""
+    return bool(url) and DEDUP_NAME_PREFIX in url.rsplit("/", 1)[-1]
 
 
 def upload_image(file_bytes: bytes, file_name: str, custom_name: str = "", subdir: str = "images") -> str:

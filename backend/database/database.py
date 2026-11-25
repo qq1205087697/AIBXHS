@@ -14,7 +14,9 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
     pool_timeout=30,
-    pool_recycle=1800,  # 30分钟
+    # 必须小于 MySQL wait_timeout（实测 300s）：否则池中连接已被服务端关闭，
+    # 每次 checkout 都要 pre_ping 重连，网络抖动时会直接抛 2013/10060
+    pool_recycle=280,  # ≈4.5 分钟
     echo=False
 )
 
@@ -23,6 +25,11 @@ engine = create_engine(
 def connect(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci'")
+    # DDL 等待 metadata lock 的超时由 lock_wait_timeout 控制，MySQL 默认
+    # 31536000s（约 1 年）。startup 里 init_db() 的 ALTER/CREATE 一旦撞上
+    # 未提交事务就会永久挂起，整个服务起不来且 health 无响应。
+    # 限制到 15s：超时由 init_db 的异常分支记录后继续启动，不阻断服务。
+    cursor.execute("SET SESSION lock_wait_timeout = 15")
     cursor.close()
 
 # 创建会话工厂
@@ -54,6 +61,32 @@ def _column_exists(conn, table: str, column: str) -> bool:
         {"t": table, "c": column},
     ).scalar()
     return bool(row)
+
+
+def _ensure_column_type(conn, table: str, column: str, expected_type: str, ddl: str) -> None:
+    """列类型不符才 ALTER，启动路径不再重复发 DDL 去抢 metadata lock。
+
+    已符合目标时立即 commit 结束只读事务，避免连接带着未提交事务进入
+    Sleep 状态长期持有 MDL 读锁（历史启动僵死的成因之一）。
+    """
+    try:
+        cur = conn.execute(
+            text(
+                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = :t AND COLUMN_NAME = :c"
+            ),
+            {"t": table, "c": column},
+        ).scalar()
+        if cur and cur.strip().lower() == expected_type.lower():
+            conn.commit()
+            return
+        if cur:
+            conn.execute(text(ddl))
+            conn.commit()
+            print(f"列类型已调整：{table}.{column} {cur} -> {expected_type}")
+    except Exception as e:  # noqa: BLE001
+        print(f"列类型检查/调整失败（{table}.{column}）: {e}")
 
 
 def _ensure_columns(conn, specs) -> None:
@@ -471,12 +504,11 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass
-            # 头程改为3位小数（如果需要）
-            try:
-                conn.execute(text("ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'"))
-                conn.commit()
-            except Exception:
-                pass
+            # 头程改为3位小数（仅类型不符时才改，避免每次启动都申请 MDL 写锁）
+            _ensure_column_type(
+                conn, "product_selections", "first_leg_cost", "decimal(12,3)",
+                "ALTER TABLE product_selections MODIFY COLUMN first_leg_cost DECIMAL(12, 3) NULL COMMENT '头程'",
+            )
 
             # products 表新增无配件标记字段（如果不存在）
             try:
@@ -485,12 +517,11 @@ def init_db():
             except Exception:
                 pass
 
-            # 页面优化机器人表品名字段（与库存快照表品名长度一致，每次启动幂等执行）
-            try:
-                conn.execute(text("ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'"))
-                conn.commit()
-            except Exception:
-                pass
+            # 页面优化机器人表品名字段（与库存快照表品名长度一致，仅类型不符时才改）
+            _ensure_column_type(
+                conn, "product_page_info", "product_name", "varchar(500)",
+                "ALTER TABLE product_page_info MODIFY COLUMN product_name VARCHAR(500) NULL COMMENT '品名'",
+            )
 
         print("scheduler_locks 和 product_selections 表创建成功")
         
