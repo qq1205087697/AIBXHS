@@ -52,8 +52,8 @@ class Review(BaseModel):
     account = Column(String(100), nullable=True, comment="账号")
     site = Column(String(50), nullable=True, comment="站点")
     return_rate = Column(Float, nullable=True, comment="退货率")
-    status = Column(Enum(ReviewStatus), default=ReviewStatus.NEW, nullable=True, index=True, comment="处理状态")
-    importance_level = Column(Enum(ImportanceLevel), default=ImportanceLevel.MEDIUM, nullable=True, index=True, comment="重要等级")
+    status = Column(Enum(ReviewStatus, values_callable=lambda e: [m.value for m in e]), default=ReviewStatus.NEW, nullable=True, index=True, comment="处理状态")
+    importance_level = Column(Enum(ImportanceLevel, values_callable=lambda e: [m.value for m in e]), default=ImportanceLevel.MEDIUM, nullable=True, index=True, comment="重要等级")
 
     # 关联关系
     tenant = relationship("Tenant", back_populates="reviews")
@@ -71,7 +71,7 @@ class ReviewAnalysis(BaseModel):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
     review_id = Column(Integer, ForeignKey("reviews.id"), nullable=False, unique=True, comment="评论ID")
     model = Column(String(100), nullable=True, comment="AI模型")
-    sentiment = Column(Enum(Sentiment), nullable=False, index=True, comment="情感分析")
+    sentiment = Column(Enum(Sentiment, values_callable=lambda e: [m.value for m in e]), nullable=False, index=True, comment="情感分析")
     sentiment_score = Column(Integer, nullable=True, comment="情感分数")
     key_points = Column(JSON, nullable=True, comment="核心观点")
     topics = Column(JSON, nullable=True, comment="主题分类")
@@ -93,7 +93,7 @@ class ReviewHandling(BaseModel):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True, comment="租户ID")
     review_id = Column(Integer, ForeignKey("reviews.id"), nullable=False, index=True, comment="评论ID")
     handler_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True, comment="处理人")
-    action = Column(Enum(HandlingAction), nullable=False, comment="操作类型")
+    action = Column(Enum(HandlingAction, values_callable=lambda e: [m.value for m in e]), nullable=False, comment="操作类型")
     note = Column(Text, nullable=True, comment="处理备注")
     reply_content = Column(Text, nullable=True, comment="回复内容")
     reply_sent = Column(Boolean, default=False, comment="回复是否已发送")

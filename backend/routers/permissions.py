@@ -781,6 +781,10 @@ async def add_missing_permissions(
     
     # 新权限列表（需要补充的）
     new_permissions = [
+        # 首页（基础模块；首页 KPI 接口 dashboard.py 使用此码）
+        {"name": "查看首页", "code": "dashboard:view", "type": "function", "module": "首页", "sort_order": 0},
+        # 数据驾驶舱（独立模块）
+        {"name": "查看数据驾驶舱", "code": "data_alert:view", "type": "function", "module": "数据驾驶舱", "sort_order": 30},
         # 选品管理
         {"name": "查看选品", "code": "product_selection:view", "type": "function", "module": "选品管理", "sort_order": 5},
         {"name": "新增选品", "code": "product_selection:create", "type": "function", "module": "选品管理", "sort_order": 6},
@@ -879,7 +883,8 @@ async def add_missing_permissions(
     ]
 
     # 先清理无用的旧权限码
-    removed_codes = ["dashboard:view", "review:reply", "robot:inventory", "robot:review", "replenishment:confirm", "replenishment:import"]
+    # 注意：dashboard:view 是首页 KPI 的正常权限码（已纳入权限定义清单与默认基线），不再清理
+    removed_codes = ["review:reply", "robot:inventory", "robot:review", "replenishment:confirm", "replenishment:import"]
     removed_count = 0
     for code in removed_codes:
         result = db.execute(text("""

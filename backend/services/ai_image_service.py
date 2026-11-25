@@ -665,6 +665,11 @@ class AIImageError(Exception):
     pass
 
 
+class AIImageBusyError(AIImageError):
+    """用户级并发冲突：同一用户已有进行中的生图任务（媒体任务中心据此转入排队）。"""
+    pass
+
+
 # 直连 ComfyUI：trust_env=False 绕过本地 HTTP 代理（实测代理隧道把 2MB 下载从 ~5s 拖到 11s+，
 # 且偶发 502），同时复用 TCP 连接省掉每次 TLS 握手。每线程一个 Session（Session 非线程安全）。
 _local = threading.local()

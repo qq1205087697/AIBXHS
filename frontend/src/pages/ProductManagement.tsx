@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete, Empty } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined, VideoCameraOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined, VideoCameraOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
-import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi, videoBindingApi, AmazonSkuEntry } from '../api'
+import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi, videoBindingApi, PlatformSkuEntry, OzonUploadResult, OzonTaskStatusResult } from '../api'
+import PlatformSkuSelector, { skuKey } from '../components/PlatformSkuSelector'
 import apiClient from '../api'
 import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
 import { useTheme } from '../contexts/ThemeContext'
@@ -138,6 +139,7 @@ const defaultColumns: ColumnState[] = [
 
 const platformOptions = [
   { label: 'Amazon', value: 'amazon' },
+  { label: 'Ozon', value: 'ozon' },
   { label: 'eBay', value: 'ebay' },
   { label: 'Walmart', value: 'walmart' },
   { label: 'Shopify', value: 'shopify' },
@@ -155,6 +157,7 @@ const platformOptions = [
 
 const platformColorMap: Record<string, string> = {
   amazon: 'orange',
+  ozon: 'blue',
   ebay: 'blue',
   walmart: 'yellow',
   shopify: 'green',
@@ -173,6 +176,7 @@ const platformColorMap: Record<string, string> = {
 // 平台显示名称映射
 const platformLabelMap: Record<string, string> = {
   amazon: 'Amazon',
+  ozon: 'Ozon',
   ebay: 'eBay',
   walmart: 'Walmart',
   shopify: 'Shopify',
@@ -411,14 +415,25 @@ const ProductManagement: React.FC = () => {
   const [detailModalProduct, setDetailModalProduct] = useState<Product | null>(null)
   const [detailActiveTab, setDetailActiveTab] = useState<'basic' | 'platform' | 'accessory' | 'logs'>('basic')
   const [detailEditMode, setDetailEditMode] = useState(false)
-  // 视频上传弹窗（两步向导：勾选产品已有视频 → 勾选 AMAZON SKU → 写入飞书多维表）
+  // 视频上传弹窗（两步向导：勾选产品已有视频 → 分平台勾选 SKU → Amazon 写飞书RPA / Ozon API直传+留痕）
   const [videoUploadOpen, setVideoUploadOpen] = useState(false)
   const [videoUploadStep, setVideoUploadStep] = useState<1 | 2>(1)
   const [vuSelectedVideos, setVuSelectedVideos] = useState<string[]>([])
   const [vuSkuLoading, setVuSkuLoading] = useState(false)
-  const [vuSkuItems, setVuSkuItems] = useState<AmazonSkuEntry[]>([])
+  const [vuSkuItems, setVuSkuItems] = useState<PlatformSkuEntry[]>([])
   const [vuSkuSelected, setVuSkuSelected] = useState<string[]>([])
+  const [vuOzonItems, setVuOzonItems] = useState<PlatformSkuEntry[]>([])
+  const [vuOzonSelected, setVuOzonSelected] = useState<string[]>([])
+  const [vuAmazonConfigured, setVuAmazonConfigured] = useState(true)
   const [vuSubmitting, setVuSubmitting] = useState(false)
+  // 上传结果（Amazon 汇总 + Ozon 分店铺任务，可刷新状态）
+  const [vuResultOpen, setVuResultOpen] = useState(false)
+  const [vuResultMessage, setVuResultMessage] = useState('')
+  const [vuAmazonResult, setVuAmazonResult] = useState<{ success?: number; failed?: number; errors?: string[]; error?: string } | null>(null)
+  const [vuOzonResults, setVuOzonResults] = useState<OzonUploadResult[]>([])
+  const [vuOzonBatchNo, setVuOzonBatchNo] = useState<string | undefined>()
+  const [vuStatusMap, setVuStatusMap] = useState<Record<string, OzonTaskStatusResult>>({})
+  const [vuStatusRefreshing, setVuStatusRefreshing] = useState(false)
   const [detailLogs, setDetailLogs] = useState<any[]>([])
   const [detailLogsLoading, setDetailLogsLoading] = useState(false)
   const [detailLogsTotal, setDetailLogsTotal] = useState(0)
@@ -743,6 +758,8 @@ const productAttributeLabelMap: Record<string, string> = {
     setVuSelectedVideos([])
     setVuSkuItems([])
     setVuSkuSelected([])
+    setVuOzonItems([])
+    setVuOzonSelected([])
     setVideoUploadStep(1)
     setVideoUploadOpen(true)
   }
@@ -756,10 +773,14 @@ const productAttributeLabelMap: Record<string, string> = {
     setVideoUploadStep(2)
     setVuSkuLoading(true)
     try {
-      const res = await videoBindingApi.getAmazonSkus(detailModalProduct.id)
-      const list = res.data.data?.items || []
-      setVuSkuItems(list)
-      setVuSkuSelected(list.filter(e => e.has_asin).map(e => `${e.pp_id}_${e.store_id}`))
+      const res = await videoBindingApi.getPlatformSkus(detailModalProduct.id)
+      const d = res.data.data
+      const amazonList = d?.amazon || []
+      setVuSkuItems(amazonList)
+      setVuOzonItems(d?.ozon || [])
+      setVuAmazonConfigured(d?.feishu_video_configured !== false)
+      // Amazon 默认预选已绑定 ASIN 的条目
+      setVuSkuSelected(amazonList.filter(e => e.has_asin).map(e => skuKey(e)))
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '获取产品 SKU 列表失败')
       setVideoUploadStep(1)
@@ -768,43 +789,57 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
+  const handleVuRefreshOzonStatus = async () => {
+    const tasks = vuOzonResults
+      .filter(r => r.ok && r.task_id)
+      .map(r => ({ store_id: r.store_id, task_id: r.task_id!, batch_no: vuOzonBatchNo }))
+    if (tasks.length === 0) return
+    setVuStatusRefreshing(true)
+    try {
+      const res = await videoBindingApi.getOzonUploadStatus(tasks)
+      const next = { ...vuStatusMap }
+      for (const r of res.data?.data?.results || []) next[`${r.store_id}_${r.task_id}`] = r
+      setVuStatusMap(next)
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '查询 Ozon 任务状态失败')
+    } finally {
+      setVuStatusRefreshing(false)
+    }
+  }
+
   const handleVuSubmit = async () => {
     if (!detailModalProduct) return
-    if (vuSkuSelected.length === 0) {
+    const allKeys = [...vuSkuSelected, ...vuOzonSelected]
+    if (allKeys.length === 0) {
       message.warning('请至少勾选一个 SKU')
       return
     }
-    const selected = vuSkuItems.filter(e => vuSkuSelected.includes(`${e.pp_id}_${e.store_id}`))
-    const noAsin = selected.filter(e => !e.has_asin)
-    if (noAsin.length > 0) {
-      message.error(`以下 SKU 未绑定 ASIN，无法上传：${noAsin.map(e => e.sku || `#${e.pp_id}`).join('、')}，请取消勾选后重试`)
+    if (vuSelectedVideos.length > 5 && vuOzonSelected.length > 0) {
+      Modal.warning({
+        title: 'Ozon 视频数量超限',
+        content: `已选 ${vuSelectedVideos.length} 个视频，Ozon 每个商品最多 5 个，请减少视频或取消 Ozon SKU 勾选`,
+      })
       return
     }
     setVuSubmitting(true)
     try {
-      const res = await videoBindingApi.uploadSkuToFeishu({
+      const res = await videoBindingApi.uploadSkuVideos({
         product_id: detailModalProduct.id,
         video_urls: vuSelectedVideos,
-        items: selected.map(e => ({ pp_id: e.pp_id, store_id: e.store_id })),
+        items: allKeys.map(k => {
+          const [pp, store] = k.split('_')
+          return { pp_id: Number(pp), store_id: Number(store) }
+        }),
       })
-      if (res.data.success) {
-        message.success(res.data.message || '视频已上传飞书')
-        const failed = res.data.data?.failed || 0
-        const errors = res.data.data?.errors || []
-        if (failed > 0) {
-          Modal.warning({
-            title: `有 ${failed} 条记录上传失败`,
-            content: (
-              <div>
-                {errors.slice(0, 5).map((t, i) => (
-                  <div key={i}>{t}</div>
-                ))}
-              </div>
-            ),
-          })
-        }
-        setVideoUploadOpen(false)
-      }
+      const body = res.data
+      const d = body?.data || {}
+      setVuAmazonResult((d.amazon as typeof vuAmazonResult) || null)
+      setVuOzonResults(d.ozon?.results || [])
+      setVuOzonBatchNo(d.ozon?.batch_no)
+      setVuStatusMap({})
+      setVuResultMessage(body?.message || (body?.success ? '提交成功' : '提交失败'))
+      setVuResultOpen(true)
+      setVideoUploadOpen(false)
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '上传失败')
     } finally {
@@ -4048,11 +4083,11 @@ const productAttributeLabelMap: Record<string, string> = {
         )}
       </Modal>
 
-      {/* 视频上传向导：第一步勾选产品已有视频，第二步勾选 AMAZON SKU（显示逻辑同首绑），确定后写入飞书多维表 */}
+      {/* 视频上传向导：第一步勾选产品已有视频，第二步分平台勾选 SKU（确定后按平台自动路由上传通道） */}
       <Modal
         open={videoUploadOpen}
         title={`视频上传 - ${detailModalProduct?.name || ''}`}
-        width={560}
+        width={760}
         zIndex={1010}
         okText={videoUploadStep === 1 ? '下一步' : '确定上传'}
         cancelText={videoUploadStep === 1 ? '取消' : '上一步'}
@@ -4102,46 +4137,99 @@ const productAttributeLabelMap: Record<string, string> = {
           <div style={{ textAlign: 'center', padding: '24px 0' }}>
             <Spin />
           </div>
-        ) : vuSkuItems.length === 0 ? (
-          <Empty description="该产品暂无 AMAZON 平台 SKU" />
         ) : (
           <>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <span>勾选上传的SKU：</span>
-              <Checkbox
-                checked={vuSkuSelected.length > 0 && vuSkuSelected.length === vuSkuItems.length}
-                indeterminate={vuSkuSelected.length > 0 && vuSkuSelected.length < vuSkuItems.length}
-                onChange={(e) => setVuSkuSelected(e.target.checked ? vuSkuItems.map(e => `${e.pp_id}_${e.store_id}`) : [])}
-              >
-                全选
-              </Checkbox>
-            </div>
-            <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 12px' }}>
-              <Checkbox.Group
-                value={vuSkuSelected}
-                onChange={(vals) => setVuSkuSelected(vals as string[])}
-                style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}
-              >
-                {vuSkuItems.map(e => {
-                  const key = `${e.pp_id}_${e.store_id}`
-                  return (
-                    <Checkbox key={key} value={key}>
-                      <span>
-                        {e.sku || `#${e.pp_id}`}
-                        {!e.has_asin && <span style={{ color: '#999' }}>（未绑定ASIN）</span>}
-                        {(e.site || e.store_name) && (
-                          <span style={{ color: '#999', marginLeft: 8 }}>{e.site || e.store_name}</span>
-                        )}
-                      </span>
-                    </Checkbox>
-                  )
-                })}
-              </Checkbox.Group>
-            </div>
+            <PlatformSkuSelector
+              amazonItems={vuSkuItems}
+              ozonItems={vuOzonItems}
+              amazonSelected={vuSkuSelected}
+              ozonSelected={vuOzonSelected}
+              onAmazonChange={setVuSkuSelected}
+              onOzonChange={setVuOzonSelected}
+              amazonConfigured={vuAmazonConfigured}
+            />
             <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
-              已选 {vuSelectedVideos.length} 个视频 × {vuSkuSelected.length} 个 SKU，确定后将写入 {vuSelectedVideos.length * vuSkuSelected.length} 条飞书记录
+              已选 {vuSelectedVideos.length} 个视频 × {vuSkuSelected.length + vuOzonSelected.length} 个 SKU；
+              Amazon 写入飞书记录由 RPA 上传，Ozon 通过 Seller API 直传（异步审核）
             </div>
           </>
+        )}
+      </Modal>
+
+      {/* 视频统一上传结果：Amazon 汇总 + Ozon 分店铺任务（可刷新状态） */}
+      <Modal
+        open={vuResultOpen}
+        title="上传结果"
+        width={680}
+        zIndex={1012}
+        onCancel={() => setVuResultOpen(false)}
+        footer={[
+          <Button key="close" onClick={() => setVuResultOpen(false)}>关闭</Button>,
+          <Button key="refresh" icon={<ReloadOutlined />} loading={vuStatusRefreshing}
+            disabled={vuOzonResults.filter(r => r.ok).length === 0}
+            onClick={handleVuRefreshOzonStatus}>
+            刷新 Ozon 状态
+          </Button>,
+        ]}
+      >
+        <Alert type={vuResultMessage.includes('失败') && !vuResultMessage.includes('已') ? 'error' : 'success'} showIcon
+          message={vuResultMessage} style={{ marginBottom: 12 }} />
+        {vuAmazonResult && (
+          <Card size="small" title={<Tag color="orange">Amazon</Tag>} style={{ marginBottom: 12 }}>
+            {vuAmazonResult.error ? (
+              <Alert type="error" showIcon message={vuAmazonResult.error} />
+            ) : (
+              <>
+                <p>飞书记录写入成功 {vuAmazonResult.success ?? 0} 条{vuAmazonResult.failed ? `，失败 ${vuAmazonResult.failed} 条` : ''}</p>
+                {vuAmazonResult.errors && vuAmazonResult.errors.length > 0 && (
+                  <ul style={{ color: '#cf1322', fontSize: 12, margin: 0, paddingLeft: 18 }}>
+                    {vuAmazonResult.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}
+                  </ul>
+                )}
+              </>
+            )}
+          </Card>
+        )}
+        {vuOzonResults.length > 0 && (
+          <Card size="small" title={<Tag color="blue">OZON</Tag>}
+            extra={<span style={{ color: '#8c8c8c', fontSize: 12 }}>视频需 Ozon 平台审核，接口成功仅代表任务受理</span>}>
+            <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ color: '#8c8c8c', textAlign: 'left' }}>
+                  <th style={{ padding: '6px 8px' }}>店铺</th>
+                  <th style={{ padding: '6px 8px' }}>SKU</th>
+                  <th style={{ padding: '6px 8px' }}>任务ID</th>
+                  <th style={{ padding: '6px 8px' }}>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vuOzonResults.map((r, i) => {
+                  const st = vuStatusMap[`${r.store_id}_${r.task_id}`]
+                  const statusTag = !r.ok
+                    ? <Tag color="error">提交失败</Tag>
+                    : st
+                      ? (st.error ? <Tag color="error">查询失败</Tag>
+                        : st.status === '成功' ? <Tag color="success">成功</Tag>
+                          : st.status === '失败' ? <Tag color="error">失败</Tag>
+                            : <Tag color="processing">处理中</Tag>)
+                      : <Tag color="processing">已提交 · 待刷新</Tag>
+                  return (
+                    <tr key={i} style={{ borderTop: '1px solid #f0f0f0' }}>
+                      <td style={{ padding: '6px 8px' }}>{r.store_name || `店铺#${r.store_id}`}</td>
+                      <td style={{ padding: '6px 8px' }}>{r.offer_ids.join('、')}</td>
+                      <td style={{ padding: '6px 8px' }}>{r.ok ? r.task_id : '-'}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        {statusTag}
+                        {st?.error && <div style={{ color: '#cf1322', fontSize: 12 }}>{st.error}</div>}
+                        {st?.error_text && <div style={{ color: '#cf1322', fontSize: 12, whiteSpace: 'pre-wrap' }}>{st.error_text}</div>}
+                        {!r.ok && <div style={{ color: '#cf1322', fontSize: 12 }}>{r.error}</div>}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </Card>
         )}
       </Modal>
 

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Card, Table, Button, Modal, Form, Input, Select, InputNumber, DatePicker, message, Popconfirm, Space, Tag, Divider, Alert, Dropdown, Menu, Pagination, Tooltip } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, CheckOutlined, SearchOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, RightOutlined, AppstoreOutlined, LinkOutlined, CloseCircleFilled } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, CheckOutlined, SearchOutlined, DownloadOutlined, UploadOutlined, InfoCircleOutlined, MoreOutlined, DownOutlined, AppstoreOutlined, LinkOutlined, CloseCircleFilled } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { outboundOrdersApi, productsApi, inventoryBatchesApi, warehousesApi, productBindingsApi, storeGroupsApi } from '../api'
+import { outboundOrdersApi, productsApi, inventoryBatchesApi, warehousesApi, storeGroupsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useNavigate } from 'react-router-dom'
@@ -91,8 +91,6 @@ interface OutboundFormItem {
   batch_details?: Array<{ batch_id: number; batch_number: string; quantity: number; unit_price: number; warehouse: string; inbound_date: string }> | null
   selected_batch_id?: number | null  // 报废时用户选择的批次
   selected_batch_number?: string  // 报废时用户选择的批次号
-  parentKey?: string  // 标识是否是配件，以及所属的成品key
-  base_quantity_per_product?: number  // 每1个成品需要的配件基础数量
 }
 
 interface BatchInfo {
@@ -221,8 +219,6 @@ const OutboundManagement: React.FC = () => {
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
-  const autoAddedKeysRef = useRef<Map<string, Set<string>>>(new Map()) // 父级item key -> 自动添加的配件item keys
-  const [expandedAccessories, setExpandedAccessories] = useState<Set<string>>(new Set()) // 存储展开配件的成品key
 
   // 使用 Form watch 监听出库类型变化
   const watchOutboundType = Form.useWatch('outbound_type', form)
@@ -461,8 +457,6 @@ const OutboundManagement: React.FC = () => {
     })
     setFormItems([createEmptyFormItem()])
     setProductBatchesMap({})
-    setExpandedAccessories(new Set()) // 重置展开状态
-    autoAddedKeysRef.current.clear() // 重置配件映射
 
     // 重置产品搜索状态
     setProductSearchKeyword('')
@@ -503,8 +497,6 @@ const OutboundManagement: React.FC = () => {
       setFormItems([createEmptyFormItem()])
     }
     setProductBatchesMap({})
-    setExpandedAccessories(new Set()) // 重置展开状态
-    autoAddedKeysRef.current.clear() // 重置配件映射
     // 后台异步加载完整产品列表（不阻塞弹窗打开）
     setProductSearchKeyword('')
     setProductPagination(prev => ({ ...prev, current: 1, hasMore: true }))
@@ -526,8 +518,6 @@ const OutboundManagement: React.FC = () => {
       store_group_id: order.store_group_id || undefined,
     })
     setProductBatchesMap({})
-    setExpandedAccessories(new Set()) // 重置展开状态
-    autoAddedKeysRef.current.clear() // 重置配件映射
     // 加载出库明细
     if (order.items && order.items.length > 0) {
       const items = order.items.map((item: any) => ({
@@ -562,6 +552,31 @@ const OutboundManagement: React.FC = () => {
       setSubmitting(true)
 
       if (editingOrder) {
+        const validItems = formItems.filter((item) => item.product_id != null && item.quantity > 0)
+        if (validItems.length === 0) {
+          message.warning('请至少添加一个出库商品')
+          setSubmitting(false)
+          return
+        }
+
+        // 验证：如果是报废类型，每个商品必须选择批次
+        if ((values.outbound_type || editingOrder.outbound_type) === 'scrap') {
+          const itemsWithoutBatch = validItems.filter((item) => !item.selected_batch_id)
+          if (itemsWithoutBatch.length > 0) {
+            message.error('报废类型的出库单必须为每个商品选择指定批次')
+            setSubmitting(false)
+            return
+          }
+        }
+
+        const items = validItems.map((item) => ({
+          product_id: item.product_id!,
+          quantity: item.quantity,
+          unit_price: item.unit_price,
+          notes: item.notes,
+          selected_batch_id: item.selected_batch_id,
+          selected_batch_number: item.selected_batch_number,
+        }))
         const payload: Record<string, any> = {
           order_number: values.order_number,
           outbound_type: values.outbound_type,
@@ -569,6 +584,7 @@ const OutboundManagement: React.FC = () => {
           handler: values.handler,
           notes: values.notes,
           store_group_id: values.store_group_id || null,
+          items,
         }
         if (values.outbound_date) {
           payload.outbound_date = values.outbound_date.format('YYYY-MM-DD HH:mm:ss')
@@ -860,78 +876,6 @@ const OutboundManagement: React.FC = () => {
     const productIds = newItems.map((item) => item.product_id as number)
     await Promise.all(productIds.map((pid) => fetchProductBatches(pid)))
 
-    // 先获取所有需要添加的配件信息
-    const accessoriesToAdd: Array<{ parentKey: string, items: OutboundFormItem[] }> = []
-    for (const item of newItems) {
-      const product = productList.find((p) => p.id === item.product_id)
-      if (product) {
-        const productType = product.product_type
-        const typeList = Array.isArray(productType) ? productType : (productType ? productType.split(',') : [])
-        if (typeList.includes('finished')) {
-          // 直接获取配件信息，而不是通过fetchAccessoriesAndAdd
-          try {
-            const res = await productBindingsApi.getByFinished(item.product_id as number)
-            if (res.data.success && res.data.data && res.data.data.length > 0) {
-              const accessories = res.data.data
-              const accessoryItems: OutboundFormItem[] = []
-              
-              for (const acc of accessories) {
-                const accessoryProduct = productList.find((p) => p.id === acc.accessory_product_id)
-                const newItem = createEmptyFormItem()
-                // 配件数量 = 每1个成品需要的配件数量 * 成品数量
-                const accessoryQuantity = acc.quantity * (item.quantity || 1)
-                accessoryItems.push({
-                  ...newItem,
-                  product_id: acc.accessory_product_id,
-                  quantity: accessoryQuantity,
-                  unit_price: (accessoryProduct && accessoryProduct.purchase_price != null) ? accessoryProduct.purchase_price : 0,
-                  notes: `[自动带出配件] ${acc.accessory_name || ''}`,
-                  parentKey: item.key, // 设置parentKey，标识这是配件
-                  base_quantity_per_product: acc.quantity, // 保存每1个成品需要的配件基础数量
-                })
-              }
-              
-              accessoriesToAdd.push({
-                parentKey: item.key,
-                items: accessoryItems,
-              })
-            }
-          } catch (e) {
-            console.error('获取成品配件失败:', e)
-          }
-        }
-      }
-    }
-
-    // 构建排序后的formItems
-    const finalItems: OutboundFormItem[] = []
-    const newExpandedKeys = new Set(expandedAccessories)
-    const accessoryMapForSort = new Map<string, OutboundFormItem[]>()
-    
-    // 先把所有配件存到映射中
-    for (const { parentKey, items } of accessoriesToAdd) {
-      accessoryMapForSort.set(parentKey, items)
-      
-      const addedKeys = new Set<string>()
-      for (const item of items) {
-        addedKeys.add(item.key)
-        // 加载配件批次库存
-        fetchProductBatches(item.product_id as number)
-      }
-      autoAddedKeysRef.current.set(parentKey, addedKeys)
-      newExpandedKeys.add(parentKey)
-    }
-    
-    // 按顺序添加成品，然后添加对应的配件
-    for (const item of newItems) {
-      finalItems.push(item)
-      // 查找该成品对应的配件并添加
-      const accessories = accessoryMapForSort.get(item.key)
-      if (accessories) {
-        finalItems.push(...accessories)
-      }
-    }
-
     setEditingOrder(null)
     setViewingOrder(null)
     const orderNumber = `OUT${dayjs().format('YYYYMMDDHHmmss')}`
@@ -941,29 +885,18 @@ const OutboundManagement: React.FC = () => {
       handler: handler,
       outbound_date: dayjs(),
     })
-    
-    // 设置状态
-    setExpandedAccessories(newExpandedKeys)
-    setFormItems(finalItems)
+
+    setFormItems(newItems)
     setPreviewModalOpen(false)
     setModalOpen(true)
     message.success('导入成功，请填写出库订单信息')
-  }, [previewItems, productList, user, form, fetchProductBatches, expandedAccessories])
+  }, [previewItems, productList, user, form, fetchProductBatches])
 
   const handleAddFormItem = () => {
     setFormItems((prev) => [...prev, createEmptyFormItem()])
   }
 
   const handleRemoveFormItem = (key: string) => {
-    // 清除该item关联的自动添加配件记录
-    autoAddedKeysRef.current.delete(key)
-    // 如果该item本身是自动添加的配件，从其父项记录中移除
-    for (const [parentKey, childKeys] of autoAddedKeysRef.current.entries()) {
-      if (childKeys.has(key)) {
-        childKeys.delete(key)
-        break
-      }
-    }
     setFormItems((prev) => {
       if (prev.length <= 1) return prev
       return prev.filter((item) => item.key !== key)
@@ -972,13 +905,6 @@ const OutboundManagement: React.FC = () => {
 
   const handleFormItemChange = (key: string, field: keyof OutboundFormItem, value: any) => {
     if (field === 'product_id') {
-      // 清除之前为该成品自动添加的配件
-      const prevAutoAdded = autoAddedKeysRef.current.get(key)
-      if (prevAutoAdded && prevAutoAdded.size > 0) {
-        setFormItems((prev) => prev.filter((item) => !prevAutoAdded.has(item.key)))
-        autoAddedKeysRef.current.delete(key)
-      }
-
       const product = productList.find((p) => p.id === value)
       const unitPrice = (product && product.purchase_price != null) ? product.purchase_price : 0
 
@@ -991,47 +917,14 @@ const OutboundManagement: React.FC = () => {
 
       if (value != null) {
         fetchProductBatches(value)
-        // 判断是否是成品，自动带出配件
-        const productType = product?.product_type
-        const typeList = Array.isArray(productType) ? productType : (productType ? productType.split(',') : [])
-        if (typeList.includes('finished')) {
-          fetchAccessoriesAndAdd(key, value as number)
-        }
       }
     } else if (field === 'quantity') {
-      setFormItems((prev) => {
-        // 首先找到当前被修改的成品项
-        const updatedItem = prev.find(item => item.key === key)
-        
-        // 如果是成品且有配件，需要更新配件数量
-        const hasAccessories = autoAddedKeysRef.current.has(key)
-        
-        if (hasAccessories && updatedItem) {
-          const finishedQuantity = value || 0
-          const accessoryKeys = autoAddedKeysRef.current.get(key)!
-          
-          return prev.map(item => {
-            if (item.key === key) {
-              // 更新成品数量
-              return { ...item, quantity: finishedQuantity }
-            }
-            // 如果是该成品的配件，更新数量
-            if (accessoryKeys.has(item.key) && item.base_quantity_per_product) {
-              return { 
-                ...item, 
-                quantity: item.base_quantity_per_product * finishedQuantity 
-              }
-            }
-            return item
-          })
-        } else {
-          // 不是成品，正常更新
-          return prev.map(item => {
-            if (item.key !== key) return item
-            return { ...item, quantity: value || 0 }
-          })
-        }
-      })
+      setFormItems((prev) =>
+        prev.map((item) => {
+          if (item.key !== key) return item
+          return { ...item, quantity: value || 0 }
+        }),
+      )
     } else {
       setFormItems((prev) =>
         prev.map((item) => {
@@ -1040,95 +933,6 @@ const OutboundManagement: React.FC = () => {
         }),
       )
     }
-  }
-
-  const toggleAccessoryExpansion = (parentKey: string) => {
-    setExpandedAccessories((prev) => {
-      const newSet = new Set(prev)
-      if (newSet.has(parentKey)) {
-        newSet.delete(parentKey)
-      } else {
-        newSet.add(parentKey)
-      }
-      return newSet
-    })
-  }
-
-  const fetchAccessoriesAndAdd = async (parentKey: string, productId: number): Promise<string[]> => {
-    console.log('fetchAccessoriesAndAdd called', { parentKey, productId })
-    try {
-      const res = await productBindingsApi.getByFinished(productId)
-      console.log('productBindingsApi response', res)
-      
-      if (res.data.success && res.data.data && res.data.data.length > 0) {
-        const accessories = res.data.data
-        const addedKeys: string[] = []
-        const accessoryItems: OutboundFormItem[] = []
-
-        // 先构建所有配件项
-        for (const acc of accessories) {
-          const accessoryProduct = productList.find((p) => p.id === acc.accessory_product_id)
-          console.log('accessoryProduct', accessoryProduct)
-          
-          const newItem = createEmptyFormItem()
-          addedKeys.push(newItem.key)
-          
-          accessoryItems.push({
-            ...newItem,
-            product_id: acc.accessory_product_id,
-            quantity: acc.quantity,
-            unit_price: (accessoryProduct && accessoryProduct.purchase_price != null) ? accessoryProduct.purchase_price : 0,
-            notes: `[自动带出配件] ${acc.accessory_name || ''}`,
-            parentKey: parentKey, // 设置parentKey，标识这是配件
-            base_quantity_per_product: acc.quantity, // 保存每1个成品需要的配件基础数量
-          })
-        }
-
-        console.log('accessoryItems to add', accessoryItems)
-
-        // 一次性更新formItems，把配件放在成品后面
-        setFormItems((prev) => {
-          console.log('prev formItems', prev)
-          // 找到父项的位置
-          const parentIndex = prev.findIndex((item) => item.key === parentKey)
-          console.log('parentIndex', parentIndex)
-          
-          if (parentIndex === -1) return prev
-          
-          const newItems = [...prev]
-          // 插入到父项后面
-          for (let i = accessoryItems.length - 1; i >= 0; i--) {
-            const accessory = accessoryItems[i]
-            console.log('Trying to add accessory', accessory)
-            // 检查是否已经存在 - 只检查已添加的配件，不检查其他
-            const exists = newItems.some(item => item.key === accessory.key)
-            if (!exists) {
-              newItems.splice(parentIndex + 1, 0, accessory)
-            } else {
-              console.log('Accessory already exists with key', accessory.key)
-            }
-          }
-          console.log('newItems after adding accessories', newItems)
-          return newItems
-        })
-
-        if (addedKeys.length > 0) {
-          autoAddedKeysRef.current.set(parentKey, new Set(addedKeys))
-          console.log('autoAddedKeysRef set', autoAddedKeysRef.current)
-          // 自动展开新添加的配件
-          setExpandedAccessories((prev) => new Set(prev).add(parentKey))
-          console.log('expandedAccessories after add', new Set(Array.from(expandedAccessories)).add(parentKey))
-          // 为配件加载批次库存
-          for (const acc of accessories) {
-            fetchProductBatches(acc.accessory_product_id)
-          }
-        }
-        return addedKeys
-      }
-    } catch (e) {
-      console.error('获取成品配件失败:', e)
-    }
-    return []
   }
 
   const columns: ColumnsType<OutboundOrder> = [
@@ -1656,28 +1460,9 @@ const OutboundManagement: React.FC = () => {
 
           <Divider orientation="left" plain>出库商品</Divider>
           {(() => {
-            console.log('Rendering items, formItems:', formItems)
-            console.log('expandedAccessories:', expandedAccessories)
-            
-            // 分离成品和配件
-            const finishedItems = formItems.filter(item => !item.parentKey)
-            const accessoryMap = new Map<string, OutboundFormItem[]>()
-            formItems.forEach(item => {
-              if (item.parentKey) {
-                if (!accessoryMap.has(item.parentKey)) {
-                  accessoryMap.set(item.parentKey, [])
-                }
-                accessoryMap.get(item.parentKey)!.push(item)
-              }
-            })
-            console.log('finishedItems:', finishedItems)
-            console.log('accessoryMap:', accessoryMap)
-
             // 渲染单个商品项的函数
-            const renderItem = (item: OutboundFormItem, isAccessory: boolean = false) => {
+            const renderItem = (item: OutboundFormItem) => {
               const product = productList.find((p) => p.id === item.product_id)
-              const hasAccessories = accessoryMap.has(item.key) && accessoryMap.get(item.key)!.length > 0
-              const isExpanded = expandedAccessories.has(item.key)
 
               // 根据产品实际类型判断标签
               const productType = product?.product_type
@@ -1689,16 +1474,15 @@ const OutboundManagement: React.FC = () => {
                 <div key={item.key}>
                   <div
                     style={{
-                      marginBottom: isAccessory ? 0 : 16,
+                      marginBottom: 16,
                       padding: 16,
                       borderRadius: 8,
-                      background: isAccessory ? '#faf7f0' : '#ffffff',
-                      border: isAccessory ? '1px dashed #d9d9d9' : '1px solid #e8e8e8',
-                      marginLeft: isAccessory ? 40 : 0,
-                      boxShadow: isAccessory ? 'none' : '0 1px 2px rgba(0,0,0,0.06)',
+                      background: '#ffffff',
+                      border: '1px solid #e8e8e8',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
                     }}
                   >
-                    {/* 头部区域：标签 + 展开按钮 + 删除按钮 */}
+                    {/* 头部区域：标签 + 删除按钮 */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         {isFinishedProduct ? (
@@ -1714,19 +1498,6 @@ const OutboundManagement: React.FC = () => {
                             商品
                           </Tag>
                         )}
-                        {hasAccessories && !isAccessory && (
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={isExpanded ? <DownOutlined /> : <RightOutlined />}
-                            onClick={() => toggleAccessoryExpansion(item.key)}
-                            style={{ padding: '0 4px', height: 22, fontSize: 12 }}
-                          >
-                            <Tag color="blue" style={{ fontSize: 11, marginRight: 0 }}>
-                              {accessoryMap.get(item.key)!.length}个配件
-                            </Tag>
-                          </Button>
-                        )}
                       </div>
                       <Button
                         danger
@@ -1735,7 +1506,7 @@ const OutboundManagement: React.FC = () => {
                         icon={<DeleteOutlined />}
                         onClick={() => handleRemoveFormItem(item.key)}
                         disabled={
-                          (formItems.filter(i => !i.parentKey).length <= 1 && !item.parentKey) ||
+                          formItems.length <= 1 ||
                           viewingOrder ||
                           (editingOrder?.status === 'confirmed')
                         }
@@ -1797,7 +1568,7 @@ const OutboundManagement: React.FC = () => {
                               } as any] : []),
                             ]}
                             style={{ width: '100%' }}
-                            disabled={viewingOrder || (editingOrder?.status === 'confirmed') || isAccessory}
+                            disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
                             notFoundContent={
                               productsLoading ? <span>加载中...</span> :
                               productSearchKeyword ? <span>未找到匹配的商品</span> :
@@ -1805,7 +1576,7 @@ const OutboundManagement: React.FC = () => {
                             }
                           />
                           {/* 悬停删除图标 */}
-                          {item.product_id && !viewingOrder && !(editingOrder?.status === 'confirmed') && !isAccessory && (
+                          {item.product_id && !viewingOrder && !(editingOrder?.status === 'confirmed') && (
                             <div
                               className="product-clear-icon"
                               style={{
@@ -1856,7 +1627,7 @@ const OutboundManagement: React.FC = () => {
                           style={{ width: '100%' }}
                           placeholder="单价"
                           prefix="¥"
-                          disabled={viewingOrder || (editingOrder?.status === 'confirmed') || isAccessory}
+                          disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
                         />
                       </div>
                     </div>
@@ -1869,7 +1640,7 @@ const OutboundManagement: React.FC = () => {
                         placeholder="请输入备注"
                         disabled={viewingOrder || (editingOrder?.status === 'confirmed')}
                         size="small"
-                        style={{ background: isAccessory ? '#fff' : '#fafafa' }}
+                        style={{ background: '#fafafa' }}
                       />
                     </div>
 
@@ -1922,16 +1693,8 @@ const OutboundManagement: React.FC = () => {
               )
             }
 
-            // 遍历所有成品并渲染
-            return finishedItems.map((item) => (
-              <React.Fragment key={item.key}>
-                {renderItem(item, false)}
-                {/* 如果成品有配件且展开了，渲染配件 */}
-                {accessoryMap.has(item.key) && expandedAccessories.has(item.key) &&
-                  accessoryMap.get(item.key)!.map((accessory) => renderItem(accessory, true))
-                }
-              </React.Fragment>
-            ))
+            // 渲染所有出库商品
+            return formItems.map((item) => renderItem(item))
           })()}
           {!viewingOrder && (!editingOrder || editingOrder.status !== 'confirmed') && (
             <Button

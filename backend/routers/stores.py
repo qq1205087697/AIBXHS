@@ -16,6 +16,8 @@ class StoreCreate(BaseModel):
     ziniao_account: Optional[str] = None
     platform: str = "amazon"
     site: Optional[str] = None
+    ozon_client_id: Optional[str] = None
+    ozon_api_key: Optional[str] = None
     shop_abbr: str
     group_id: Optional[int] = None
 
@@ -29,6 +31,30 @@ class StoreUpdate(BaseModel):
     shop_abbr: Optional[str] = None
     group_id: Optional[int] = None
     status: Optional[str] = None
+    ozon_client_id: Optional[str] = None
+    ozon_api_key: Optional[str] = None
+    # 显式清除已配置的 Ozon Api-Key（None/空串表示保持原值，避免编辑时误清空）
+    clear_ozon_api_key: bool = False
+
+
+def _mask_ozon_api_key(raw) -> str:
+    """Api-Key 掩码：•••• + 后 4 位（不足 4 位时全部掩码）"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    tail = s[-4:] if len(s) >= 4 else ""
+    return f"••••{tail}" if tail else "••••"
+
+
+def _ozon_credential_fields(row_idx: int, row) -> dict:
+    """从店铺查询行提取 Ozon 凭证脱敏字段（row_idx 为 ozon_client_id 在 SELECT 中的下标）"""
+    client_id = row[row_idx] or ""
+    api_key = row[row_idx + 1] or ""
+    return {
+        "ozon_client_id": client_id,
+        "ozon_api_key_masked": _mask_ozon_api_key(api_key),
+        "has_ozon_api_key": bool(api_key),
+    }
 
 
 @router.get("/all")
@@ -69,7 +95,8 @@ async def get_all_stores(
             SELECT s.id, s.name, s.ziniao_account, s.platform, s.site, s.status,
                    s.department_id, d.name as department_name, s.created_at,
                    s.group_id, sg.name as group_name,
-                   s.inventory_name, s.shop_abbr
+                   s.inventory_name, s.shop_abbr,
+                   s.ozon_client_id, s.ozon_api_key
             FROM stores s
             LEFT JOIN departments d ON s.department_id = d.id
             LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
@@ -93,6 +120,7 @@ async def get_all_stores(
                 "group_name": row[10] or "",
                 "inventory_name": row[11] or "",
                 "shop_abbr": row[12] or "",
+                **_ozon_credential_fields(13, row),
             })
         return {"success": True, "data": stores}
     except Exception as e:
@@ -261,7 +289,8 @@ async def get_stores(
         query = text(f"""
             SELECT s.id, s.name, s.ziniao_account, s.platform, s.site, s.status,
                    s.department_id, d.name as department_name, s.inventory_name, s.shop_abbr, s.created_at,
-                   s.group_id, sg.name as group_name
+                   s.group_id, sg.name as group_name,
+                   s.ozon_client_id, s.ozon_api_key
             FROM stores s
             LEFT JOIN departments d ON s.department_id = d.id
             LEFT JOIN store_groups sg ON s.group_id = sg.id AND sg.deleted_at IS NULL
@@ -286,6 +315,7 @@ async def get_stores(
                 "created_at": row[10].strftime("%Y-%m-%d %H:%M:%S") if row[10] else "",
                 "group_id": row[11],
                 "group_name": row[12] or "",
+                **_ozon_credential_fields(13, row),
             })
         return {"success": True, "data": stores, "total": total}
     except Exception as e:
@@ -300,8 +330,10 @@ async def create_store(
 ):
     try:
         insert_sql = text("""
-            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, inventory_name, shop_abbr, group_id)
-            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :inventory_name, :shop_abbr, :group_id)
+            INSERT INTO stores (tenant_id, name, ziniao_account, platform, site, ozon_client_id, ozon_api_key,
+                                inventory_name, shop_abbr, group_id)
+            VALUES (:tenant_id, :name, :ziniao_account, :platform, :site, :ozon_client_id, :ozon_api_key,
+                    :inventory_name, :shop_abbr, :group_id)
         """)
         result = db.execute(insert_sql, {
             "tenant_id": current_user.tenant_id,
@@ -309,6 +341,8 @@ async def create_store(
             "ziniao_account": store_data.ziniao_account,
             "platform": store_data.platform,
             "site": store_data.site,
+            "ozon_client_id": (store_data.ozon_client_id or "").strip() or None,
+            "ozon_api_key": (store_data.ozon_api_key or "").strip() or None,
             "inventory_name": store_data.inventory_name,
             "shop_abbr": store_data.shop_abbr,
             "group_id": store_data.group_id,
@@ -364,6 +398,15 @@ async def update_store(
         if store_data.status is not None:
             updates.append("status = :status")
             params["status"] = store_data.status
+        # Ozon 凭证：client_id 直接更新；api_key 仅在显式清除或传入非空值时变更（None/空串保持原值）
+        if store_data.ozon_client_id is not None:
+            updates.append("ozon_client_id = :ozon_client_id")
+            params["ozon_client_id"] = (store_data.ozon_client_id or "").strip() or None
+        if store_data.clear_ozon_api_key:
+            updates.append("ozon_api_key = NULL")
+        elif store_data.ozon_api_key is not None and store_data.ozon_api_key.strip():
+            updates.append("ozon_api_key = :ozon_api_key")
+            params["ozon_api_key"] = store_data.ozon_api_key.strip()
 
         if updates:
             update_sql = text(f"UPDATE stores SET {', '.join(updates)}, updated_at = NOW() WHERE id = :id")

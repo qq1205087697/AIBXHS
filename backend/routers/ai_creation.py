@@ -65,6 +65,11 @@ class GeneratePromptsRequest(BaseModel):
     concepts: list
 
 
+class PrioritizeTaskRequest(BaseModel):
+    """排队任务插队方式：interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行"""
+    mode: str
+
+
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
@@ -116,13 +121,18 @@ async def proxy_image(url: str, current_user: User = Depends(get_current_user)):
         )
 
     try:
-        # trust_env=False：绕过系统/沙箱 HTTP 代理，避免隧道 502 把取图拖到超时
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as client:
+        from services import tos_service  # 局部导入避免路由层循环依赖
+
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "").split(";")[0].strip()
             if not content_type.startswith("image/"):
-                raise HTTPException(status_code=400, detail="目标地址不是图片")
+                # CDN 对无扩展名对象（TOS 兜底存成 .bin）返回 octet-stream，按魔数嗅探真实格式
+                sniffed = tos_service.sniff_image_content_type(resp.content[:16])
+                if not sniffed:
+                    raise HTTPException(status_code=400, detail="目标地址不是图片")
+                content_type = sniffed
             data = resp.content
     except httpx.HTTPError as e:
         logger.warning(f"[AI创作中心] 代理取图失败: {url}, err={e}")
@@ -402,6 +412,28 @@ async def cancel_upscale_task_endpoint(
     return {"success": True, "message": "任务已取消"}
 
 
+@router.post("/upscale-tasks/{task_id}/prioritize")
+async def prioritize_upscale_task_endpoint(
+    task_id: int,
+    body: PrioritizeTaskRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """超分排队任务插队（mode: interrupt=取消当前执行中任务立即执行 / wait=当前任务完成后立即执行）。
+
+    含 ComfyUI 查询/重排与源视频重新下载上传（秒级到分钟级，取决于视频大小），
+    放到线程池执行避免阻塞事件循环。
+    """
+    from services.upscale_service import prioritize_upscale_task, UpscaleError
+
+    try:
+        action, message = await asyncio.to_thread(
+            prioritize_upscale_task, current_user.tenant_id, task_id, body.mode
+        )
+    except UpscaleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
+
+
 @router.post("/upscale-tasks/{task_id}/retry")
 async def retry_upscale_task_endpoint(
     task_id: int,
@@ -495,6 +527,29 @@ async def cancel_video_task_endpoint(
     except H3VideoError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "message": "任务已取消"}
+
+
+@router.post("/video-tasks/{task_id}/prioritize")
+async def prioritize_video_task_endpoint(
+    task_id: int,
+    body: PrioritizeTaskRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """排队任务插队。
+
+    mode="interrupt"：取消当前执行中任务，本任务立即生成；
+    mode="wait"：等待当前执行中任务完成后，本任务立即执行。
+    含 ComfyUI 查询/重排与参考图下载（秒级），放到线程池执行避免阻塞事件循环。
+    """
+    from services.h3_video_service import prioritize_video_task
+
+    try:
+        action, message = await asyncio.to_thread(
+            prioritize_video_task, current_user.tenant_id, task_id, body.mode
+        )
+    except H3VideoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "action": action, "message": message}
 
 
 @router.post("/video-tasks/{task_id}/recover")

@@ -1050,7 +1050,7 @@ async def update_replenishment_order(
         """), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="补货申请不存在")
-        if row[2] != "pending":
+        if str(row[2] or "").lower() != "pending":
             raise HTTPException(status_code=400, detail="只能修改待处理状态的补货申请")
 
         ensure_parent_product_id_column(db)
@@ -1278,7 +1278,7 @@ async def batch_approve_replenishment_orders(
         if not rows:
             raise HTTPException(status_code=400, detail="未找到可审批的补货单")
 
-        invalid = [row[1] for row in rows if row[2] != "pending"]
+        invalid = [row[1] for row in rows if str(row[2] or "").lower() != "pending"]
         if invalid:
             raise HTTPException(status_code=400, detail=f"以下补货单不是待审批状态，无法审批: {', '.join(invalid)}")
 
@@ -1321,7 +1321,7 @@ async def approve_replenishment_order(
         """), {"id": order_id, "tid": current_user.tenant_id}).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="补货申请不存在")
-        if row[2] != "pending":
+        if str(row[2] or "").lower() != "pending":
             raise HTTPException(status_code=400, detail=f"当前状态为'{row[2]}'，只能审批待审批状态的补货单")
 
         db.execute(text("""
@@ -1368,7 +1368,7 @@ async def cancel_replenishment_approval(
         if not row:
             raise HTTPException(status_code=404, detail="补货申请不存在")
 
-        current_status = row[2]
+        current_status = str(row[2] or "").lower()
         if current_status != "approved":
             raise HTTPException(status_code=400, detail="只有已审批状态的补货单才能取消审批")
 

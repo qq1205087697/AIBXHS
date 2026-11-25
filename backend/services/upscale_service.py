@@ -227,9 +227,16 @@ def _run_task(task_id: int) -> None:
         for _ in range(max_polls):
             threading.Event().wait(interval)
             # 取消/状态变更检查：任务已不在进行中（如被用户取消）时退出轮询
-            if _get_upscale_task_status(task_id) not in ("排队中", "处理中"):
+            status_now, latest_prompt_id = _get_upscale_task_state(task_id)
+            if status_now not in ("排队中", "处理中"):
                 logger.info(f"[超分] 任务 {task_id} 状态已变更，轮询退出")
                 return
+            # 插队会删除旧队列条目并以新 ID 重新提交：每轮跟随 DB 中最新的 ComfyUI 任务 ID
+            if latest_prompt_id and latest_prompt_id != prompt_id:
+                logger.info(
+                    f"[超分] 任务 {task_id} ComfyUI ID 变更: {prompt_id} → {latest_prompt_id}（插队重排）"
+                )
+                prompt_id = latest_prompt_id
             try:
                 history = _api("GET", f"/history/{prompt_id}").json()
             except requests.exceptions.Timeout as e:
@@ -532,6 +539,15 @@ def list_upscale_tasks(
                 )
         except Exception as e:
             logger.warning(f"超分列表附加绑定状态失败: {e}")
+        # 附加排队位置（仅排队中任务）：前端显示「前方x条任务」
+        if any(r.status == "排队中" for r in rows):
+            try:
+                ahead_map = _compute_upscale_queue_ahead(db)
+                for r, item in zip(rows, items):
+                    if r.status == "排队中":
+                        item["queue_ahead"] = ahead_map.get(r.id)
+            except Exception as e:
+                logger.warning(f"超分列表附加排队位置失败: {e}")
         return {"items": items, "total": total}
     finally:
         db.close()
@@ -548,6 +564,127 @@ def _get_upscale_task_status(task_id: int):
         return r[0] if r else None
     finally:
         db.close()
+
+
+def _get_upscale_task_state(task_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """读取任务当前状态与 ComfyUI 任务 ID（轮询循环内感知取消与插队重排）"""
+    from database.database import SessionLocal
+    from models.video_upscale_task import VideoUpscaleTask
+
+    db = SessionLocal()
+    try:
+        r = (
+            db.query(VideoUpscaleTask.status, VideoUpscaleTask.comfy_prompt_id)
+            .filter(VideoUpscaleTask.id == task_id)
+            .first()
+        )
+        return (r[0], r[1]) if r else (None, None)
+    finally:
+        db.close()
+
+
+def _compute_upscale_queue_ahead(db) -> Dict[int, int]:
+    """计算进行中超分任务各自「前方的任务数」（全租户口径，与 ComfyUI 实际执行顺序一致）
+
+    超分与 H3 视频生成共用同一台 ComfyUI 串行队列，前方条数天然包含彼此的任务
+    （按 ComfyUI pending 实际顺序 + 执行中数量）。尚未提交（仍在下载/上传源视频）
+    的任务排在当前队列末尾之后，按提交顺序递增；ComfyUI 不可达时按任务 ID 顺序估算。
+    """
+    from models.video_upscale_task import VideoUpscaleTask
+
+    rows = (
+        db.query(VideoUpscaleTask.id, VideoUpscaleTask.status, VideoUpscaleTask.comfy_prompt_id)
+        .filter(VideoUpscaleTask.status.in_(["排队中", "处理中"]), VideoUpscaleTask.deleted_at.is_(None))
+        .all()
+    )
+    if not rows:
+        return {}
+    try:
+        queue = _api("GET", "/queue", timeout=15).json()
+        running_ids = [e[1] for e in (queue.get("queue_running") or []) if len(e) > 1]
+        pending_ids = [e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1]
+    except Exception as e:
+        logger.warning(f"[超分] 查询 ComfyUI 队列失败，排队位置按提交顺序估算: {e}")
+        return {
+            r.id: (0 if r.status == "处理中" else i)
+            for i, r in enumerate(sorted(rows, key=lambda x: x.id))
+        }
+
+    running_count = len(running_ids)
+    preparing = sorted((r for r in rows if not r.comfy_prompt_id), key=lambda x: x.id)
+    base = running_count + len(pending_ids)
+    ahead: Dict[int, int] = {}
+    for r in rows:
+        pid = r.comfy_prompt_id
+        if r.status == "处理中" or (pid and pid in running_ids):
+            ahead[r.id] = 0
+        elif pid and pid in pending_ids:
+            ahead[r.id] = pending_ids.index(pid) + running_count
+        elif not pid:
+            ahead[r.id] = base + sum(1 for p in preparing if p.id < r.id)
+        else:
+            ahead[r.id] = base  # 瞬态：不在队列中（待入队/刚结束待写 history），按队尾估算
+    return ahead
+
+
+def _cancel_comfyui_prompt(prompt_id: str) -> str:
+    """向 ComfyUI 发送任务取消指令，返回操作说明。
+
+    先查队列精确判定：执行中→移出队列+中断；排队中→仅移出；都无命中→查 history
+    区分已结束/瞬态，瞬态兜底双发。不盲目双发：当前执行的是其他任务时误发
+    /interrupt 会中断别人的任务。
+    """
+    try:
+        queue = _api("GET", "/queue", timeout=15).json()
+        running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
+        pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
+    except Exception as e:
+        logger.warning(f"[超分] 查询 ComfyUI 队列失败（{e}），保守双发取消指令")
+        try:
+            _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+        except Exception:
+            pass
+        try:
+            _api("POST", "/interrupt", timeout=15)
+        except Exception:
+            pass
+        return "ComfyUI 查询失败，已尽力发送取消指令"
+
+    if prompt_id in running_ids:
+        try:
+            _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+        except Exception:
+            pass
+        try:
+            _api("POST", "/interrupt", timeout=15)
+        except Exception:
+            pass
+        return "已中断 ComfyUI 执行中的任务"
+    if prompt_id in pending_ids:
+        try:
+            _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+        except Exception as e:
+            logger.warning(f"[超分] 移出 ComfyUI 队列失败: {e}")
+            return "移出队列失败（任务仍标记为取消）"
+        return "已从 ComfyUI 队列移除"
+
+    # 都无命中：查 history 区分「已执行结束」与「状态切换瞬态」
+    try:
+        h = _api("GET", f"/history/{prompt_id}", timeout=15).json()
+        if h.get(prompt_id):
+            return "任务已执行结束（ComfyUI 端无需取消）"
+    except Exception:
+        pass
+    # 瞬态兜底：任务恰在状态切换瞬间，双发覆盖
+    try:
+        _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+    except Exception:
+        pass
+    try:
+        _api("POST", "/interrupt", timeout=15)
+    except Exception:
+        pass
+    return "任务处于状态切换瞬间，已发送取消指令"
 
 
 def cancel_upscale_task(tenant_id: int, task_id: int) -> None:
@@ -570,19 +707,11 @@ def cancel_upscale_task(tenant_id: int, task_id: int) -> None:
     finally:
         db.close()
 
-    # 同步 ComfyUI：执行中的中断，排队中的移出队列
-    cancelled_via = "任务不在 ComfyUI 队列中（直接标记取消）"
+    # 同步 ComfyUI：精确判定 + 瞬态兜底（见 _cancel_comfyui_prompt）
+    cancelled_via = "任务无 ComfyUI 记录（直接标记取消）"
     if prompt_id:
         try:
-            queue = _api("GET", "/queue", timeout=30).json()
-            running_ids = {e[1] for e in (queue.get("queue_running") or []) if len(e) > 1}
-            pending_ids = {e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1}
-            if prompt_id in running_ids:
-                _api("POST", "/interrupt", timeout=30)
-                cancelled_via = "已中断 ComfyUI 执行中的任务"
-            elif prompt_id in pending_ids:
-                _api("POST", "/queue", timeout=30, json={"delete": [prompt_id]})
-                cancelled_via = "已从 ComfyUI 队列移除"
+            cancelled_via = _cancel_comfyui_prompt(prompt_id)
         except Exception as e:
             logger.warning(f"[超分] 取消任务 {task_id} 时操作 ComfyUI 失败: {e}")
             cancelled_via = "ComfyUI 操作失败（任务仍将标记为取消）"
@@ -600,6 +729,119 @@ def cancel_upscale_task(tenant_id: int, task_id: int) -> None:
     finally:
         db.close()
     logger.info(f"[超分] 任务 {task_id} 已取消: {cancelled_via}")
+
+
+def _jump_upscale_task_to_front(task_id: int, prompt_id: str, *, source_url: str, scale: float) -> str:
+    """把排队任务移到 ComfyUI 待执行队列最前：删除旧条目 → front:true 重新提交 → 回写新 prompt_id。
+
+    返回新的 ComfyUI prompt_id；失败抛 UpscaleError。
+    超分工作流可由 source_url + scale 完整重建，无需存任何额外状态。
+    """
+    # 删除旧排队条目（已不在队列时为无害空操作）
+    try:
+        _api("POST", "/queue", timeout=15, json={"delete": [prompt_id]})
+    except Exception as e:
+        logger.warning(f"[超分] 插队任务 {task_id} 移出旧队列条目失败: {e}")
+
+    # 防竞态复判：删除瞬间任务可能恰好开始执行，此时放弃重排，避免同一任务重复提交
+    try:
+        running2 = [e[1] for e in (_api("GET", "/queue", timeout=15).json().get("queue_running") or []) if len(e) > 1]
+        if prompt_id in running2:
+            raise UpscaleError("任务已开始处理，无需插队")
+    except UpscaleError:
+        raise
+    except Exception:
+        pass
+
+    # 重新下载源视频 → 上传 ComfyUI → 重建工作流 → front:true 插队提交
+    content = _download(source_url)
+    video_name = _upload_video(content)
+    workflow = _build_workflow(video_name, scale)
+    try:
+        resp = _api("POST", "/prompt", timeout=60, json={"prompt": workflow, "front": True})
+        new_prompt_id = resp.json()["prompt_id"]
+    except Exception as e:
+        raise UpscaleError(f"插队重新提交工作流失败: {str(e)[:200]}")
+
+    _update_task(task_id, comfy_prompt_id=new_prompt_id)
+    logger.info(f"[超分] 任务 {task_id} 已插队重排: {prompt_id} → {new_prompt_id}")
+    return new_prompt_id
+
+
+def prioritize_upscale_task(tenant_id: int, task_id: int, mode: str) -> Tuple[str, str]:
+    """排队任务插队，返回 (action, message)。语义与 H3 视频插队一致。
+
+    mode="interrupt"：先取消当前执行中的任务（其记录由自身轮询线程标记失败），本任务立即开始处理；
+    mode="wait"：不打断当前任务，本任务排到队首，当前任务完成后立即执行。
+    实现：删除 ComfyUI 中本任务的旧排队条目 → front:true 重新提交工作流 → 回写新 prompt_id
+    （轮询线程每轮从 DB 读取最新 ID，自动跟随）。interrupt 模式下先插队再中断，
+    确保中断后弹出的是本任务而非其他排队任务。仅已提交 ComfyUI 的「排队中」任务可插队。
+    """
+    from database.database import SessionLocal
+    from models.video_upscale_task import VideoUpscaleTask
+
+    if mode not in ("interrupt", "wait"):
+        raise UpscaleError("无效的插队方式")
+
+    db = SessionLocal()
+    try:
+        task = db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.id == task_id,
+            VideoUpscaleTask.tenant_id == tenant_id,
+            VideoUpscaleTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise UpscaleError("任务不存在或已删除")
+        if task.status == "处理中":
+            raise UpscaleError("任务已在处理中，无需插队")
+        if task.status != "排队中":
+            raise UpscaleError("任务已结束，无需插队")
+        prompt_id = task.comfy_prompt_id
+        source_url = task.source_video_url or ""
+        scale = float(task.scale) if task.scale else 2.0
+    finally:
+        db.close()
+
+    if not source_url:
+        raise UpscaleError("找不到源视频地址，无法插队")
+    if not prompt_id:
+        raise UpscaleError("任务仍在准备中（下载/上传源视频），请稍后再试")
+
+    try:
+        queue = _api("GET", "/queue", timeout=15).json()
+        running_ids = [e[1] for e in (queue.get("queue_running") or []) if len(e) > 1]
+        pending_ids = [e[1] for e in (queue.get("queue_pending") or []) if len(e) > 1]
+    except Exception as e:
+        raise UpscaleError(f"查询 ComfyUI 队列失败，请稍后重试: {str(e)[:200]}")
+
+    if prompt_id in running_ids:
+        # DB 状态尚未被轮询线程刷新，实际已在处理
+        raise UpscaleError("任务已开始处理，无需插队")
+
+    is_front = prompt_id in pending_ids and pending_ids.index(prompt_id) == 0
+
+    if mode == "interrupt" and running_ids:
+        # 本任务不在队首时先插队，再中断当前任务——中断后弹出的才是本任务
+        if not is_front:
+            _jump_upscale_task_to_front(task_id, prompt_id, source_url=source_url, scale=scale)
+        # 中断时用的是最初捕获的执行中 ID：若其间当前任务已自然结束，该 ID 落在 history 中，
+        # _cancel_comfyui_prompt 判定后不会误中断已弹出的本任务
+        try:
+            _cancel_comfyui_prompt(running_ids[0])
+        except Exception as e:
+            logger.warning(f"[超分] 插队任务 {task_id} 中断当前任务失败: {e}")
+        logger.info(f"[超分] 任务 {task_id} 插队（interrupt）：已中断当前任务 {running_ids[0]}")
+        return ("interrupted", "已取消当前执行中的任务，本任务开始处理")
+
+    # wait 模式（或 interrupt 但当前恰好无执行任务）：不动当前任务，只把本任务顶到队首
+    if is_front:
+        if mode == "interrupt":
+            return ("already_front", "当前没有执行中的任务，本任务即将开始处理")
+        return ("already_front", "本任务已是队首，将紧随当前任务执行" if running_ids else "本任务已是队首，即将开始处理")
+    _jump_upscale_task_to_front(task_id, prompt_id, source_url=source_url, scale=scale)
+    if mode == "interrupt":
+        return ("jumped", "本任务已排到队首，即将开始处理")
+    return ("jumped", "本任务已排到队首，当前任务完成后立即执行")
 
 
 def retry_upscale_task(tenant_id: int, task_id: int) -> Tuple[Dict[str, Any], str]:
@@ -687,23 +929,42 @@ def retry_upscale_task(tenant_id: int, task_id: int) -> Tuple[Dict[str, Any], st
 
 
 def delete_upscale_task(tenant_id: int, task_id: int) -> None:
-    """软删除超分任务"""
+    """软删除超分任务。
+
+    非「已完成」任务删除时向 ComfyUI 补发取消指令：取消请求可能因竞态漏发
+    （如点取消后立刻删除），避免记录删了 ComfyUI 仍在白跑占用算力。
+    """
     from database.database import SessionLocal
     from models.video_upscale_task import VideoUpscaleTask
 
     db = SessionLocal()
+    need_cancel = False
+    prompt_id = ""
     try:
         now = datetime.now()
-        updated = db.query(VideoUpscaleTask).filter(
+        task = db.query(VideoUpscaleTask).filter(
+            VideoUpscaleTask.id == task_id,
+            VideoUpscaleTask.tenant_id == tenant_id,
+            VideoUpscaleTask.deleted_at.is_(None),
+        ).first()
+        if not task:
+            raise UpscaleError("任务不存在或已删除")
+        prompt_id = task.comfy_prompt_id or ""
+        need_cancel = bool(prompt_id) and task.status != "已完成"
+        db.query(VideoUpscaleTask).filter(
             VideoUpscaleTask.id == task_id,
             VideoUpscaleTask.tenant_id == tenant_id,
             VideoUpscaleTask.deleted_at.is_(None),
         ).update({"deleted_at": now}, synchronize_session=False)
         db.commit()
-        if not updated:
-            raise UpscaleError("任务不存在或已删除")
     finally:
         db.close()
+    if need_cancel:
+        try:
+            via = _cancel_comfyui_prompt(prompt_id)
+            logger.info(f"[超分] 删除任务 {task_id} 时补发 ComfyUI 取消: {via}")
+        except Exception as e:
+            logger.warning(f"[超分] 删除任务 {task_id} 补发取消失败: {e}")
 
 
 def resume_pending_tasks() -> Optional[int]:
