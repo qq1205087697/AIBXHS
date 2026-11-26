@@ -291,6 +291,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     "/ads",
     "/product-selection",
     "/development",
+    "/finance",
   ];
   const inRobotGroup = (path: string) =>
     robotPaths.includes(path) || path.startsWith("/development/");
@@ -372,6 +373,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         ...(hasPermission("development:view")
           ? [{ key: "/development", icon: <Rocket size={18} />, label: "开发机器人" }]
           : []),
+        { key: "/finance", icon: <Wallet size={18} />, label: "财务机器人" },
       ] as any[],
     },
     ...(hasPermission("chat:use")
@@ -444,12 +446,6 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           },
         ]
       : []),
-    {
-      key: "/finance",
-      icon: <Wallet size={20} />,
-      label: "财务机器人",
-      shortLabel: "财务",
-    },
     ...(hasPermission("product:view")
       ? [
           {
