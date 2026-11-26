@@ -462,7 +462,8 @@ def low_star_stats_job():
     LOCK_KEY = "low_star_stats"
     db = SessionLocal()
     try:
-        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+        # 锁 TTL 需覆盖子进程最长 60 分钟 + 余量；过期会导致下一次触发静默抢锁失败
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=90):
             db.close()
             return
         db.close()
@@ -470,21 +471,29 @@ def low_star_stats_job():
         if not script.exists():
             logger.error(f"低分产品统计脚本不存在: {script}")
             return
-        logger.info("执行低分产品统计任务（预计8~10分钟）...")
+        logger.info("执行低分产品统计任务（进度逐页打印，60分钟上限）...")
+        deadline = time.time() + 60 * 60
         try:
-            result = subprocess.run(
-                [sys.executable, str(script), "run"],
-                cwd=str(script.parent), capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=20 * 60,
+            # Popen + python -u 逐行读取子进程输出，实时透传进度日志；
+            # stderr 合并进 stdout，避免 PIPE 缓冲死锁；脚本自带断点续传缓存
+            proc = subprocess.Popen(
+                [sys.executable, "-u", str(script), "run"],
+                cwd=str(script.parent), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
             )
-            if result.returncode == 0:
-                tail = (result.stdout or "").strip().splitlines()[-5:]
-                logger.info("低分产品统计完成:\n" + "\n".join(tail))
+            for line in proc.stdout or []:
+                line = line.strip()
+                if line:
+                    logger.info(f"[低分统计] {line}")
+                if time.time() > deadline:
+                    proc.kill()
+                    logger.error("低分产品统计超时（>60分钟），已终止；断点缓存已保留，下次自动续传")
+                    return
+            proc.wait(timeout=120)
+            if proc.returncode == 0:
+                logger.info("低分产品统计完成")
             else:
-                err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-10:]
-                logger.error(f"低分产品统计失败(退出码{result.returncode}):\n" + "\n".join(err_tail))
-        except subprocess.TimeoutExpired:
-            logger.error("低分产品统计超时（>20分钟），已终止")
+                logger.error(f"低分产品统计失败(退出码{proc.returncode})，详见上方 [低分统计] 日志")
         except Exception as e:
             logger.error(f"低分产品统计执行异常: {e}")
     finally:

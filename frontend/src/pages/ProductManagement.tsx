@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Alert, Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete, Empty } from 'antd'
+import { Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, Space, Tag, InputNumber, Switch, Drawer, Checkbox, Image, Tooltip, Divider, Transfer, Dropdown, MenuProps, Progress, Badge, Descriptions, Pagination, DatePicker, Popover, Spin, AutoComplete, Empty } from 'antd'
 import dayjs, { Dayjs } from 'dayjs'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined, VideoCameraOutlined, ReloadOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, SettingOutlined, HolderOutlined, AppstoreOutlined, ShopOutlined, DownOutlined, EyeOutlined, InboxOutlined, DownloadOutlined, UploadOutlined, CheckCircleOutlined, WarningOutlined, ExportOutlined, UnorderedListOutlined, LoadingOutlined, FilterOutlined, VideoCameraOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { Resizable, ResizeCallbackData } from 'react-resizable'
-import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi, videoBindingApi, PlatformSkuEntry, OzonUploadResult, OzonTaskStatusResult } from '../api'
+import { productsApi, storesApi, storeGroupsApi, inventoryBatchesApi, inventoryCountApi, productBindingsApi, shipmentsApi, suppliersApi, operationLogsApi, videoBindingApi, PlatformSkuEntry } from '../api'
 import PlatformSkuSelector, { skuKey } from '../components/PlatformSkuSelector'
 import apiClient from '../api'
 import { loadCustomPlatforms, saveCustomPlatform } from '../utils/customPlatforms'
+import { confirmLanguageMismatch, confirmLanguageUnknown, getLanguageMismatch, getLanguageUnknown } from '../utils/languageMismatch'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { VideosUpload } from '../components/TosUpload'
@@ -426,14 +427,6 @@ const ProductManagement: React.FC = () => {
   const [vuOzonSelected, setVuOzonSelected] = useState<string[]>([])
   const [vuAmazonConfigured, setVuAmazonConfigured] = useState(true)
   const [vuSubmitting, setVuSubmitting] = useState(false)
-  // 上传结果（Amazon 汇总 + Ozon 分店铺任务，可刷新状态）
-  const [vuResultOpen, setVuResultOpen] = useState(false)
-  const [vuResultMessage, setVuResultMessage] = useState('')
-  const [vuAmazonResult, setVuAmazonResult] = useState<{ success?: number; failed?: number; errors?: string[]; error?: string } | null>(null)
-  const [vuOzonResults, setVuOzonResults] = useState<OzonUploadResult[]>([])
-  const [vuOzonBatchNo, setVuOzonBatchNo] = useState<string | undefined>()
-  const [vuStatusMap, setVuStatusMap] = useState<Record<string, OzonTaskStatusResult>>({})
-  const [vuStatusRefreshing, setVuStatusRefreshing] = useState(false)
   const [detailLogs, setDetailLogs] = useState<any[]>([])
   const [detailLogsLoading, setDetailLogsLoading] = useState(false)
   const [detailLogsTotal, setDetailLogsTotal] = useState(0)
@@ -789,25 +782,7 @@ const productAttributeLabelMap: Record<string, string> = {
     }
   }
 
-  const handleVuRefreshOzonStatus = async () => {
-    const tasks = vuOzonResults
-      .filter(r => r.ok && r.task_id)
-      .map(r => ({ store_id: r.store_id, task_id: r.task_id!, batch_no: vuOzonBatchNo }))
-    if (tasks.length === 0) return
-    setVuStatusRefreshing(true)
-    try {
-      const res = await videoBindingApi.getOzonUploadStatus(tasks)
-      const next = { ...vuStatusMap }
-      for (const r of res.data?.data?.results || []) next[`${r.store_id}_${r.task_id}`] = r
-      setVuStatusMap(next)
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '查询 Ozon 任务状态失败')
-    } finally {
-      setVuStatusRefreshing(false)
-    }
-  }
-
-  const handleVuSubmit = async () => {
+  const handleVuSubmit = async (languageConfirmed = false, unknownConfirmed = false) => {
     if (!detailModalProduct) return
     const allKeys = [...vuSkuSelected, ...vuOzonSelected]
     if (allKeys.length === 0) {
@@ -830,17 +805,30 @@ const productAttributeLabelMap: Record<string, string> = {
           const [pp, store] = k.split('_')
           return { pp_id: Number(pp), store_id: Number(store) }
         }),
+        confirm_language_mismatch: languageConfirmed,
+        confirm_language_unknown: unknownConfirmed,
       })
       const body = res.data
-      const d = body?.data || {}
-      setVuAmazonResult((d.amazon as typeof vuAmazonResult) || null)
-      setVuOzonResults(d.ozon?.results || [])
-      setVuOzonBatchNo(d.ozon?.batch_no)
-      setVuStatusMap({})
-      setVuResultMessage(body?.message || (body?.success ? '提交成功' : '提交失败'))
-      setVuResultOpen(true)
+      // 不再弹「上传结果」弹窗，顶部临时提示统一为「已添加上传任务」
+      if (body?.success) {
+        message.success('已添加上传任务', 3)
+      } else {
+        message.warning(body?.message || '上传失败', 8)
+      }
       setVideoUploadOpen(false)
     } catch (e: any) {
+      // 视频语言与目标站点语言不一致：弹警告，确认后带 confirm 标记重试
+      const mismatch = getLanguageMismatch(e)
+      if (mismatch) {
+        confirmLanguageMismatch(mismatch, () => handleVuSubmit(true, unknownConfirmed), '上传')
+        return
+      }
+      // 无法识别视频语言：提醒人工核对视频与目标站点语言是否匹配
+      const unknown = getLanguageUnknown(e)
+      if (unknown) {
+        confirmLanguageUnknown(unknown, () => handleVuSubmit(languageConfirmed, true), '上传')
+        return
+      }
       message.error(e?.response?.data?.detail || '上传失败')
     } finally {
       setVuSubmitting(false)
@@ -4092,7 +4080,7 @@ const productAttributeLabelMap: Record<string, string> = {
         okText={videoUploadStep === 1 ? '下一步' : '确定上传'}
         cancelText={videoUploadStep === 1 ? '取消' : '上一步'}
         confirmLoading={vuSubmitting}
-        onOk={videoUploadStep === 1 ? handleVuNext : handleVuSubmit}
+        onOk={videoUploadStep === 1 ? handleVuNext : () => handleVuSubmit()}
         onCancel={() => {
           if (videoUploadStep === 2) {
             setVideoUploadStep(1)
@@ -4153,83 +4141,6 @@ const productAttributeLabelMap: Record<string, string> = {
               Amazon 写入飞书记录由 RPA 上传，Ozon 通过 Seller API 直传（异步审核）
             </div>
           </>
-        )}
-      </Modal>
-
-      {/* 视频统一上传结果：Amazon 汇总 + Ozon 分店铺任务（可刷新状态） */}
-      <Modal
-        open={vuResultOpen}
-        title="上传结果"
-        width={680}
-        zIndex={1012}
-        onCancel={() => setVuResultOpen(false)}
-        footer={[
-          <Button key="close" onClick={() => setVuResultOpen(false)}>关闭</Button>,
-          <Button key="refresh" icon={<ReloadOutlined />} loading={vuStatusRefreshing}
-            disabled={vuOzonResults.filter(r => r.ok).length === 0}
-            onClick={handleVuRefreshOzonStatus}>
-            刷新 Ozon 状态
-          </Button>,
-        ]}
-      >
-        <Alert type={vuResultMessage.includes('失败') && !vuResultMessage.includes('已') ? 'error' : 'success'} showIcon
-          message={vuResultMessage} style={{ marginBottom: 12 }} />
-        {vuAmazonResult && (
-          <Card size="small" title={<Tag color="orange">Amazon</Tag>} style={{ marginBottom: 12 }}>
-            {vuAmazonResult.error ? (
-              <Alert type="error" showIcon message={vuAmazonResult.error} />
-            ) : (
-              <>
-                <p>飞书记录写入成功 {vuAmazonResult.success ?? 0} 条{vuAmazonResult.failed ? `，失败 ${vuAmazonResult.failed} 条` : ''}</p>
-                {vuAmazonResult.errors && vuAmazonResult.errors.length > 0 && (
-                  <ul style={{ color: '#cf1322', fontSize: 12, margin: 0, paddingLeft: 18 }}>
-                    {vuAmazonResult.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}
-                  </ul>
-                )}
-              </>
-            )}
-          </Card>
-        )}
-        {vuOzonResults.length > 0 && (
-          <Card size="small" title={<Tag color="blue">OZON</Tag>}
-            extra={<span style={{ color: '#8c8c8c', fontSize: 12 }}>视频需 Ozon 平台审核，接口成功仅代表任务受理</span>}>
-            <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ color: '#8c8c8c', textAlign: 'left' }}>
-                  <th style={{ padding: '6px 8px' }}>店铺</th>
-                  <th style={{ padding: '6px 8px' }}>SKU</th>
-                  <th style={{ padding: '6px 8px' }}>任务ID</th>
-                  <th style={{ padding: '6px 8px' }}>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {vuOzonResults.map((r, i) => {
-                  const st = vuStatusMap[`${r.store_id}_${r.task_id}`]
-                  const statusTag = !r.ok
-                    ? <Tag color="error">提交失败</Tag>
-                    : st
-                      ? (st.error ? <Tag color="error">查询失败</Tag>
-                        : st.status === '成功' ? <Tag color="success">成功</Tag>
-                          : st.status === '失败' ? <Tag color="error">失败</Tag>
-                            : <Tag color="processing">处理中</Tag>)
-                      : <Tag color="processing">已提交 · 待刷新</Tag>
-                  return (
-                    <tr key={i} style={{ borderTop: '1px solid #f0f0f0' }}>
-                      <td style={{ padding: '6px 8px' }}>{r.store_name || `店铺#${r.store_id}`}</td>
-                      <td style={{ padding: '6px 8px' }}>{r.offer_ids.join('、')}</td>
-                      <td style={{ padding: '6px 8px' }}>{r.ok ? r.task_id : '-'}</td>
-                      <td style={{ padding: '6px 8px' }}>
-                        {statusTag}
-                        {st?.error && <div style={{ color: '#cf1322', fontSize: 12 }}>{st.error}</div>}
-                        {st?.error_text && <div style={{ color: '#cf1322', fontSize: 12, whiteSpace: 'pre-wrap' }}>{st.error_text}</div>}
-                        {!r.ok && <div style={{ color: '#cf1322', fontSize: 12 }}>{r.error}</div>}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </Card>
         )}
       </Modal>
 

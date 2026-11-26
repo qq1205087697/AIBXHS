@@ -1,18 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Alert, Button, Card, Checkbox, Descriptions, Empty, Image, Input, Modal, Pagination, Popconfirm, Popover, Radio, Select, Slider, Space, Spin,
-  Table, Tabs, Tag, Timeline, Tooltip, Typography, message,
+  Alert, Button, Card, Checkbox, Descriptions, Empty, Image, Input, InputNumber, Modal, Pagination, Popconfirm, Popover, Radio, Select, Slider, Space, Spin,
+  Switch, Table, Tabs, Tag, Timeline, Tooltip, Typography, message,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  CheckCircleOutlined, CloudUploadOutlined, DeleteOutlined, DownOutlined, EyeOutlined,
-  BulbOutlined, PictureOutlined, PlusOutlined, ReloadOutlined, SendOutlined, ThunderboltOutlined, VideoCameraOutlined,
+  AppstoreOutlined, CheckCircleOutlined, CloudUploadOutlined, DeleteOutlined, DownOutlined, EyeOutlined,
+  BulbOutlined, PictureOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined, RightOutlined, SendOutlined, ThunderboltOutlined, VideoCameraOutlined,
 } from '@ant-design/icons'
 import {
   mediaRequestApi, MediaPlan, MediaRequestItem, MediaStage, ProductSkuEntry, ProductSkuGroup, productsApi, videoBindingApi,
 } from '../api'
+import AIImageLayoutPicker from '../components/AIImageLayoutPicker'
 import TosUpload from '../components/TosUpload'
 import { useAuth } from '../contexts/AuthContext'
+import {
+  confirmLanguageMismatch,
+  confirmLanguageUnknown,
+  getLanguageMismatch,
+  getLanguageUnknown,
+  type LanguageMismatchInfo,
+  type LanguageUnknownInfo,
+} from '../utils/languageMismatch'
 
 /**
  * 媒体任务中心
@@ -31,12 +40,12 @@ const STAGES: MediaStage[] = ['待提交', '待审核', '待生成', '已生成'
 const STAGE_HINT: Record<MediaStage, string> = {
   待提交: '运营提报视频需求：选择产品与目标平台 SKU，填写需求类型与需求描述后提交。可在此阶段修改需求描述/需求类型。',
   待审核: '运营主管审核需求：通过后按需求类型拆成待生成子单（勾 N 个类型拆 N 条）；驳回退回待提交。',
-  待生成: '美工微调提示词、上传参考图（1~9 张）并设置时长/比例/分辨率，点击生成调用 AI 视频；图片类需求点「生成」按需求类型直接生图，完成后自动进入已生成。',
+  待生成: '美工微调提示词、上传参考图（1~9 张）并设置时长/比例/分辨率，点击生成调用 AI 视频；图片类需求点「生成」按需求类型直接生图，A+ 类需求可在「参数」列设置版式、张数和无文字模式，完成后自动进入已生成。',
   已生成: '美工审核成片内容：通过后进入待确认；不通过退回待生成，需重新生成。',
   待确认: '运营二次审核内容：通过后进入待高清（图片类需求免高清，直接进入待绑定）；驳回退回待生成重新生成。',
   待高清: '强制高清门禁：成片必须先完成高清处理（Topaz 超分，档位可选）才能进入绑定；高清中自动等待，失败可重新提交。',
   待绑定: '绑定门禁：提交「绑定至产品」申请，审核人直接在本页任务行上通过/拒绝；通过后视频写入产品并自动进入待上传。也可用「新增提报（已有素材）」直接上传已有视频/图片进入绑定。',
-  待上传: '已绑定产品后，按提报时选择的平台 SKU 上传：Amazon 写飞书多维表由 RPA 上传，Ozon 走 Seller API 直传（异步审核）。点「上传」后单据变为「上传排队中」（按钮置灰），RPA/平台完成上传后自动进入已上传。也可用「新增提报（已有素材）」上传已有素材（先走绑定审核）。',
+  待上传: '已绑定产品后，按提报时选择的平台 SKU 上传：Amazon 写飞书多维表由 RPA 上传，Ozon 走 Seller API 直传（异步审核）。点「上传」后单据变为「上传排队中」（按钮置灰），RPA/平台完成上传后自动进入已上传。',
   已上传: '流程结束：RPA/平台完成上传后进入本页签，可查看上传时间与上传结果。',
 }
 
@@ -57,6 +66,9 @@ const DEMAND_COLOR: Record<string, string> = {
   '手机A+图': 'green',
 }
 const isImageDemand = (t?: string | null) => !!t && IMAGE_TYPES.includes(t)
+// A+ 类需求：待生成页可设置版式 / 张数 / 无文字模式
+const APLUS_DEMAND_TYPES = ['高级A+图', '普通A+图', '手机A+图']
+const isAplusDemand = (t?: string | null) => !!t && APLUS_DEMAND_TYPES.includes(t)
 const RATIOS = ['9:16', '16:9', '1:1', '3:4']
 const RESOLUTIONS: { value: string; label: string }[] = [
   { value: '0.3', label: '0.3K 快速' },
@@ -122,6 +134,28 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   const [filterInput, setFilterInput] = useState({ op: '', keyword: '' })
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [batchLoading, setBatchLoading] = useState(false)
+  // A+ 版式选择弹窗（与 AI生图同款），保存到当前单据的 gen_options
+  const [aplusPickerItem, setAplusPickerItem] = useState<MediaRequestItem | null>(null)
+  // 表格铺满剩余高度：测量容器高度，扣除表头与分页后作为 scroll.y
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const [tableBodyHeight, setTableBodyHeight] = useState(480)
+
+  useEffect(() => {
+    const el = tableWrapRef.current
+    if (!el) return
+    const update = () => {
+      // 92 ≈ 表头 + 分页高度（含间距）；留一点余量避免分页被裁切
+      setTableBodyHeight(Math.max(180, Math.floor(el.clientHeight - 92)))
+    }
+    update()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    ro?.observe(el)
+    window.addEventListener('resize', update)
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [])
 
   // ===== 弹窗 =====
   const [detailItem, setDetailItem] = useState<MediaRequestItem | null>(null)
@@ -143,7 +177,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   // ===== 新增提报 =====
   const [createOpen, setCreateOpen] = useState(false)
   const [creating, setCreating] = useState(false)
-  // normal=待提交需求提报；media=待绑定/待上传页签上传已有素材（跳过生成/审核/高清，直接落待绑定）
+  // normal=待提交需求提报；media=待绑定页签上传已有素材（跳过生成/审核/高清，直接落待绑定）
   const [createMode, setCreateMode] = useState<'normal' | 'media'>('normal')
   const [extKind, setExtKind] = useState<'video' | 'image'>('video')
   const [extStyle, setExtStyle] = useState<'主图' | '附图' | 'A+'>('附图')
@@ -158,8 +192,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   const [skuPlatform, setSkuPlatform] = useState<string | undefined>()
   const [skuSelected, setSkuSelected] = useState<Record<string, ProductSkuEntry>>({})
   const reasonRef = useRef('')
+  // 请求序号：切换页签/翻页后，丢弃旧页签迟到的响应，避免列表和计数显示到错误页签
+  const loadSeqRef = useRef(0)
 
   const load = useCallback(async (silent = false) => {
+    const seq = ++loadSeqRef.current
     if (!silent) setLoading(true)
     try {
       const resp = await mediaRequestApi.list({
@@ -170,21 +207,32 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         platform: filters.platform || undefined,
         keyword: filters.keyword || undefined,
       })
+      if (seq !== loadSeqRef.current) return
       const d = resp.data?.data
       setItems(d?.items || [])
       setCounts(d?.counts || {})
       setTotal(d?.total || 0)
     } catch (e: any) {
-      if (!silent) message.error(errText(e))
+      if (seq === loadSeqRef.current && !silent) message.error(errText(e))
     } finally {
-      if (!silent) setLoading(false)
+      if (seq === loadSeqRef.current && !silent) setLoading(false)
     }
   }, [stage, page, filters])
 
   useEffect(() => {
     setSelectedRowKeys([])
+    // 页签/分页/筛选变化时先清空旧数据，避免上一个页签的行在新页签短暂显示
+    setItems([])
+    setTotal(0)
     load()
   }, [load])
+
+  // A+ 版式库加载器：媒体任务中心用户可能没有 ai_image:use 权限，
+  // 走 /media-requests/aplus-layouts（READ_PERM）而不是 AI生图 的版式接口。
+  const loadAplusLayoutsForPicker = useCallback(async () => {
+    const resp = await mediaRequestApi.getAplusLayouts()
+    return resp.data.data
+  }, [])
 
   // 有「排队中 / 生成中 / 高清中 / 上传排队中」单据时轮询，后台任务完成后会自动流转到下一阶段
   useEffect(() => {
@@ -442,7 +490,28 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     } catch (e: any) { message.error(errText(e)) }
   }
 
-  const doUpload = async (id: number) => {
+  // 真正发起上传；两个 confirmed 分别表示已确认「语言不匹配」「语言无法识别」弹窗
+  const runUpload = async (id: number, languageConfirmed = false, unknownConfirmed = false) => {
+    try {
+      await mediaRequestApi.upload(id, languageConfirmed, unknownConfirmed)
+      message.success('已添加上传任务', 3)
+      await load(true)
+    } catch (e: any) {
+      const mismatch = getLanguageMismatch(e)
+      if (mismatch) {
+        confirmLanguageMismatch(mismatch, () => runUpload(id, true, unknownConfirmed), '上传')
+        return
+      }
+      const unknown = getLanguageUnknown(e)
+      if (unknown) {
+        confirmLanguageUnknown(unknown, () => runUpload(id, languageConfirmed, true), '上传')
+        return
+      }
+      message.error(errText(e))
+    }
+  }
+
+  const doUpload = (id: number) => {
     const target = items.find((i) => i.id === id)
     const isImage = target?.media_type === 'image'
     Modal.confirm({
@@ -452,14 +521,97 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         : '将按提报时选择的平台 SKU 上传成片：Amazon 写入飞书多维表、Ozon 走 Seller API 直传。提交后单据变为「上传排队中」，RPA/平台完成后自动进入已上传。',
       okText: '开始上传',
       cancelText: '取消',
-      onOk: async () => {
-        try {
-          const r = await mediaRequestApi.upload(id)
-          message.success(r.data?.message || '上传完成', 5)
-          await load(true)
-        } catch (e: any) { message.error(errText(e)) }
-      },
+      onOk: () => runUpload(id),
     })
+  }
+
+  // 批量上传：逐条上传；语言不匹配 / 无法识别语言的单据聚合后各弹一次确认框，确认后带标记重试
+  const runBatchUpload = async () => {
+    const keys = selectedRowKeys
+    if (!keys.length) return
+    setBatchLoading(true)
+    let ok = 0
+    let fail = 0
+    const errs: string[] = []
+    const pendingMismatch: { id: number; info: LanguageMismatchInfo }[] = []
+    const pendingUnknown: { id: number; info: LanguageUnknownInfo }[] = []
+    for (const key of keys) {
+      try {
+        const r = await mediaRequestApi.upload(Number(key))
+        if (r.data?.success === false) throw new Error(r.data?.message || '上传失败')
+        ok += 1
+      } catch (e: any) {
+        const mismatch = getLanguageMismatch(e)
+        if (mismatch) {
+          pendingMismatch.push({ id: Number(key), info: mismatch })
+          continue
+        }
+        const unknown = getLanguageUnknown(e)
+        if (unknown) {
+          pendingUnknown.push({ id: Number(key), info: unknown })
+          continue
+        }
+        fail += 1
+        errs.push(`单据 #${key}：${errText(e)}`)
+      }
+    }
+    setBatchLoading(false)
+    setSelectedRowKeys([])
+    await load(true)
+
+    const finalize = () => {
+      if (fail > 0) {
+        const failNote = errs.slice(0, 3).join('；')
+        message.warning(
+          `已添加上传任务：成功 ${ok} 条，失败 ${fail} 条${failNote ? `（${failNote}${errs.length > 3 ? ' 等' : ''}）` : ''}`,
+          8,
+        )
+      } else {
+        message.success('已添加上传任务', 3)
+      }
+    }
+
+    const retryUpload = async (items: { id: number; mismatch: boolean; unknown: boolean }[]) => {
+      for (const item of items) {
+        try {
+          const r = await mediaRequestApi.upload(item.id, item.mismatch, item.unknown)
+          if (r.data?.success === false) throw new Error(r.data?.message || '上传失败')
+          ok += 1
+        } catch (e: any) {
+          fail += 1
+          errs.push(`单据 #${item.id}：${errText(e)}`)
+        }
+      }
+      await load(true)
+    }
+
+    // 先处理语言不匹配，再处理无法识别语言（两类互斥，顺序弹窗）
+    const askUnknown = () => {
+      if (!pendingUnknown.length) {
+        finalize()
+        return
+      }
+      const sites = Array.from(new Set(pendingUnknown.flatMap((p) => p.info.sites || []).filter(Boolean)))
+      confirmLanguageUnknown({ sites }, async () => {
+        await retryUpload(pendingUnknown.map((p) => ({ id: p.id, mismatch: false, unknown: true })))
+        finalize()
+      }, '上传')
+    }
+
+    if (pendingMismatch.length) {
+      const merged: LanguageMismatchInfo = { video_language: pendingMismatch[0].info.video_language, mismatches: [] }
+      const seen = new Set<string>()
+      pendingMismatch.forEach(({ info }) => info.mismatches.forEach((m) => {
+        const key = `${m.site}_${m.site_language}`
+        if (!seen.has(key)) { seen.add(key); merged.mismatches.push(m) }
+      }))
+      confirmLanguageMismatch(merged, async () => {
+        await retryUpload(pendingMismatch.map((p) => ({ id: p.id, mismatch: true, unknown: false })))
+        askUnknown()
+      }, '上传')
+      return
+    }
+    askUnknown()
   }
 
   const runBatch = async (label: string, fn: (id: number) => Promise<void>, ids?: React.Key[]) => {
@@ -621,6 +773,63 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   }
 
   // ===== 表格 =====
+  // 成片缩略图：视频显示首帧 + 播放图标，图片显示缩略图；点击仍打开原有预览弹窗
+  const mediaThumb = (url?: string | null, item?: MediaRequestItem) => {
+    if (!url) return <span style={{ color: '#bfbfbf' }}>—</span>
+    const isImage = item?.media_type === 'image' || isImageDemand(item?.demand_type)
+    if (isImage) {
+      return (
+        <Image
+          src={url}
+          width={64}
+          height={44}
+          style={{ objectFit: 'cover', borderRadius: 6, cursor: 'pointer' }}
+          preview={{ mask: <EyeOutlined /> }}
+        />
+      )
+    }
+    return (
+      <Tooltip title="点击查看成片">
+        <div
+          onClick={() => setVideoUrl(url)}
+          style={{
+            position: 'relative',
+            width: 72,
+            height: 44,
+            borderRadius: 6,
+            overflow: 'hidden',
+            background: '#000',
+            cursor: 'pointer',
+            flexShrink: 0,
+            margin: '0 auto',
+          }}
+        >
+          <video
+            src={`${url}#t=0.1`}
+            preload="metadata"
+            muted
+            playsInline
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#fff',
+              fontSize: 18,
+              background: 'rgba(0, 0, 0, 0.18)',
+            }}
+          >
+            <PlayCircleOutlined />
+          </div>
+        </div>
+      </Tooltip>
+    )
+  }
+
   const columns: ColumnsType<MediaRequestItem> = (() => {
     const editable = stage === '待生成'
 
@@ -665,11 +874,11 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       {
         title: '商品', dataIndex: 'product_code', width: 230,
         render: (_, r) => (
-          <Space size={8} align="start">
+          <Space size={8} align="center" style={{ width: '100%', justifyContent: 'center' }}>
             {r.product_image
               ? <Image src={r.product_image} width={42} height={42} style={{ objectFit: 'cover', borderRadius: 6 }} preview={false} />
               : <div style={{ width: 42, height: 42, borderRadius: 6, background: '#f5f5f5' }} />}
-            <div style={{ minWidth: 0 }}>
+            <div style={{ minWidth: 0, textAlign: 'center' }}>
               <div style={{ fontWeight: 500 }}>{r.product_code}</div>
               <div style={{ color: '#8c8c8c', fontSize: 12, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.product_name}>
                 {r.product_name}
@@ -688,7 +897,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
             <Tooltip
               title={list.map((i) => `${platformMeta(i.platform).label} · ${i.store_name || `店铺#${i.store_id}`} · ${i.sku || '-'}`).join('；')}
             >
-              <div>
+              <div style={{ textAlign: 'center' }}>
                 <div style={{ fontFamily: 'Consolas, Menlo, monospace', fontSize: 12 }}>{first.sku || '-'}</div>
                 <div style={{ color: '#8c8c8c', fontSize: 12 }}>
                   {first.store_name || `店铺#${first.store_id}`}{first.site ? ` · ${first.site}` : ''}{list.length > 1 ? ` 等 ${list.length} 个` : ''}
@@ -741,7 +950,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
                   onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#1677ff' }}
                   onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#d9d9d9' }}
                 >
-                  <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: 3, overflow: 'hidden' }}>
+                  <div style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: 3, overflow: 'hidden', justifyContent: 'center' }}>
                     {sel.length
                       ? sel.map((t) => <Tag key={t} color={DEMAND_COLOR[t] || 'default'} style={{ margin: 0, fontSize: 12, lineHeight: '20px', padding: '0 8px' }}>{t}</Tag>)
                       : <span style={{ color: '#b7bec9', fontSize: 12 }}>请选择需求类型</span>}
@@ -829,8 +1038,8 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       base.push({
         title: '参考图', dataIndex: 'ref_images', width: 190,
         render: (_, r) => (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 180 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 180, justifyContent: 'center' }}>
               {(r.ref_images || []).map((url) => (
                 <div key={url} style={{ position: 'relative' }}>
                   <Image src={url} width={34} height={34} style={{ objectFit: 'cover', borderRadius: 4 }} />
@@ -867,10 +1076,72 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       base.push({
         title: '参数', dataIndex: 'ratio', width: 210,
         render: (_, r) => {
-          if (isImageDemand(r.demand_type)) return <span style={{ color: '#bfbfbf' }}>—</span>
+          if (isImageDemand(r.demand_type)) {
+            if (!isAplusDemand(r.demand_type)) return <span style={{ color: '#bfbfbf' }}>—</span>
+            const opts = r.gen_options || {}
+            const layoutIds = opts.aplus_layout_ids || []
+            const count = opts.aplus_image_count ?? 1
+            const noText = (opts.aplus_text_mode || 'no_text') !== 'with_text'
+            const save = (next: Partial<NonNullable<MediaRequestItem['gen_options']>>, ok: string) =>
+              patch(r.id, { gen_options: { ...opts, ...next } }, ok)
+            if (!editable) {
+              return (
+                <span style={{ fontSize: 12 }}>
+                  {layoutIds.length ? `版式×${layoutIds.length}` : `${count} 张`} · {noText ? '无文字' : '含文字'}
+                </span>
+              )
+            }
+            return (
+              <Space direction="vertical" size={4} style={{ width: 190 }}>
+                <div
+                  onClick={() => setAplusPickerItem(r)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                    padding: '6px 8px', borderRadius: 6, width: 190,
+                    border: `1px solid ${layoutIds.length ? '#91caff' : '#d9d9d9'}`,
+                    background: layoutIds.length ? '#f0f7ff' : '#fafafa',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 24, height: 24, borderRadius: 5, flex: '0 0 24px',
+                      background: '#e6f4ff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}
+                  >
+                    <AppstoreOutlined style={{ color: '#1677ff', fontSize: 13 }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                    <div style={{ fontSize: 12, lineHeight: 1.4 }}>选择版式</div>
+                    <div style={{ fontSize: 11, color: '#8c8c8c', lineHeight: 1.4 }}>
+                      {layoutIds.length ? `已选 ${layoutIds.length} 个 · 每种一张` : '未选 · 随机官方版式'}
+                    </div>
+                  </div>
+                  <RightOutlined style={{ fontSize: 10, color: '#8c8c8c' }} />
+                </div>
+                <Space size={6} align="center">
+                  <span style={{ fontSize: 12, color: '#8c8c8c' }}>张数</span>
+                  <InputNumber
+                    size="small"
+                    min={1}
+                    max={4}
+                    value={layoutIds.length || count}
+                    disabled={layoutIds.length > 0}
+                    onChange={(v) => save({ aplus_image_count: Number(v) || 1 }, '张数已保存')}
+                    style={{ width: 60 }}
+                  />
+                  <span style={{ fontSize: 12, color: '#8c8c8c' }}>无文字</span>
+                  <Switch
+                    size="small"
+                    checked={noText}
+                    onChange={(checked) => save({ aplus_text_mode: checked ? 'no_text' : 'with_text' }, '文字模式已保存')}
+                  />
+                </Space>
+              </Space>
+            )
+          }
           return editable
             ? (
-              <Space size={4} direction="vertical" style={{ width: 190 }}>
+              <Space size={4} direction="vertical" align="center" style={{ width: 190 }}>
                 <Space size={4}>
                   <Select size="small" value={r.ratio} style={{ width: 78 }} options={RATIOS.map((v) => ({ value: v, label: v }))}
                     onChange={(v) => patch(r.id, { ratio: v }, '比例已保存')} />
@@ -922,25 +1193,23 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       base.push({ title: '高清时间', dataIndex: 'hd_time', width: 150, render: (v) => v || '-' })
     }
 
-    if (['已生成', '待确认', '待高清', '待绑定', '待上传', '已上传'].includes(stage)) {
+    if (['已生成', '待确认', '待高清'].includes(stage)) {
       base.push({
-        title: '成片', dataIndex: 'media_url', width: 100,
-        render: (_, r) => r.media_url
-          ? <Button size="small" type="link" icon={<VideoCameraOutlined />} onClick={() => setVideoUrl(r.media_url!)}>查看</Button>
-          : <span style={{ color: '#bfbfbf' }}>—</span>,
+        title: '成片', dataIndex: 'media_url', width: 96,
+        render: (_, r) => mediaThumb(r.media_url, r),
       })
     }
 
+    // 待绑定/待上传/已上传只保留一列成片：视频优先生效高清成片，图片用原图
     if (['待绑定', '待上传', '已上传'].includes(stage)) {
       base.push({
-        title: '成片', dataIndex: 'hd_url', width: 100,
-        render: (_, r) => r.media_type === 'image' || isImageDemand(r.demand_type)
-          ? (r.media_url
-            ? <Image src={r.media_url} width={44} height={44} style={{ objectFit: 'cover', borderRadius: 6 }} />
-            : <span style={{ color: '#bfbfbf' }}>—</span>)
-          : r.hd_url
-            ? <Button size="small" type="link" icon={<VideoCameraOutlined />} onClick={() => setVideoUrl(r.hd_url!)}>查看</Button>
-            : <span style={{ color: '#bfbfbf' }}>{stage === '待绑定' ? '未高清' : '—'}</span>,
+        title: '成片', dataIndex: 'hd_url', width: 96,
+        render: (_, r) => {
+          const isImage = r.media_type === 'image' || isImageDemand(r.demand_type)
+          const url = isImage ? r.media_url : r.hd_url
+          if (url) return mediaThumb(url, r)
+          return <span style={{ color: '#bfbfbf' }}>{stage === '待绑定' ? '未高清' : '—'}</span>
+        },
       })
     }
 
@@ -964,9 +1233,6 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
             ? <Tag color="processing">{v}</Tag>
             : v ? <Tag color="success">{v}</Tag> : <Tag>待上传</Tag>,
       })
-      base.push({ title: '上传时间', dataIndex: 'upload_time', width: 150, render: (v) => v || '-' })
-    }
-    if (stage === '已上传') {
       base.push({ title: '上传时间', dataIndex: 'upload_time', width: 150, render: (v) => v || '-' })
     }
 
@@ -1080,6 +1346,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
     // 所有列名列头与单元格内容统一居中；操作列减小内边距保证按钮完整
     return base.map((col) => ({
       ...col,
+      align: 'center' as const,
       onHeaderCell: () => ({ style: { textAlign: 'center' as const } }),
       onCell: col.key === 'ops'
         ? () => ({ style: { textAlign: 'center' as const, padding: '4px 6px' } })
@@ -1165,7 +1432,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
       })
     }
     if (stage === '待上传' && canUpload) {
-      list.push({ label: '批量上传', type: 'primary', onClick: () => runBatch('批量上传', async (id) => { const r = await mediaRequestApi.upload(id); if (r.data?.success === false) throw new Error(r.data?.message) }) })
+      list.push({ label: '批量上传', type: 'primary', onClick: () => runBatchUpload() })
     }
     return list
   }, [stage, selectedRowKeys, canReport, canReview, canWork, canUpload, load, items])
@@ -1179,31 +1446,57 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   }
 
   return (
-    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div
+      style={{
+        // MainLayout：Header 56 + Content 上边距 16，页面根高度直接锁定到视口剩余高度，
+        // 不依赖父级百分比高度链（避免表格只占内容高度、下方留白）
+        padding: 24, height: 'calc(100vh - 72px)', minHeight: 0,
+        overflow: 'hidden', boxSizing: 'border-box',
+        display: 'flex', flexDirection: 'column', gap: 16,
+      }}
+    >
       <Card
         size="small"
+        style={{ flexShrink: 0 }}
         title={<Space><VideoCameraOutlined /> 媒体任务中心</Space>}
         extra={<span style={{ color: '#8c8c8c', fontSize: 12 }}>运营提报 → 主管审核 → 美工生成 → 成片审核 → 运营二次审核 → 高清 → 绑定产品 → 平台上传</span>}
       >
         <Alert type="info" showIcon message={STAGE_HINT[stage]} />
       </Card>
 
-      <Card size="small" bodyStyle={{ paddingTop: 8 }}>
+      <Card
+        size="small"
+        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+        styles={{
+          body: {
+            flex: 1, minHeight: 0, paddingTop: 8, overflow: 'hidden',
+            display: 'flex', flexDirection: 'column',
+          },
+        }}
+      >
         {/* key 随各阶段数量变化：计数加载后重渲染页签条，修复动态标签导致的下划线错位 */}
         <Tabs
           key={STAGES.map((s) => counts[s] || 0).join('-')}
+          style={{ flexShrink: 0 }}
           activeKey={stage}
-          onChange={(key) => { setStage(key as MediaStage); setPage(1) }}
+          onChange={(key) => {
+            if (key === stage) return
+            // 立即清空旧页签列表：新页签数据返回前不显示上一页签的行，避免列/计数错位
+            setItems([])
+            setTotal(0)
+            setStage(key as MediaStage)
+            setPage(1)
+          }}
           items={STAGES.map((s) => ({ key: s, label: `${s}${counts[s] ? ` (${counts[s]})` : ''}` }))}
         />
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 12, flexShrink: 0 }}>
           {stage === '待提交' && canReport && (
             <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate('normal')}>
               新增提报
             </Button>
           )}
-          {(stage === '待绑定' || stage === '待上传') && canReport && (
+          {stage === '待绑定' && canReport && (
             <Tooltip title="上传已有的视频/图片素材，跳过生成与高清，直接提交绑定审核">
               <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate('media')}>
                 新增提报（已有素材）
@@ -1241,32 +1534,41 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
           </div>
         </div>
 
-        <Table<MediaRequestItem>
-          rowKey="id"
-          size="small"
-          loading={loading}
-          columns={columns}
-          dataSource={items}
-          scroll={{ x: stage === '待提交' ? 1964 : 2194 }}
-          rowSelection={stage === '已上传' ? undefined : {
-            selectedRowKeys,
-            onChange: setSelectedRowKeys,
-            preserveSelectedRowKeys: true,
+        <div
+          ref={tableWrapRef}
+          className={`media-task-table${items.length ? '' : ' is-empty'}`}
+          style={{
+            flex: 1, minHeight: 0, overflow: 'hidden',
+            ...({ '--media-table-body-height': `${tableBodyHeight}px` } as React.CSSProperties),
           }}
-          pagination={{
-            current: page,
-            pageSize: PAGE_SIZE,
-            total,
-            showSizeChanger: false,
-            showTotal: (t) => `共 ${t} 条`,
-            onChange: (p) => setPage(p),
-          }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该阶段暂无单据" /> }}
-        />
+        >
+          <Table<MediaRequestItem>
+            rowKey="id"
+            size="small"
+            loading={loading}
+            columns={columns}
+            dataSource={items}
+            scroll={{ x: stage === '待提交' ? 1964 : 2194, y: tableBodyHeight }}
+            rowSelection={stage === '已上传' ? undefined : {
+              selectedRowKeys,
+              onChange: setSelectedRowKeys,
+              preserveSelectedRowKeys: true,
+            }}
+            pagination={{
+              current: page,
+              pageSize: PAGE_SIZE,
+              total,
+              showSizeChanger: false,
+              showTotal: (t) => `共 ${t} 条`,
+              onChange: (p) => setPage(p),
+            }}
+            locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该阶段暂无单据" /> }}
+          />
+        </div>
       </Card>
 
       {stage === '待绑定' && (
-        <div style={{ color: '#8c8c8c', fontSize: 12 }}>
+        <div style={{ color: '#8c8c8c', fontSize: 12, flexShrink: 0 }}>
           提示：绑定申请审核通过后视频将写入产品详情；提交后可直接在本页任务行上「通过 / 拒绝」。
         </div>
       )}
@@ -1731,6 +2033,24 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
         )}
         <div style={{ color: '#8c8c8c', fontSize: 12, marginTop: 8 }}>已选 {pickerSelected.length} 张 · 参考图最多 9 张</div>
       </Modal>
+
+      {/* A+ 版式选择：与 AI生图同款弹窗，仅用于选择，不提供上传/收藏/结构编辑 */}
+      <AIImageLayoutPicker
+        open={!!aplusPickerItem}
+        value={aplusPickerItem?.gen_options?.aplus_layout_ids || []}
+        limit={8}
+        selectionOnly
+        loadLayouts={loadAplusLayoutsForPicker}
+        onClose={() => setAplusPickerItem(null)}
+        onConfirm={(keys) => {
+          const item = aplusPickerItem
+          setAplusPickerItem(null)
+          if (item) {
+            const opts = item.gen_options || {}
+            patch(item.id, { gen_options: { ...opts, aplus_layout_ids: keys } }, '版式已保存')
+          }
+        }}
+      />
     </div>
   )
 }

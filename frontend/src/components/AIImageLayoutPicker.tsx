@@ -82,9 +82,21 @@ interface Props {
   limit: number
   onClose: () => void
   onConfirm: (keys: string[], items: AIImageLayout[]) => void
+  /** 自定义版式库加载器（无 ai_image:use 权限的入口，例如媒体任务中心） */
+  loadLayouts?: () => Promise<{
+    presets: AIImageLayout[]
+    mine: AIImageLayout[]
+    favorites: AIImageLayout[]
+    limit?: number
+    counts?: { official?: number; structural?: number; mine?: number }
+  }>
+  /** 仅选择：隐藏上传 / 收藏 / 删除 / 结构编辑，避免触发无权限接口 */
+  selectionOnly?: boolean
 }
 
-const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onConfirm }) => {
+const AIImageLayoutPicker: React.FC<Props> = ({
+  open, value, limit, onClose, onConfirm, loadLayouts, selectionOnly = false,
+}) => {
   const { token } = theme.useToken()
   const [loading, setLoading] = useState(false)
   const [tab, setTab] = useState('preset')
@@ -151,7 +163,9 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const { data } = await aiImageApi.getLayouts()
+      const data = loadLayouts
+        ? await loadLayouts()
+        : (await aiImageApi.getLayouts()).data
       setPresets(data.presets || [])
       setMine(data.mine || [])
       setFavorites(data.favorites || [])
@@ -162,7 +176,7 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
     } finally {
       setLoading(false)
     }
-  }, [limit])
+  }, [limit, loadLayouts])
 
   useEffect(() => {
     if (open) {
@@ -193,6 +207,7 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
 
   const toggleFavorite = async (item: AIImageLayout, e?: React.MouseEvent) => {
     e?.stopPropagation()
+    if (selectionOnly) return
     const next = !(item.favorited ?? item.favorite)
     try {
       await aiImageApi.favoriteLayout(item.key, next)
@@ -204,6 +219,7 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
 
   const removeMine = async (item: AIImageLayout, e: React.MouseEvent) => {
     e.stopPropagation()
+    if (selectionOnly) return
     try {
       await aiImageApi.deleteLayout(Number(item.id))
       setSelected(selected.filter((k) => k !== item.key))
@@ -287,11 +303,13 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
               <ZoomInOutlined style={{ color: token.colorText, fontSize: 13 }} />
             </span>
           </Tooltip>
-          <span onClick={(e) => toggleFavorite(item, e)} style={{ padding: 3, lineHeight: 1, background: token.colorBgContainer, borderRadius: 4 }}>
-            {fav ? <StarFilled style={{ color: token.colorWarning, fontSize: 13 }} />
-              : <StarOutlined style={{ color: token.colorTextTertiary, fontSize: 13 }} />}
-          </span>
-          {item.source === 'upload' && (
+          {!selectionOnly && (
+            <span onClick={(e) => toggleFavorite(item, e)} style={{ padding: 3, lineHeight: 1, background: token.colorBgContainer, borderRadius: 4 }}>
+              {fav ? <StarFilled style={{ color: token.colorWarning, fontSize: 13 }} />
+                : <StarOutlined style={{ color: token.colorTextTertiary, fontSize: 13 }} />}
+            </span>
+          )}
+          {!selectionOnly && item.source === 'upload' && (
             <span onClick={(e) => removeMine(item, e)} style={{ padding: 3, lineHeight: 1, background: token.colorBgContainer, borderRadius: 4 }}>
               <DeleteOutlined style={{ color: token.colorTextTertiary, fontSize: 13 }} />
             </span>
@@ -314,7 +332,7 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
     )
   }
 
-  const uploadBox = (
+  const uploadBox = selectionOnly ? null : (
     <Upload
       accept="image/*" showUploadList={false} beforeUpload={doUpload} disabled={uploading}
       style={{ display: 'block', width: '100%' }}
@@ -462,11 +480,13 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
         footer={
           preview ? (
             <Space>
-              <Button
-                onClick={() => { void toggleFavorite(preview) }}
-              >
-                {(preview.favorited ?? preview.favorite) ? '取消收藏' : '收藏'}
-              </Button>
+              {!selectionOnly && (
+                <Button
+                  onClick={() => { void toggleFavorite(preview) }}
+                >
+                  {(preview.favorited ?? preview.favorite) ? '取消收藏' : '收藏'}
+                </Button>
+              )}
               <Button
                 type={selected.includes(preview.key) ? 'default' : 'primary'}
                 onClick={() => { toggle(preview); setPreview(null) }}
@@ -518,7 +538,7 @@ const AIImageLayoutPicker: React.FC<Props> = ({ open, value, limit, onClose, onC
             })()}
           </div>
         )}
-        {preview && (
+        {preview && !selectionOnly && (
           <div style={{ marginTop: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
               <Space size={4}>

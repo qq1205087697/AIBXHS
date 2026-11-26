@@ -15,6 +15,7 @@ import {
   Input,
   Spin,
   Modal,
+  Breadcrumb,
 } from "antd";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
@@ -60,6 +61,8 @@ import {
   Layers,
   Trophy,
   ClipboardCheck,
+  ChevronDown,
+  X,
   Send,
   Wallet,
 } from "lucide-react";
@@ -73,7 +76,7 @@ import { notificationsApi } from "../../api";
 import dayjs from "dayjs";
 
 const { Header, Sider, Content } = Layout;
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 interface MainLayoutProps {
   children: React.ReactNode;
@@ -88,6 +91,60 @@ interface Notification {
   is_read: boolean;
   created_at: string;
 }
+
+interface PageTab {
+  path: string;
+  title: string;
+}
+
+const PAGE_TAB_STORAGE_KEY = "app-page-tabs";
+const HOME_TAB: PageTab = { path: "/", title: "首页" };
+
+// 不在侧边栏菜单中的页面：补充面包屑层级（不含首页）
+const EXTRA_PAGE_TRAILS: Record<string, string[]> = {
+  "/business-settings": ["系统设置", "业务设置"],
+  "/development/new": ["开发机器人", "添加新品"],
+  "/video-binding-review": ["媒体创作中心", "媒体任务中心", "媒体绑定审核"],
+  "/inventory/allocate-test": ["进销存", "分配发货测试"],
+};
+
+// 在菜单树中查找路径对应的标签链（含自身）
+const findMenuTrail = (items: any[], path: string): string[] | null => {
+  for (const item of items) {
+    if (item.key === path) return [String(item.label)];
+    if (item.children && item.children.length > 0) {
+      const childTrail = findMenuTrail(item.children, path);
+      if (childTrail) return [String(item.label), ...childTrail];
+    }
+  }
+  return null;
+};
+
+// 从 sessionStorage 恢复已打开的页签（刷新不丢失）
+const loadStoredTabs = (): PageTab[] => {
+  try {
+    const raw = sessionStorage.getItem(PAGE_TAB_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const tabs = parsed.filter(
+          (tab): tab is PageTab =>
+            !!tab &&
+            typeof tab.path === "string" &&
+            typeof tab.title === "string",
+        );
+        if (tabs.length > 0) {
+          return tabs.some((tab) => tab.path === HOME_TAB.path)
+            ? tabs
+            : [HOME_TAB, ...tabs];
+        }
+      }
+    }
+  } catch {
+    // 本地缓存损坏时忽略，回落到首页页签
+  }
+  return [HOME_TAB];
+};
 
 const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
@@ -108,6 +165,8 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const [selectedNotification, setSelectedNotification] =
     useState<Notification | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
+  // 面包屑页签：访问过的页面依次生成页签，刷新后从会话缓存恢复
+  const [pageTabs, setPageTabs] = useState<PageTab[]>(loadStoredTabs);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isAdmin = user?.role === "admin";
@@ -223,10 +282,23 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   // AI生图是媒体创作中心下的二级菜单（只有分组，本身无路由），A+套图/主副图是三级
   const imagePaths = ["/ai-image", "/ai-image-aplus", "/ai-image-main"];
   const mediaPaths = ["/ai-creation", ...imagePaths];
+  // 机器人中心下的各机器人页面（/development/new 也归属开发机器人）
+  const robotPaths = [
+    "/inventory",
+    "/review",
+    "/email",
+    "/rating-optimization",
+    "/ads",
+    "/product-selection",
+    "/development",
+  ];
+  const inRobotGroup = (path: string) =>
+    robotPaths.includes(path) || path.startsWith("/development/");
 
   const [openKeys, setOpenKeys] = useState<string[]>(() => {
     const currentPath = location.pathname;
     const keys: string[] = [];
+    if (inRobotGroup(currentPath)) keys.push("robot-group");
     if (inventoryPaths.includes(currentPath)) keys.push("inventory-group");
     if (systemPaths.includes(currentPath)) keys.push("system-group");
     if (mediaPaths.includes(currentPath)) keys.push("media-creation");
@@ -238,6 +310,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
     const currentPath = location.pathname;
     setOpenKeys((prev) => {
       const next = [...prev];
+      if (inRobotGroup(currentPath) && !next.includes("robot-group")) {
+        next.push("robot-group");
+      }
       if (
         inventoryPaths.includes(currentPath) &&
         !next.includes("inventory-group")
@@ -269,6 +344,36 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       icon: <ClipboardList size={20} />,
       label: "KPI",
     },
+    // 机器人中心：统一收纳各业务机器人页面
+    {
+      key: "robot-group",
+      icon: <Bot size={20} />,
+      label: "机器人中心",
+      shortLabel: "机器人",
+      children: [
+        ...(hasPermission("robot:inventory:view")
+          ? [{ key: "/inventory", icon: <Package size={18} />, label: "库存机器人" }]
+          : []),
+        ...(hasPermission("robot:review:view")
+          ? [{ key: "/review", icon: <MessageSquare size={18} />, label: "差评机器人" }]
+          : []),
+        ...(hasPermission("robot:email:view")
+          ? [{ key: "/email", icon: <Mail size={18} />, label: "邮件机器人" }]
+          : []),
+        ...(hasPermission("robot:rating:view")
+          ? [{ key: "/rating-optimization", icon: <Star size={18} />, label: "页面优化机器人" }]
+          : []),
+        ...(hasPermission("robot:ad:view")
+          ? [{ key: "/ads", icon: <Megaphone size={18} />, label: "广告机器人" }]
+          : []),
+        ...(hasPermission('product_selection:view')
+          ? [{ key: '/product-selection', icon: <Target size={18} />, label: '选品机器人' }]
+          : []),
+        ...(hasPermission("development:view")
+          ? [{ key: "/development", icon: <Rocket size={18} />, label: "开发机器人" }]
+          : []),
+      ] as any[],
+    },
     ...(hasPermission("chat:use")
       ? [
           {
@@ -279,62 +384,6 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           },
         ]
       : []),
-    ...(hasPermission("robot:inventory:view")
-      ? [
-          {
-            key: "/inventory",
-            icon: <Package size={20} />,
-            label: "库存机器人",
-            shortLabel: "库存",
-          },
-        ]
-      : []),
-    ...(hasPermission("robot:review:view")
-      ? [
-          {
-            key: "/review",
-            icon: <MessageSquare size={20} />,
-            label: "差评机器人",
-            shortLabel: "差评",
-          },
-        ]
-      : []),
-    ...(hasPermission("robot:email:view")
-      ? [
-          {
-            key: "/email",
-            icon: <Mail size={20} />,
-            label: "邮件机器人",
-            shortLabel: "邮件",
-          },
-        ]
-      : []),
-    ...(hasPermission("robot:rating:view")
-      ? [
-          {
-            key: "/rating-optimization",
-            icon: <Star size={20} />,
-            label: "页面优化机器人",
-            shortLabel: "页面优化",
-          },
-        ]
-      : []),
-    ...(hasPermission("robot:ad:view")
-      ? [
-          {
-            key: "/ads",
-            icon: <Megaphone size={20} />,
-            label: "广告机器人",
-            shortLabel: "广告",
-          },
-        ]
-      : []),     
-    ...(hasPermission('product_selection:view')
-      ? [{
-          key: '/product-selection',
-          icon: <Target size={20} />,
-          label: '选品机器人',
-        }] : []),
     ...(hasPermission('ai_video:use') || hasPermission('ai_image:use')
       ? [{
           key: 'media-creation',
@@ -386,14 +435,6 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               : []),
           ],
         }] : []),
-    ...(hasPermission("development:view")
-      ? [{
-          key: "/development",
-          icon: <Rocket size={20} />,
-          label: "开发机器人",
-          shortLabel: "开发",
-        }]
-      : []),
     ...(hasPermission("data_alert:view")
       ? [
           {
@@ -621,6 +662,64 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       '/video-upload': '媒体任务中心',
     };
     return pathMap[location.pathname] || "未知页面";
+  };
+
+  // 面包屑层级：首页 / 一级菜单 / 二级菜单 / 当前页
+  const breadcrumbLabels = (() => {
+    if (location.pathname === "/") return ["首页"];
+    const menuTrail = findMenuTrail(menuItems as any[], location.pathname);
+    if (menuTrail) return ["首页", ...menuTrail];
+    const extraTrail = EXTRA_PAGE_TRAILS[location.pathname];
+    if (extraTrail) return ["首页", ...extraTrail];
+    return ["首页", getPageTitle()];
+  })();
+  const currentPageTitle = breadcrumbLabels[breadcrumbLabels.length - 1];
+
+  // 进入新页面时自动追加页签
+  useEffect(() => {
+    setPageTabs((prev) =>
+      prev.some((tab) => tab.path === location.pathname)
+        ? prev
+        : [...prev, { path: location.pathname, title: currentPageTitle }],
+    );
+  }, [location.pathname, currentPageTitle]);
+
+  // 页签持久化：刷新/重新登录前保留已打开的页签
+  useEffect(() => {
+    sessionStorage.setItem(PAGE_TAB_STORAGE_KEY, JSON.stringify(pageTabs));
+  }, [pageTabs]);
+
+  // 页签过多出现横向滚动时，保证当前页签始终可见
+  const activeTabRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [location.pathname]);
+
+  const closeTab = (path: string) => {
+    if (path === HOME_TAB.path) return;
+    const index = pageTabs.findIndex((tab) => tab.path === path);
+    if (index === -1) return;
+    const nextTabs = pageTabs.filter((tab) => tab.path !== path);
+    setPageTabs(nextTabs);
+    // 关闭的是当前页时，切到相邻页签（优先右侧，没有则左侧）
+    if (location.pathname === path) {
+      const fallback = nextTabs[Math.min(index, nextTabs.length - 1)];
+      navigate(fallback ? fallback.path : HOME_TAB.path);
+    }
+  };
+
+  const closeOtherTabs = () => {
+    setPageTabs((prev) =>
+      prev.filter(
+        (tab) =>
+          tab.path === HOME_TAB.path || tab.path === location.pathname,
+      ),
+    );
+  };
+
+  const closeAllTabs = () => {
+    setPageTabs([HOME_TAB]);
+    if (location.pathname !== HOME_TAB.path) navigate(HOME_TAB.path);
   };
 
   const userMenuItems: any[] = [
@@ -867,7 +966,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
 
   return (
     <div style={{ height: "100vh", overflowX: "auto", overflowY: "hidden" }}>
-      <Layout style={{ minWidth: 1480, height: "100%" }}>
+      <Layout style={{ minWidth: 1510, height: "100%" }}>
         {/* 固定侧边栏：小屏也保持桌面布局，通过整体横向滚动查看 */}
         <Sider
           collapsible
@@ -960,6 +1059,7 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
             ) : (
               <Menu
                 mode="inline"
+                inlineIndent={16}
                 selectedKeys={[location.pathname.startsWith("/development") ? "/development" : location.pathname]}
                 openKeys={isMenuSearching ? searchedOpenKeys : openKeys}
                 onOpenChange={(keys) => setOpenKeys(keys)}
@@ -1033,17 +1133,33 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                 minWidth: 0,
               }}
             >
-              <Title
-                level={4}
-                style={{
-                  margin: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {getPageTitle()}
-              </Title>
+              <Breadcrumb
+                style={{ fontSize: 14 }}
+                items={breadcrumbLabels.map((label, index) => {
+                  const isLast = index === breadcrumbLabels.length - 1;
+                  return {
+                    icon: index === 0 ? <Home size={14} /> : undefined,
+                    title:
+                      index === 0 && !isLast ? (
+                        <a
+                          onClick={() => navigate("/")}
+                          style={{ color: "#999", cursor: "pointer" }}
+                        >
+                          首页
+                        </a>
+                      ) : (
+                        <span
+                          style={{
+                            color: isLast ? "#333" : "#999",
+                            fontWeight: isLast ? 600 : 400,
+                          }}
+                        >
+                          {label}
+                        </span>
+                      ),
+                  };
+                })}
+              />
             </div>
             <div
               style={{
@@ -1081,6 +1197,109 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
               </Dropdown>
             </div>
           </Header>
+          {/* 面包屑页签栏：访问过的页面生成页签，可切换、关闭 */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              padding: "5px 16px",
+              background: colorBgContainer,
+              borderBottom: "1px solid #f0f0f0",
+              flexShrink: 0,
+              minHeight: 40,
+              boxSizing: "border-box",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                flex: 1,
+                minWidth: 0,
+                overflowX: "auto",
+                overflowY: "hidden",
+              }}
+            >
+              {pageTabs.map((tab) => {
+                const active = tab.path === location.pathname;
+                const closable = tab.path !== HOME_TAB.path;
+                return (
+                  <div
+                    key={tab.path}
+                    ref={active ? activeTabRef : undefined}
+                    onClick={() => {
+                      if (!active) navigate(tab.path);
+                    }}
+                    title={tab.title}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      height: 28,
+                      padding: closable ? "0 4px 0 10px" : "0 10px",
+                      borderRadius: 6,
+                      border: `1px solid ${active ? currentTheme.primaryLight : "#e8e8e8"}`,
+                      background: active ? currentTheme.selectedBg : "#fff",
+                      color: active ? currentTheme.primary : "#666",
+                      fontSize: 13,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                      transition: "all 0.2s",
+                      userSelect: "none",
+                    }}
+                  >
+                    <span>{tab.title}</span>
+                    {closable && (
+                      <span
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(tab.path);
+                        }}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          width: 16,
+                          height: 16,
+                          borderRadius: 4,
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = "rgba(0,0,0,0.06)";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = "transparent";
+                        }}
+                      >
+                        <X size={12} />
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <Dropdown
+              placement="bottomRight"
+              menu={{
+                items: [
+                  { key: "closeOthers", label: "关闭其他页签" },
+                  { key: "closeAll", label: "关闭全部页签" },
+                ],
+                onClick: ({ key }) => {
+                  if (key === "closeOthers") closeOtherTabs();
+                  if (key === "closeAll") closeAllTabs();
+                },
+              }}
+            >
+              <Button
+                type="text"
+                size="small"
+                icon={<ChevronDown size={14} />}
+                style={{ flexShrink: 0, color: "#999", marginLeft: 8 }}
+              />
+            </Dropdown>
+          </div>
           <Content
             style={{
               margin: "16px 16px 0 16px",

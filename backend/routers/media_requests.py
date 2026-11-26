@@ -109,6 +109,7 @@ def _serialize(row) -> Dict[str, Any]:
     d["ref_images"] = _json(d.get("ref_images"), [])
     d["platform_items"] = _json(d.get("platform_items"), [])
     d["plan"] = _json(d.get("plan"), None)
+    d["gen_options"] = _json(d.get("gen_options"), {})
     d["upload_result"] = _json(d.get("upload_result"), None)
     for key in ("gen_time", "hd_time", "upload_time", "submit_time", "reviewer_at", "created_at", "updated_at"):
         d[key] = _fmt(d.get(key))
@@ -179,7 +180,7 @@ def _promote_queued_image_rows(db: Session, tenant_id: int) -> None:
     from services.ai_image_service import submit_image_task, AIImageError, AIImageBusyError
 
     queued = db.execute(text("""
-        SELECT id, gen_user_id, demand_type, description, prompt, ref_images, product_code, product_name
+        SELECT id, gen_user_id, demand_type, description, prompt, ref_images, product_code, product_name, gen_options
         FROM media_requests
         WHERE tenant_id = :tid AND stage = '待生成' AND gen_status = '排队中'
           AND gen_kind = 'image' AND gen_task_id IS NULL AND deleted_at IS NULL
@@ -234,6 +235,7 @@ def _promote_queued_image_rows(db: Session, tenant_id: int) -> None:
                 images=images,
                 product_code=r[6] or "", product_name=r[7] or "",
                 provider="local", **gen_params,
+                **_image_generate_options(demand_type, _json(r[8], {})),
             )
         except AIImageBusyError:
             continue  # 极端并发下被抢，下轮再试
@@ -264,9 +266,11 @@ def _sync_generation(db: Session, tenant_id: int) -> None:
     """
     _promote_queued_image_rows(db, tenant_id)
 
+    # 同时回看「失败」单据：AI生图页重试/任务恢复后同一 task 可能已完成，
+    # 若只盯「生成中」，媒体单据会一直停在失败状态。
     rows = db.execute(text("""
-        SELECT id, gen_task_id, gen_kind FROM media_requests
-        WHERE tenant_id = :tid AND gen_status = '生成中'
+        SELECT id, gen_task_id, gen_kind, gen_status FROM media_requests
+        WHERE tenant_id = :tid AND gen_status IN ('生成中', '失败')
           AND gen_task_id IS NOT NULL AND deleted_at IS NULL
     """), {"tid": tenant_id}).fetchall()
     if not rows:
@@ -309,14 +313,16 @@ def _sync_generation(db: Session, tenant_id: int) -> None:
                 _add_log(db, tenant_id, r[0], None, "生成成功", "AI 生图完成，自动流转「已生成」")
                 changed = True
             elif task.status in ("失败", "已取消"):
-                db.execute(text("""
-                    UPDATE media_requests
-                    SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
-                    WHERE id = :id AND tenant_id = :tid
-                """), {"id": r[0], "tid": tenant_id})
-                _add_log(db, tenant_id, r[0], None, "生成失败",
-                         (task.error_message or "AI 生图失败，可修改提示词后重新生图")[:1000])
-                changed = True
+                # 已经是失败状态的不重复写日志，避免每次列表刷新都刷一条失败记录
+                if (r[3] or "") != "失败":
+                    db.execute(text("""
+                        UPDATE media_requests
+                        SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
+                        WHERE id = :id AND tenant_id = :tid
+                    """), {"id": r[0], "tid": tenant_id})
+                    _add_log(db, tenant_id, r[0], None, "生成失败",
+                             (task.error_message or "AI 生图失败，可修改提示词后重新生图")[:1000])
+                    changed = True
             continue
 
         task = video_tasks.get(r[1])
@@ -332,14 +338,15 @@ def _sync_generation(db: Session, tenant_id: int) -> None:
             _add_log(db, tenant_id, r[0], None, "生成成功", "AI 视频生成完成，自动流转「已生成」")
             changed = True
         elif task.status == "失败":
-            db.execute(text("""
-                UPDATE media_requests
-                SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
-                WHERE id = :id AND tenant_id = :tid
-            """), {"id": r[0], "tid": tenant_id})
-            _add_log(db, tenant_id, r[0], None, "生成失败",
-                     (task.error_message or "AI 视频生成失败，可修改提示词后重新生成")[:1000])
-            changed = True
+            if (r[3] or "") != "失败":
+                db.execute(text("""
+                    UPDATE media_requests
+                    SET gen_status = '失败', gen_time = NOW(), updated_at = NOW()
+                    WHERE id = :id AND tenant_id = :tid
+                """), {"id": r[0], "tid": tenant_id})
+                _add_log(db, tenant_id, r[0], None, "生成失败",
+                         (task.error_message or "AI 视频生成失败，可修改提示词后重新生成")[:1000])
+                changed = True
     if changed:
         db.commit()
 
@@ -432,6 +439,8 @@ class MediaRequestUpdate(BaseModel):
     ratio: Optional[str] = None
     resolution: Optional[str] = None
     duration: Optional[int] = None
+    # 图片类需求生图参数（A+ 版式 / 张数 / 无文字模式），仅「待生成」阶段可改
+    gen_options: Optional[Dict[str, Any]] = None
 
 
 class ReviewBody(BaseModel):
@@ -554,6 +563,25 @@ async def list_product_skus(
             "entries": entries_by_product.get(pid, []),
         })
     return {"success": True, "data": {"items": items, "total": int(total)}}
+
+
+@router.get("/aplus-layouts")
+async def list_aplus_layouts(
+    current_user: User = Depends(READ_PERM),
+):
+    """待生成页 A+ 参数：版式库（官方推荐 / 我的上传 / 收藏）。"""
+    from services.ai_image_layout_service import LayoutError, list_layouts
+
+    try:
+        return {
+            "success": True,
+            "data": list_layouts(current_user.id, current_user.tenant_id or 0),
+        }
+    except LayoutError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("读取 A+ 版式库失败")
+        raise HTTPException(status_code=500, detail="读取 A+ 版式库失败")
 
 
 # ==================== 列表 / 详情 ====================
@@ -799,6 +827,30 @@ async def update_media_request(
             if body.duration not in DURATIONS:
                 raise HTTPException(status_code=400, detail="视频时长仅支持 5 / 10 / 15 秒")
             fields["duration"] = body.duration
+        if body.gen_options is not None:
+            if (row.demand_type or "") not in IMAGE_TYPES:
+                raise HTTPException(status_code=400, detail="只有图片类需求可以设置生图参数")
+            current = _json(row.gen_options, {})
+            incoming = body.gen_options
+            if "aplus_layout_ids" in incoming:
+                raw_ids = incoming.get("aplus_layout_ids") or []
+                if not isinstance(raw_ids, list):
+                    raise HTTPException(status_code=400, detail="A+ 版式参数格式不正确")
+                current["aplus_layout_ids"] = [
+                    str(x).strip() for x in raw_ids if str(x).strip()
+                ][:8]
+            if "aplus_image_count" in incoming:
+                try:
+                    count = int(incoming.get("aplus_image_count") or 1)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="A+ 生成张数格式不正确")
+                current["aplus_image_count"] = max(1, min(4, count))
+            if "aplus_text_mode" in incoming:
+                mode = str(incoming.get("aplus_text_mode") or "").strip()
+                if mode not in ("no_text", "with_text"):
+                    raise HTTPException(status_code=400, detail="A+ 文字模式仅支持 no_text / with_text")
+                current["aplus_text_mode"] = mode
+            fields["gen_options"] = _dumps(current)
     else:
         raise HTTPException(status_code=400, detail="当前阶段不可编辑")
 
@@ -1040,6 +1092,24 @@ IMAGE_GEN_PARAMS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _image_generate_options(demand_type: str, gen_options: Dict[str, Any]) -> Dict[str, Any]:
+    """解析图片生图参数：A+ 版式 / 张数 / 无文字模式；非 A+ 保持默认 1 张。"""
+    if not (IMAGE_GEN_PARAMS.get(demand_type) or {}).get("aplus_type"):
+        return {"image_count": 1, "layout_keys": [], "brand_settings": None}
+    layout_keys = [
+        str(x).strip() for x in (gen_options.get("aplus_layout_ids") or []) if str(x).strip()
+    ][:8]
+    try:
+        count = int(gen_options.get("aplus_image_count") or 1)
+    except (TypeError, ValueError):
+        count = 1
+    # 选了版式时张数由版式数量决定（与 AI生图页一致）
+    image_count = len(layout_keys) or max(1, min(4, count))
+    text_mode = str(gen_options.get("aplus_text_mode") or "no_text").strip()
+    brand_settings = {"text_mode": text_mode if text_mode in ("no_text", "with_text") else "no_text"}
+    return {"image_count": image_count, "layout_keys": layout_keys, "brand_settings": brand_settings}
+
+
 @router.post("/{request_id}/generate-image")
 async def generate_media_image(
     request_id: int,
@@ -1063,6 +1133,14 @@ async def generate_media_image(
     gen_params = IMAGE_GEN_PARAMS.get(demand_type)
     if not gen_params:
         raise HTTPException(status_code=400, detail=f"需求类型 {demand_type} 暂不支持生图")
+
+    # A+ 生图参数：版式（每种版式一张）、张数、无文字模式；主副图沿用默认 1 张
+    gen_options = _json(row.gen_options, {})
+    is_aplus = bool(gen_params.get("aplus_type"))
+    gen_kwargs = _image_generate_options(demand_type, gen_options)
+    image_count = int(gen_kwargs["image_count"])
+    layout_keys = gen_kwargs["layout_keys"]
+    brand_settings = gen_kwargs["brand_settings"]
 
     refs = [u for u in _json(row.ref_images, []) if u]
     if not refs:
@@ -1101,6 +1179,7 @@ async def generate_media_image(
                 product_name=row.product_name or "",
                 provider="local",
                 **gen_params,
+                **gen_kwargs,
             )
         except AIImageBusyError:
             _queue_row()
@@ -1119,8 +1198,12 @@ async def generate_media_image(
             media_url = NULL, upload_status = NULL, updated_at = NOW()
         WHERE id = :id AND tenant_id = :tid
     """), {"task_id": task.get("id"), "uid": current_user.id, "id": request_id, "tid": current_user.tenant_id})
+    log_note = f"{demand_type} · 1:1 · {image_count} 张"
+    if is_aplus:
+        log_note += f" · 版式 {len(layout_keys)} 个" if layout_keys else " · 随机版式"
+        log_note += " · 无文字" if (brand_settings or {}).get("text_mode") != "with_text" else " · 含文字"
     _add_log(db, current_user.tenant_id, request_id, current_user, "提交生图",
-             f"{demand_type} · 1:1 · 1 张（AI生图任务 #{task.get('id')}）")
+             f"{log_note}（AI生图任务 #{task.get('id')}）")
     db.commit()
     return {"success": True, "message": "已提交 AI 生图，完成后自动进入「已生成」",
             "data": _serialize(_load_row(db, current_user.tenant_id, request_id))}
@@ -1462,9 +1545,17 @@ async def bind_media_request(
 
 # ==================== 待上传 → 平台上传 ====================
 
+class UploadConfirmBody(BaseModel):
+    # 视频语言与目标站点语言不匹配的警告已确认
+    confirm_language_mismatch: bool = False
+    # 视频语言无法识别的提醒已确认
+    confirm_language_unknown: bool = False
+
+
 @router.post("/{request_id}/upload")
 async def upload_media_request(
     request_id: int,
+    body: Optional[UploadConfirmBody] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(UPLOAD_PERM),
 ):
@@ -1517,13 +1608,20 @@ async def upload_media_request(
         result = {"success": ok, "message": message, "data": stats}
     else:
         # 视频：走统一上传通道（Amazon 写视频多维表由 RPA 上传 / Ozon Seller API 直传）
-        body = SkuVideoUploadBody(
+        # 语言门禁：方案语言（或 AI 生成任务口播语言）与目标 SKU 站点语言不一致时，
+        # 统一上传通道会返回 409，前端确认后带 confirm_language_mismatch=true 重试。
+        plan = _json(row.plan, {}) or {}
+        sku_body = SkuVideoUploadBody(
             product_id=row.product_id,
             video_urls=[media_url],
             items=[SkuVideoUploadItem(**p) for p in pairs],
+            confirm_language_mismatch=bool(body and body.confirm_language_mismatch),
+            confirm_language_unknown=bool(body and body.confirm_language_unknown),
+            video_language=(plan.get("language") or None),
+            video_type=(row.video_type or plan.get("video_type") or None),
         )
         try:
-            result = await upload_sku_video_unified(body=body, db=db, current_user=current_user)
+            result = await upload_sku_video_unified(body=sku_body, db=db, current_user=current_user)
         except HTTPException:
             raise
         except Exception as e:
