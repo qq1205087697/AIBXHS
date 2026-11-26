@@ -12,6 +12,7 @@ import ReviewBot from "./pages/ReviewBot";
 import EmailBot from "./pages/EmailBot";
 import AdBotPage from "./pages/AdBot";
 import DataAlertBot from "./pages/DataAlertBot";
+import FinanceBot from "./pages/FinanceBot";
 import OrgManagement from "./pages/OrgManagement";
 import StoreManagement from "./pages/StoreManagement";
 import ProductManagement from "./pages/ProductManagement";
@@ -37,6 +38,7 @@ import AIImageStudio from './pages/AIImageStudio';
 import VideoUploadCenter from './pages/VideoUploadCenter';
 import GradePool from './pages/GradePool';
 import VideoBindingReview from './pages/VideoBindingReview';
+import PublishTask from './pages/PublishTask';
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
@@ -154,6 +156,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <DataAlertBot />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/finance"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <FinanceBot />
             </MainLayout>
           </ProtectedRoute>
         }
@@ -400,6 +412,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <MainLayout>
               <VideoUploadCenter />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/publish-task"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <PublishTask />
             </MainLayout>
           </ProtectedRoute>
         }

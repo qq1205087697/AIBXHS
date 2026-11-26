@@ -312,6 +312,18 @@ const ProductSelection: React.FC = () => {
     ro.observe(el)
     return () => ro.disconnect()
   }, [detailItem])
+  // 列表表格高度自适应容器：扣除表头与分页，避免底部被裁切
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const [tableScrollY, setTableScrollY] = useState(420)
+  useEffect(() => {
+    const el = tableWrapRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      setTableScrollY(Math.max(240, el.clientHeight - 120))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [loading])
   const [form] = Form.useForm()
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [typeOptions, setTypeOptions] = useState<{ label: string; value: string }[]>([])
@@ -570,7 +582,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const targetItems = items.filter(i => ids.includes(i.id))
+    const targetItems = selectedItems.filter(i => ids.includes(i.id))
     setAnalyzeModal({ open: true, mode: 'batch', targetIds: ids, targetItems })
   }
 
@@ -861,12 +873,13 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const emptyIds = items.filter(i => ids.includes(i.id) && !i.status).map(i => i.id)
+    const emptyItems = selectedItems.filter(i => ids.includes(i.id) && !i.status)
+    const emptyIds = emptyItems.map(i => i.id)
     if (emptyIds.length === 0) {
       message.warning('所选选品中没有可申请的产品')
       return
     }
-    const first = items.find(i => i.id === emptyIds[0])
+    const first = emptyItems[0]
     setApplyImgFiles(imgFilesFromItem(first))
     applyUploadSeqRef.current = 0
     setBatchStep(0)
@@ -1116,7 +1129,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const pendingItems = items.filter(i => ids.includes(i.id) && i.status === 'pending')
+    const pendingItems = selectedItems.filter(i => ids.includes(i.id) && i.status === 'pending')
     if (pendingItems.length === 0) {
       message.warning('所选选品中没有待审批状态的记录')
       return
@@ -1268,7 +1281,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const cancelIds = items.filter(i => ids.includes(i.id) && (i.status === 'pending' || i.status === 'grouping')).map(i => i.id)
+    const cancelIds = selectedItems.filter(i => ids.includes(i.id) && (i.status === 'pending' || i.status === 'grouping')).map(i => i.id)
     if (cancelIds.length === 0) {
       message.warning('所选选品中没有待审批或待拼团状态的记录')
       return
@@ -1292,7 +1305,7 @@ const ProductSelection: React.FC = () => {
       return
     }
     const ids = selectedRowKeys as number[]
-    const approvedIds = items.filter(i => ids.includes(i.id) && i.status === 'approved').map(i => i.id)
+    const approvedIds = selectedItems.filter(i => ids.includes(i.id) && i.status === 'approved').map(i => i.id)
     if (approvedIds.length === 0) {
       message.warning('所选选品中没有已审批状态的记录')
       return
@@ -2048,7 +2061,7 @@ const ProductSelection: React.FC = () => {
       key: 'actions',
       width: 160,
       fixed: 'right',
-      align: 'right',
+      align: 'center',
       render: (_: any, record: ProductSelectionItem) => {
         const canApprove = hasPermission('product_selection:approve')
         const dropdownItems: any[] = [
@@ -2132,7 +2145,7 @@ const ProductSelection: React.FC = () => {
           },
         })
         return (
-          <Space size="small" style={{ justifyContent: 'flex-end' }}>
+          <Space size="small" style={{ justifyContent: 'center' }}>
             <Button
               size="small"
               icon={<EyeOutlined />}
@@ -2157,8 +2170,19 @@ const ProductSelection: React.FC = () => {
     sortOrder: col.sorter && col.key === localSort.field ? localSort.order : col.sortOrder,
   })), [localSort, productTypeMaxWidth, useRealtimeRate, profitSettings])
 
+  // 跨页保留勾选：preserveSelectedRowKeys 让翻页/数据刷新不清除已选 keys；
+  // 勾选缓存记录已选项的完整数据（含非当前页），供批量操作按状态过滤。
+  // 缓存随每次渲染同步（当前页 items 一定最新），历史页条目以最近一次可见时的数据为准，
+  // 批量操作的最终状态校验仍由后端兜底
+  const selectedItemsCacheRef = useRef<Map<number, ProductSelectionItem>>(new Map())
+  items.forEach(i => selectedItemsCacheRef.current.set(i.id, i))
+  const selectedItems = (selectedRowKeys as number[])
+    .map(id => selectedItemsCacheRef.current.get(id))
+    .filter(Boolean) as ProductSelectionItem[]
+
   const rowSelection = {
     selectedRowKeys,
+    preserveSelectedRowKeys: true,
     onChange: (keys: React.Key[]) => setSelectedRowKeys(keys),
     getCheckboxProps: () => ({}),
   }
@@ -2205,7 +2229,7 @@ const ProductSelection: React.FC = () => {
           background: transparent !important;
         }
       `}</style>
-      <div style={{ padding: 24, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, position: 'relative' }}>
+      <div style={{ padding: '8px 16px 16px', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, position: 'relative' }}>
       <Tabs
         activeKey={activeTab}
         onChange={(key) => {
@@ -2221,18 +2245,31 @@ const ProductSelection: React.FC = () => {
           { key: 'approved', label: '已审批' },
           { key: 'rejected', label: '审批未通过' },
         ]}
-        style={{ marginBottom: 16, flexShrink: 0 }}
+        style={{ marginBottom: 8, flexShrink: 0 }}
+        tabBarStyle={{ marginBottom: 0 }}
       />
       <Card
-        loading={loading}
-        title={
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, width: '100%', padding: '4px 0' }}>
-            <Space wrap size={6}>
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+        styles={{ body: { flex: 1, padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
+        className="ps-card"
+      >
+        {/* 筛选工具栏：筛选与操作分区，避免挤在卡片标题里错乱换行 */}
+        <div
+          style={{
+            padding: '10px 16px',
+            borderBottom: '1px solid #f0f0f0',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
               <Input
                 placeholder="搜索ASIN、产品标题、关键词..."
                 prefix={<SearchOutlined />}
                 allowClear
-                style={{ width: 250 }}
+                style={{ width: 280 }}
                 value={searchText}
                 onChange={(e) => handleSearch(e.target.value)}
               />
@@ -2258,7 +2295,7 @@ const ProductSelection: React.FC = () => {
                 mode="multiple"
                 placeholder="状态"
                 allowClear
-                style={{ minWidth: 100 }}
+                style={{ minWidth: 160, maxWidth: 280 }}
                 value={statusFilter}
                 options={[
                   { label: '未申请', value: 'empty' },
@@ -2275,8 +2312,9 @@ const ProductSelection: React.FC = () => {
                 onChange={(v) => { setDateFilter(v as [dayjs.Dayjs, dayjs.Dayjs] | null); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
               <Button onClick={handleReset}>重置</Button>
-            </Space>
-            <Space wrap size={6} style={{ marginLeft: 'auto' }}>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+            <Space wrap size={8}>
               <Dropdown
                 menu={{
                   items: [
@@ -2284,14 +2322,14 @@ const ProductSelection: React.FC = () => {
                       key: 'batch-submit-approval',
                       icon: <FileTextOutlined />,
                       label: '批量申请选品',
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && !i.status),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => !i.status),
                       onClick: handleBatchSubmitForApproval,
                     },
                     hasPermission('product_selection:approve') && {
                       key: 'batch-approve',
                       icon: <CheckOutlined />,
                       label: '批量审批',
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'pending'),
                       onClick: handleBatchApprove,
                     },
                     hasPermission('product_selection:approve') && {
@@ -2299,7 +2337,7 @@ const ProductSelection: React.FC = () => {
                       icon: <UndoOutlined />,
                       label: '批量撤回审批',
                       danger: true,
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'approved'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'approved'),
                       onClick: handleBatchRevokeApproval,
                     },
                     hasPermission('product_selection:approve') && {
@@ -2307,9 +2345,9 @@ const ProductSelection: React.FC = () => {
                       icon: <CloseOutlined />,
                       label: '批量拒绝',
                       danger: true,
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'pending'),
                       onClick: () => openRejectModal(
-                        items.filter(i => selectedRowKeys.includes(i.id) && i.status === 'pending').map(i => i.id)
+                        selectedItems.filter(i => i.status === 'pending').map(i => i.id)
                       ),
                     },
                     {
@@ -2317,7 +2355,7 @@ const ProductSelection: React.FC = () => {
                       icon: <DeleteOutlined />,
                       label: '批量取消申请',
                       danger: true,
-                      disabled: selectedRowKeys.length === 0 || !items.some(i => selectedRowKeys.includes(i.id) && i.status === 'pending'),
+                      disabled: selectedRowKeys.length === 0 || !selectedItems.some(i => i.status === 'pending'),
                       onClick: handleBatchCancelApprovalApplication,
                     },
                     {
@@ -2407,25 +2445,26 @@ const ProductSelection: React.FC = () => {
                   </div>
                 }
               >
-                <QuestionCircleOutlined style={{ color: '#999', cursor: 'help', fontSize: 14 }} />
+                <Space size={4} style={{ color: '#8c8c8c', fontSize: 13, cursor: 'help' }}>
+                  <QuestionCircleOutlined style={{ fontSize: 14 }} />
+                  <span>{useRealtimeRate ? '实时汇率' : '抓取时汇率'}</span>
+                </Space>
               </Tooltip>
             </Space>
           </div>
-        }
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-        styles={{ body: { flex: 1, padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
-        className="ps-card"
-      >
-        <div style={{ flex: 1, padding: 16, overflow: 'hidden' }}>
+        </div>
+        <div ref={tableWrapRef} style={{ flex: 1, minHeight: 0, padding: '0 16px' }}>
           <Table
             className="ps-table"
+            size="middle"
+            loading={loading}
             rowSelection={rowSelection}
             dataSource={items}
             columns={columns}
             rowKey="id"
-            scroll={{ x: 3545, y: 'calc(100vh - 420px)' }}
-            onChange={(pagination, _, sorter) => {
-              setPagination(prev => ({ ...prev, current: pagination.current, pageSize: pagination.pageSize || 20 }))
+            scroll={{ x: 3545, y: tableScrollY }}
+            onChange={(pg, _, sorter) => {
+              setPagination(prev => ({ ...prev, current: pg.current, pageSize: pg.pageSize || 20 }))
               if (sorter && !Array.isArray(sorter) && sorter.columnKey) {
                 const newSort = {
                   field: sorter.columnKey as string,

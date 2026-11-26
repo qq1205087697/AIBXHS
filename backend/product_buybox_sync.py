@@ -80,8 +80,8 @@ def sync(rows):
 
                 cur.execute(
                     """
-                    INSERT INTO product_buybox (date, sku, product_name, store, status)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO product_buybox (date, sku, product_name, store, status, platform)
+                    VALUES (%s, %s, %s, %s, %s, 'Amazon')
                     """,
                     (date, sku, product_name, store, DEFAULT_STATUS),
                 )

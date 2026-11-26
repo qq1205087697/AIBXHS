@@ -122,6 +122,199 @@ async def get_store_group_tree(
         raise HTTPException(status_code=500, detail=f"获取店铺分组树失败: {str(e)}")
 
 
+@router.get("/platform-owners")
+async def get_platform_owners(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """返回平台列表及各平台店铺负责人映射（负责人=通过 user_stores 关联到该平台店铺的用户）"""
+    try:
+        p_rows = db.execute(text("""
+            SELECT DISTINCT s.platform
+            FROM stores s
+            WHERE s.tenant_id = :tenant_id AND s.deleted_at IS NULL
+              AND s.status = 'active' AND s.platform IS NOT NULL AND s.platform != ''
+            ORDER BY s.platform ASC
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+        platforms = [row[0] for row in p_rows]
+
+        o_rows = db.execute(text("""
+            SELECT DISTINCT s.platform, u.id AS uid,
+                   COALESCE(NULLIF(u.nickname, ''), u.username) AS uname
+            FROM user_stores us
+            INNER JOIN users u ON u.id = us.user_id
+                AND u.tenant_id = :tenant_id AND u.deleted_at IS NULL
+            INNER JOIN stores s ON s.id = us.store_id
+                AND s.deleted_at IS NULL AND s.status = 'active'
+            WHERE us.tenant_id = :tenant_id
+              AND s.platform IS NOT NULL AND s.platform != ''
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+
+        # 负责人可能管理多个平台的店铺（一对多），按 (platform, user_id) 去重
+        seen: set = set()
+        platform_owners: dict = {}
+        assigned_ids: set = set()
+        for platform, uid, uname in o_rows:
+            assigned_ids.add(uid)
+            if not uname or (platform, uid) in seen:
+                continue
+            seen.add((platform, uid))
+            owners = platform_owners.setdefault(platform, [])
+            owners.append({"id": uid, "name": uname})
+
+        # 未分配店铺的用户（不在 user_stores 中）：无平台归属，前端单独分组展示
+        ua_rows = db.execute(text("""
+            SELECT u.id,
+                   COALESCE(NULLIF(u.nickname, ''), u.username) AS uname
+            FROM users u
+            WHERE u.tenant_id = :tenant_id AND u.status = 'active'
+              AND u.deleted_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM user_stores us WHERE us.user_id = u.id)
+            ORDER BY u.id ASC
+        """), {"tenant_id": current_user.tenant_id}).fetchall()
+        unassigned_owners = [
+            {"id": uid, "name": uname}
+            for uid, uname in ua_rows
+            if uname and uid not in assigned_ids
+        ]
+
+        return {
+            "success": True,
+            "data": {
+                "platforms": platforms,
+                "platform_owners": {k: v for k, v in platform_owners.items()},
+                "unassigned_owners": unassigned_owners,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取平台负责人失败: {str(e)}")
+
+
+@router.get("/dashboard-options")
+async def get_dashboard_filter_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """数据驾驶舱筛选选项：平台列表 + 分组列表（分组名即驾驶舱店铺名，按平台聚合）
+    权限：admin 可见全部分组；非 admin 仅可见自己有权限店铺（user_stores）所在的分组
+    """
+    try:
+        # admin 判定（与 /stores/my-stores 一致）
+        is_admin = False
+        if current_user.role_id:
+            role_row = db.execute(
+                text("SELECT code FROM roles WHERE id = :role_id AND deleted_at IS NULL"),
+                {"role_id": current_user.role_id},
+            ).fetchone()
+            if role_row and role_row[0] == "admin":
+                is_admin = True
+        if not is_admin and current_user.username == "admin":
+            is_admin = True
+
+        # 平台列表：active 店铺的 distinct platform（admin 全量；非 admin 限定其可访问店铺）
+        if is_admin:
+            p_rows = db.execute(text("""
+                SELECT DISTINCT s.platform
+                FROM stores s
+                WHERE s.tenant_id = :tenant_id AND s.deleted_at IS NULL
+                  AND s.status = 'active' AND s.platform IS NOT NULL AND s.platform != ''
+                ORDER BY s.platform ASC
+            """), {"tenant_id": current_user.tenant_id}).fetchall()
+            # 分组列表：分组名聚合（同名分组合并，分组名为数据表 store 字段的值）
+            g_rows = db.execute(text("""
+                SELECT sg.name,
+                       GROUP_CONCAT(DISTINCT s.platform) AS platforms,
+                       COUNT(DISTINCT s.id) AS store_count
+                FROM store_groups sg
+                INNER JOIN stores s ON s.group_id = sg.id
+                    AND s.deleted_at IS NULL AND s.status = 'active'
+                    AND s.platform IS NOT NULL AND s.platform != ''
+                WHERE sg.tenant_id = :tenant_id AND sg.deleted_at IS NULL
+                GROUP BY sg.name
+                ORDER BY sg.name ASC
+            """), {"tenant_id": current_user.tenant_id}).fetchall()
+        else:
+            p_rows = db.execute(text("""
+                SELECT DISTINCT s.platform
+                FROM stores s
+                INNER JOIN user_stores us ON us.store_id = s.id
+                    AND us.user_id = :uid AND us.tenant_id = :tenant_id
+                WHERE s.tenant_id = :tenant_id AND s.deleted_at IS NULL
+                  AND s.status = 'active' AND s.platform IS NOT NULL AND s.platform != ''
+                ORDER BY s.platform ASC
+            """), {"uid": current_user.id, "tenant_id": current_user.tenant_id}).fetchall()
+            g_rows = db.execute(text("""
+                SELECT sg.name,
+                       GROUP_CONCAT(DISTINCT s.platform) AS platforms,
+                       COUNT(DISTINCT s.id) AS store_count
+                FROM store_groups sg
+                INNER JOIN stores s ON s.group_id = sg.id
+                    AND s.deleted_at IS NULL AND s.status = 'active'
+                    AND s.platform IS NOT NULL AND s.platform != ''
+                INNER JOIN user_stores us ON us.store_id = s.id
+                    AND us.user_id = :uid AND us.tenant_id = :tenant_id
+                WHERE sg.tenant_id = :tenant_id AND sg.deleted_at IS NULL
+                GROUP BY sg.name
+                ORDER BY sg.name ASC
+            """), {"uid": current_user.id, "tenant_id": current_user.tenant_id}).fetchall()
+
+        platforms = [row[0] for row in p_rows]
+        groups = [
+            {
+                "name": row[0],
+                "platforms": str(row[1] or ""),
+                "store_count": int(row[2] or 0),
+            }
+            for row in g_rows
+        ]
+
+        # 店铺列表：非 Amazon 平台的 active 店铺（Amazon 平台店铺筛选读分组，其他平台读店铺）
+        if is_admin:
+            s_rows = db.execute(text("""
+                SELECT s.id, s.shop_abbr, s.name, s.platform
+                FROM stores s
+                WHERE s.tenant_id = :tenant_id AND s.deleted_at IS NULL
+                  AND s.status = 'active'
+                  AND s.platform IS NOT NULL AND s.platform != ''
+                  AND LOWER(s.platform) != 'amazon'
+                ORDER BY s.shop_abbr ASC
+            """), {"tenant_id": current_user.tenant_id}).fetchall()
+        else:
+            s_rows = db.execute(text("""
+                SELECT s.id, s.shop_abbr, s.name, s.platform
+                FROM stores s
+                INNER JOIN user_stores us ON us.store_id = s.id
+                    AND us.user_id = :uid AND us.tenant_id = :tenant_id
+                WHERE s.tenant_id = :tenant_id AND s.deleted_at IS NULL
+                  AND s.status = 'active'
+                  AND s.platform IS NOT NULL AND s.platform != ''
+                  AND LOWER(s.platform) != 'amazon'
+                ORDER BY s.shop_abbr ASC
+            """), {"uid": current_user.id, "tenant_id": current_user.tenant_id}).fetchall()
+        stores = [
+            {
+                "id": int(row[0]),
+                "shop_abbr": row[1],
+                "name": row[2],
+                "platform": row[3],
+            }
+            for row in s_rows
+        ]
+
+        # 平台开放白名单：目前仅 Amazon 有数据，其余平台先隐藏，后续数据补充后放开
+        ENABLED_PLATFORMS = {"amazon"}
+        platforms = [p for p in platforms if p in ENABLED_PLATFORMS]
+        groups = [
+            g for g in groups
+            if any(p.strip() in ENABLED_PLATFORMS for p in g["platforms"].split(","))
+        ]
+        stores = [s for s in stores if s["platform"].lower() in ENABLED_PLATFORMS]
+
+        return {"success": True, "data": {"platforms": platforms, "groups": groups, "stores": stores}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取驾驶舱筛选选项失败: {str(e)}")
+
+
 @router.get("/my-group")
 async def get_my_store_group(
     db: Session = Depends(get_db),

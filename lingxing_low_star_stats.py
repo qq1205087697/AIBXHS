@@ -8,7 +8,6 @@
   python lingxing_low_star_stats.py run     # 全量分页拉取并统计，输出明细 CSV + 汇总
 """
 
-import csv
 import json
 import math
 import os
@@ -211,18 +210,6 @@ def run():
     with open(asin_path, "w", encoding="utf-8") as f:
         json.dump(asin_map, f, ensure_ascii=False, separators=(",", ":"))
 
-    # 明细 CSV（Excel 友好）
-    csv_path = os.path.join(OUT_DIR, "low_star_listings.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["sid", "店铺名", "seller_sku", "asin", "last_star", "price",
-                    "currency_code", "status", "item_name"])
-        for it in matched:
-            w.writerow([it.get("sid"), sid_names.get(str(it.get("sid")), ""), it.get("seller_sku"),
-                        it.get("asin"), it.get("last_star"), it.get("price"),
-                        it.get("currency_code"), it.get("status"),
-                        (it.get("item_name") or "")[:100]])
-
     # 汇总
     summary = {
         "统计时间": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -238,9 +225,41 @@ def run():
             for sid, v in sorted(by_store.items(), key=lambda kv: -kv[1]["低分listing数"])
         },
     }
-    json_path = os.path.join(OUT_DIR, "low_star_summary.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    # 低分统计写入数据库（按租户隔离）；接口不再读取 CSV/JSON 文件
+    tenant_id = int(os.getenv("LOW_STAR_TENANT_ID", "1"))
+    db_rows = [{
+        "sid": it.get("sid"),
+        "store_name": sid_names.get(str(it.get("sid")), ""),
+        "seller_sku": it.get("seller_sku"),
+        "asin": it.get("asin"),
+        "last_star": parse_star(it.get("last_star")),
+        "price": it.get("price"),
+        "currency_code": it.get("currency_code"),
+        "status": it.get("status"),
+        "item_name": it.get("item_name"),
+    } for it in matched]
+    try:
+        sys.path.insert(0, os.path.join(OUT_DIR, "backend"))
+        from datetime import datetime as _dt
+        from database.database import SessionLocal
+        from services.low_star_service import sync_low_star_snapshot
+
+        _db = SessionLocal()
+        try:
+            saved = sync_low_star_snapshot(
+                _db,
+                tenant_id=tenant_id,
+                rows=db_rows,
+                generated_at=_dt.strptime(summary["统计时间"], "%Y-%m-%d %H:%M:%S"),
+                threshold=str(THRESHOLD),
+                scanned_total=len(all_listings),
+            )
+        finally:
+            _db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"\n[低分统计] 写入数据库失败：{e}")
+        raise
 
     print("\n" + "=" * 60)
     print(f"扫描 Listing 总数: {len(all_listings)}（其中无评分 {no_star} 条）")
@@ -251,7 +270,8 @@ def run():
     print("\n低分最多的前 10 个店铺:")
     for sid, v in top:
         print(f"  sid={sid}  {v['店铺']}  低分listing {v['低分listing数']} / ASIN {v['低分ASIN数']}")
-    print(f"\n明细: {csv_path}\n汇总: {json_path}\nASIN评分映射: {asin_path}（{len(asin_map)} 个 ASIN）")
+    print(f"\n数据库写入: 租户 {tenant_id}，{saved} 条低分 Listing")
+    print(f"ASIN评分映射: {asin_path}（{len(asin_map)} 个 ASIN）")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Card, Row, Col, List, Button, Alert, Tag, Statistic, Divider, Space, Avatar, Modal, Checkbox, Pagination, message, Input, Select, DatePicker, Dropdown, MenuProps, Table, Tooltip, Spin, Image } from 'antd'
 import {
   MessageSquare,
@@ -12,6 +12,7 @@ import {
   Search,
   ChevronDown,
   Store,
+  RefreshCw,
 } from 'lucide-react'
 import { reviewsApi } from '../api'
 import dayjs, { Dayjs } from 'dayjs'
@@ -151,6 +152,7 @@ const ReviewBot: React.FC = () => {
   const [lowStarSid, setLowStarSid] = useState<number | undefined>(undefined)
   const [lowStarKeyword, setLowStarKeyword] = useState('')
   const [lowStarQuery, setLowStarQuery] = useState('')
+  const [lowStarUpdating, setLowStarUpdating] = useState(false)
 
   const [importanceStats, setImportanceStats] = useState({
     high: { unviewed: 0, viewed: 0 },
@@ -268,6 +270,37 @@ const ReviewBot: React.FC = () => {
       setLowStarLoading(false)
     }
   }
+
+  // 手动更新低分产品统计：后台执行8~10分钟，轮询状态完成后自动刷新列表
+  const lowStarPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const stopLowStarPoll = () => {
+    if (lowStarPollRef.current) { clearInterval(lowStarPollRef.current); lowStarPollRef.current = null }
+  }
+  const handleLowStarUpdate = async () => {
+    try {
+      setLowStarUpdating(true)
+      const res = await reviewsApi.runLowStarStats()
+      message.success(res.data?.message || '统计已启动，预计8~10分钟，完成后自动刷新')
+      stopLowStarPoll()
+      lowStarPollRef.current = setInterval(async () => {
+        try {
+          const s = await reviewsApi.getLowStarStatsStatus()
+          if (!s.data?.running) {
+            stopLowStarPoll()
+            setLowStarUpdating(false)
+            if (s.data?.error) message.error(`低分产品统计失败: ${s.data.error}`)
+            else { message.success('低分产品统计完成，数据已更新'); fetchLowStarListings(1, lowStarPageSize) }
+          }
+        } catch { /* 单次轮询失败忽略，下轮再试 */ }
+      }, 10000)
+    } catch (error: any) {
+      setLowStarUpdating(false)
+      message.error(error?.response?.data?.detail || '启动低分产品统计失败')
+    }
+  }
+  // 弹窗关闭/组件卸载时停止轮询
+  useEffect(() => { if (!lowStarOpen) stopLowStarPoll() }, [lowStarOpen])
+  useEffect(() => () => stopLowStarPoll(), [])
 
   const openLowStarModal = () => {
     setLowStarOpen(true)
@@ -1002,6 +1035,11 @@ const ReviewBot: React.FC = () => {
           </>
         )}
         <Space style={{ marginBottom: 12 }} wrap>
+          <Tooltip title="重新拉取领星全店铺 Listing 并统计（后台执行约8~10分钟，完成后自动刷新）">
+            <Button icon={<RefreshCw size={14} />} onClick={handleLowStarUpdate} loading={lowStarUpdating}>
+              更新数据
+            </Button>
+          </Tooltip>
           <Select
             value={lowStarSid}
             onChange={(value) => { setLowStarSid(value); setLowStarPage(1) }}

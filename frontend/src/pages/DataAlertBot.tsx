@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Card, Button, List, Typography, Space, Divider, Tag, message, Select, Table, DatePicker, Input, Modal, Tooltip, Form, InputNumber } from 'antd';
-import { SearchOutlined, UpOutlined, DownOutlined } from '@ant-design/icons';
+import { Card, Button, List, Typography, Space, Divider, Tag, message, Select, Table, DatePicker, Input, Modal, Tooltip, Form, InputNumber, Image, Empty, Spin } from 'antd';
+import { SearchOutlined, UpOutlined, DownOutlined, PictureOutlined } from '@ant-design/icons';
 import { AlertTriangle, RefreshCw, CheckCircle, XCircle, Store, Filter } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, ReferenceLine, ComposedChart, PieChart, Pie, Cell, Sector } from 'recharts';
 import * as XLSX from 'xlsx';
@@ -72,8 +72,30 @@ interface MyStore {
   id: number;
   shop_abbr: string;
   name: string;
-  site: string;
+  site: string;  // 驾驶舱场景存分组下的平台集合（逗号分隔）
 }
+
+// 平台筛选显示名映射（与产品管理的平台标签一致）
+const PLATFORM_LABELS: Record<string, string> = {
+  amazon: 'Amazon',
+  ebay: 'eBay',
+  walmart: 'Walmart',
+  shopify: 'Shopify',
+  shopee: 'Shopee',
+  lazada: 'Lazada',
+  tiktok: 'TikTok',
+  temu: 'Temu',
+  temu_half: 'Temu半托',
+  temu_full: 'Temu全托',
+  shein_half: 'SHEIN半托',
+  shein_full: 'SHEIN全托',
+  aliexpress_half: '速卖通半托',
+  aliexpress_full: '速卖通全托',
+  ozon: 'Ozon',
+  cdiscount: 'Cdiscount',
+  other: '其他',
+};
+const platformLabel = (p: string) => PLATFORM_LABELS[p] || PLATFORM_LABELS[p.toLowerCase()] || p;
 
 interface DateQueryRecord {
   date: string;
@@ -99,6 +121,8 @@ interface SkuSalesRecord {
   sku: string;
   totalSales: number;
   stores: StoreSalesDetail[];
+  imageUrl?: string;
+  productName?: string;
 }
 
 
@@ -146,11 +170,21 @@ interface DataWarningRecord {
   storage_fee?: number;
 }
 
+// data-warnings 响应缓存：同参数60秒内复用，KPI日期切换等场景避免重复请求
+const dataWarningsCache = new Map<string, { ts: number; data: DataWarningRecord[] }>();
+const DATA_WARNINGS_CACHE_TTL = 60 * 1000;
+
 const fetchDataWarnings = async (
   stores?: string[],
   startDate?: string,
-  endDate?: string
+  endDate?: string,
+  force?: boolean
 ): Promise<DataWarningRecord[]> => {
+  const cacheKey = `${(stores || []).join(',')}|${startDate || ''}|${endDate || ''}`;
+  const cached = dataWarningsCache.get(cacheKey);
+  if (!force && cached && Date.now() - cached.ts < DATA_WARNINGS_CACHE_TTL) {
+    return cached.data;
+  }
   try {
     const params: Record<string, any> = {};
     if (stores && stores.length > 0) {
@@ -162,11 +196,13 @@ const fetchDataWarnings = async (
     if (endDate) {
       params.end_date = endDate;
     }
-    
+
     console.log('fetchDataWarnings params:', params);
-    
+
     const response = await apiClient.get('/data-warnings', { params });
     if (response.data.success) {
+      if (dataWarningsCache.size > 30) dataWarningsCache.clear();
+      dataWarningsCache.set(cacheKey, { ts: Date.now(), data: response.data.data });
       return response.data.data;
     }
     return [];
@@ -180,6 +216,8 @@ interface TopSkuRecord {
   store: string;
   sku: string;
   total_sales: number;
+  product_name?: string;
+  image_url?: string;
 }
 
 interface SkuDailySalesRecord {
@@ -511,6 +549,66 @@ const fetchSkuDailySales = async (
   }
 };
 
+// 从SKU聚合记录展开为每日销量（同日期同SKU跨店铺合并），用于趋势折线图
+const toDailySalesRecords = (records: SkuSalesRecord[], skus?: Set<string>): SkuDailySalesRecord[] => {
+  const dailyMap = new Map<string, SkuDailySalesRecord>();
+  records.forEach(record => {
+    if (skus && !skus.has(record.sku)) return;
+    record.stores.forEach(s => {
+      const key = `${s.date}|${record.sku}`;
+      const existing = dailyMap.get(key);
+      if (existing) {
+        existing.total_sales += s.sales;
+      } else {
+        dailyMap.set(key, { date: s.date, sku: record.sku, total_sales: s.sales });
+      }
+    });
+  });
+  return Array.from(dailyMap.values());
+};
+
+// 销量对比展示数据：默认按SKU过滤；品名模式下按品名分组聚合（销量/店铺/展开明细合并）
+const buildSalesCompareDisplay = (rows: SkuSalesRecord[], byName: boolean, keyword: string) => {
+  const kw = keyword.trim().toLowerCase();
+  if (!byName) {
+    return rows.filter(r => r.sku.toLowerCase().includes(kw));
+  }
+  const groupMap = new Map<string, any>();
+  rows.forEach(r => {
+    const name = r.productName || r.sku; // 无品名时回退SKU
+    if (kw && !name.toLowerCase().includes(kw)) return;
+    if (!groupMap.has(name)) {
+      groupMap.set(name, {
+        sku: name, // 作为唯一键
+        productName: name,
+        imageUrl: r.imageUrl || '',
+        totalSales: 0,
+        stores: [] as any[],
+        skuList: [] as string[],
+      });
+    }
+    const agg = groupMap.get(name)!;
+    agg.totalSales += r.totalSales;
+    if (!agg.imageUrl && r.imageUrl) agg.imageUrl = r.imageUrl;
+    if (!agg.skuList.includes(r.sku)) agg.skuList.push(r.sku);
+    r.stores.forEach(s => {
+      const existing = agg.stores.find((x: any) => x.date === s.date && x.storeName === s.storeName);
+      if (existing) {
+        existing.sales += s.sales;
+      } else {
+        agg.stores.push({ ...s });
+      }
+    });
+  });
+  return Array.from(groupMap.values()).sort((a, b) => b.totalSales - a.totalSales);
+};
+
+// 销量对比扩展列取值：SKU模式直取，品名模式下对组内所有SKU求和
+const getSalesCompareExtraVal = (record: any, map: Record<string, number>, byName: boolean) => {
+  if (!byName) return map[record.sku] ?? 0;
+  return (record.skuList as string[]).reduce((sum, s) => sum + (map[s] ?? 0), 0);
+};
+
 const fetchThresholdSettings = async (): Promise<Record<string, { adRatio: number; storageRatio: number; acos: number; overallTrend: number; latestTrend: number }>> => {
   try {
     const response = await apiClient.get('/threshold-settings/stores');
@@ -576,6 +674,7 @@ const DataAlertBot: React.FC = () => {
   const [shipmentLoading, setShipmentLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(dayjs().format('YYYY-MM-DD HH:mm:ss'));
   const [myStores, setMyStores] = useState<MyStore[]>([]);
+  const [nonAmazonStores, setNonAmazonStores] = useState<MyStore[]>([]);  // 非Amazon平台的店铺（Amazon读分组，其他平台读店铺）
   const [regions, setRegions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   
@@ -603,6 +702,8 @@ const DataAlertBot: React.FC = () => {
   );
   // --- KPI快捷日期按钮：昨日/近7天/近30天/上月/自定义（参考首页消息搜索面板）
   const [kpiQuickKey, setKpiQuickKey] = useState<'yesterday' | '7d' | '30d' | 'lastMonth' | 'custom'>('yesterday');
+  // KPI 卡片加载中标识（日期切换/店铺切换重新拉数据时显示）
+  const [kpiLoading, setKpiLoading] = useState(false);
   const handleKpiQuick = (key: 'yesterday' | '7d' | '30d' | 'lastMonth' | 'custom') => {
     setKpiQuickKey(key);
     if (key === 'custom') return;
@@ -648,7 +749,20 @@ const DataAlertBot: React.FC = () => {
   const [dateQueryExpanded, setDateQueryExpanded] = useState<boolean>(false);
   
   // --- 对比模式状态
-  const [compareMode, setCompareMode] = useState<'store' | 'date'>('store');
+  const [compareMode, setCompareMode] = useState<'store' | 'date' | 'sales'>('sales');
+  // --- 币种筛选：读取汇率表币种名，默认人民币（KPI金额原值展示）
+  const [currencyOptions, setCurrencyOptions] = useState<{ currency_name: string; currency_code: string; rate: number }[]>([]);
+  const [selectedCurrency, setSelectedCurrency] = useState('人民币');
+  // --- 销量对比数据（复用详情弹窗数据缓存，SKU聚合粒度）
+  const [salesCompareData, setSalesCompareData] = useState<SkuSalesRecord[]>([]);
+  const [salesSearchValue, setSalesSearchValue] = useState('');
+  // 销量对比按品名聚合展示：false=按SKU（默认），true=按品名分组
+  const [salesCompareByName, setSalesCompareByName] = useState(false);
+  const [salesCompareLoading, setSalesCompareLoading] = useState(false);
+  // --- 销量对比的对比列：单日→上周同日+去年同日；日期跨度→当月累计+上月整月
+  const [salesCompareExtra, setSalesCompareExtra] = useState<{
+    label1: string; label2: string; map1: Record<string, number>; map2: Record<string, number>;
+  }>({ label1: '上周销量', label2: '去年销量', map1: {}, map2: {} });
 
   // --- 基数对比状态（用于GMV和广告占比的趋势判断）
   const [gmvBase, setGmvBase] = useState<string>('');
@@ -712,6 +826,8 @@ const DataAlertBot: React.FC = () => {
 
   // --- SKU销量波动趋势相关状态
   const [trendDateMode, setTrendDateMode] = useState<'recent7Days' | 'dateRange'>('recent7Days');
+  // 趋势图加载中：切换模式/日期时展示转圈，避免用旧数据重算出全0折线
+  const [trendLoading, setTrendLoading] = useState(false);
   const [selectedSkusForTrend, setSelectedSkusForTrend] = useState<string[]>([]);
   const [showAddSkuModal, setShowAddSkuModal] = useState(false);
   const [addSkuSearchValue, setAddSkuSearchValue] = useState('');
@@ -722,13 +838,20 @@ const DataAlertBot: React.FC = () => {
   }, [skuAnomalyRealData]);
 
   // --- 店铺列表（前置到此处，供后续 adRatioKpis / adRatioDailyChartData 等 useMemo 引用）
+  // Amazon 平台读分组（分组名即数据中的店铺名），非 Amazon 平台读店铺；id 加前缀防止分组序号与店铺ID冲突
   const STORES = useMemo(() => {
-    return myStores.map(s => ({
-      id: s.id.toString(),
+    const groupItems = myStores.map(s => ({
+      id: `g_${s.id}`,
       name: s.shop_abbr,
       region: s.site || '',
     }));
-  }, [myStores]);
+    const storeItems = nonAmazonStores.map(s => ({
+      id: `s_${s.id}`,
+      name: s.shop_abbr,
+      region: s.site || '',
+    }));
+    return [...groupItems, ...storeItems];
+  }, [myStores, nonAmazonStores]);
 
   // --- 实际用于显示的店铺ID列表（考虑"只显示"筛选）
   const displayStoreIds = useMemo(() => {
@@ -905,7 +1028,7 @@ const DataAlertBot: React.FC = () => {
     return thresholds[storeName] || null;
   };
 
-  // --- 购物车预警：加载 product_buybox 未处理数据（按筛选店铺）
+  // --- 购物车预警：加载 product_buybox 数据（未处理 + 已处理，按筛选店铺）
   const loadBuyboxRecords = useCallback(async () => {
     if (isTestMode) {
       // 测试模式：购物车预警使用固定测试数据（日期相对今天生成，保持新鲜）
@@ -920,7 +1043,13 @@ const DataAlertBot: React.FC = () => {
         { id: 9106, date: d(1), sku: 'TEST-CART-006', product_name: '厨房置物架 落地多层（测试数据）', store: 'A欧', status: null },
         { id: 9107, date: d(3), sku: 'TEST-CART-007', product_name: 'LED化妆镜 带灯可调光（测试数据）', store: 'B日', status: null },
       ];
+      const processedAll: BuyboxRecord[] = [
+        { id: 9301, date: d(4), sku: 'TEST-CART-101', product_name: '桌面加湿器 静音大容量（测试数据）', store: 'A加', status: '已处理' },
+        { id: 9302, date: d(5), sku: 'TEST-CART-102', product_name: '儿童保温饭盒 304不锈钢（测试数据）', store: 'A加', status: '已处理' },
+        { id: 9303, date: d(6), sku: 'TEST-CART-103', product_name: '折叠收纳箱 大号带轮（测试数据）', store: 'B美', status: '已处理' },
+      ];
       setBuyboxRecords(names.length > 0 ? all.filter(r => names.includes(r.store)) : all);
+      setProcessedBuyboxRecords(names.length > 0 ? processedAll.filter(r => names.includes(r.store)) : processedAll);
       return;
     }
     try {
@@ -928,11 +1057,16 @@ const DataAlertBot: React.FC = () => {
       const names = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
       const params: Record<string, any> = {};
       if (names.length > 0) params.stores = names.join(',');
-      const res = await apiClient.get('/product-buybox', { params });
-      setBuyboxRecords(res.data?.data || []);
+      const [pendingRes, processedRes] = await Promise.all([
+        apiClient.get('/product-buybox', { params }),
+        apiClient.get('/product-buybox', { params: { ...params, processed: true } }),
+      ]);
+      setBuyboxRecords(pendingRes.data?.data || []);
+      setProcessedBuyboxRecords(processedRes.data?.data || []);
     } catch (err) {
       console.error('加载购物车预警失败', err);
       setBuyboxRecords([]);
+      setProcessedBuyboxRecords([]);
     } finally {
       setBuyboxLoading(false);
     }
@@ -965,9 +1099,9 @@ const DataAlertBot: React.FC = () => {
     }
   }, [loadBuyboxRecords]);
 
-  // --- 购物车预警：按店铺分组展示（组头行 + 组内数据行）
-  const buyboxGroups = useMemo(() => {
-    const sorted = [...buyboxRecords].sort((a, b) =>
+  // --- 购物车预警：按店铺分组展示（组头行 + 组内数据行，待处理/已处理共用）
+  const groupBuyboxByStore = (records: BuyboxRecord[]): Array<[string, BuyboxRecord[]]> => {
+    const sorted = [...records].sort((a, b) =>
       a.store.localeCompare(b.store, 'zh') || b.date.localeCompare(a.date)
     );
     const map = new Map<string, BuyboxRecord[]>();
@@ -976,14 +1110,45 @@ const DataAlertBot: React.FC = () => {
       map.get(r.store)!.push(r);
     });
     return Array.from(map.entries());
-  }, [buyboxRecords]);
+  };
+  type BuyboxRow = BuyboxRecord & { isGroup?: boolean; isDateGroup?: boolean; count?: number; groupIds?: number[]; dateCount?: number; dateIds?: number[] };
 
-  type BuyboxRow = BuyboxRecord & { isGroup?: boolean; count?: number; groupIds?: number[] };
+  // --- 预警日期筛选（卡片右上角 RangePicker，默认全部）
+  const [buyboxDateRange, setBuyboxDateRange] = useState<[any, any] | null>(null);
+  const [shipmentDateRange, setShipmentDateRange] = useState<[any, any] | null>(null);
+  // --- 预警店铺筛选（卡片右上角多选，默认全部）
+  const [buyboxStoreFilter, setBuyboxStoreFilter] = useState<string[]>([]);
+  const [shipmentStoreFilter, setShipmentStoreFilter] = useState<string[]>([]);
+  // 按日期范围过滤记录（只选开始=该日期起，只选结束=该日期止）
+  const filterByDateRange = useCallback(<T extends { date: string }>(records: T[], range: [any, any] | null): T[] => {
+    if (!range || !range[0]) return records;
+    const start = range[0] ? range[0].format('YYYY-MM-DD') : '';
+    const end = range[1] ? range[1].format('YYYY-MM-DD') : '';
+    return records.filter(r => (!start || r.date >= start) && (!end || r.date <= end));
+  }, []);
+  // 按店铺名过滤记录（空=全部）
+  const filterByStores = useCallback(<T extends { store: string }>(records: T[], stores: string[]): T[] => {
+    if (!stores || stores.length === 0) return records;
+    const set = new Set(stores);
+    return records.filter(r => set.has(r.store));
+  }, []);
+  const filteredBuyboxRecords = useMemo(() => filterByStores(filterByDateRange(buyboxRecords, buyboxDateRange), buyboxStoreFilter), [buyboxRecords, buyboxDateRange, buyboxStoreFilter, filterByDateRange, filterByStores]);
+
+  const buyboxGroups = useMemo(() => groupBuyboxByStore(filteredBuyboxRecords), [filteredBuyboxRecords]);
+  // 待处理：店铺组头行 + 日期头行 + 数据行（与货件预警结构一致）
   const buyboxTableRows = useMemo<BuyboxRow[]>(() => {
     const rows: BuyboxRow[] = [];
     buyboxGroups.forEach(([store, recs]) => {
       rows.push({ ...recs[0], id: -rows.length - 1, isGroup: true, store, count: recs.length, groupIds: recs.map(r => r.id) });
-      recs.forEach(r => rows.push({ ...r, isGroup: false }));
+      const byDate = new Map<string, BuyboxRecord[]>();
+      recs.forEach(r => {
+        if (!byDate.has(r.date)) byDate.set(r.date, []);
+        byDate.get(r.date)!.push(r);
+      });
+      Array.from(byDate.entries()).forEach(([date, drecs]) => {
+        rows.push({ ...drecs[0], id: -rows.length - 1, isDateGroup: true, store, date, dateCount: drecs.length, dateIds: drecs.map(r => r.id) });
+        drecs.forEach(r => rows.push({ ...r, isGroup: false }));
+      });
     });
     return rows;
   }, [buyboxGroups]);
@@ -1005,31 +1170,88 @@ const DataAlertBot: React.FC = () => {
     }
   }, [loadBuyboxRecords]);
 
-  // --- 购物车预警：查看已处理记录
-  const [processedModalVisible, setProcessedModalVisible] = useState(false);
-  const [processedRecords, setProcessedRecords] = useState<BuyboxRecord[]>([]);
-  const [processedLoading, setProcessedLoading] = useState(false);
-
-  const openProcessedModal = useCallback(async () => {
-    setProcessedModalVisible(true);
+  // --- 购物车预警：处理某店铺某日期的全部记录（日期头行按钮）
+  const handleBuyboxProcessDate = useCallback(async (storeName: string, date: string, ids: number[]) => {
     if (isTestMode) {
-      // 测试模式：无已处理记录，直接展示空状态
-      setProcessedRecords([]);
+      setBuyboxRecords(prev => prev.filter(r => !ids.includes(r.id)));
+      message.success(`已处理 ${storeName} ${date} 的 ${ids.length} 条记录`);
       return;
     }
-    setProcessedLoading(true);
     try {
-      const res = await apiClient.get('/product-buybox', { params: { processed: true } });
-      setProcessedRecords(res.data?.data || []);
+      await apiClient.post('/product-buybox/process-batch', { ids });
+      message.success(`已处理 ${storeName} ${date} 的 ${ids.length} 条记录`);
+      loadBuyboxRecords();
     } catch (err) {
-      console.error('加载已处理记录失败', err);
-      setProcessedRecords([]);
-    } finally {
-      setProcessedLoading(false);
+      console.error('日期处理失败', err);
+      message.error('操作失败，请重试');
     }
-  }, []);
+  }, [loadBuyboxRecords]);
 
-  // --- 货件预警（product_shipment_notice，逻辑与购物车预警一致）
+  // --- 购物车预警：待处理 / 已处理 左右并排展示
+  const [processedBuyboxRecords, setProcessedBuyboxRecords] = useState<BuyboxRecord[]>([]);
+  // 已处理记录去重：同店铺同 SKU 只保留最新日期的一条
+  const dedupeBuyboxProcessed = (records: BuyboxRecord[]): BuyboxRecord[] => {
+    const latest = new Map<string, BuyboxRecord>();
+    records.forEach(r => {
+      const key = `${r.store}||${r.sku}`;
+      const cur = latest.get(key);
+      if (!cur || (r.date || '') > (cur.date || '')) latest.set(key, r);
+    });
+    return Array.from(latest.values());
+  };
+  // 店铺筛选下拉选项（待处理 + 已处理的店铺并集）
+  const buyboxStoreOptions = useMemo(() => {
+    const set = new Set<string>();
+    buyboxRecords.forEach(r => set.add(r.store));
+    processedBuyboxRecords.forEach(r => set.add(r.store));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'zh')).map(s => ({ label: s, value: s }));
+  }, [buyboxRecords, processedBuyboxRecords]);
+  const filteredProcessedBuyboxRecords = useMemo(() => filterByStores(filterByDateRange(processedBuyboxRecords, buyboxDateRange), buyboxStoreFilter), [processedBuyboxRecords, buyboxDateRange, buyboxStoreFilter, filterByDateRange, filterByStores]);
+  const processedBuyboxGroups = useMemo(() => groupBuyboxByStore(dedupeBuyboxProcessed(filteredProcessedBuyboxRecords)), [filteredProcessedBuyboxRecords]);
+  // 已处理：店铺组头行 + 数据行（去重后按店铺展示，不做日期分组）
+  const processedBuyboxTableRows = useMemo<BuyboxRow[]>(() => {
+    const rows: BuyboxRow[] = [];
+    processedBuyboxGroups.forEach(([store, recs]) => {
+      rows.push({ ...recs[0], id: -rows.length - 1, isGroup: true, store, count: recs.length, groupIds: recs.map(r => r.id) });
+      recs.forEach(r => rows.push({ ...r, isGroup: false }));
+    });
+    return rows;
+  }, [processedBuyboxGroups]);
+
+  // --- 购物车预警：已处理记录移回待处理（状态改为待处理，并在待处理页签展示）
+  const handleBuyboxRevert = useCallback(async (id: number) => {
+    if (isTestMode) {
+      // 测试模式：本地把该条从已处理移入待处理
+      const target = processedBuyboxRecords.find(r => r.id === id);
+      setProcessedBuyboxRecords(prev => prev.filter(r => r.id !== id));
+      if (target) setBuyboxRecords(prev => [{ ...target, status: '待处理' }, ...prev]);
+      message.success('已移回待处理');
+      return;
+    }
+    try {
+      await apiClient.post(`/product-buybox/${id}/unprocess`);
+      message.success('已移回待处理');
+      loadBuyboxRecords();
+    } catch (err) {
+      console.error('移回待处理失败', err);
+      message.error('操作失败，请重试');
+    }
+  }, [processedBuyboxRecords, loadBuyboxRecords]);
+
+  // 页签标签：文字 + 计数胶囊
+  const renderBuyboxTabLabel = (text: string, count: number, color: string) => (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      {text}
+      <span style={{
+        background: count > 0 ? color : '#f0f0f0',
+        color: count > 0 ? '#fff' : '#999',
+        borderRadius: 10, padding: '0 8px', fontSize: 12, lineHeight: '18px', fontWeight: 600,
+        minWidth: 18, textAlign: 'center',
+      }}>{count}</span>
+    </span>
+  );
+
+  // --- 货件预警（product_shipment_notice，待处理/已确认 左右并排，逻辑与购物车预警一致）
   const loadShipmentRecords = useCallback(async () => {
     if (isTestMode) {
       // 测试模式：货件预警使用固定测试数据
@@ -1044,7 +1266,13 @@ const DataAlertBot: React.FC = () => {
         { id: 9206, date: d(2), store: 'A欧', shipment_code: 'FBA15TEST03U002', status: null },
         { id: 9207, date: d(3), store: 'B日', shipment_code: 'FBA15TEST04U001', status: null },
       ];
+      const processedAll: ShipmentRecord[] = [
+        { id: 9401, date: d(4), store: 'A加', shipment_code: 'FBA15TEST01U009', status: '已确认' },
+        { id: 9402, date: d(5), store: 'A加', shipment_code: 'FBA15TEST01U010', status: '已确认' },
+        { id: 9403, date: d(6), store: 'B美', shipment_code: 'FBA15TEST02U009', status: '已确认' },
+      ];
       setShipmentRecords(names.length > 0 ? all.filter(r => names.includes(r.store)) : all);
+      setProcessedShipmentRecords(names.length > 0 ? processedAll.filter(r => names.includes(r.store)) : processedAll);
       return;
     }
     try {
@@ -1052,11 +1280,16 @@ const DataAlertBot: React.FC = () => {
       const names = STORES.filter(s => selectedStoreIds.includes(s.id)).map(s => s.name);
       const params: Record<string, any> = {};
       if (names.length > 0) params.stores = names.join(',');
-      const res = await apiClient.get('/product-shipment-notice', { params });
-      setShipmentRecords(res.data?.data || []);
+      const [pendingRes, processedRes] = await Promise.all([
+        apiClient.get('/product-shipment-notice', { params }),
+        apiClient.get('/product-shipment-notice', { params: { ...params, processed: true } }),
+      ]);
+      setShipmentRecords(pendingRes.data?.data || []);
+      setProcessedShipmentRecords(processedRes.data?.data || []);
     } catch (err) {
       console.error('加载货件预警失败', err);
       setShipmentRecords([]);
+      setProcessedShipmentRecords([]);
     } finally {
       setShipmentLoading(false);
     }
@@ -1072,8 +1305,9 @@ const DataAlertBot: React.FC = () => {
   }, [shipmentRecords]);
 
   // --- 货件预警：按店铺分组 + 店铺内按日期分组（组头行 + 日期头行 + 数据行）
+  const filteredShipmentRecords = useMemo(() => filterByStores(filterByDateRange(shipmentRecords, shipmentDateRange), shipmentStoreFilter), [shipmentRecords, shipmentDateRange, shipmentStoreFilter, filterByDateRange, filterByStores]);
   const shipmentGroups = useMemo(() => {
-    const sorted = [...shipmentRecords].sort((a, b) =>
+    const sorted = [...filteredShipmentRecords].sort((a, b) =>
       a.store.localeCompare(b.store, 'zh') || b.date.localeCompare(a.date)
     );
     const map = new Map<string, ShipmentRecord[]>();
@@ -1082,7 +1316,7 @@ const DataAlertBot: React.FC = () => {
       map.get(r.store)!.push(r);
     });
     return Array.from(map.entries());
-  }, [shipmentRecords]);
+  }, [filteredShipmentRecords]);
 
   type ShipmentRow = ShipmentRecord & { isGroup?: boolean; isDateGroup?: boolean; count?: number; groupIds?: number[]; dateCount?: number; dateIds?: number[] };
   const shipmentTableRows = useMemo<ShipmentRow[]>(() => {
@@ -1122,6 +1356,23 @@ const DataAlertBot: React.FC = () => {
     }
   }, [loadShipmentRecords]);
 
+  // --- 货件预警：确认单条记录（行悬停按钮，复用批量确认接口）
+  const handleShipmentConfirmOne = useCallback(async (id: number) => {
+    if (isTestMode) {
+      setShipmentRecords(prev => prev.filter(r => r.id !== id));
+      message.success('已确认该条记录');
+      return;
+    }
+    try {
+      await apiClient.post('/product-shipment-notice/process-batch', { ids: [id] });
+      message.success('已确认该条记录');
+      loadShipmentRecords();
+    } catch (err) {
+      console.error('确认失败', err);
+      message.error('操作失败，请重试');
+    }
+  }, [loadShipmentRecords]);
+
   // --- 货件预警：确认某店铺某日期的记录
   const handleShipmentConfirmDate = useCallback(async (storeName: string, date: string, ids: number[]) => {
     if (isTestMode) {
@@ -1139,29 +1390,57 @@ const DataAlertBot: React.FC = () => {
     }
   }, [loadShipmentRecords]);
 
-  // --- 货件预警：查看已确认记录
-  const [shipmentProcessedModalVisible, setShipmentProcessedModalVisible] = useState(false);
-  const [shipmentProcessedRecords, setShipmentProcessedRecords] = useState<ShipmentRecord[]>([]);
-  const [shipmentProcessedLoading, setShipmentProcessedLoading] = useState(false);
+  // --- 货件预警：待处理 / 已确认 左右并排展示（已确认不再走弹窗）
+  const [processedShipmentRecords, setProcessedShipmentRecords] = useState<ShipmentRecord[]>([]);
 
-  const openShipmentProcessedModal = useCallback(async () => {
-    setShipmentProcessedModalVisible(true);
+  // 已确认记录按店铺分组（组头行 + 数据行，与购物车预警已处理面板一致）
+  // 店铺筛选下拉选项（待处理 + 已确认的店铺并集）
+  const shipmentStoreOptions = useMemo(() => {
+    const set = new Set<string>();
+    shipmentRecords.forEach(r => set.add(r.store));
+    processedShipmentRecords.forEach(r => set.add(r.store));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'zh')).map(s => ({ label: s, value: s }));
+  }, [shipmentRecords, processedShipmentRecords]);
+  const filteredProcessedShipmentRecords = useMemo(() => filterByStores(filterByDateRange(processedShipmentRecords, shipmentDateRange), shipmentStoreFilter), [processedShipmentRecords, shipmentDateRange, shipmentStoreFilter, filterByDateRange, filterByStores]);
+  const processedShipmentGroups = useMemo(() => {
+    const sorted = [...filteredProcessedShipmentRecords].sort((a, b) =>
+      a.store.localeCompare(b.store, 'zh') || b.date.localeCompare(a.date)
+    );
+    const map = new Map<string, ShipmentRecord[]>();
+    sorted.forEach(r => {
+      if (!map.has(r.store)) map.set(r.store, []);
+      map.get(r.store)!.push(r);
+    });
+    return Array.from(map.entries());
+  }, [filteredProcessedShipmentRecords]);
+  const processedShipmentTableRows = useMemo<ShipmentRow[]>(() => {
+    const rows: ShipmentRow[] = [];
+    processedShipmentGroups.forEach(([store, recs]) => {
+      rows.push({ ...recs[0], id: -rows.length - 1, isGroup: true, store, count: recs.length, groupIds: recs.map(r => r.id) });
+      recs.forEach(r => rows.push({ ...r }));
+    });
+    return rows;
+  }, [processedShipmentGroups]);
+
+  // --- 货件预警：已确认记录移回待处理（状态改为待处理，并在待处理面板展示）
+  const handleShipmentRevert = useCallback(async (id: number) => {
     if (isTestMode) {
-      // 测试模式：无已确认记录，直接展示空状态
-      setShipmentProcessedRecords([]);
+      // 测试模式：本地把该条从已确认移入待处理
+      const target = processedShipmentRecords.find(r => r.id === id);
+      setProcessedShipmentRecords(prev => prev.filter(r => r.id !== id));
+      if (target) setShipmentRecords(prev => [{ ...target, status: '待处理' }, ...prev]);
+      message.success('已移回待处理');
       return;
     }
-    setShipmentProcessedLoading(true);
     try {
-      const res = await apiClient.get('/product-shipment-notice', { params: { processed: true } });
-      setShipmentProcessedRecords(res.data?.data || []);
+      await apiClient.post(`/product-shipment-notice/${id}/unprocess`);
+      message.success('已移回待处理');
+      loadShipmentRecords();
     } catch (err) {
-      console.error('加载已确认记录失败', err);
-      setShipmentProcessedRecords([]);
-    } finally {
-      setShipmentProcessedLoading(false);
+      console.error('移回待处理失败', err);
+      message.error('操作失败，请重试');
     }
-  }, []);
+  }, [processedShipmentRecords, loadShipmentRecords]);
 
 
   // SKU异动检测结果：最近3天有事件→按事件方向分组，否则按总体趋势方向分组（只保留观察池口径）
@@ -1246,6 +1525,8 @@ const DataAlertBot: React.FC = () => {
   }, [selectedStoreIds, skuSalesData, skuDailySalesData, trendDateMode, dateRange, selectedSkusForTrend]);
 
   // --- 从数据库获取完整的商品销量数据（用于弹窗）
+  // 详情数据缓存：key=店铺+日期范围，数据截至昨天，当天内复用避免重复请求
+  const skuDetailCacheRef = useRef<{ key: string; data: SkuSalesRecord[] } | null>(null);
   const fetchAllSkuSalesData = async (customStart?: string, customEnd?: string) => {
     if (displayStoreIds.length === 0) {
       console.log('fetchAllSkuSalesData: 未选择店铺');
@@ -1260,6 +1541,12 @@ const DataAlertBot: React.FC = () => {
       const yesterday = dayjs().subtract(1, 'day');
       const startDate = customStart || yesterday.clone().subtract(6, 'day').format('YYYY-MM-DD');
       const endDate = customEnd || yesterday.format('YYYY-MM-DD');
+
+      // 当日缓存：同店铺+同日期范围直接复用（数据截至昨天，当天内不变）
+      const cacheKey = storeNames.slice().sort().join(',') + '|' + startDate + '|' + endDate;
+      if (skuDetailCacheRef.current && skuDetailCacheRef.current.key === cacheKey) {
+        return skuDetailCacheRef.current.data;
+      }
 
       const response = await apiClient.get('/product-sales/', {
         params: {
@@ -1282,6 +1569,8 @@ const DataAlertBot: React.FC = () => {
               sku,
               totalSales: 0,
               stores: [],
+              imageUrl: record.image_url || '',
+              productName: record.product_name || '',
             };
           }
           
@@ -1302,6 +1591,7 @@ const DataAlertBot: React.FC = () => {
 
         const result = Object.values(aggregated);
         result.sort((a, b) => b.totalSales - a.totalSales);
+        skuDetailCacheRef.current = { key: cacheKey, data: result };
         return result;
       }
     } catch (error) {
@@ -1314,10 +1604,102 @@ const DataAlertBot: React.FC = () => {
   const [allSkuSalesData, setAllSkuSalesData] = useState<SkuSalesRecord[]>([]);
   const [skuModalMode, setSkuModalMode] = useState<'recent7' | 'dateRange'>('recent7');
   const [skuModalDateLabel, setSkuModalDateLabel] = useState('');
+  const [skuDetailLoading, setSkuDetailLoading] = useState(false);
   // --- TOP10卡片模式：近7天 / 筛选日期（点击"按筛选日期查看"后图表跟随切换）
   const [top10Mode, setTop10Mode] = useState<'recent7' | 'dateRange'>('recent7');
   const [top10DateData, setTop10DateData] = useState<SkuSalesRecord[]>([]);
   const [top10DateLabel, setTop10DateLabel] = useState('');
+  // --- Top排行销量下滑提醒（上月top20 / 去年同月top20 vs 本月对比）
+  const [topDeclineOpen, setTopDeclineOpen] = useState(false);
+  const [topDeclineMode, setTopDeclineMode] = useState<'lastMonth' | 'lastYear'>('lastMonth');
+  const [topDeclineLoading, setTopDeclineLoading] = useState(false);
+  const [topDeclineRows, setTopDeclineRows] = useState<Array<{
+    rank: number; sku: string; productName: string; imageUrl: string; stores: string[];
+    baseSales: number; baseAvg: number; curSales: number; curAvg: number; changePct: number | null;
+  }>>([]);
+  const [topDeclineLabels, setTopDeclineLabels] = useState<{ base: string; cur: string }>({ base: '上月', cur: '本月' });
+  // 品名维度TOP20（基期全部SKU先按品名聚合后取前20）
+  const [topDeclineNameRows, setTopDeclineNameRows] = useState<Array<{
+    rank: number; sku: string; productName: string; imageUrl: string; stores: string[];
+    baseSales: number; baseAvg: number; curSales: number; curAvg: number; changePct: number | null;
+  }>>([]);
+  // Top排行展示粒度：false=按SKU（默认），true=按品名（与销量对比一致）
+  const [topDeclineByName, setTopDeclineByName] = useState(false);
+
+  const loadTopDeclineData = useCallback(async (mode: 'lastMonth' | 'lastYear') => {
+    if (displayStoreIds.length === 0) { setTopDeclineRows([]); return; }
+    setTopDeclineLoading(true);
+    try {
+      const yesterday = dayjs().subtract(1, 'day');
+      // 本期：本月1日 ~ 昨天
+      const curStart = yesterday.startOf('month');
+      const curEnd = yesterday;
+      const curDays = curEnd.diff(curStart, 'day') + 1;
+      // 基期：上月整月 或 去年同月整月
+      const baseStart = mode === 'lastMonth' ? curStart.subtract(1, 'month') : curStart.subtract(1, 'year');
+      const baseEnd = baseStart.endOf('month');
+      const baseDays = baseEnd.diff(baseStart, 'day') + 1;
+
+      const [baseData, curData] = await Promise.all([
+        fetchAllSkuSalesData(baseStart.format('YYYY-MM-DD'), baseEnd.format('YYYY-MM-DD')),
+        fetchAllSkuSalesData(curStart.format('YYYY-MM-DD'), curEnd.format('YYYY-MM-DD')),
+      ]);
+      const curMap = new Map<string, number>();
+      curData.forEach(r => curMap.set(r.sku, r.totalSales));
+
+      const rows = baseData.slice(0, 20).map((r, i) => {
+        const curSales = curMap.get(r.sku) || 0;
+        const baseAvg = r.totalSales / baseDays;
+        const curAvg = curSales / curDays;
+        const changePct = baseAvg > 0 ? ((curAvg - baseAvg) / baseAvg) * 100 : null;
+        return { rank: i + 1, sku: r.sku, productName: r.productName || '', imageUrl: r.imageUrl || '', stores: Array.from(new Set((r.stores || []).map(s => s.storeName))), baseSales: r.totalSales, baseAvg, curSales, curAvg, changePct };
+      }).sort((a, b) => a.rank - b.rank);
+      setTopDeclineRows(rows);
+
+      // 品名维度：先聚合基期全部SKU → 品名销量降序 → 取TOP20，再对比本期
+      const nameAgg = new Map<string, { baseSales: number; imageUrl: string; count: number; stores: Set<string> }>();
+      baseData.forEach(r => {
+        const key = r.productName || r.sku;
+        const cur = nameAgg.get(key);
+        if (cur) {
+          cur.baseSales += r.totalSales;
+          cur.imageUrl = cur.imageUrl || r.imageUrl || '';
+          cur.count += 1;
+          (r.stores || []).forEach(s => cur.stores.add(s.storeName));
+        } else {
+          nameAgg.set(key, { baseSales: r.totalSales, imageUrl: r.imageUrl || '', count: 1, stores: new Set((r.stores || []).map(s => s.storeName)) });
+        }
+      });
+      const curNameMap = new Map<string, number>();
+      curData.forEach(r => {
+        const key = r.productName || r.sku;
+        curNameMap.set(key, (curNameMap.get(key) || 0) + r.totalSales);
+      });
+      const nameRows = Array.from(nameAgg.entries())
+        .sort((a, b) => b[1].baseSales - a[1].baseSales)
+        .slice(0, 20)
+        .map(([key, g], i) => {
+          const curSales = curNameMap.get(key) || 0;
+          const baseAvg = g.baseSales / baseDays;
+          const curAvg = curSales / curDays;
+          const changePct = baseAvg > 0 ? ((curAvg - baseAvg) / baseAvg) * 100 : null;
+          return { rank: i + 1, sku: key, productName: `共 ${g.count} 个SKU`, imageUrl: g.imageUrl, stores: Array.from(g.stores), baseSales: g.baseSales, baseAvg, curSales, curAvg, changePct };
+        });
+      setTopDeclineNameRows(nameRows);
+      setTopDeclineLabels({
+        base: mode === 'lastMonth' ? `上月(${baseStart.format('M月')})` : `去年同月(${baseStart.format('YYYY年M月')})`,
+        cur: `本月(${curStart.format('M-D')}~${curEnd.format('M-D')})`,
+      });
+    } catch (e) {
+      console.error('加载TOP排行下滑数据失败', e);
+      setTopDeclineRows([]);
+    } finally {
+      setTopDeclineLoading(false);
+    }
+  }, [displayStoreIds]);
+
+  // Top排行弹窗展示数据：SKU模式=SKU维度TOP20；品名模式=品名维度TOP20（先聚合后取前20）
+  const topDeclineDisplayRows = useMemo(() => (topDeclineByName ? topDeclineNameRows : topDeclineRows), [topDeclineByName, topDeclineNameRows, topDeclineRows]);
   // --- 右下角悬浮球：板块导航（悬停展开，点击定位，可拖拽移动）
   const [sectionNavOpen, setSectionNavOpen] = useState(false);
   const [ballPos, setBallPos] = useState<{ left: number; top: number } | null>(null);
@@ -1405,13 +1787,57 @@ const DataAlertBot: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // --- 销量对比：切到销量对比模式、店铺选择或筛选日期变化时加载数据（跟随店铺日期查询范围，未选日期默认近7天）
+  useEffect(() => {
+    if (compareMode !== 'sales' || displayStoreIds.length === 0) return;
+    const isDateRange = dateRange && dateRange[0] && dateRange[1];
+    const startDate = isDateRange ? dateRange![0].format('YYYY-MM-DD') : undefined;
+    const endDate = isDateRange ? dateRange![1].format('YYYY-MM-DD') : undefined;
+
+    // 对比列定义：单日→上周同日+去年同日销量；跨度→当月累计(月初~范围末日)+上月整月
+    const single = isDateRange ? dateRange![0].isSame(dateRange![1], 'day') : false;
+    const baseEnd = isDateRange ? dateRange![1] : dayjs().subtract(1, 'day');
+    let label1 = '', label2 = '', s1a = '', s1b = '', s2a = '', s2b = '';
+    if (single) {
+      const d = baseEnd;
+      const lw = d.subtract(7, 'day');
+      const ly = d.subtract(1, 'year');
+      label1 = `上周销量(${lw.format('MM-DD')})`;
+      label2 = '去年销量';
+      s1a = lw.format('YYYY-MM-DD'); s1b = s1a;
+      s2a = ly.format('YYYY-MM-DD'); s2b = s2a;
+    } else {
+      const lme = baseEnd.startOf('month').subtract(1, 'day');
+      label1 = `当月销量(${baseEnd.format('M')}月)`;
+      label2 = `上月销量(${lme.format('M')}月)`;
+      s1a = baseEnd.startOf('month').format('YYYY-MM-DD'); s1b = baseEnd.format('YYYY-MM-DD');
+      s2a = lme.startOf('month').format('YYYY-MM-DD'); s2b = lme.format('YYYY-MM-DD');
+    }
+
+    setSalesCompareLoading(true);
+    const toMap = (rows: SkuSalesRecord[]) => {
+      const m: Record<string, number> = {};
+      rows.forEach((r) => { m[r.sku] = r.totalSales; });
+      return m;
+    };
+    Promise.all([
+      fetchAllSkuSalesData(startDate, endDate),
+      fetchAllSkuSalesData(s1a, s1b),
+      fetchAllSkuSalesData(s2a, s2b),
+    ]).then(([mainRows, rows1, rows2]) => {
+      setSalesCompareData(mainRows);
+      setSalesCompareExtra({ label1, label2, map1: toMap(rows1), map2: toMap(rows2) });
+      setSalesCompareLoading(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareMode, displayStoreIds, dateRange]);
+
   // --- 打开详情弹窗：按当前TOP10模式获取数据（近7天 / 筛选日期）
+  // 立即打开弹窗显示 loading，数据就绪后填充（命中当日缓存则毫秒级展示）
   const handleOpenSkuModal = async () => {
     const isDateRange = top10Mode === 'dateRange' && dateRange && dateRange[0] && dateRange[1];
     const startDate = isDateRange ? dateRange![0].format('YYYY-MM-DD') : undefined;
     const endDate = isDateRange ? dateRange![1].format('YYYY-MM-DD') : undefined;
-    const data = await fetchAllSkuSalesData(startDate, endDate);
-    setAllSkuSalesData(data);
     setSkuModalMode(isDateRange ? 'dateRange' : 'recent7');
     if (isDateRange) {
       setSkuModalDateLabel(`${dateRange![0].format('MM-DD')} ~ ${dateRange![1].format('MM-DD')}`);
@@ -1420,6 +1846,13 @@ const DataAlertBot: React.FC = () => {
       setSkuModalDateLabel(`近 7 天 (${yesterday.clone().subtract(6, 'day').format('MM-DD')} ~ ${yesterday.format('MM-DD')})`);
     }
     setShowSkuModal(true);
+    setSkuDetailLoading(true);
+    try {
+      const data = await fetchAllSkuSalesData(startDate, endDate);
+      setAllSkuSalesData(data);
+    } finally {
+      setSkuDetailLoading(false);
+    }
   };
 
   // --- 切换TOP10为近7天模式（图表回退到近7天榜单，不打开弹窗）
@@ -1447,7 +1880,7 @@ const DataAlertBot: React.FC = () => {
         const skuMap = new Map<string, SkuSalesRecord>();
         topSkus.forEach(record => {
           if (!skuMap.has(record.sku)) {
-            skuMap.set(record.sku, { sku: record.sku, totalSales: 0, stores: [] });
+            skuMap.set(record.sku, { sku: record.sku, totalSales: 0, stores: [], imageUrl: record.image_url || '', productName: record.product_name || '' });
           }
           const skuRecord = skuMap.get(record.sku)!;
           skuRecord.totalSales += record.total_sales;
@@ -1537,17 +1970,17 @@ const DataAlertBot: React.FC = () => {
     return grouped;
   }, [dateQueryResults]);
 
-  // --- 国家筛选选项（添加"全部"选项）
+  // --- 平台筛选选项（添加"全部"选项，来自店铺管理 active 店铺的平台集合）
   const COUNTRIES = useMemo(() => {
     return ['全部', ...regions];
   }, [regions]);
 
-  // --- 根据筛选后的店铺列表
+  // --- 根据所选平台筛选分组列表（site 字段存分组下的平台集合，逗号分隔）
   const filteredStores = useMemo(() => {
     if (selectedRegion === '全部') {
       return STORES;
     }
-    return STORES.filter(s => s.region === selectedRegion);
+    return STORES.filter(s => (s.region || '').split(',').includes(selectedRegion));
   }, [selectedRegion, STORES]);
 
   // --- 计算聚合的指标
@@ -1619,6 +2052,8 @@ const DataAlertBot: React.FC = () => {
       fbaStockDate,
       grossProfit: totalGrossProfit,
       storageRatio: parseFloat(aggregateStorageRatio.toFixed(2)),
+      storageFee: totalStorageFee,
+      salesAmount: totalSalesAmount,
     };
   }, [STORES]);
 
@@ -1633,6 +2068,7 @@ const DataAlertBot: React.FC = () => {
     acos: { name: 'ACOS', unit: '%', format: (v: number) => fmtPct(v) },
     fbaTotalStock: { name: 'FBA总库存', unit: '件', format: (v: number) => v.toLocaleString() },
     grossProfit: { name: '毛利润', unit: '¥', format: (v: number) => v.toLocaleString() },
+    grossMargin: { name: '毛利率', unit: '%', format: (v: number) => fmtPct(v) },
     storageRatio: { name: '仓储占比', unit: '%', format: (v: number) => fmtPct(v) },
     avgOrderPrice: { name: '平均客单价', unit: '¥', format: (v: number) => v.toLocaleString() },
   };
@@ -1644,6 +2080,20 @@ const DataAlertBot: React.FC = () => {
     const end = kpiDateRange[1].format('MM-DD');
     return start === end ? start : `${start} ~ ${end}`;
   }, [kpiDateRange]);
+
+  // --- 币种换算（KPI金额展示）：选人民币原值展示，其他币种按汇率表折算
+  const activeCurrencyRate = useMemo(() => {
+    if (selectedCurrency === '人民币') return null;
+    return currencyOptions.find(c => c.currency_name === selectedCurrency) || null;
+  }, [selectedCurrency, currencyOptions]);
+  const currencySymbol = useMemo(() => {
+    if (!activeCurrencyRate) return '¥';
+    const symbolMap: Record<string, string> = { USD: '$', GBP: '£', CAD: 'CA$', AUD: 'A$', JPY: 'JP¥', EUR: '€' };
+    return symbolMap[activeCurrencyRate.currency_code.toUpperCase()] || activeCurrencyRate.currency_code;
+  }, [activeCurrencyRate]);
+  const convMoney = useCallback((v: number) => {
+    return activeCurrencyRate ? v / activeCurrencyRate.rate : v;
+  }, [activeCurrencyRate]);
 
   // --- 渲染KPI下方详细内容（各店铺该KPI数据）
   const renderKpiDetail = useCallback((kpiType: string) => {
@@ -1661,6 +2111,7 @@ const DataAlertBot: React.FC = () => {
     
     // 悬停时显示所有店铺数据（不限制）
     const isAvgOrderPrice = kpiType === 'avgOrderPrice';
+    const isGrossMargin = kpiType === 'grossMargin';
     const storeData = selectedStoreIds
       .filter(id => {
         const sd = storesData[id];
@@ -1676,6 +2127,8 @@ const DataAlertBot: React.FC = () => {
         // avgOrderPrice 是派生指标，不是 MetricData 原生字段，要单独算
         const rawValue = isAvgOrderPrice
           ? (metrics.orders > 0 ? metrics.gmv / metrics.orders : 0)
+          : isGrossMargin
+          ? (metrics.salesAmount > 0 ? (metrics.grossProfit / metrics.salesAmount) * 100 : 0)
           : (metrics[kpiType as keyof MetricData] as number);
         return {
           key: id,
@@ -1690,33 +2143,23 @@ const DataAlertBot: React.FC = () => {
         return b.value - a.value;
       });
 
+    // 仅点击卡片（pinnedKpi === kpiType）时弹出独立 Modal，悬停不再触发
+    if (pinnedKpi !== kpiType) return null;
+
     return (
-      <div style={{ 
-        position: 'absolute', 
-        top: '100%', 
-        left: 0, 
-        right: 0, 
-        marginTop: '8px', 
-        padding: '12px', 
-        backgroundColor: '#fff', 
-        borderRadius: '8px',
-        border: '1px solid #eee',
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        zIndex: 100,
-        width: '100%',
-        maxWidth: '100%',
-        boxSizing: 'border-box'
-      }}>
-        <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '10px', color: '#333' }}>
-          {info.name} - 各店铺{kpiDateLabel}数据
-        </div>
-        
+      <Modal
+        open
+        title={`${info.name} · 各店铺${kpiDateLabel}明细`}
+        onCancel={() => setPinnedKpi(null)}
+        footer={null}
+        width={storeData.length > 4 ? 560 : 420}
+      >
         {isAcos && isMultiStore && (
           <div style={{
             backgroundColor: '#fffbe6',
             border: '1px solid #ffe58f',
-            borderRadius: '4px',
-            padding: '8px',
+            borderRadius: '6px',
+            padding: '8px 12px',
             marginBottom: '10px',
             fontSize: '12px',
             color: '#d48806'
@@ -1724,41 +2167,87 @@ const DataAlertBot: React.FC = () => {
             💡 多店铺时ACOS卡片仅显示第一个选中店铺的数值，以下为各店铺明细。
           </div>
         )}
-        
-        <div style={{ maxHeight: '250px', overflow: 'auto' }}>
+
+        <div style={{ marginBottom: '10px' }}>
+          <Tag color="blue">{storeData.length} 家店铺</Tag>
+        </div>
+
+        {/* 店铺明细：小卡片网格 */}
+        <div style={{
+          maxHeight: '420px',
+          overflow: 'auto',
+          padding: '10px',
+          display: 'grid',
+          gridTemplateColumns: storeData.length > 4 ? 'repeat(2, 1fr)' : '1fr',
+          gap: '8px',
+          backgroundColor: '#fafafa',
+          borderRadius: '8px'
+        }}>
           {storeData.map((item, index) => {
             let displayValue = '';
             if (isAvgOrderPrice) {
-              // 平均客单价详情：显示每个店铺的平均客单价
-              displayValue = `¥${item.value.toLocaleString()}`;
+              // 平均客单价详情：显示每个店铺的平均客单价（按所选币种换算）
+              displayValue = `${currencySymbol}${Math.round(convMoney(item.value)).toLocaleString()}`;
             } else if (isFbaStock) {
-              displayValue = `${item.value.toLocaleString()}件 / ¥${item.fbaStockValue?.toLocaleString() || '0'}`;
+              displayValue = `${item.value.toLocaleString()}件 / ${currencySymbol}${Math.round(convMoney(item.fbaStockValue || 0)).toLocaleString()}`;
             } else if (info.unit === '¥') {
-              displayValue = `¥${item.value.toLocaleString()}`;
+              displayValue = `${currencySymbol}${Math.round(convMoney(item.value)).toLocaleString()}`;
             } else if (info.unit === '%') {
               displayValue = `${fmtPct(item.value)}%`;
             } else {
               displayValue = `${item.value.toLocaleString()} ${info.unit}`;
             }
-            
+
             return (
-              <div key={item.key} style={{ 
-                display: 'flex', 
-                justifyContent: 'space-between', 
-                alignItems: 'center', 
-                padding: '8px 0',
-                borderBottom: index < storeData.length - 1 ? '1px solid #f0f0f0' : 'none',
-                fontSize: '13px'
+              <div key={item.key} style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                backgroundColor: '#fff',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                border: '1px solid #f0f0f0'
               }}>
-                <span style={{ color: '#666' }}>{index + 1}. {item.storeName}</span>
-                <span style={{ fontWeight: 600, color: '#333' }}>{displayValue}</span>
+                {/* 排名徽标 */}
+                <div style={{
+                  width: '22px',
+                  height: '22px',
+                  borderRadius: '50%',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#fff',
+                  backgroundColor: index === 0 ? '#faad14' : index === 1 ? '#bfbfbf' : index === 2 ? '#d48806' : '#d9d9d9'
+                }}>
+                  {index + 1}
+                </div>
+                {/* 店铺名 + 数值 */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: '12px', color: '#8c8c8c', lineHeight: 1.4,
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                  }}>
+                    {item.storeName}
+                  </div>
+                  <div style={{ fontSize: '15px', fontWeight: 600, color: '#262626', lineHeight: 1.3 }}>
+                    {displayValue}
+                  </div>
+                  {!isFbaStock && kpiType !== 'orders' && (
+                    <div style={{ fontSize: '11px', color: '#bfbfbf', lineHeight: 1.4 }}>
+                      订单量 {item.orders.toLocaleString()}
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })}
         </div>
-      </div>
+      </Modal>
     );
-  }, [selectedStoreIds, storesData, STORES, kpiInfo, kpiDateLabel]);
+  }, [selectedStoreIds, storesData, STORES, kpiInfo, kpiDateLabel, currencySymbol, convMoney, pinnedKpi]);
 
   const currentMetrics = useMemo(() => {
     return aggregateMetrics(displayStoreIds, storesData);
@@ -2197,20 +2686,22 @@ const DataAlertBot: React.FC = () => {
   // 注意：该函数依赖 skuSalesData（随每次商品销量加载而变化），函数身份不稳定，
   // 禁止直接放入 effect 依赖数组，否则会形成「加载→identity变化→effect重跑→再加载」死循环
   const loadSkuTrendForDateRange = useCallback(async () => {
-    if (!dateRange || !dateRange[0] || !dateRange[1] || selectedStoreIds.length === 0) return;
-    const startDate = dateRange[0].format('YYYY-MM-DD');
-    const endDate = dateRange[1].format('YYYY-MM-DD');
+    setTrendLoading(true);
     try {
-      const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
-      const storeNames = selectedStores.map(s => s.name);
+      if (!dateRange || !dateRange[0] || !dateRange[1] || selectedStoreIds.length === 0) return;
+      const startDate = dateRange[0].format('YYYY-MM-DD');
+      const endDate = dateRange[1].format('YYYY-MM-DD');
       const skus = selectedSkusForTrend.length > 0
         ? selectedSkusForTrend
         : skuSalesData.slice(0, 10).map(s => s.sku);
       if (skus.length === 0) return;
-      const dailySales = await fetchSkuDailySales(storeNames, skus, startDate, endDate);
-      setSkuDailySalesData(dailySales);
+      // 复用当日缓存（与销量对比/详情弹窗共享），替代 sku-daily-sales 请求
+      const allRecords = await fetchAllSkuSalesData(startDate, endDate);
+      setSkuDailySalesData(toDailySalesRecords(allRecords, new Set(skus)));
     } catch (error) {
       console.error('按筛选日期刷新SKU趋势数据失败:', error);
+    } finally {
+      setTrendLoading(false);
     }
   }, [dateRange, selectedStoreIds, selectedSkusForTrend, skuSalesData]);
 
@@ -2234,9 +2725,13 @@ const DataAlertBot: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateRange]);
 
-  // --- 从后端API加载数据并更新storesData
-  const loadStoreDataFromAPI = useCallback(async () => {
-    if (selectedStoreIds.length === 0) return;
+  // --- 从后端API加载数据并更新storesData（force=true 时跳过缓存强制重新请求）
+  const loadStoreDataFromAPI = useCallback(async (force?: boolean) => {
+    setKpiLoading(true);
+    if (selectedStoreIds.length === 0) {
+      setKpiLoading(false);
+      return;
+    }
 
     // 如果是测试模式，使用测试数据
     if (isTestMode) {
@@ -2361,6 +2856,7 @@ const DataAlertBot: React.FC = () => {
       setLastUpdated(dayjs().format('YYYY-MM-DD HH:mm:ss'));
       console.log('tenant_id=6，使用测试KPI数据');
       setOrdersCompare(null);
+      setKpiLoading(false);
       return;
     }
 
@@ -2380,7 +2876,7 @@ const DataAlertBot: React.FC = () => {
       const storeNames = selectedStores.map(s => s.name);
 
       // 查询数据（默认30天窗口 + KPI范围扩展部分）
-      const warnings = await fetchDataWarnings(storeNames, fetchStart, fetchEnd);
+      const warnings = await fetchDataWarnings(storeNames, fetchStart, fetchEnd, force === true);
 
       if (warnings.length === 0) {
         console.warn(`未从数据库获取到${fetchStart}至${fetchEnd}的数据，按0处理`);
@@ -2545,8 +3041,8 @@ const DataAlertBot: React.FC = () => {
         const weekDate = kpiDateRange[0].subtract(7, 'day').format('YYYY-MM-DD');
         try {
           const [mRes, wRes] = await Promise.all([
-            fetchDataWarnings(storeNames, monthDate, monthDate),
-            fetchDataWarnings(storeNames, weekDate, weekDate),
+            fetchDataWarnings(storeNames, monthDate, monthDate, force === true),
+            fetchDataWarnings(storeNames, weekDate, weekDate, force === true),
           ]);
           const sumOrders = (rows: DataWarningRecord[]) => rows.reduce((s, w) => s + (w.order_count || 0), 0);
           setOrdersCompare({
@@ -2567,6 +3063,7 @@ const DataAlertBot: React.FC = () => {
       setStoresData(newStoresData);
       setLastUpdated(dayjs().format('YYYY-MM-DD HH:mm:ss'));
       message.success('数据已从数据库加载');
+      setKpiLoading(false);
     } catch (error) {
       console.error('从数据库加载数据失败:', error);
       message.error('从数据库加载数据失败，按0处理');
@@ -2602,6 +3099,7 @@ const DataAlertBot: React.FC = () => {
       });
       setStoresData(newStoresData);
       setLastUpdated(dayjs().format('YYYY-MM-DD HH:mm:ss'));
+      setKpiLoading(false);
     }
   }, [selectedStoreIds, STORES, isTestMode, kpiDateRange]);
 
@@ -2700,6 +3198,8 @@ const DataAlertBot: React.FC = () => {
             sku,
             totalSales: 0,
             stores: [],
+            imageUrl: record.image_url || '',
+            productName: record.product_name || '',
           });
         }
         const skuRecord = skuMap.get(sku)!;
@@ -2899,19 +3399,38 @@ const DataAlertBot: React.FC = () => {
         // 如果 tenant_id === 6，使用测试数据
         if (isTestMode) {
           const testStores: MyStore[] = [
-            { id: 1, shop_abbr: 'A加', name: 'A加店铺', site: '加拿大' },
-            { id: 2, shop_abbr: 'B美', name: 'B美店铺', site: '美国' },
-            { id: 3, shop_abbr: 'A欧', name: 'A欧店铺', site: '欧洲' },
-            { id: 4, shop_abbr: 'B日', name: 'B日店铺', site: '日本' },
+            { id: 1, shop_abbr: 'A加', name: 'A加分组', site: 'amazon' },
+            { id: 2, shop_abbr: 'B美', name: 'B美分组', site: 'amazon' },
+            { id: 3, shop_abbr: 'A欧', name: 'A欧分组', site: 'amazon' },
+            { id: 4, shop_abbr: 'B日', name: 'B日分组', site: 'amazon' },
           ];
           setMyStores(testStores);
-          setRegions(['加拿大', '美国', '欧洲', '日本']);
-          console.log('tenant_id=6，使用测试店铺数据:', testStores);
+          setNonAmazonStores([]);
+          setRegions(['amazon']);
+          console.log('tenant_id=6，使用测试分组数据:', testStores);
         } else {
-          const res = await apiClient.get('/stores/my-stores');
+          // 平台筛选读取店铺管理的所有平台；店铺筛选：Amazon 平台读分组，非 Amazon 平台读店铺
+          const res = await apiClient.get('/store-groups/dashboard-options');
           if (res.data.success) {
-            setMyStores(res.data.data.stores || []);
-            setRegions(res.data.data.regions || []);
+            const platforms: string[] = res.data.data.platforms || [];
+            const groups: Array<{ name: string; platforms: string; store_count: number }> = res.data.data.groups || [];
+            const stores: Array<{ id: number; shop_abbr: string; name: string; platform: string }> = res.data.data.stores || [];
+            const groupStores: MyStore[] = groups.map((g, i) => ({
+              id: i + 1,
+              shop_abbr: g.name,
+              name: g.name,
+              site: g.platforms,
+            }));
+            const plainStores: MyStore[] = stores.map(s => ({
+              id: s.id,
+              shop_abbr: s.shop_abbr,
+              name: s.name || s.shop_abbr,
+              site: s.platform,
+            }));
+            setMyStores(groupStores);
+            setNonAmazonStores(plainStores);
+            setRegions(platforms);
+            console.log(`加载分组筛选选项: 平台=${platforms.length}个, 分组=${groupStores.length}个, 非Amazon店铺=${plainStores.length}个`);
           }
         }
       } catch (error) {
@@ -2940,6 +3459,16 @@ const DataAlertBot: React.FC = () => {
       setSelectedStoreIds(STORES.map(s => s.id));
     }
   }, [STORES, isTestMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- 加载币种选项（汇率表 currency_rates）；打开下拉时若为空则重新拉取，避免挂载时请求失败后不再重试
+  const loadCurrencyOptions = useCallback(() => {
+    apiClient.get('/currency-rates/').then(res => {
+      if (res.data?.success && Array.isArray(res.data.data)) {
+        setCurrencyOptions(res.data.data);
+      }
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { loadCurrencyOptions(); }, [loadCurrencyOptions]);
 
   // --- 当 myStores 加载完成后从API获取数据和阈值设置
   useEffect(() => {
@@ -3056,18 +3585,18 @@ const DataAlertBot: React.FC = () => {
       {/* --- 筛选区 */}
       <Card bordered={false} style={{ marginBottom: '16px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-          <Space wrap size="middle" style={{ justifyContent: 'flex-start' }}>
+          <Space wrap size="small" style={{ justifyContent: 'flex-start' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Filter size={16} />
-              <span style={{ fontWeight: 500 }}>地区筛选:</span>
+              <span style={{ fontWeight: 500 }}>平台筛选:</span>
             </div>
             <Select
               value={selectedRegion}
               onChange={handleRegionChange}
-              style={{ width: 120 }}
+              style={{ width: 140 }}
             >
               {COUNTRIES.map(country => (
-                <Option key={country} value={country}>{country}</Option>
+                <Option key={country} value={country}>{country === '全部' ? '全部' : platformLabel(country)}</Option>
               ))}
             </Select>
 
@@ -3080,7 +3609,7 @@ const DataAlertBot: React.FC = () => {
               placeholder="请选择店铺"
               value={selectedStoreIds}
               onChange={setSelectedStoreIds}
-              style={{ minWidth: 250 }}
+              style={{ minWidth: 180 }}
               maxTagCount="responsive"
               maxTagPlaceholder={() => `已选${selectedStoreIds.length}个店铺`}
               showSearch
@@ -3116,7 +3645,7 @@ const DataAlertBot: React.FC = () => {
                   title={key === 'custom' ? '在右侧选择日期范围' : `查看${label}数据`}
                   style={{
                     fontSize: 12,
-                    padding: '3px 10px',
+                    padding: '3px 8px',
                     borderRadius: 12,
                     cursor: 'pointer',
                     whiteSpace: 'nowrap',
@@ -3131,16 +3660,26 @@ const DataAlertBot: React.FC = () => {
               <DatePicker.RangePicker
                 value={kpiDateRange}
                 onChange={(dates) => { setKpiQuickKey('custom'); setKpiDateRange(dates as [Dayjs | null, Dayjs | null] | null); }}
-                style={{ width: 280 }}
+                style={{ width: 220 }}
                 allowClear
                 disabledDate={(current) => current && current > dayjs().endOf('day')}
               />
             </div>
 
-            <Button type="primary" icon={<RefreshCw />} onClick={loadStoreDataFromAPI}>
+            <Button type="primary" icon={<RefreshCw />} onClick={() => loadStoreDataFromAPI(true)}>
               刷新数据
             </Button>
             <Button onClick={handleResetFilters}>重置</Button>
+            <Select
+              value={selectedCurrency}
+              onChange={setSelectedCurrency}
+              onDropdownVisibleChange={(open) => { if (open && currencyOptions.length === 0) loadCurrencyOptions(); }}
+              style={{ width: 96 }}
+              options={[
+                { value: '人民币', label: '人民币' },
+                ...currencyOptions.map(c => ({ value: c.currency_name, label: c.currency_name })),
+              ]}
+            />
           </Space>
           <Text type="secondary" style={{ fontSize: '14px' }}>
             最后更新: {lastUpdated}
@@ -3148,13 +3687,31 @@ const DataAlertBot: React.FC = () => {
         </div>
       </Card>
 
-      {/* --- 顶部 KPI 指标卡区 */}
+      {/* --- 顶部 KPI 指标卡区（加载中显示遮罩） */}
       <div id="section-kpi" style={{
         display: 'flex',
         flexWrap: 'nowrap',
         gap: '12px',
-        marginBottom: '16px'
+        marginBottom: '16px',
+        position: 'relative'
       }}>
+        {kpiLoading && (
+          <div style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(255, 255, 255, 0.65)',
+            borderRadius: 8
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Spin size="small" />
+              <span style={{ color: '#1890ff', fontSize: 13 }}>KPI 加载中…</span>
+            </div>
+          </div>
+        )}
         {/* 订单量 */}
         <div 
           style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
@@ -3242,7 +3799,7 @@ const DataAlertBot: React.FC = () => {
               <div>
                 <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>GMV</Text>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
-                  ¥{currentMetrics.gmv.toLocaleString()}
+                  {currencySymbol}{Math.round(convMoney(currentMetrics.gmv)).toLocaleString()}
                 </div>
                 <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>{kpiDateLabel}交易总额</Text>
               </div>
@@ -3276,7 +3833,7 @@ const DataAlertBot: React.FC = () => {
               <div>
                 <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>平均客单价</Text>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
-                  ¥{(currentMetrics.orders > 0 ? Math.round(currentMetrics.gmv / currentMetrics.orders) : 0).toLocaleString()}
+                  {currencySymbol}{(currentMetrics.orders > 0 ? Math.round(convMoney(currentMetrics.gmv) / currentMetrics.orders) : 0).toLocaleString()}
                 </div>
                 <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>GMV ÷ 订单量 · {kpiDateLabel}</Text>
               </div>
@@ -3310,13 +3867,47 @@ const DataAlertBot: React.FC = () => {
               <div>
                 <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>毛利润</Text>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
-                  ¥{currentMetrics.grossProfit.toLocaleString()}
+                  {currencySymbol}{Math.round(convMoney(currentMetrics.grossProfit)).toLocaleString()}
                 </div>
                 <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>{kpiDateLabel}毛利润</Text>
               </div>
             </div>
           </Card>
           {(hoveredKpi === 'grossProfit' || pinnedKpi === 'grossProfit') && renderKpiDetail('grossProfit')}
+        </div>
+
+        {/* 毛利率 */}
+        <div
+          style={{ flex: 1, minWidth: 0, position: 'relative', display: 'flex', alignItems: 'stretch' }}
+          data-kpi-card="grossMargin"
+          onClick={() => setPinnedKpi(prev => prev === 'grossMargin' ? null : 'grossMargin')}
+          onMouseEnter={() => setHoveredKpi('grossMargin')}
+          onMouseLeave={() => setHoveredKpi(null)}
+        >
+          <Card
+            size="small"
+            bordered
+            bodyStyle={{ padding: '8px 12px' }}
+            style={{
+              minHeight: 'auto',
+              height: '100%',
+              width: '100%',
+              minWidth: 0,
+              backgroundColor: '#f6ffed'
+            }}
+            hoverable
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', minHeight: '60px' }}>
+              <div>
+                <Text type="secondary" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>毛利率</Text>
+                <div style={{ fontSize: '24px', fontWeight: 600, color: currentMetrics.grossProfit < 0 ? '#ff4d4f' : '#333', lineHeight: 1.2 }}>
+                  {fmtPct(currentMetrics.salesAmount > 0 ? (currentMetrics.grossProfit / currentMetrics.salesAmount) * 100 : 0)}%
+                </div>
+                <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>毛利润/销售额</Text>
+              </div>
+            </div>
+          </Card>
+          {(hoveredKpi === 'grossMargin' || pinnedKpi === 'grossMargin') && renderKpiDetail('grossMargin')}
         </div>
 
         {/* 广告占比 */}
@@ -3471,7 +4062,7 @@ const DataAlertBot: React.FC = () => {
                   )}
                 </Text>
                 <div style={{ fontSize: '24px', fontWeight: 600, color: '#333', lineHeight: 1.2 }}>
-                  {currentMetrics.fbaTotalStock} / ¥{currentMetrics.fbaStockValue.toLocaleString()}
+                  {currentMetrics.fbaTotalStock} / {currencySymbol}{Math.round(convMoney(currentMetrics.fbaStockValue)).toLocaleString()}
                 </div>
                 <Text type="secondary" style={{ fontSize: '12px', lineHeight: 1.2 }}>
                   {kpiDateLabel.includes('~') ? '库存为快照值，不随日期范围累计' : 'FBA仓库总库存'}
@@ -3756,47 +4347,167 @@ const DataAlertBot: React.FC = () => {
         <Card
           id="section-compare"
           title={
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', gap: '16px', flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                <span>📊 数据对比</span>
-                <span style={{ color: '#999', fontSize: '12px' }}>基数对比:</span>
-                <Input 
-                  placeholder="GMV基数" 
-                  value={gmvBase}
-                  onChange={(e) => setGmvBase(e.target.value)}
-                  style={{ width: 120 }}
-                  prefix="¥"
-                />
-                <Input 
-                  placeholder="广告占比基数" 
-                  value={adRatioBase}
-                  onChange={(e) => setAdRatioBase(e.target.value)}
-                  style={{ width: 120 }}
-                  suffix="%"
-                />
-                <Input 
-                  placeholder="仓储占比基数" 
-                  value={storageRatioBase}
-                  onChange={(e) => setStorageRatioBase(e.target.value)}
-                  style={{ width: 120 }}
-                  suffix="%"
-                />
+            <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: '16px', flexWrap: 'wrap' }}>
+              <span>📊 数据对比</span>
+              <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                {compareMode === 'sales' && (
+                  <Input
+                    placeholder={salesCompareByName ? '搜索品名' : '搜索SKU'}
+                    prefix={<SearchOutlined />}
+                    value={salesSearchValue}
+                    onChange={(e) => setSalesSearchValue(e.target.value)}
+                    allowClear
+                    style={{ width: 180 }}
+                  />
+                )}
+                {compareMode === 'sales' && (
+                  <Button
+                    size="small"
+                    onClick={() => setSalesCompareByName(v => !v)}
+                  >
+                    {salesCompareByName ? 'SKU对比' : '品名对比'}
+                  </Button>
+                )}
+                {compareMode === 'sales' && (
+                  <span style={{ fontSize: 12, color: '#999' }}>
+                    统计范围：{(() => {
+                      const isDateRange = dateRange && dateRange[0] && dateRange[1];
+                      if (isDateRange) {
+                        return `${dateRange![0].format('MM-DD')} ~ ${dateRange![1].format('MM-DD')}（筛选日期）`;
+                      }
+                      const yesterday = dayjs().subtract(1, 'day');
+                      return `近 7 天（${yesterday.clone().subtract(6, 'day').format('MM-DD')} ~ ${yesterday.format('MM-DD')}）`;
+                    })()}
+                  </span>
+                )}
+                <Select
+                  value={compareMode}
+                  onChange={setCompareMode}
+                  style={{ width: 150 }}
+                >
+                  <Option value="sales">销量对比</Option>
+                  <Option value="store">店铺对比</Option>
+                  <Option value="date">日期对比</Option>
+                </Select>
               </div>
-              <Select
-                value={compareMode}
-                onChange={setCompareMode}
-                style={{ width: 150 }}
-              >
-                <Option value="store">店铺对比</Option>
-                <Option value="date">日期对比</Option>
-              </Select>
             </div>
           }
           bordered={false}
           style={{ flex: 1.5, minWidth: '500px', display: 'flex', flexDirection: 'column' }}
         >
-        {compareMode === 'store' ? (
+        {compareMode === 'sales' ? (
+          <div>
+            <Table
+              loading={salesCompareLoading}
+              columns={[
+                ...(salesCompareByName
+                  ? [{ title: '品名', dataIndex: 'productName', key: 'productName', width: 105 }]
+                  : [{ title: 'SKU', dataIndex: 'sku', key: 'sku', width: 105 }]),
+                { title: '图片', key: 'image', width: 105,
+                  render: (_: any, record: any) => (
+                    <div
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 6,
+                        backgroundColor: '#f5f5f5',
+                        border: record.imageUrl ? '1px solid #e8e8e8' : '1px dashed #d9d9d9',
+                        overflow: 'hidden',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      {record.imageUrl ? (
+                        <Image
+                          src={record.imageUrl}
+                          alt={record.sku}
+                          width={36}
+                          height={36}
+                          style={{ objectFit: 'cover' }}
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      ) : (
+                        <PictureOutlined style={{ color: '#bfbfbf', fontSize: 16 }} />
+                      )}
+                    </div>
+                  ),
+                },
+                ...(!salesCompareByName ? [{
+                  title: '品名', dataIndex: 'productName', key: 'productNameMid', width: 105,
+                  render: (text: string) => (
+                    <Tooltip title={text || '-'}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{text || '-'}</span>
+                    </Tooltip>
+                  ),
+                }] : []),
+                { title: '销量', dataIndex: 'totalSales', key: 'totalSales', width: 105,
+                  defaultSortOrder: 'descend' as const,
+                  sorter: (a: any, b: any) => a.totalSales - b.totalSales,
+                },
+                { title: salesCompareExtra.label1, key: 'extra1', width: 105,
+                  onHeaderCell: () => ({ style: { whiteSpace: 'nowrap', padding: '8px 4px' } }),
+                  sorter: (a: any, b: any) => getSalesCompareExtraVal(a, salesCompareExtra.map1, salesCompareByName) - getSalesCompareExtraVal(b, salesCompareExtra.map1, salesCompareByName),
+                  render: (_: any, record: any) => getSalesCompareExtraVal(record, salesCompareExtra.map1, salesCompareByName),
+                },
+                { title: salesCompareExtra.label2, key: 'extra2', width: 105,
+                  onHeaderCell: () => ({ style: { whiteSpace: 'nowrap', padding: '8px 4px' } }),
+                  sorter: (a: any, b: any) => getSalesCompareExtraVal(a, salesCompareExtra.map2, salesCompareByName) - getSalesCompareExtraVal(b, salesCompareExtra.map2, salesCompareByName),
+                  render: (_: any, record: any) => getSalesCompareExtraVal(record, salesCompareExtra.map2, salesCompareByName),
+                },
+                { title: '店铺', key: 'stores', width: 105,
+                  render: (_: any, record: any) => {
+                    const storeText = [...new Set(record.stores.map((s: any) => s.storeName))].join('、');
+                    return (
+                      <Tooltip title={storeText}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{storeText}</span>
+                      </Tooltip>
+                    );
+                  },
+                },
+                ...(salesCompareByName ? [{
+                  title: 'SKU', dataIndex: 'sku', key: 'sku', width: 105,
+                  render: (_: any, record: any) => {
+                    const skuText = (record.skuList || []).join('、');
+                    return (
+                      <Tooltip title={skuText}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{skuText}</span>
+                      </Tooltip>
+                    );
+                  },
+                }] : []),
+              ]}
+              dataSource={buildSalesCompareDisplay(salesCompareData, salesCompareByName, salesSearchValue)}
+              rowKey="sku"
+              expandable={{
+                expandedRowRender: (record: any) => {
+                  const daily = [...record.stores].sort((a: any, b: any) => {
+                    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+                    return a.storeName.localeCompare(b.storeName);
+                  });
+                  return (
+                    <Table
+                      columns={[
+                        { title: '日期', dataIndex: 'date', key: 'date', width: 130 },
+                        { title: '店铺', dataIndex: 'storeName', key: 'storeName', width: 180 },
+                        { title: '销量', dataIndex: 'sales', key: 'sales', width: 110 },
+                      ]}
+                      dataSource={daily}
+                      rowKey={(r: any) => `${r.date}-${r.storeName}`}
+                      pagination={false}
+                      size="small"
+                    />
+                  );
+                },
+              }}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
+              size="small"
+              tableLayout="fixed"
+            />
+          </div>
+        ) : compareMode === 'store' ? (
           <Table
+            loading={dateQueryLoading}
             columns={[
               { title: '店铺', dataIndex: 'name', key: 'name', width: 150 },
               { title: '订单量', dataIndex: 'orders', key: 'orders', width: 120,
@@ -3860,6 +4571,7 @@ const DataAlertBot: React.FC = () => {
           />
         ) : (
           <Table
+            loading={dateQueryLoading}
             columns={[
               { title: '店铺', dataIndex: 'storeName', key: 'storeName', width: 120 },
               { title: '日期', dataIndex: 'date', key: 'date', width: 120,
@@ -3969,11 +4681,11 @@ const DataAlertBot: React.FC = () => {
                   按筛选日期查看
                 </Button>
                 <Button
-                  type="primary"
                   size="small"
-                  onClick={handleOpenSkuModal}
+                  icon={<AlertTriangle />}
+                  onClick={() => { setTopDeclineOpen(true); loadTopDeclineData(topDeclineMode); }}
                 >
-                  查看详情
+                  Top排行
                 </Button>
               </div>
             </div>
@@ -4036,7 +4748,40 @@ const DataAlertBot: React.FC = () => {
                     >
                       {rank}
                     </div>
-                    
+
+                    <div
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 6,
+                        marginRight: 8,
+                        flexShrink: 0,
+                        backgroundColor: '#f5f5f5',
+                        border: record.imageUrl ? '1px solid #e8e8e8' : '1px dashed #d9d9d9',
+                        overflow: 'hidden',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      {record.imageUrl ? (
+                        <Tooltip title={record.productName || record.sku}>
+                          <Image
+                            src={record.imageUrl}
+                            alt={record.sku}
+                            width={36}
+                            height={36}
+                            style={{ objectFit: 'cover' }}
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                          />
+                        </Tooltip>
+                      ) : (
+                        <Tooltip title={record.productName || record.sku}>
+                          <PictureOutlined style={{ color: '#bfbfbf', fontSize: 16 }} />
+                        </Tooltip>
+                      )}
+                    </div>
+
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: '500', fontSize: '12px', marginBottom: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {record.sku}
@@ -4098,6 +4843,110 @@ const DataAlertBot: React.FC = () => {
             </div>
           </div>
         </Card>
+
+        {/* --- Top排行：SKU销量下滑提醒弹窗 */}
+        <Modal
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span>SKU销量下滑提醒 · TOP20排行</span>
+              <Button
+                size="small"
+                type={topDeclineMode === 'lastMonth' ? 'primary' : 'default'}
+                onClick={() => { setTopDeclineMode('lastMonth'); loadTopDeclineData('lastMonth'); }}
+              >
+                上月TOP20
+              </Button>
+              <Button
+                size="small"
+                type={topDeclineMode === 'lastYear' ? 'primary' : 'default'}
+                onClick={() => { setTopDeclineMode('lastYear'); loadTopDeclineData('lastYear'); }}
+              >
+                去年同月TOP20
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setTopDeclineByName(v => !v)}
+              >
+                {topDeclineByName ? 'SKU对比' : '品名对比'}
+              </Button>
+            </div>
+          }
+          open={topDeclineOpen}
+          onCancel={() => setTopDeclineOpen(false)}
+          footer={null}
+          width={760}
+        >
+          <div style={{ marginBottom: 8, fontSize: 12, color: '#8c8c8c' }}>
+            对比口径：日均销量（基期整月 vs 本月至今），红色行 + ↓ 为下滑提醒，按基期销量顺序排列。
+          </div>
+          <Table
+            rowKey={(r: any) => `${r.sku}-${r.rank ?? ''}`}
+            size="small"
+            loading={topDeclineLoading}
+            dataSource={topDeclineDisplayRows}
+            pagination={topDeclineDisplayRows.length > 10 ? { pageSize: 10, showSizeChanger: false } : false}
+            locale={{ emptyText: topDeclineMode === 'lastYear' ? '暂无去年同月销量数据' : '暂无数据' }}
+            onRow={(r: any) => ((r?.changePct ?? 0) < 0 ? { style: { background: '#fff1f0' } } : {})}
+            columns={[
+              {
+                title: '排名', key: 'rank', width: 56,
+                render: (_: any, __: any, idx: number) => <span style={{ fontWeight: 600, color: idx + 1 <= 3 ? '#fa8c16' : '#666' }}>{idx + 1}</span>,
+              },
+              {
+                title: topDeclineByName ? '品名' : 'SKU', dataIndex: 'sku', key: 'sku',
+                width: topDeclineByName ? 260 : undefined,
+                render: (_: any, r: any) => (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {!topDeclineByName && r.imageUrl ? (
+                      <Image src={r.imageUrl} width={32} height={32} style={{ objectFit: 'cover', borderRadius: 4 }} preview={false} />
+                    ) : null}
+                    <div style={{ minWidth: 0 }}>
+                      <Tooltip title={r.sku} placement="topLeft">
+                        <div style={{
+                          fontWeight: 600,
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                          maxWidth: topDeclineByName ? 230 : 160,
+                        }}>{r.sku}</div>
+                      </Tooltip>
+                      <div style={{ fontSize: 12, color: '#8c8c8c', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: topDeclineByName ? 230 : 160 }}>
+                        {topDeclineByName ? r.productName : (r.productName || '--')}
+                      </div>
+                    </div>
+                  </div>
+                ),
+              },
+              {
+                title: '店铺', key: 'stores', width: 130,
+                render: (_: any, r: any) => {
+                  const names: string[] = r.stores || [];
+                  if (names.length === 0) return '--';
+                  const text = names.length > 2 ? `${names.slice(0, 2).join('、')} 等${names.length}店` : names.join('、');
+                  return (
+                    <Tooltip title={names.join('、')}>
+                      <span style={{ fontSize: 12, color: '#595959' }}>{text}</span>
+                    </Tooltip>
+                  );
+                },
+              },
+              { title: `${topDeclineLabels.base}销量`, dataIndex: 'baseSales', key: 'baseSales', width: 100, align: 'center', render: (v: number) => v.toLocaleString() },
+              { title: `${topDeclineLabels.base}日均`, dataIndex: 'baseAvg', key: 'baseAvg', width: 90, align: 'center', render: (v: number) => v.toFixed(1) },
+              { title: `${topDeclineLabels.cur}销量`, dataIndex: 'curSales', key: 'curSales', width: 100, align: 'center', render: (v: number) => v.toLocaleString() },
+              { title: `${topDeclineLabels.cur}日均`, dataIndex: 'curAvg', key: 'curAvg', width: 90, align: 'center', render: (v: number) => v.toFixed(1) },
+              {
+                title: '环比', key: 'change', width: 100, align: 'center',
+                render: (_: any, r: any) => {
+                  if (r.changePct === null) return '--';
+                  const down = r.changePct < 0;
+                  return (
+                    <Tag color={down ? 'red' : 'green'} style={{ margin: 0 }}>
+                      {down ? '↓' : '↑'} {fmtPct(Math.abs(r.changePct))}%
+                    </Tag>
+                  );
+                },
+              },
+            ]}
+          />
+        </Modal>
       </div>
 
       {/* --- 第二行：SKU销量波动趋势（独立板块） */}
@@ -4113,48 +4962,22 @@ const DataAlertBot: React.FC = () => {
                 onClick={async () => {
                   setTrendDateMode('recent7Days');
                   setSelectedSkusForTrend([]);
-                  
+                  setTrendLoading(true);
+
+                  try {
                   if (selectedStoreIds.length > 0) {
-                    const selectedStores = STORES.filter(s => selectedStoreIds.includes(s.id));
-                    const storeNames = selectedStores.map(s => s.name);
                     const yesterday = dayjs().subtract(1, 'day');
                     const startDate = yesterday.clone().subtract(6, 'day').format('YYYY-MM-DD');
                     const endDate = yesterday.format('YYYY-MM-DD');
                     
-                    const topSkus = await fetchTopSkus(storeNames, startDate, endDate, 10);
-                    const topSkuList = topSkus.map(s => s.sku);
-                    const dailySales = await fetchSkuDailySales(storeNames, topSkuList, startDate, endDate);
-                    
-                    const skuMap = new Map<string, SkuSalesRecord>();
-                    topSkus.forEach(record => {
-                      const sku = record.sku;
-                      const storeName = record.store;
-                      if (!skuMap.has(sku)) {
-                        skuMap.set(sku, {
-                          sku,
-                          totalSales: 0,
-                          stores: [],
-                        });
-                      }
-                      const skuRecord = skuMap.get(sku)!;
-                      skuRecord.totalSales += record.total_sales;
-                      
-                      const existingStore = skuRecord.stores.find(s => s.storeName === storeName);
-                      if (existingStore) {
-                        existingStore.sales += record.total_sales;
-                      } else {
-                        skuRecord.stores.push({
-                          storeId: '',
-                          storeName: storeName,
-                          date: endDate,
-                          sales: record.total_sales,
-                        });
-                      }
-                    });
-                    
-                    const result = Array.from(skuMap.values()).sort((a, b) => b.totalSales - a.totalSales);
-                    setProductSalesData(result);
-                    setSkuDailySalesData(dailySales);
+                    // 单次请求复用当日缓存（与销量对比/添加SKU共享），替代原 top-skus + sku-daily 两次串行请求
+                    const allRecords = await fetchAllSkuSalesData(startDate, endDate);
+                    const top10 = [...allRecords].sort((a, b) => b.totalSales - a.totalSales).slice(0, 10);
+                    setProductSalesData(top10);
+                    setSkuDailySalesData(toDailySalesRecords(top10));
+                  }
+                  } finally {
+                    setTrendLoading(false);
                   }
                 }}
               >
@@ -4188,33 +5011,35 @@ const DataAlertBot: React.FC = () => {
         style={{ overflow: 'visible', position: 'relative', zIndex: 10 }}
         bodyStyle={{ overflow: 'visible', position: 'relative', zIndex: 10 }}
       >
-        <ResponsiveContainer width="100%" height={250}>
-          <LineChart data={skuTrendData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-            <XAxis dataKey="date" fontSize={10} />
-            <YAxis fontSize={10} />
-            <RechartsTooltip wrapperStyle={{ zIndex: 9999, position: 'relative' }} />
-            <Legend />
-            {(() => {
-              const skusToShow = selectedSkusForTrend.length > 0 
-                ? selectedSkusForTrend 
-                : skuSalesData.slice(0, 10).map(s => s.sku);
-              const colors = ['#1890ff', '#52c41a', '#36cfc9', '#2f54eb', '#722ed1', '#13c2c2', '#eb2f96', '#9254de', '#5cdbd3', '#531dab'];
-              return skusToShow.map((sku, index) => (
-                <Line
-                  key={sku}
-                  type="monotone"
-                  dataKey={sku}
-                  name={sku}
-                  stroke={colors[index % colors.length]}
-                  strokeWidth={2}
-                  dot={{ r: 3 }}
-                  activeDot={{ r: 5 }}
-                />
-              ));
-            })()}
-          </LineChart>
-        </ResponsiveContainer>
+        <Spin spinning={trendLoading}>
+          <ResponsiveContainer width="100%" height={250}>
+            <LineChart data={skuTrendData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="date" fontSize={10} />
+              <YAxis fontSize={10} />
+              <RechartsTooltip wrapperStyle={{ zIndex: 9999, position: 'relative' }} />
+              <Legend />
+              {(() => {
+                const skusToShow = selectedSkusForTrend.length > 0
+                  ? selectedSkusForTrend
+                  : skuSalesData.slice(0, 10).map(s => s.sku);
+                const colors = ['#1890ff', '#52c41a', '#36cfc9', '#2f54eb', '#722ed1', '#13c2c2', '#eb2f96', '#9254de', '#5cdbd3', '#531dab'];
+                return skusToShow.map((sku, index) => (
+                  <Line
+                    key={sku}
+                    type="monotone"
+                    dataKey={sku}
+                    name={sku}
+                    stroke={colors[index % colors.length]}
+                    strokeWidth={2}
+                    dot={{ r: 3 }}
+                    activeDot={{ r: 5 }}
+                  />
+                ));
+              })()}
+            </LineChart>
+          </ResponsiveContainer>
+        </Spin>
       </Card>
 
       {/* --- SKU销量异动检测板块 */}
@@ -5120,18 +5945,37 @@ const DataAlertBot: React.FC = () => {
         </>)}
       </Card>
 
-      {/* --- 购物车预警（product_buybox 未处理数据，按店铺分组：组头行带一键处理） */}
+      {/* --- 购物车预警（product_buybox，待处理/已处理 一分为二，均按店铺分组展示） */}
       <Card id="section-buybox" bordered={false} style={{ marginTop: 16 }}
         title={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontWeight: 600 }}>🛒 购物车预警</span>
-            <Tag color={buyboxRecords.length > 0 ? 'orange' : 'green'} style={{ marginLeft: 4 }}>
-              {buyboxRecords.length > 0 ? `未处理 ${buyboxRecords.length} 条` : '暂无预警'}
+            <Tag color={filteredBuyboxRecords.length > 0 ? 'orange' : 'green'} style={{ marginLeft: 4 }}>
+              {filteredBuyboxRecords.length > 0 ? `未处理 ${filteredBuyboxRecords.length} 条` : '暂无预警'}
             </Tag>
           </div>
         }
         extra={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Select
+              mode="multiple"
+              size="small"
+              allowClear
+              maxTagCount="responsive"
+              placeholder="全部店铺"
+              style={{ minWidth: 130, maxWidth: 220 }}
+              value={buyboxStoreFilter}
+              onChange={setBuyboxStoreFilter}
+              options={buyboxStoreOptions}
+            />
+            <DatePicker.RangePicker
+              size="small"
+              style={{ width: 230 }}
+              value={buyboxDateRange}
+              onChange={(v) => setBuyboxDateRange(v)}
+              placeholder={['开始日期', '结束日期']}
+              allowClear
+            />
             <Button
               type="link"
               size="small"
@@ -5140,119 +5984,203 @@ const DataAlertBot: React.FC = () => {
             >
               {buyboxExpanded ? '收起' : '展开'}
             </Button>
-            <Button size="small" onClick={openProcessedModal}>查看已处理</Button>
             <Button size="small" onClick={loadBuyboxRecords} loading={buyboxLoading}>刷新</Button>
           </div>
         }
       >
         {buyboxExpanded && (
-        <Table<BuyboxRow>
-          rowKey="id"
-          size="small"
-          tableLayout="fixed"
-          className="buybox-table"
-          loading={buyboxLoading}
-          dataSource={buyboxTableRows}
-          pagination={buyboxTableRows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
-          locale={{ emptyText: '当前筛选店铺下没有未处理的购物车预警' }}
-          onRow={(record) => record.isGroup ? { style: { background: '#fafafa' } } : {}}
-          columns={[
-            {
-              title: '日期', key: 'main', width: 160,
-              onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 3 : 1 }),
-              render: (_, record: BuyboxRow) => {
-                if (record.isGroup) {
-                  return (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span>
-                        <Text strong style={{ fontSize: 13 }}>🏪 {record.store}</Text>
-                        <Tag color="orange" style={{ marginLeft: 8 }}>未处理 {record.count} 条</Tag>
-                      </span>
-                      <Button
-                        type="primary"
-                        size="small"
-                        style={{ background: '#389e0d', borderColor: '#389e0d' }}
-                        onClick={() => handleBuyboxProcessAll(record.store, record.groupIds || [])}
-                      >
-                        一键处理
-                      </Button>
-                    </div>
-                  );
-                }
-                return record.date;
-              },
-            },
-            {
-              title: 'SKU', dataIndex: 'sku', key: 'sku', width: 180, ellipsis: true,
-              onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
-            },
-            {
-              title: '品名', dataIndex: 'product_name', key: 'product_name', ellipsis: false,
-              onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
-              render: (_, record: BuyboxRow) => {
-                if (record.isGroup) return null;
-                return (
-                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                    <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingRight: 110 }}>
-                      {record.product_name || '--'}
-                    </span>
-                    <Button
-                      className="row-process-btn"
-                      type="primary"
-                      size="small"
-                      style={{
-                        position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
-                        background: '#52c41a', borderColor: '#52c41a',
-                      }}
-                      onClick={() => handleBuyboxProcess(record.id)}
-                    >
-                      已处理
-                    </Button>
-                  </div>
-                );
-              },
-            },
-          ]}
-        />
+        <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
+          {/* 左侧：待处理 */}
+          <div style={{ flex: '11 1 0', minWidth: 0, border: '1px solid #ffe7ba', borderRadius: 8, padding: '12px 16px 8px', background: '#fffdf8' }}>
+            <div style={{ marginBottom: 8, fontWeight: 600 }}>
+              {renderBuyboxTabLabel('待处理', filteredBuyboxRecords.length, '#fa8c16')}
+            </div>
+                <Table<BuyboxRow>
+                  rowKey="id"
+                  size="small"
+                  tableLayout="fixed"
+                  className="buybox-table"
+                  loading={buyboxLoading}
+                  dataSource={buyboxTableRows}
+                  pagination={buyboxTableRows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
+                  locale={{ emptyText: '当前筛选店铺下没有未处理的购物车预警' }}
+                  onRow={(record) => (record.isGroup || record.isDateGroup) ? { style: { background: record.isGroup ? '#fafafa' : '#fcfcfc' } } : {}}
+                  columns={[
+                    {
+                      title: '日期', key: 'main', width: 160,
+                      onCell: (record: BuyboxRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 3 : 1 }),
+                      render: (_, record: BuyboxRow) => {
+                        if (record.isGroup) {
+                          return (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span>
+                                <Text strong style={{ fontSize: 13 }}>🏪 {record.store}</Text>
+                                <Tag color="orange" style={{ marginLeft: 8 }}>未处理 {record.count} 条</Tag>
+                              </span>
+                              <Button
+                                type="primary"
+                                size="small"
+                                style={{ background: '#389e0d', borderColor: '#389e0d' }}
+                                onClick={() => handleBuyboxProcessAll(record.store, record.groupIds || [])}
+                              >
+                                店铺一键处理
+                              </Button>
+                            </div>
+                          );
+                        }
+                        if (record.isDateGroup) {
+                          return (
+                            <span>
+                              <Text type="secondary" style={{ fontSize: 12 }}>📅 {record.date}</Text>
+                              <Tag style={{ marginLeft: 8 }}>{record.dateCount} 条</Tag>
+                              <Button
+                                type="primary"
+                                size="small"
+                                style={{ marginLeft: 8, background: '#52c41a', borderColor: '#52c41a' }}
+                                onClick={() => handleBuyboxProcessDate(record.store, record.date, record.dateIds || [])}
+                              >
+                                日期已处理
+                              </Button>
+                            </span>
+                          );
+                        }
+                        return record.date;
+                      },
+                    },
+                    {
+                      title: 'SKU', dataIndex: 'sku', key: 'sku', width: 180, ellipsis: true,
+                      onCell: (record: BuyboxRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 0 : 1 }),
+                    },
+                    {
+                      title: '品名', dataIndex: 'product_name', key: 'product_name', ellipsis: false,
+                      onCell: (record: BuyboxRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 0 : 1 }),
+                      render: (_, record: BuyboxRow) => {
+                        if (record.isGroup || record.isDateGroup) return null;
+                        return (
+                          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                            <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingRight: 110 }}>
+                              {record.product_name || '--'}
+                            </span>
+                            <Button
+                              className="row-process-btn"
+                              type="primary"
+                              size="small"
+                              style={{
+                                position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                                background: '#52c41a', borderColor: '#52c41a',
+                              }}
+                              onClick={() => handleBuyboxProcess(record.id)}
+                            >
+                              已处理
+                            </Button>
+                          </div>
+                        );
+                      },
+                    },
+                  ]}
+                />
+          </div>
+          {/* 右侧：已处理 */}
+          <div style={{ flex: '9 1 0', minWidth: 0, border: '1px solid #b7eb8f', borderRadius: 8, padding: '12px 16px 8px', background: '#fcfff5' }}>
+            <div style={{ marginBottom: 8, fontWeight: 600 }}>
+              {renderBuyboxTabLabel('已处理', filteredProcessedBuyboxRecords.length, '#52c41a')}
+            </div>
+                <Table<BuyboxRow>
+                  rowKey="id"
+                  size="small"
+                  tableLayout="fixed"
+                  className="buybox-table"
+                  loading={buyboxLoading}
+                  dataSource={processedBuyboxTableRows}
+                  pagination={processedBuyboxTableRows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
+                  locale={{ emptyText: '当前筛选店铺下暂无已处理记录' }}
+                  onRow={(record) => record.isGroup ? { style: { background: '#fafafa' } } : {}}
+                  columns={[
+                    {
+                      title: '日期', key: 'main', width: 160,
+                      onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 3 : 1 }),
+                      render: (_, record: BuyboxRow) => {
+                        if (record.isGroup) {
+                          return (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span>
+                                <Text strong style={{ fontSize: 13 }}>🏪 {record.store}</Text>
+                                <Tag color="green" style={{ marginLeft: 8 }}>已处理 {record.count} 条</Tag>
+                              </span>
+                            </div>
+                          );
+                        }
+                        return record.date;
+                      },
+                    },
+                    {
+                      title: 'SKU', dataIndex: 'sku', key: 'sku', width: 180, ellipsis: true,
+                      onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
+                    },
+                    {
+                      title: '品名', dataIndex: 'product_name', key: 'product_name', ellipsis: false,
+                      onCell: (record: BuyboxRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
+                      render: (v: string | null, record: BuyboxRow) => {
+                        if (record.isGroup) return null;
+                        return (
+                          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                            <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingRight: 96 }}>
+                              {v || '--'}
+                            </span>
+                            <Button
+                              className="row-process-btn"
+                              type="primary"
+                              size="small"
+                              style={{
+                                position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                                background: '#fa8c16', borderColor: '#fa8c16',
+                              }}
+                              onClick={() => handleBuyboxRevert(record.id)}
+                            >
+                              移入待处理
+                            </Button>
+                          </div>
+                        );
+                      },
+                    },
+                  ]}
+                />
+          </div>
+        </div>
         )}
       </Card>
-
-      {/* --- 购物车预警：已处理记录弹窗 */}
-      <Modal
-        title={`已处理记录（${processedRecords.length} 条）`}
-        visible={processedModalVisible}
-        onCancel={() => setProcessedModalVisible(false)}
-        footer={null}
-        width={640}
-      >
-        <Table<BuyboxRecord>
-          rowKey="id"
-          size="small"
-          loading={processedLoading}
-          dataSource={processedRecords}
-          pagination={processedRecords.length > 10 ? { pageSize: 10, showSizeChanger: false } : false}
-          locale={{ emptyText: '暂无已处理记录' }}
-          columns={[
-            { title: '日期', dataIndex: 'date', key: 'date', width: 95 },
-            { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 120, ellipsis: true },
-            { title: '品名', dataIndex: 'product_name', key: 'product_name', ellipsis: true, render: (v: string | null) => v || '--' },
-            { title: '店铺', dataIndex: 'store', key: 'store', width: 90 },
-          ]}
-        />
-      </Modal>
 
       {/* --- 货件预警（product_shipment_notice 未处理数据，按店铺分组：组头行带一键处理） */}
       <Card id="section-shipment" bordered={false} style={{ marginTop: 16 }}
         title={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontWeight: 600 }}>🚚 货件预警</span>
-            <Tag color={shipmentRecords.length > 0 ? 'orange' : 'green'} style={{ marginLeft: 4 }}>
-              {shipmentRecords.length > 0 ? `未处理 ${shipmentRecords.length} 条` : '暂无预警'}
+            <Tag color={filteredShipmentRecords.length > 0 ? 'orange' : 'green'} style={{ marginLeft: 4 }}>
+              {filteredShipmentRecords.length > 0 ? `未处理 ${filteredShipmentRecords.length} 条` : '暂无预警'}
             </Tag>
           </div>
         }
         extra={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Select
+              mode="multiple"
+              size="small"
+              allowClear
+              maxTagCount="responsive"
+              placeholder="全部店铺"
+              style={{ minWidth: 130, maxWidth: 220 }}
+              value={shipmentStoreFilter}
+              onChange={setShipmentStoreFilter}
+              options={shipmentStoreOptions}
+            />
+            <DatePicker.RangePicker
+              size="small"
+              style={{ width: 230 }}
+              value={shipmentDateRange}
+              onChange={(v) => setShipmentDateRange(v)}
+              placeholder={['开始日期', '结束日期']}
+              allowClear
+            />
             <Button
               type="link"
               size="small"
@@ -5261,12 +6189,17 @@ const DataAlertBot: React.FC = () => {
             >
               {shipmentExpanded ? '收起' : '展开'}
             </Button>
-            <Button size="small" onClick={openShipmentProcessedModal}>查看已确认</Button>
             <Button size="small" onClick={loadShipmentRecords} loading={shipmentLoading}>刷新</Button>
           </div>
         }
       >
         {shipmentExpanded && (
+        <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
+          {/* 左侧：待处理 */}
+          <div style={{ flex: '11 1 0', minWidth: 0, border: '1px solid #ffe7ba', borderRadius: 8, padding: '12px 16px 8px', background: '#fffdf8' }}>
+            <div style={{ marginBottom: 8, fontWeight: 600 }}>
+              {renderBuyboxTabLabel('待处理', filteredShipmentRecords.length, '#fa8c16')}
+            </div>
         <Table<ShipmentRow>
           rowKey="id"
           size="small"
@@ -5295,7 +6228,7 @@ const DataAlertBot: React.FC = () => {
                         style={{ background: '#389e0d', borderColor: '#389e0d' }}
                         onClick={() => handleShipmentProcessAll(record.store, record.groupIds || [])}
                       >
-                        一键确认
+                        店铺一键确认
                       </Button>
                     </div>
                   );
@@ -5311,7 +6244,7 @@ const DataAlertBot: React.FC = () => {
                         style={{ marginLeft: 8, background: '#52c41a', borderColor: '#52c41a' }}
                         onClick={() => handleShipmentConfirmDate(record.store, record.date, record.dateIds || [])}
                       >
-                        已确认
+                        日期已确认
                       </Button>
                     </span>
                   );
@@ -5326,35 +6259,99 @@ const DataAlertBot: React.FC = () => {
             {
               title: '货件编码', dataIndex: 'shipment_code', key: 'shipment_code', ellipsis: true,
               onCell: (record: ShipmentRow) => ({ colSpan: (record.isGroup || record.isDateGroup) ? 0 : 1 }),
-              render: (v: string | null) => v || '--',
+              render: (v: string | null, record: ShipmentRow) => {
+                if (record.isGroup || record.isDateGroup) return null;
+                return (
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingRight: 70 }}>
+                      {v || '--'}
+                    </span>
+                    <Button
+                      className="row-process-btn"
+                      type="primary"
+                      size="small"
+                      style={{
+                        position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                        background: '#52c41a', borderColor: '#52c41a',
+                      }}
+                      onClick={() => handleShipmentConfirmOne(record.id)}
+                    >
+                      已确认
+                    </Button>
+                  </div>
+                );
+              },
             },
           ]}
         />
+          </div>
+          {/* 右侧：已确认 */}
+          <div style={{ flex: '9 1 0', minWidth: 0, border: '1px solid #b7eb8f', borderRadius: 8, padding: '12px 16px 8px', background: '#fcfff5' }}>
+            <div style={{ marginBottom: 8, fontWeight: 600 }}>
+              {renderBuyboxTabLabel('已确认', filteredProcessedShipmentRecords.length, '#52c41a')}
+            </div>
+            <Table<ShipmentRow>
+              rowKey="id"
+              size="small"
+              tableLayout="fixed"
+              className="buybox-table"
+              loading={shipmentLoading}
+              dataSource={processedShipmentTableRows}
+              pagination={processedShipmentTableRows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
+              locale={{ emptyText: '当前筛选店铺下暂无已确认记录' }}
+              onRow={(record) => record.isGroup ? { style: { background: '#fafafa' } } : {}}
+              columns={[
+                {
+                  title: '日期', key: 'main', width: 130,
+                  onCell: (record: ShipmentRow) => ({ colSpan: record.isGroup ? 3 : 1 }),
+                  render: (_, record: ShipmentRow) => {
+                    if (record.isGroup) {
+                      return (
+                        <span>
+                          <Text strong style={{ fontSize: 13 }}>🏪 {record.store}</Text>
+                          <Tag color="green" style={{ marginLeft: 8 }}>已确认 {record.count} 条</Tag>
+                        </span>
+                      );
+                    }
+                    return record.date;
+                  },
+                },
+                {
+                  title: '店铺', dataIndex: 'store', key: 'store', width: 100,
+                  onCell: (record: ShipmentRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
+                },
+                {
+                  title: '货件编码', dataIndex: 'shipment_code', key: 'shipment_code', ellipsis: true,
+                  onCell: (record: ShipmentRow) => ({ colSpan: record.isGroup ? 0 : 1 }),
+                  render: (v: string | null, record: ShipmentRow) => {
+                    if (record.isGroup) return null;
+                    return (
+                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                        <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', paddingRight: 96 }}>
+                          {v || '--'}
+                        </span>
+                        <Button
+                          className="row-process-btn"
+                          type="primary"
+                          size="small"
+                          style={{
+                            position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
+                            background: '#fa8c16', borderColor: '#fa8c16',
+                          }}
+                          onClick={() => handleShipmentRevert(record.id)}
+                        >
+                          移入待处理
+                        </Button>
+                      </div>
+                    );
+                  },
+                },
+              ]}
+            />
+          </div>
+        </div>
         )}
       </Card>
-
-      {/* --- 货件预警：已确认记录弹窗 */}
-      <Modal
-        title={`已确认记录（${shipmentProcessedRecords.length} 条）`}
-        visible={shipmentProcessedModalVisible}
-        onCancel={() => setShipmentProcessedModalVisible(false)}
-        footer={null}
-        width={640}
-      >
-        <Table<ShipmentRecord>
-          rowKey="id"
-          size="small"
-          loading={shipmentProcessedLoading}
-          dataSource={shipmentProcessedRecords}
-          pagination={shipmentProcessedRecords.length > 10 ? { pageSize: 10, showSizeChanger: false } : false}
-          locale={{ emptyText: '暂无已处理记录' }}
-          columns={[
-            { title: '日期', dataIndex: 'date', key: 'date', width: 95 },
-            { title: '货件编码', dataIndex: 'shipment_code', key: 'shipment_code', width: 180, ellipsis: true },
-            { title: '店铺', dataIndex: 'store', key: 'store', width: 90 },
-          ]}
-        />
-      </Modal>
 
       {/* --- 阈值设置弹窗 */}
       <Modal
@@ -5913,9 +6910,50 @@ const DataAlertBot: React.FC = () => {
         </div>
         <Table
           columns={[
-            { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 180 },
+            { title: 'SKU', dataIndex: 'sku', key: 'sku', width: 180,
+              render: (text: string, record: any) => (
+                <span style={{ display: 'flex', alignItems: 'center' }}>
+                  <div
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 6,
+                      marginRight: 8,
+                      flexShrink: 0,
+                      backgroundColor: '#f5f5f5',
+                      border: record.imageUrl ? '1px solid #e8e8e8' : '1px dashed #d9d9d9',
+                      overflow: 'hidden',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {record.imageUrl ? (
+                      <Image
+                        src={record.imageUrl}
+                        alt={text}
+                        width={36}
+                        height={36}
+                        style={{ objectFit: 'cover' }}
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                      />
+                    ) : (
+                      <PictureOutlined style={{ color: '#bfbfbf', fontSize: 16 }} />
+                    )}
+                  </div>
+                  <span style={{ fontWeight: 500 }}>{text}</span>
+                </span>
+              ),
+            },
+            { title: '品名', dataIndex: 'productName', key: 'productName', width: 220,
+              render: (text: string) => (
+                <Tooltip title={text || '-'}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{text || '-'}</span>
+                </Tooltip>
+              ),
+            },
             { title: '销量', dataIndex: 'totalSales', key: 'totalSales', width: 100 },
-            { title: '店铺', key: 'stores', width: 250,
+            { title: '店铺', key: 'stores', width: 180,
               render: (_: any, record: any) => (
                 <span>{[...new Set(record.stores.map((s: any) => s.storeName))].join('、')}</span>
               )
@@ -5927,10 +6965,14 @@ const DataAlertBot: React.FC = () => {
               sku: record.sku,
               totalSales: record.totalSales,
               stores: record.stores,
+              imageUrl: record.imageUrl,
+              productName: record.productName,
             }))}
           rowKey={(record) => record.sku}
+          loading={skuDetailLoading}
           pagination={{ pageSize: 15 }}
           size="small"
+          tableLayout="fixed"
           expandable={{
             expandedRowRender: (record: any) => (
               <Table

@@ -582,6 +582,13 @@ class SkuVideoUploadBody(BaseModel):
     video_url: Optional[str] = None
     video_urls: Optional[List[str]] = None
     items: List[SkuVideoUploadItem]
+    # 语言不匹配警告已确认：跳过「视频语言 vs 目标站点语言」拦截
+    confirm_language_mismatch: bool = False
+    # 无法识别视频语言的提醒已确认：跳过「请检查视频与站点语言」拦截
+    confirm_language_unknown: bool = False
+    # 媒体任务中心可显式传入方案语言（成片地址未必能回查到 AI 视频任务）
+    video_language: Optional[str] = None
+    video_type: Optional[str] = None
 
 
 @router.post("/sku-video-upload")
@@ -610,6 +617,30 @@ async def upload_sku_video_unified(
     )
     if not entries:
         raise HTTPException(status_code=400, detail="所选 SKU 不存在或已删除")
+
+    # 语言门禁（警告式）：视频语言与目标 SKU/ASIN 所属站点语言不一致时，
+    # 先返回 409 让前端弹窗确认；用户确认后带 confirm_language_mismatch=true 重试。
+    from utils.media_language import (
+        find_site_language_mismatches,
+        language_mismatch_detail,
+        language_unknown_detail,
+        resolve_video_language,
+    )
+
+    sites = [e.get("site") for e in entries]
+    video_language, has_voiceover = resolve_video_language(
+        db, current_user.tenant_id, video_urls,
+        explicit_language=body.video_language, video_type=body.video_type,
+        product_id=body.product_id,
+    )
+    if has_voiceover:
+        if video_language:
+            mismatches = find_site_language_mismatches(video_language, sites)
+            if mismatches and not body.confirm_language_mismatch:
+                raise HTTPException(status_code=409, detail=language_mismatch_detail(video_language, mismatches))
+        elif not body.confirm_language_unknown:
+            # 无法识别视频语言：提醒人员核对视频与目标站点的语言是否匹配
+            raise HTTPException(status_code=409, detail=language_unknown_detail(sites))
 
     product_code = product[1] or ""
     product_name = product[2] or ""

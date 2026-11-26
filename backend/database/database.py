@@ -130,6 +130,7 @@ def init_db():
         from models import ad_daily
         from models import group_message
         from models import memo
+        from models import task
 
         # 导入所有模型类
         from models.tenant import Tenant
@@ -154,6 +155,7 @@ def init_db():
         from models.ad_report import AdReportSnapshot, AdOptimizationRule, AdOptimizationLog
         from models.group_message import GroupMessage, GroupsFs, GroupUserPermission
         from models.memo import Memo
+        from models.task import Task, TaskAssignee, TaskReply
         from models.ad_daily import (
             AdCampaignDaily, AdKeywordDaily, AdSearchTermDaily,
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
@@ -162,9 +164,22 @@ def init_db():
         from models.ai_image_task import AIImageTask
         from models.ai_image_layout import AIImageLayout
         from models.video_binding_request import VideoBindingRequest
+        from models.finance import FinanceRecord
+        from models.low_star import LowStarListing, LowStarSnapshot
 
         # 创建所有表
         Base.metadata.create_all(bind=engine)
+
+        # 演示租户低分产品统计演示数据（已有数据则跳过；真实租户不播种）
+        try:
+            from services.low_star_service import seed_demo_low_star
+            _seed_db = SessionLocal()
+            try:
+                seed_demo_low_star(_seed_db)
+            finally:
+                _seed_db.close()
+        except Exception as _seed_err:  # noqa: BLE001
+            print(f"低分产品统计演示数据播种跳过: {_seed_err}")
         
         # 检查并添加缺失的字段（幂等：已存在则跳过，不再伪造「失败」日志）
         with engine.connect() as conn:
@@ -359,6 +374,7 @@ def init_db():
                     gen_status VARCHAR(20) NULL COMMENT '生成状态：生成中/失败',
                     gen_task_id INT NULL COMMENT 'AI视频任务ID',
                     gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图',
+                    gen_options TEXT NULL COMMENT '生图参数（JSON：A+版式/张数/无文字模式）',
                     gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）',
                     gen_time DATETIME NULL COMMENT '生成时间',
                     media_url VARCHAR(1000) NULL COMMENT '生成成片地址',
@@ -404,6 +420,7 @@ def init_db():
             _media_extra_columns = [
                 ("plan", "ALTER TABLE media_requests ADD COLUMN plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）' AFTER prompt"),
                 ("gen_kind", "ALTER TABLE media_requests ADD COLUMN gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图' AFTER gen_task_id"),
+                ("gen_options", "ALTER TABLE media_requests ADD COLUMN gen_options TEXT NULL COMMENT '生图参数（JSON：A+版式/张数/无文字模式）' AFTER gen_kind"),
                 ("gen_user_id", "ALTER TABLE media_requests ADD COLUMN gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）' AFTER gen_kind"),
                 ("hd_status", "ALTER TABLE media_requests ADD COLUMN hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败' AFTER media_url"),
                 ("hd_task_id", "ALTER TABLE media_requests ADD COLUMN hd_task_id INT NULL COMMENT '超分任务ID' AFTER hd_status"),
@@ -526,7 +543,16 @@ def init_db():
             )
 
         print("scheduler_locks 和 product_selections 表创建成功")
-        
+
+        # 注意：ALTER 必须放在 SessionLocal 块外——块内未提交事务会持有表元数据锁，
+        # 导致另一连接的 ALTER 等锁卡死启动流程
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE currency_rates MODIFY COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'"))
+                conn.commit()
+        except Exception:
+            pass  # 已是 ON UPDATE 或执行失败不影响启动
+
     except Exception as e:
         print(f"数据库初始化失败: {e}")
         raise

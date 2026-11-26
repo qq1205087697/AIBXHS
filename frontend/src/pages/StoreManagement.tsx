@@ -2,14 +2,15 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, Select, message,
   Popconfirm, Space, Tag, Tabs, Drawer, Transfer, Pagination, Dropdown, Menu,
-  Spin, Empty, Tooltip, Checkbox,
+  Spin, Empty, Tooltip, Switch, Checkbox,
 } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
   AppstoreOutlined, ShopOutlined, TeamOutlined, UserOutlined, DownOutlined,
+  MessageOutlined,
 } from '@ant-design/icons'
-import { storesApi, departmentsApi, storeGroupsApi } from '../api'
+import { storesApi, departmentsApi, storeGroupsApi, groupPermissionsApi } from '../api'
 import { useTheme } from '../contexts/ThemeContext'
 import { useResponsive } from '../hooks/useResponsive'
 import { CSSProperties, useMemo } from 'react'
@@ -38,6 +39,15 @@ interface StoreGroup {
   store_count: number
   member_count?: number
   members?: { id: number; name: string }[]
+  created_at: string
+}
+
+// 群组（IM 群，来自 groups_fs）
+interface ImGroup {
+  group_id: number
+  group_name: string
+  user_count: number
+  members: { id: number; name: string }[]
   created_at: string
 }
 
@@ -94,6 +104,26 @@ const StoreManagement: React.FC = () => {
   // Ozon 平台判定（大小写不敏感：历史数据可能存为 'Ozon'）
   const isOzonPlatform = (watchPlatform || '').trim().toLowerCase() === 'ozon'
 
+  // 群组管理相关状态（IM 群可见用户设置）
+  const [imGroups, setImGroups] = useState<ImGroup[]>([])
+  const [imGroupLoading, setImGroupLoading] = useState(false)
+  const [imGroupSearchText, setImGroupSearchText] = useState('')
+  const [imGroupPagination, setImGroupPagination] = useState({ current: 1, pageSize: 20 })
+  const [imMemberModalOpen, setImMemberModalOpen] = useState(false)
+  const [imMemberLoading, setImMemberLoading] = useState(false)
+  const [currentImGroup, setCurrentImGroup] = useState<ImGroup | null>(null)
+  const [imAllUsers, setImAllUsers] = useState<any[]>([])
+  const [imVisibleIds, setImVisibleIds] = useState<number[]>([])
+  const [imMemberSaving, setImMemberSaving] = useState(false)
+  // 弹窗内：平台 → 店铺分组 快捷选择（多选，选中分组后显示其下店铺的负责人）
+  const [imSelectedPlatform, setImSelectedPlatform] = useState<string[]>([])
+  const [imStoreGroups, setImStoreGroups] = useState<{ id: number; name: string }[]>([])
+  const [imSelectedStoreGroupIds, setImSelectedStoreGroupIds] = useState<number[]>([])
+  const [imOwnerUsers, setImOwnerUsers] = useState<any[]>([])
+  const [imOwnerLoading, setImOwnerLoading] = useState(false)
+  // 平台 → 负责人用户映射（选中平台后过滤下方用户表）
+  const [imPlatformOwners, setImPlatformOwners] = useState<Record<string, { id: number; name: string }[]>>({})
+
   const platformOptions = [
     { label: 'Amazon', value: 'amazon' },
     { label: 'Ozon', value: 'ozon' },
@@ -139,6 +169,44 @@ const StoreManagement: React.FC = () => {
     return [...platformOptions, ...Array.from(extra).map((p) => ({ label: p, value: p }))]
   }, [customPlatforms, allStores])
 
+  // 平台选项：取全部店铺中的去重平台
+  const imPlatformOptions = useMemo(() => {
+    const set = new Set<string>()
+    allStores.forEach((s) => { if (s.platform) set.add(s.platform) })
+    return Array.from(set).sort().map((p) => ({
+      label: platformLabelMap[p] || p,
+      value: p,
+    }))
+  }, [allStores])
+
+  // 店铺分组选项：选了平台则只显示含这些平台店铺的分组
+  const imStoreGroupOptions = useMemo(() => {
+    if (imSelectedPlatform.length === 0) return imStoreGroups
+    const groupIds = new Set(
+      allStores.filter((s) => imSelectedPlatform.includes(s.platform)).map((s) => s.group_id),
+    )
+    return imStoreGroups.filter((g) => groupIds.has(g.id))
+  }, [imStoreGroups, imSelectedPlatform, allStores])
+
+  // 下方用户表：选了分组显示分组负责人并集；其次选了平台显示平台负责人；否则全部用户
+  const imTableUsers = useMemo(() => {
+    if (imSelectedStoreGroupIds.length > 0) return imOwnerUsers
+    if (imSelectedPlatform.length > 0) {
+      const fullById = new Map(imAllUsers.map((u: any) => [u.id, u]))
+      const result: any[] = []
+      const seen = new Set<number>()
+      imSelectedPlatform.forEach((p) => {
+        ;(imPlatformOwners[p] || []).forEach((o) => {
+          if (seen.has(o.id)) return
+          seen.add(o.id)
+          result.push(fullById.get(o.id) || { id: o.id, name: o.name, username: o.name })
+        })
+      })
+      return result
+    }
+    return imAllUsers
+  }, [imSelectedStoreGroupIds, imOwnerUsers, imSelectedPlatform, imPlatformOwners, imAllUsers])
+
   const statusOptions = [
     { label: 'Active', value: 'active' },
     { label: 'Inactive', value: 'inactive' },
@@ -176,6 +244,7 @@ const StoreManagement: React.FC = () => {
   useEffect(() => {
     fetchGroups()
     fetchAllStores()
+    fetchImGroups()
   }, [])
 
   const fetchStores = async () => {
@@ -549,6 +618,115 @@ const StoreManagement: React.FC = () => {
     }
   }
 
+  // ==================== 群组管理（IM 群可见用户设置） ====================
+  const fetchImGroups = async () => {
+    setImGroupLoading(true)
+    try {
+      const res = await groupPermissionsApi.getList()
+      if (res.data.success) {
+        const list: ImGroup[] = res.data.data || []
+        setImGroups(list)
+        setImGroupPagination((prev) => {
+          const maxPage = Math.max(1, Math.ceil(list.length / prev.pageSize))
+          return prev.current > maxPage ? { ...prev, current: maxPage } : prev
+        })
+      }
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setImGroupLoading(false)
+    }
+  }
+
+  // 打开「可见用户设置」弹窗：加载全部用户 + 当前群已配置的可见用户 + 店铺分组选项
+  const handleOpenImMemberModal = async (group: ImGroup) => {
+    setCurrentImGroup(group)
+    setImMemberModalOpen(true)
+    setImMemberLoading(true)
+    setImSelectedPlatform([])
+    setImSelectedStoreGroupIds([])
+    setImOwnerUsers([])
+    try {
+      const [memberRes, userRes, sgRes, poRes] = await Promise.all([
+        groupPermissionsApi.getMembers(group.group_id),
+        departmentsApi.getAllUsers(),
+        storeGroupsApi.getList(),
+        storeGroupsApi.getPlatformOwners(),
+      ])
+      const members = memberRes.data?.data || []
+      setImVisibleIds(members.map((m: any) => m.id))
+      setImAllUsers(userRes.data?.data || [])
+      setImStoreGroups(
+        ((sgRes.data?.data || []) as any[]).map((g) => ({ id: g.id, name: g.name })),
+      )
+      const poData = poRes.data?.data || {}
+      setImPlatformOwners(poData.platform_owners || {})
+    } catch (e) {
+      message.error('获取数据失败')
+    } finally {
+      setImMemberLoading(false)
+    }
+  }
+
+  // 选中平台（多选）→ 重置店铺分组选择
+  const handleImPlatformChange = (platforms: string[]) => {
+    setImSelectedPlatform(platforms || [])
+    setImSelectedStoreGroupIds([])
+    setImOwnerUsers([])
+  }
+
+  // 选中店铺分组（多选）→ 显示这些分组下店铺的负责人用户（并集）
+  const handleImStoreGroupChange = async (groupIds: number[]) => {
+    setImSelectedStoreGroupIds(groupIds || [])
+    if (!groupIds || groupIds.length === 0) {
+      setImOwnerUsers([])
+      return
+    }
+    setImOwnerLoading(true)
+    try {
+      const results = await Promise.all(groupIds.map((id) => storeGroupsApi.getMembers(id)))
+      const merged: any[] = []
+      const seen = new Set<number>()
+      results.forEach((res) => {
+        ;(res.data?.data || []).forEach((u: any) => {
+          if (seen.has(u.id)) return
+          seen.add(u.id)
+          merged.push(u)
+        })
+      })
+      setImOwnerUsers(merged)
+    } catch (e) {
+      message.error('获取负责人失败')
+    } finally {
+      setImOwnerLoading(false)
+    }
+  }
+
+  // 切换用户可见状态
+  const toggleImUserVisible = (userId: number) => {
+    setImVisibleIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId],
+    )
+  }
+
+  // 保存：可见用户全量覆盖
+  const handleSaveImMembers = async () => {
+    if (!currentImGroup) return
+    setImMemberSaving(true)
+    try {
+      await groupPermissionsApi.setMembers(currentImGroup.group_id, {
+        user_ids: imVisibleIds,
+      })
+      message.success('可见用户设置成功')
+      setImMemberModalOpen(false)
+      fetchImGroups()
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '保存失败')
+    } finally {
+      setImMemberSaving(false)
+    }
+  }
+
   // 分组搜索过滤（名称/描述）
   const filteredGroups = useMemo(() => {
     const kw = groupSearchText.trim().toLowerCase()
@@ -564,6 +742,58 @@ const StoreManagement: React.FC = () => {
     setGroupSearchText(value)
     setGroupPagination((prev) => ({ ...prev, current: 1 }))
   }
+
+  // 群组搜索过滤（群名）
+  const filteredImGroups = useMemo(() => {
+    const kw = imGroupSearchText.trim().toLowerCase()
+    if (!kw) return imGroups
+    return imGroups.filter((g) => (g.group_name || '').toLowerCase().includes(kw))
+  }, [imGroups, imGroupSearchText])
+
+  const handleImGroupSearch = (value: string) => {
+    setImGroupSearchText(value)
+    setImGroupPagination((prev) => ({ ...prev, current: 1 }))
+  }
+
+  const imGroupColumns = [
+    { title: '群名称', dataIndex: 'group_name', key: 'group_name', width: 320 },
+    {
+      title: '可见用户',
+      dataIndex: 'members',
+      key: 'members',
+      render: (_: any, record: ImGroup) => {
+        const members = record.members || []
+        if (members.length === 0)
+          return <span style={{ color: '#bbb' }}>未设置（所有人不可见）</span>
+        const visible = members.slice(0, 4)
+        return (
+          <Tooltip title={members.map((m) => m.name).join('、')}>
+            <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+              {visible.map((m) => (
+                <Tag key={m.id} color="cyan" style={{ marginInlineEnd: 0 }}>{m.name}</Tag>
+              ))}
+              {members.length > 4 && <Tag style={{ marginInlineEnd: 0 }}>+{members.length - 4}</Tag>}
+            </span>
+          </Tooltip>
+        )
+      },
+    },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 200 },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 130,
+      render: (_: any, record: ImGroup) => (
+        <Button
+          size="small"
+          icon={<UserOutlined />}
+          onClick={() => handleOpenImMemberModal(record)}
+        >
+          可见用户
+        </Button>
+      ),
+    },
+  ]
 
   const storeColumns = [
     { title: '店铺名', dataIndex: 'inventory_name', key: 'inventory_name' },
@@ -903,6 +1133,52 @@ const StoreManagement: React.FC = () => {
               </>
             ),
           },
+          {
+            key: 'imGroups',
+            label: <span><MessageOutlined /> 群组管理</span>,
+            children: (
+              <>
+                <Card
+                  loading={imGroupLoading}
+                  title={
+                    <Input
+                      placeholder="搜索群名称..."
+                      prefix={<SearchOutlined />}
+                      allowClear
+                      style={{ width: resp.isMobile ? '100%' : 400 }}
+                      value={imGroupSearchText}
+                      onChange={(e) => handleImGroupSearch(e.target.value)}
+                    />
+                  }
+                >
+                  <Table
+                    dataSource={filteredImGroups.slice(
+                      (imGroupPagination.current - 1) * imGroupPagination.pageSize,
+                      imGroupPagination.current * imGroupPagination.pageSize,
+                    )}
+                    columns={imGroupColumns}
+                    rowKey="group_id"
+                    pagination={false}
+                    scroll={{ x: 1100, y: 500 }}
+                  />
+                </Card>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 16 }}>
+                  <Pagination
+                    current={imGroupPagination.current}
+                    pageSize={imGroupPagination.pageSize}
+                    total={filteredImGroups.length}
+                    showSizeChanger
+                    showQuickJumper
+                    showTotal={(total) => `共 ${total} 条`}
+                    pageSizeOptions={['10', '20', '50', '100']}
+                    onChange={(page, pageSize) =>
+                      setImGroupPagination((prev) => ({ ...prev, current: page, pageSize: pageSize || 20 }))
+                    }
+                  />
+                </div>
+              </>
+            ),
+          },
         ]}
       />
 
@@ -1137,6 +1413,159 @@ const StoreManagement: React.FC = () => {
           }
           listStyle={{ width: 260, height: 350 }}
         />
+      </Modal>
+
+      {/* 群组可见用户设置弹窗 */}
+      <Modal
+        title={currentImGroup ? `群组可见用户：${currentImGroup.group_name}` : '群组可见用户设置'}
+        open={imMemberModalOpen}
+        onOk={handleSaveImMembers}
+        onCancel={() => setImMemberModalOpen(false)}
+        confirmLoading={imMemberSaving}
+        okText="保存"
+        width={resp.isMobile ? '95vw' : 620}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 6, color: '#666' }}>按平台/店铺分组快速选择</div>
+          <Space wrap style={{ width: '100%' }}>
+            <Select
+              mode="multiple"
+              placeholder="平台（可多选）"
+              style={{ minWidth: 220, maxWidth: 360 }}
+              allowClear
+              showSearch
+              maxTagCount="responsive"
+              optionFilterProp="label"
+              value={imSelectedPlatform}
+              options={imPlatformOptions}
+              onChange={(v) => handleImPlatformChange(v)}
+            />
+            <Select
+              mode="multiple"
+              placeholder="店铺分组（可多选）"
+              style={{ minWidth: 220, maxWidth: 360 }}
+              allowClear
+              showSearch
+              maxTagCount="responsive"
+              optionFilterProp="label"
+              value={imSelectedStoreGroupIds}
+              options={imStoreGroupOptions.map((g) => ({ label: g.name, value: g.id }))}
+              onChange={(v) => handleImStoreGroupChange(v)}
+            />
+          </Space>
+          {imSelectedStoreGroupIds.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              {imOwnerLoading ? (
+                <Spin size="small" />
+              ) : imOwnerUsers.length === 0 ? (
+                <span style={{ color: '#bbb', fontSize: 13 }}>该分组下没有店铺或未分配负责人</span>
+              ) : (
+                <>
+                  <Checkbox
+                    style={{ marginBottom: 8 }}
+                    checked={imOwnerUsers.every((u: any) => imVisibleIds.includes(u.id))}
+                    indeterminate={
+                      imOwnerUsers.some((u: any) => imVisibleIds.includes(u.id)) &&
+                      !imOwnerUsers.every((u: any) => imVisibleIds.includes(u.id))
+                    }
+                    onChange={(e) => {
+                      const ids = imOwnerUsers.map((u: any) => u.id)
+                      setImVisibleIds((prev) =>
+                        e.target.checked
+                          ? Array.from(new Set([...prev, ...ids]))
+                          : prev.filter((id) => !ids.includes(id)),
+                      )
+                    }}
+                  >
+                    全选
+                  </Checkbox>
+                  <div>
+                    <Space wrap size={6}>
+                      {imOwnerUsers.map((u: any) => {
+                        const on = imVisibleIds.includes(u.id)
+                        return (
+                          <Tag.CheckableTag
+                            key={u.id}
+                            checked={on}
+                            onChange={() => toggleImUserVisible(u.id)}
+                            style={{ border: '1px solid #d9d9d9', padding: '2px 10px' }}
+                          >
+                            {u.name || u.username}
+                          </Tag.CheckableTag>
+                        )
+                      })}
+                    </Space>
+                  </div>
+                </>
+              )}
+              <div style={{ color: '#999', fontSize: 12, marginTop: 6 }}>
+                点击负责人标签或勾选「全选」即可切换其可见状态（选中为可见）
+              </div>
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '12px 0 8px' }}>
+          <span style={{ color: '#666' }}>
+            用户列表（{imTableUsers.length} 人）
+            {imSelectedStoreGroupIds.length > 0 && ' · 已按店铺分组筛选'}
+            {imSelectedStoreGroupIds.length === 0 && imSelectedPlatform.length > 0 && ' · 已按平台筛选'}
+          </span>
+          <Checkbox
+            checked={imTableUsers.length > 0 && imTableUsers.every((u: any) => imVisibleIds.includes(u.id))}
+            indeterminate={
+              imTableUsers.some((u: any) => imVisibleIds.includes(u.id)) &&
+              !imTableUsers.every((u: any) => imVisibleIds.includes(u.id))
+            }
+            onChange={(e) => {
+              const ids = imTableUsers.map((u: any) => u.id)
+              setImVisibleIds((prev) =>
+                e.target.checked
+                  ? Array.from(new Set([...prev, ...ids]))
+                  : prev.filter((id) => !ids.includes(id)),
+              )
+            }}
+          >
+            全选
+          </Checkbox>
+        </div>
+        <Table
+          loading={imMemberLoading}
+          dataSource={imTableUsers}
+          rowKey="id"
+          size="small"
+          pagination={false}
+          scroll={{ y: 320 }}
+          columns={[
+            {
+              title: '用户',
+              key: 'name',
+              render: (_: any, record: any) => (
+                <span>
+                  {record.name || record.username}
+                  {record.email && (
+                    <span style={{ color: '#999', marginLeft: 8, fontSize: 12 }}>{record.email}</span>
+                  )}
+                </span>
+              ),
+            },
+            {
+              title: '可见',
+              key: 'visible',
+              width: 90,
+              render: (_: any, record: any) => (
+                <Switch
+                  checked={imVisibleIds.includes(record.id)}
+                  onChange={() => toggleImUserVisible(record.id)}
+                />
+              ),
+            },
+          ]}
+        />
+        <div style={{ color: '#999', fontSize: 12, paddingTop: 8 }}>
+          {imSelectedPlatform.length > 0
+            ? `已按平台「${imSelectedPlatform.map((p) => platformLabelMap[p] || p).join('、')}」筛选负责人；开启「可见」后该用户可看到此群消息`
+            : '开启「可见」后该用户可看到此群消息；保存时全量覆盖已有设置'}
+        </div>
       </Modal>
     </div>
   )

@@ -11,6 +11,7 @@ class ProductShipmentNotice(BaseModel):
     store = Column(String(100), nullable=False, index=True, comment="店铺")
     shipment_code = Column(String(100), nullable=False, comment="货件编码")
     status = Column(String(50), nullable=True, comment="状态")
+    platform = Column(String(20), nullable=False, default="Amazon", server_default="Amazon", comment="平台")
 
     __table_args__ = (
         Index('ix_psn_date_store_code', 'date', 'store', 'shipment_code'),

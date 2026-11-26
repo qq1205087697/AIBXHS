@@ -253,6 +253,17 @@ def init_scheduler():
         replace_existing=True
     )
 
+    # 商品销量品名回填：每天早上9:00，为 product_name 为空的行按 SKU 从产品档案补填
+    scheduler.add_job(
+        backfill_product_sales_name_job,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        id="product_sales_name_backfill",
+        name="商品销量品名回填",
+        replace_existing=True
+    )
+
     # 海外仓库存每日自动同步（默认 8:00，可配置）。与 FBA 同步共用同一套后台线程 + 内存状态机，
     # 因此定时触发与手动点击产生的是同一种任务，前端可实时看到同一份进度与结果。
     _overseas_hour = get_settings().OVERSEAS_SYNC_HOUR
@@ -361,6 +372,51 @@ def product_selection_group_expire_job():
         db.close()
 
 
+def backfill_product_sales_name_job():
+    """每天早上9:00：回填 product_sales 中 product_name 为空的行
+    匹配链路：SKU → platform_products.product_id → products.name（品名权威来源）
+    场景：新SKU先同步了销量、之后才在产品管理建档；或上游同步未带品名
+    """
+    from database.database import SessionLocal
+    from sqlalchemy import text
+
+    LOCK_KEY = "product_sales_name_backfill"
+    db = SessionLocal()
+    try:
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+            db.close()
+            return
+
+        logger.info("========== 开始商品销量品名回填任务 ==========")
+
+        cur = db.execute(text("SELECT COUNT(*) FROM product_sales WHERE product_name = ''"))
+        empty_total = cur.fetchone()[0]
+        if empty_total == 0:
+            logger.info("没有空品名数据，跳过")
+            return
+
+        result = db.execute(text("""
+            UPDATE product_sales ps
+            INNER JOIN (
+                SELECT pp.sku, MIN(p.name) AS pname
+                FROM platform_products pp
+                INNER JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+                WHERE pp.deleted_at IS NULL AND p.name IS NOT NULL AND p.name != ''
+                GROUP BY pp.sku
+            ) t ON t.sku = ps.sku
+            SET ps.product_name = t.pname
+            WHERE ps.product_name = ''
+        """))
+        db.commit()
+        logger.info(f"========== 品名回填完成：空品名 {empty_total} 行，本轮补填 {result.rowcount} 行（其余为档案无匹配SKU）==========")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"品名回填任务失败: {e}", exc_info=True)
+    finally:
+        release_distributed_lock(db, LOCK_KEY)
+        db.close()
+
+
 def startop_pull_job():
     """每日定时：星拓 MCP 拉取搜索词 → 自动打标（拉取完成后触发重算，与导入互不阻塞）"""
     from database.database import SessionLocal
@@ -397,7 +453,8 @@ def startop_pull_job():
 
 def low_star_stats_job():
     """每日定时拉取领星全店铺 Listing，统计低分产品（差评机器人"低分产品统计"弹窗数据源）
-    生成 low_star_listings.csv / low_star_summary.json 到项目根目录
+    统计结果按租户写入数据库（low_star_listings / low_star_snapshots），
+    租户由脚本环境变量 LOW_STAR_TENANT_ID 指定（默认 1）
     """
     import subprocess
     import sys
@@ -406,7 +463,8 @@ def low_star_stats_job():
     LOCK_KEY = "low_star_stats"
     db = SessionLocal()
     try:
-        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=30):
+        # 锁 TTL 需覆盖子进程最长 60 分钟 + 余量；过期会导致下一次触发静默抢锁失败
+        if not acquire_distributed_lock(db, LOCK_KEY, timeout_minutes=90):
             db.close()
             return
         db.close()
@@ -414,21 +472,29 @@ def low_star_stats_job():
         if not script.exists():
             logger.error(f"低分产品统计脚本不存在: {script}")
             return
-        logger.info("执行低分产品统计任务（预计8~10分钟）...")
+        logger.info("执行低分产品统计任务（进度逐页打印，60分钟上限）...")
+        deadline = time.time() + 60 * 60
         try:
-            result = subprocess.run(
-                [sys.executable, str(script), "run"],
-                cwd=str(script.parent), capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=20 * 60,
+            # Popen + python -u 逐行读取子进程输出，实时透传进度日志；
+            # stderr 合并进 stdout，避免 PIPE 缓冲死锁；脚本自带断点续传缓存
+            proc = subprocess.Popen(
+                [sys.executable, "-u", str(script), "run"],
+                cwd=str(script.parent), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
             )
-            if result.returncode == 0:
-                tail = (result.stdout or "").strip().splitlines()[-5:]
-                logger.info("低分产品统计完成:\n" + "\n".join(tail))
+            for line in proc.stdout or []:
+                line = line.strip()
+                if line:
+                    logger.info(f"[低分统计] {line}")
+                if time.time() > deadline:
+                    proc.kill()
+                    logger.error("低分产品统计超时（>60分钟），已终止；断点缓存已保留，下次自动续传")
+                    return
+            proc.wait(timeout=120)
+            if proc.returncode == 0:
+                logger.info("低分产品统计完成")
             else:
-                err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-10:]
-                logger.error(f"低分产品统计失败(退出码{result.returncode}):\n" + "\n".join(err_tail))
-        except subprocess.TimeoutExpired:
-            logger.error("低分产品统计超时（>20分钟），已终止")
+                logger.error(f"低分产品统计失败(退出码{proc.returncode})，详见上方 [低分统计] 日志")
         except Exception as e:
             logger.error(f"低分产品统计执行异常: {e}")
     finally:
