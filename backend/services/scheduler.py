@@ -453,7 +453,8 @@ def startop_pull_job():
 
 def low_star_stats_job():
     """每日定时拉取领星全店铺 Listing，统计低分产品（差评机器人"低分产品统计"弹窗数据源）
-    生成 low_star_listings.csv / low_star_summary.json 到项目根目录
+    统计结果按租户写入数据库（low_star_listings / low_star_snapshots），
+    租户由脚本环境变量 LOW_STAR_TENANT_ID 指定（默认 1）
     """
     import subprocess
     import sys

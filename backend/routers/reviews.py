@@ -2,10 +2,9 @@ from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, or_
 import json
 import logging
-import csv
 from pathlib import Path
 from database.database import SessionLocal, get_db
 from config import get_settings
@@ -13,6 +12,7 @@ from services.translate_service import translate_review
 from services.chat_service import batch_analyze_reviews
 from dependencies import get_current_user, PermissionChecker
 from models.user import User
+from models.low_star import LowStarListing, LowStarSnapshot
 import concurrent.futures
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
@@ -681,15 +681,14 @@ async def get_negative_ranking(
 
 # ============ 低分产品统计（领星全店铺 Listing 0 < last_star <= 3，由 lingxing_low_star_stats.py 生成） ============
 # 注意：必须注册在 GET /{review_id} 通配路由之前，否则会被其抢先匹配
-def _find_low_star_files():
-    """从当前文件向上逐级查找数据文件（兼容主目录与发布目录两种布局）"""
-    for ancestor in Path(__file__).resolve().parents[:5]:
-        for base in (ancestor, ancestor / "data"):
-            csv_path = base / "low_star_listings.csv"
-            if csv_path.exists():
-                json_path = base / "low_star_summary.json"
-                return csv_path, json_path if json_path.exists() else None
-    return None, None
+def _is_demo_account(db: Session, user: User) -> bool:
+    """演示账号判定：用户名以 demo 开头，或所属公司名包含 demo。"""
+    username = (getattr(user, "username", "") or "").strip().lower()
+    tenant_name = db.execute(
+        text("SELECT name FROM tenants WHERE id = :tid"),
+        {"tid": getattr(user, "tenant_id", None)},
+    ).scalar() or ""
+    return username.startswith("demo") or "demo" in str(tenant_name).lower()
 
 
 # ASIN→总评分映射缓存（asin_ratings.json 由 lingxing_low_star_stats.py 每天生成，
@@ -735,10 +734,16 @@ _low_star_run_state: dict = {"running": False, "started_at": None, "finished_at"
 
 
 @router.post("/low-star-stats/run")
-async def run_low_star_stats(current_user: User = Depends(get_current_user)):
+async def run_low_star_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """手动触发低分产品统计（后台线程执行，预计8~10分钟）。
     复用 low_star_stats_job：内部抢 low_star_stats 分布式锁，与每日3:30定时任务互斥"""
     import threading
+
+    if _is_demo_account(db, current_user):
+        raise HTTPException(status_code=400, detail="演示账号使用内置演示数据，不支持重新统计")
 
     if _low_star_run_state["running"]:
         return {"success": True, "running": True, "message": "统计已在运行中，请等待完成"}
@@ -780,112 +785,112 @@ async def get_low_star_listings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """低分产品统计：过滤无评分(0星)后取 0 < last_star <= star_max，汇总数字按过滤后明细实时计算"""
-    csv_path, json_path = _find_low_star_files()
-    if not csv_path:
-        raise HTTPException(status_code=404, detail="低分产品数据未生成，请先运行 lingxing_low_star_stats.py run")
+    """低分产品统计：从数据库按租户读取，过滤无评分(0星)后取 0 < last_star <= star_max。"""
     try:
-        rows = []
+        tenant_id = current_user.tenant_id
+        query = db.query(LowStarListing).filter(
+            LowStarListing.tenant_id == tenant_id,
+            LowStarListing.deleted_at.is_(None),
+            LowStarListing.last_star.isnot(None),
+            LowStarListing.last_star > 0,
+            LowStarListing.last_star <= star_max,
+        )
+        if sid is not None:
+            query = query.filter(LowStarListing.sid == sid)
+        if keyword and keyword.strip():
+            kw = f"%{keyword.strip()}%"
+            query = query.filter(or_(
+                LowStarListing.asin.ilike(kw),
+                LowStarListing.seller_sku.ilike(kw),
+                LowStarListing.item_name.ilike(kw),
+            ))
+        rows = query.order_by(
+            LowStarListing.last_star.asc(),
+            LowStarListing.sid.asc(),
+            LowStarListing.seller_sku.asc(),
+        ).all()
+
         dist = {"<=1": 0, "1-2": 0, "2-3": 0}
         store_counts: dict = {}
+        store_names: dict = {}
         store_asins: dict = {}
-        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-            for r in csv.DictReader(f):
-                try:
-                    row = {
-                        "sid": int(r["sid"]),
-                        "store_name": (r.get("店铺名") or "").strip(),
-                        "seller_sku": (r.get("seller_sku") or "").strip(),
-                        "asin": (r.get("asin") or "").strip(),
-                        "last_star": float(r["last_star"]) if r.get("last_star") else None,
-                        "price": float(r["price"]) if r.get("price") else None,
-                        "currency_code": (r.get("currency_code") or "").strip(),
-                        "status": int(r["status"]) if r.get("status") else None,
-                        "item_name": (r.get("item_name") or "").strip(),
-                    }
-                except (ValueError, TypeError):
-                    continue
-                # 无评分（0 星/空）不参与统计与展示
-                if row["last_star"] is None or row["last_star"] <= 0 or row["last_star"] > star_max:
-                    continue
-                if sid is not None and row["sid"] != sid:
-                    continue
-                if keyword:
-                    kw = keyword.lower()
-                    hay = f"{row['asin']} {row['seller_sku']} {row['item_name']}".lower()
-                    if kw not in hay:
-                        continue
-                if row["last_star"] <= 1:
-                    dist["<=1"] += 1
-                elif row["last_star"] <= 2:
-                    dist["1-2"] += 1
-                else:
-                    dist["2-3"] += 1
-                store_counts[row["sid"]] = store_counts.get(row["sid"], 0) + 1
-                store_asins.setdefault(row["sid"], set()).add(row["asin"])
-                rows.append(row)
-        rows.sort(key=lambda x: (x["last_star"], x["sid"], x["seller_sku"]))
+        for r in rows:
+            if r.last_star <= 1:
+                dist["<=1"] += 1
+            elif r.last_star <= 2:
+                dist["1-2"] += 1
+            else:
+                dist["2-3"] += 1
+            store_counts[r.sid] = store_counts.get(r.sid, 0) + 1
+            store_names.setdefault(r.sid, r.store_name or "")
+            store_asins.setdefault(r.sid, set()).add(r.asin)
+
         total = len(rows)
         start = (page - 1) * page_size
-
-        # 匹配产品管理品名：先按 ASIN（platform_products.asin），再按 SKU（platform_products.sku）；
-        # 产品管理未绑定的展示 "-"
         page_rows = rows[start:start + page_size]
+        items = [{
+            "sid": r.sid,
+            "store_name": r.store_name or "",
+            "seller_sku": r.seller_sku or "",
+            "asin": r.asin or "",
+            "last_star": r.last_star,
+            "price": r.price,
+            "currency_code": r.currency_code or "",
+            "status": r.status,
+            "item_name": r.item_name or "",
+        } for r in page_rows]
+
+        # 匹配产品管理品名：先按 ASIN，再按 MSKU；严格限定当前租户，避免跨租户串数据
         name_map: dict = {}
         try:
-            page_asins = list({r["asin"] for r in page_rows if r["asin"]})
+            page_asins = list({r["asin"] for r in items if r["asin"]})
             if page_asins:
                 ph = ",".join([f":a{i}" for i in range(len(page_asins))])
                 params = {f"a{i}": a for i, a in enumerate(page_asins)}
+                params["tid"] = tenant_id
                 for p in db.execute(text(
                     f"SELECT pp.asin, p.name FROM platform_products pp "
                     f"JOIN products p ON p.id = pp.product_id "
-                    f"WHERE pp.asin IN ({ph}) AND p.deleted_at IS NULL"
+                    f"WHERE pp.asin IN ({ph}) AND pp.tenant_id = :tid "
+                    f"AND p.tenant_id = :tid AND p.deleted_at IS NULL"
                 ), params).mappings():
                     name_map.setdefault(p["asin"], p["name"])
-            # ASIN 未命中的行再按 MSKU 匹配
-            sku_rows = [r for r in page_rows if not name_map.get(r["asin"]) and r["seller_sku"]]
+            sku_rows = [r for r in items if not name_map.get(r["asin"]) and r["seller_sku"]]
             page_skus = list({r["seller_sku"] for r in sku_rows})
             sku_map: dict = {}
             if page_skus:
                 ph2 = ",".join([f":s{i}" for i in range(len(page_skus))])
                 params2 = {f"s{i}": s for i, s in enumerate(page_skus)}
+                params2["tid"] = tenant_id
                 for p in db.execute(text(
                     f"SELECT pp.sku, p.name FROM platform_products pp "
                     f"JOIN products p ON p.id = pp.product_id "
-                    f"WHERE pp.sku IN ({ph2}) AND p.deleted_at IS NULL"
+                    f"WHERE pp.sku IN ({ph2}) AND pp.tenant_id = :tid "
+                    f"AND p.tenant_id = :tid AND p.deleted_at IS NULL"
                 ), params2).mappings():
                     sku_map.setdefault(p["sku"], p["name"])
-            for r in page_rows:
+            for r in items:
                 r["product_name"] = name_map.get(r["asin"]) or sku_map.get(r["seller_sku"])
         except Exception as e:
             logger.warning(f"匹配产品管理品名失败: {e}")
-            for r in page_rows:
-                r["product_name"] = r.get("product_name")
+            for r in items:
+                r.setdefault("product_name", None)
 
-        # 店铺名等元信息取自汇总 JSON；数字全部按过滤后的明细重新计算
-        names, generated_at, threshold, scanned_total = {}, None, None, None
-        if json_path:
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                names = {int(k): (v.get("店铺") or "") for k, v in (raw.get("按店铺分布") or {}).items()}
-                generated_at = raw.get("统计时间")
-                threshold = raw.get("阈值")
-                scanned_total = raw.get("扫描listing总数")
-            except (json.JSONDecodeError, OSError, ValueError):
-                pass
-
+        snap = (
+            db.query(LowStarSnapshot)
+            .filter(LowStarSnapshot.tenant_id == tenant_id)
+            .first()
+        )
         summary = {
-            "generated_at": generated_at,
-            "threshold": threshold,
-            "scanned_total": scanned_total,
+            "generated_at": snap.generated_at.strftime("%Y-%m-%d %H:%M:%S") if snap and snap.generated_at else None,
+            "threshold": snap.threshold if snap else None,
+            "scanned_total": snap.scanned_total if snap else None,
             "matched_total": total,
-            "unique_asin": len({r["asin"] for r in rows if r["asin"]}),
-            "unique_msku": len({(r["sid"], r["seller_sku"]) for r in rows}),
+            "unique_asin": len({r.asin for r in rows if r.asin}),
+            "unique_msku": len({(r.sid, r.seller_sku) for r in rows}),
             "distribution": dist,
             "by_store": [
-                {"sid": k, "name": names.get(k, ""), "count": v,
+                {"sid": k, "name": store_names.get(k, ""), "count": v,
                  "asin_count": len(store_asins.get(k, set()))}
                 for k, v in sorted(store_counts.items(), key=lambda kv: -kv[1])
             ],
@@ -894,7 +899,7 @@ async def get_low_star_listings(
             "success": True,
             "data": {
                 "summary": summary,
-                "items": rows[start:start + page_size],
+                "items": items,
                 "total": total,
             },
         }

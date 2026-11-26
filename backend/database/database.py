@@ -165,9 +165,21 @@ def init_db():
         from models.ai_image_layout import AIImageLayout
         from models.video_binding_request import VideoBindingRequest
         from models.finance import FinanceRecord
+        from models.low_star import LowStarListing, LowStarSnapshot
 
         # 创建所有表
         Base.metadata.create_all(bind=engine)
+
+        # 演示租户低分产品统计演示数据（已有数据则跳过；真实租户不播种）
+        try:
+            from services.low_star_service import seed_demo_low_star
+            _seed_db = SessionLocal()
+            try:
+                seed_demo_low_star(_seed_db)
+            finally:
+                _seed_db.close()
+        except Exception as _seed_err:  # noqa: BLE001
+            print(f"低分产品统计演示数据播种跳过: {_seed_err}")
         
         # 检查并添加缺失的字段（幂等：已存在则跳过，不再伪造「失败」日志）
         with engine.connect() as conn:
