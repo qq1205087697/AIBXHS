@@ -940,6 +940,20 @@ export const storeGroupsApi = {
     apiClient.get(`/store-groups/${groupId}/members`),
   setMembers: (groupId: number, data: { user_ids: number[] }) =>
     apiClient.put(`/store-groups/${groupId}/members`, data),
+  // 平台列表 + 各平台店铺负责人（user_stores 关联）
+  getPlatformOwners: () => apiClient.get("/store-groups/platform-owners"),
+};
+
+// ========== Group Permissions API（群组管理：群可见用户及权限） ==========
+export const groupPermissionsApi = {
+  // 群列表（含消息数、可见用户及权限）
+  getList: () => apiClient.get("/group-permissions/"),
+  // 获取指定群的可见用户及权限
+  getMembers: (groupId: number) =>
+    apiClient.get(`/group-permissions/${groupId}/members`),
+  // 设置指定群的可见用户（全量覆盖）
+  setMembers: (groupId: number, data: { user_ids: number[] }) =>
+    apiClient.put(`/group-permissions/${groupId}/members`, data),
 };
 
 // ========== Tenants API ==========
@@ -2540,6 +2554,36 @@ export const videoBindingApi = {
       "/video-bindings/ozon-upload-status",
       { tasks },
     ),
+};
+
+// ========== Finance API（财务机器人） ==========
+export interface FinanceRecordItem {
+  id: number;
+  category: string;
+  flowType: "收入" | "支出";
+  recordDate: string;
+  amount: number;
+  description: string;
+  createdBy: string;
+  createdAt: string | null;
+}
+
+export const financeApi = {
+  /** 查询财务流水（按板块/日期范围过滤） */
+  list: (params: { category?: string; start_date?: string; end_date?: string }) =>
+    apiClient.get<{ success: boolean; data: FinanceRecordItem[] }>("/finance/records", { params }),
+  /** 登记一条财务流水 */
+  create: (data: {
+    category: string;
+    flow_type: string;
+    record_date: string;
+    amount: number;
+    description?: string;
+  }) =>
+    apiClient.post<{ success: boolean; data: FinanceRecordItem }>("/finance/records", data),
+  /** 删除财务流水（软删除） */
+  remove: (id: number) =>
+    apiClient.delete<{ success: boolean; data: { id: number } }>(`/finance/records/${id}`),
 };
 
 export const aiCreationApi = {

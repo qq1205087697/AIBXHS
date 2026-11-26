@@ -4,7 +4,9 @@ from datetime import datetime
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database.database import get_db
+from dependencies import get_current_user
 from models.product_shipment_notice import ProductShipmentNotice
+from models.user import User
 
 router = APIRouter(prefix="/product-shipment-notice", tags=["product-shipment-notice"])
 
@@ -13,7 +15,8 @@ router = APIRouter(prefix="/product-shipment-notice", tags=["product-shipment-no
 async def get_shipment_records(
     stores: Optional[str] = Query(None, description="逗号分隔的店铺名"),
     processed: Optional[bool] = Query(None, description="true=只查已处理，false/不传=只查未处理"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """获取货件预警数据（默认未处理；processed=true 时返回已处理记录）"""
     try:
@@ -71,3 +74,25 @@ async def process_batch(req: ProcessBatchRequest, db: Session = Depends(get_db))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"批量确认失败: {str(e)}")
+
+
+@router.post("/{record_id}/unprocess")
+async def mark_unprocessed(record_id: int, db: Session = Depends(get_db)):
+    """将已确认记录移回待处理（状态写为待处理）"""
+    try:
+        record = db.query(ProductShipmentNotice).filter(
+            ProductShipmentNotice.id == record_id,
+            ProductShipmentNotice.deleted_at.is_(None),
+        ).first()
+        if not record:
+            raise HTTPException(status_code=404, detail=f"记录 {record_id} 不存在")
+
+        record.status = '待处理'
+        record.updated_at = datetime.now()
+        db.commit()
+        return {"success": True, "message": f"记录 {record_id} 已移回待处理"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"移回待处理失败: {str(e)}")

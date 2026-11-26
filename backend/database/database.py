@@ -130,6 +130,7 @@ def init_db():
         from models import ad_daily
         from models import group_message
         from models import memo
+        from models import task
 
         # 导入所有模型类
         from models.tenant import Tenant
@@ -154,6 +155,7 @@ def init_db():
         from models.ad_report import AdReportSnapshot, AdOptimizationRule, AdOptimizationLog
         from models.group_message import GroupMessage, GroupsFs, GroupUserPermission
         from models.memo import Memo
+        from models.task import Task, TaskAssignee, TaskReply
         from models.ad_daily import (
             AdCampaignDaily, AdKeywordDaily, AdSearchTermDaily,
             AdProductDaily, AdOptimizationSuggestion, AdExecutionLog
@@ -162,6 +164,7 @@ def init_db():
         from models.ai_image_task import AIImageTask
         from models.ai_image_layout import AIImageLayout
         from models.video_binding_request import VideoBindingRequest
+        from models.finance import FinanceRecord
 
         # 创建所有表
         Base.metadata.create_all(bind=engine)
@@ -528,7 +531,16 @@ def init_db():
             )
 
         print("scheduler_locks 和 product_selections 表创建成功")
-        
+
+        # 注意：ALTER 必须放在 SessionLocal 块外——块内未提交事务会持有表元数据锁，
+        # 导致另一连接的 ALTER 等锁卡死启动流程
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE currency_rates MODIFY COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'"))
+                conn.commit()
+        except Exception:
+            pass  # 已是 ON UPDATE 或执行失败不影响启动
+
     except Exception as e:
         print(f"数据库初始化失败: {e}")
         raise

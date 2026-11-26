@@ -14,6 +14,7 @@ class ProductAgingInventory(BaseModel):
     aging_271_365 = Column(Integer, nullable=True, default=0, comment="库龄271-365天数量")
     aging_366_455 = Column(Integer, nullable=True, default=0, comment="库龄366-455天数量")
     aging_456_plus = Column(Integer, nullable=True, default=0, comment="库龄456天以上数量")
+    platform = Column(String(20), nullable=False, default="Amazon", server_default="Amazon", comment="平台")
 
     __table_args__ = (
         Index('ix_pai_date_store_sku', 'date', 'store', 'sku'),
