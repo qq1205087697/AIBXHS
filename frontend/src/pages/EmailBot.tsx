@@ -687,19 +687,6 @@ const EmailBot: React.FC = () => {
               </Space>
             </div>
 
-            {selectedEmail.need_reply === 1 && (
-              <>
-                <Divider style={{ margin: '8px 0' }} />
-                <div>
-                  <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>提交回复信息</h3>
-                  <Card type="inner" style={{ padding: '12px' }}>
-                    <p style={{ margin: '4px 0' }}><strong>回复内容：</strong>{selectedEmail.reply_text}</p>
-                    <p style={{ margin: '4px 0' }}><strong>提交时间：</strong>{dayjs(selectedEmail.reply_text_time).format('YYYY年MM月DD日 HH:mm')}</p>
-                  </Card>
-                </div>
-              </>
-            )}
-
             <Divider style={{ margin: '8px 0' }} />
 
             <div>
@@ -737,6 +724,24 @@ const EmailBot: React.FC = () => {
               <div style={{ padding: '12px', background: '#fff7e6', borderRadius: 8 }}>
                 <p style={{ margin: 0, color: '#fa8c16' }}>暂无AI回复内容</p>
               </div>
+            )}
+
+            {selectedEmail.need_reply === 1 && (
+              <>
+                <Divider style={{ margin: '8px 0' }} />
+                <div>
+                  <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>📨 提交回复信息</h3>
+                  <Card
+                    type="inner"
+                    style={{ padding: '12px', backgroundColor: '#f6ffed', whiteSpace: 'pre-wrap', border: '1px solid #b7eb8f' }}
+                  >
+                    {selectedEmail.reply_text}
+                    <p style={{ margin: '8px 0 0', fontSize: 12, color: '#8c8c8c' }}>
+                      提交时间：{dayjs(selectedEmail.reply_text_time).format('YYYY年MM月DD日 HH:mm')}
+                    </p>
+                  </Card>
+                </div>
+              </>
             )}
           </div>
         </Modal>

@@ -223,7 +223,7 @@ async def get_reviews(
                         r.translated_title, r.content, r.translated_content,
                         r.review_date, r.status, r.return_rate,
                         COALESCE(p.name, r.asin, '未知商品') as product_name,
-                        rc.review_count, r.importance_level
+                        rc.review_count, r.importance_level, r.vine
                     FROM reviews r
                     LEFT JOIN (
             SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
@@ -248,7 +248,7 @@ async def get_reviews(
                         r.translated_title, r.content, r.translated_content,
                         r.review_date, r.status, r.return_rate,
                         COALESCE(p.name, r.asin, '未知商品') as product_name,
-                        rc.review_count
+                        rc.review_count, r.vine
                     FROM reviews r
                     LEFT JOIN (
             SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
@@ -274,7 +274,7 @@ async def get_reviews(
                         r.translated_title, r.content, r.translated_content,
                         r.review_date, r.status, r.return_rate,
                         COALESCE(p.name, r.asin, '未知商品') as product_name,
-                        r.importance_level
+                        r.importance_level, r.vine
                     FROM reviews r
                     LEFT JOIN (
             SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
@@ -294,8 +294,7 @@ async def get_reviews(
                         r.id, r.asin, r.reviewer_name, r.rating, r.title,
                         r.translated_title, r.content, r.translated_content,
                         r.review_date, r.status, r.return_rate,
-                        COALESCE(p.name, r.asin, '未知商品') as product_name
-                    FROM reviews r
+                        COALESCE(p.name, r.asin, '未知商品') as product_name, r.vine
                     LEFT JOIN (
             SELECT pp.asin, MAX(p.name) AS name, MAX(p.product_code) AS product_code, MAX(pp.sku) AS sku
             FROM platform_products pp
@@ -449,6 +448,7 @@ async def get_reviews(
                 "author": row[2] or "Anonymous",
                 "importanceLevel": importance_level,
                 "returnRate": return_rate,
+                "vine": "" if row[-1] is None else str(row[-1]).strip(),
                 "asinRating": asin_rating,
                 "asinReviewNum": asin_review_num,
                 "asinRatingStore": asin_store,

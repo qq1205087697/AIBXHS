@@ -39,6 +39,7 @@ interface ReviewItem {
   isNew?: boolean
   importanceLevel?: string | null
   returnRate?: number
+  vine?: string
   asinRating?: number | null
   asinReviewNum?: number | null
   asinRatingStore?: string
@@ -1119,6 +1120,16 @@ const ReviewBot: React.FC = () => {
                     );
                   }
                   return null;
+                })()}
+                {/* VINE计划引来差评：vine为1显示是，空或0显示否 */}
+                {(() => {
+                  const isVine = String(selectedReview.vine ?? '').trim() === '1';
+                  return (
+                    <p key="vine" style={{ margin: '4px 0' }}>
+                      <strong>VINE计划引来差评：</strong>
+                      <Tag color={isVine ? 'error' : 'default'}>{isVine ? '是' : '否'}</Tag>
+                    </p>
+                  );
                 })()}
               </div>
               <div style={{ textAlign: 'right' }}>
