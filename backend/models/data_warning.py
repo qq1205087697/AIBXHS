@@ -22,6 +22,7 @@ class DataWarning(BaseModel):
     fba_total_stock = Column(Integer, nullable=True, comment="FBA总库存")
     storage_ratio = Column(Float, nullable=True, comment="仓储占比")
     gross_profit = Column(Float, nullable=True, comment="毛利润")
+    platform = Column(String(20), nullable=False, default="Amazon", server_default="Amazon", comment="平台")
     
     # 关联关系
     tenant = relationship("Tenant", back_populates="data_warnings")

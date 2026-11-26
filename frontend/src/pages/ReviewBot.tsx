@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Card, Row, Col, List, Button, Alert, Tag, Statistic, Divider, Space, Avatar, Modal, Checkbox, Pagination, message, Input, Select, DatePicker, Dropdown, MenuProps, Table, Tooltip, Spin, Image } from 'antd'
 import {
   MessageSquare,
@@ -12,6 +12,7 @@ import {
   Search,
   ChevronDown,
   Store,
+  RefreshCw,
 } from 'lucide-react'
 import { reviewsApi } from '../api'
 import dayjs, { Dayjs } from 'dayjs'
@@ -39,6 +40,10 @@ interface ReviewItem {
   isNew?: boolean
   importanceLevel?: string | null
   returnRate?: number
+  asinRating?: number | null
+  asinReviewNum?: number | null
+  asinRatingStore?: string
+  asinRatingSynced?: boolean
   department?: string
   departments?: string[]
   suggestionProcessed?: Record<string, { note: string; by: string; at: string }>
@@ -135,6 +140,19 @@ const ReviewBot: React.FC = () => {
   const [rankingData, setRankingData] = useState<any[]>([])
   const [rankingLoading, setRankingLoading] = useState(false)
 
+  // 低分产品统计弹窗（全店铺 Listing 评分<=3）
+  const [lowStarOpen, setLowStarOpen] = useState(false)
+  const [lowStarLoading, setLowStarLoading] = useState(false)
+  const [lowStarSummary, setLowStarSummary] = useState<any>(null)
+  const [lowStarItems, setLowStarItems] = useState<any[]>([])
+  const [lowStarTotal, setLowStarTotal] = useState(0)
+  const [lowStarPage, setLowStarPage] = useState(1)
+  const [lowStarPageSize, setLowStarPageSize] = useState(50)
+  const [lowStarSid, setLowStarSid] = useState<number | undefined>(undefined)
+  const [lowStarKeyword, setLowStarKeyword] = useState('')
+  const [lowStarQuery, setLowStarQuery] = useState('')
+  const [lowStarUpdating, setLowStarUpdating] = useState(false)
+
   const [importanceStats, setImportanceStats] = useState({
     high: { unviewed: 0, viewed: 0 },
     medium: { unviewed: 0, viewed: 0 },
@@ -229,6 +247,83 @@ const ReviewBot: React.FC = () => {
       setRankingLoading(false)
     }
   }
+
+  const fetchLowStarListings = async (page = lowStarPage, size = lowStarPageSize) => {
+    setLowStarLoading(true)
+    try {
+      const response = await reviewsApi.getLowStarListings({
+        page,
+        page_size: size,
+        sid: lowStarSid,
+        keyword: lowStarQuery || undefined,
+      })
+      if (response.data.success) {
+        setLowStarSummary(response.data.data.summary)
+        setLowStarItems(response.data.data.items)
+        setLowStarTotal(response.data.data.total)
+      }
+    } catch (error: any) {
+      console.error('获取低分产品统计失败:', error)
+      message.error(error?.response?.data?.detail || '获取低分产品统计失败')
+    } finally {
+      setLowStarLoading(false)
+    }
+  }
+
+  // 手动更新低分产品统计：后台执行8~10分钟，轮询状态完成后自动刷新列表
+  const lowStarPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const stopLowStarPoll = () => {
+    if (lowStarPollRef.current) { clearInterval(lowStarPollRef.current); lowStarPollRef.current = null }
+  }
+  const handleLowStarUpdate = async () => {
+    try {
+      setLowStarUpdating(true)
+      const res = await reviewsApi.runLowStarStats()
+      message.success(res.data?.message || '统计已启动，预计8~10分钟，完成后自动刷新')
+      stopLowStarPoll()
+      lowStarPollRef.current = setInterval(async () => {
+        try {
+          const s = await reviewsApi.getLowStarStatsStatus()
+          if (!s.data?.running) {
+            stopLowStarPoll()
+            setLowStarUpdating(false)
+            if (s.data?.error) message.error(`低分产品统计失败: ${s.data.error}`)
+            else { message.success('低分产品统计完成，数据已更新'); fetchLowStarListings(1, lowStarPageSize) }
+          }
+        } catch { /* 单次轮询失败忽略，下轮再试 */ }
+      }, 10000)
+    } catch (error: any) {
+      setLowStarUpdating(false)
+      message.error(error?.response?.data?.detail || '启动低分产品统计失败')
+    }
+  }
+  // 弹窗关闭/组件卸载时停止轮询
+  useEffect(() => { if (!lowStarOpen) stopLowStarPoll() }, [lowStarOpen])
+  useEffect(() => () => stopLowStarPoll(), [])
+
+  const openLowStarModal = () => {
+    setLowStarOpen(true)
+    setLowStarPage(1)
+    setLowStarSid(undefined)
+    setLowStarKeyword('')
+    setLowStarQuery('')
+  }
+
+  // 低分产品关键词搜索防抖（300ms）
+  useEffect(() => {
+    if (!lowStarOpen) return
+    const timer = setTimeout(() => {
+      setLowStarQuery(lowStarKeyword)
+      setLowStarPage(1)
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [lowStarKeyword])
+
+  // 打开弹窗或筛选/翻页变化时拉取（React 批量更新，同一事件只触发一次）
+  useEffect(() => {
+    if (!lowStarOpen) return
+    fetchLowStarListings(lowStarPage, lowStarPageSize)
+  }, [lowStarOpen, lowStarPage, lowStarPageSize, lowStarSid, lowStarQuery])
 
   const fetchReviewData = async () => {
     try {
@@ -645,6 +740,9 @@ const ReviewBot: React.FC = () => {
                 <Button type="primary" ghost onClick={() => { setRankingOpen(true); fetchRanking() }}>
                   半年排行榜
                 </Button>
+                <Button type="primary" ghost onClick={openLowStarModal}>
+                  低分产品统计
+                </Button>
               </Space>
             </Col>
           </Row>
@@ -904,6 +1002,100 @@ const ReviewBot: React.FC = () => {
         />
       </Modal>
 
+      {/* 低分产品统计（全店铺 Listing 评分<=3，数据由 lingxing_low_star_stats.py 生成） */}
+      <Modal
+        title="低分产品统计（全店铺 Listing 评分 ≤ 3 星）"
+        open={lowStarOpen}
+        onCancel={() => setLowStarOpen(false)}
+        footer={null}
+        width={res.isMobile ? '95vw' : 1150}
+      >
+        {lowStarSummary && (
+          <>
+            <Row gutter={16} style={{ marginBottom: 8 }}>
+              <Col span={5}><Statistic title="低分 Listing" value={lowStarSummary.matched_total ?? '-'} /></Col>
+              <Col span={5}><Statistic title="唯一 ASIN" value={lowStarSummary.unique_asin ?? '-'} /></Col>
+              <Col span={5}><Statistic title="唯一 MSKU" value={lowStarSummary.unique_msku ?? '-'} /></Col>
+              <Col span={9}>
+                <Statistic
+                  title="数据生成时间"
+                  value={lowStarSummary.generated_at || '-'}
+                  suffix={lowStarSummary.scanned_total ? `/ 扫描 ${lowStarSummary.scanned_total} 条` : ''}
+                />
+              </Col>
+            </Row>
+            <Space size={4} wrap style={{ marginBottom: 12 }}>
+              {Object.entries(lowStarSummary.distribution || {}).map(([k, v]) => (
+                <Tag key={k} color={k === '>3' ? 'green' : k === '无评分' ? 'default' : 'red'} style={{ marginInlineEnd: 0 }}>
+                  {k}: {v as number}
+                </Tag>
+              ))}
+            </Space>
+          </>
+        )}
+        <Space style={{ marginBottom: 12 }} wrap>
+          <Tooltip title="重新拉取领星全店铺 Listing 并统计（后台执行约8~10分钟，完成后自动刷新）">
+            <Button icon={<RefreshCw size={14} />} onClick={handleLowStarUpdate} loading={lowStarUpdating}>
+              更新数据
+            </Button>
+          </Tooltip>
+          <Select
+            value={lowStarSid}
+            onChange={(value) => { setLowStarSid(value); setLowStarPage(1) }}
+            style={{ width: 240 }}
+            placeholder="全部店铺"
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            options={(lowStarSummary?.by_store || []).map((s: any) => ({ value: s.sid, label: `${s.name}（${s.count}）` }))}
+          />
+          <Input
+            allowClear
+            value={lowStarKeyword}
+            onChange={(e) => setLowStarKeyword(e.target.value)}
+            placeholder="搜索 ASIN / SKU / 标题"
+            prefix={<Search size={14} />}
+            style={{ width: 240 }}
+          />
+        </Space>
+        <Table
+          dataSource={lowStarItems}
+          loading={lowStarLoading}
+          rowKey={(r: any) => `${r.sid}_${r.seller_sku}`}
+          size="small"
+          scroll={{ y: 420 }}
+          tableLayout="fixed"
+          pagination={{
+            current: lowStarPage,
+            pageSize: lowStarPageSize,
+            total: lowStarTotal,
+            showSizeChanger: true,
+            showTotal: (t: number) => `共 ${t} 条`,
+            onChange: (p: number, s: number) => { setLowStarPage(p); setLowStarPageSize(s) },
+          }}
+          columns={[
+            { title: '店铺', dataIndex: 'store_name', key: 'store_name', width: 120, ellipsis: true },
+            { title: 'MSKU', dataIndex: 'seller_sku', key: 'seller_sku', width: 130, ellipsis: true,
+              render: (v: string) => <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip> },
+            { title: 'ASIN', dataIndex: 'asin', key: 'asin', width: 120, ellipsis: true },
+            { title: '品名', dataIndex: 'product_name', key: 'product_name', width: 150, ellipsis: { showTitle: false },
+              render: (v: string) => v
+                ? <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip>
+                : <span style={{ color: '#999' }}>-</span> },
+            { title: '评分', dataIndex: 'last_star', key: 'last_star', width: 80, align: 'center',
+              render: (v: number) => v === null ? '-'
+                : <Tag color={v <= 1 ? 'red' : v <= 2 ? 'orange' : 'gold'} style={{ marginInlineEnd: 0 }}>{v} 星</Tag> },
+            { title: '价格', dataIndex: 'price', key: 'price', width: 100, align: 'center',
+              render: (v: number, r: any) => v === null ? '-' : `${v} ${r.currency_code || ''}` },
+            { title: '状态', dataIndex: 'status', key: 'status', width: 70, align: 'center',
+              render: (v: number) => v === 1 ? <Tag color="green" style={{ marginInlineEnd: 0 }}>在售</Tag>
+                : <Tag style={{ marginInlineEnd: 0 }}>停售</Tag> },
+            { title: '产品标题', dataIndex: 'item_name', key: 'item_name', ellipsis: { showTitle: false },
+              render: (v: string) => <Tooltip title={v} placement="topLeft"><span>{v}</span></Tooltip> },
+          ]}
+        />
+      </Modal>
+
       {selectedReview && (
         <Modal
           title="差评详情"
@@ -921,6 +1113,31 @@ const ReviewBot: React.FC = () => {
                 <h3 style={{ margin: 0, marginBottom: 8, fontSize: 16 }}>商品信息</h3>
                 <p style={{ margin: '4px 0' }}><strong>商品：</strong>{selectedReview.productName}</p>
                 <p style={{ margin: '4px 0' }}><strong>ASIN：</strong>{selectedReview.asin}</p>
+                {/* ASIN 当前总评分（按差评所属店铺匹配领星站点；未同步则灰色提示） */}
+                {(() => {
+                  const star = selectedReview.asinRating;
+                  const rn = Number(selectedReview.asinReviewNum) || 0;
+                  const st = selectedReview.asinRatingStore;
+                  if (star !== undefined && star !== null && !isNaN(Number(star))) {
+                    const numStar = Number(star);
+                    const color = numStar < 3 ? 'error' : numStar < 4 ? 'warning' : 'success';
+                    return (
+                      <p key="asin-rating" style={{ margin: '4px 0' }}>
+                        <strong>当前总评分：</strong>
+                        <Tag color={color}>{numStar.toFixed(1)}{rn ? ` · ${rn} 条评论` : ''}{st ? ` · ${st}` : ''}</Tag>
+                      </p>
+                    );
+                  }
+                  if (st) {
+                    return (
+                      <p key="asin-rating" style={{ margin: '4px 0' }}>
+                        <strong>当前总评分：</strong>
+                        <Tag>领星暂未同步评分 · {st}</Tag>
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
                 {selectedReview.storeName && (
                   <p style={{ margin: '4px 0' }}><strong>店铺：</strong>{selectedReview.storeName}</p>
                 )}

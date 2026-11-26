@@ -1,14 +1,69 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, text
 import time, logging
 from database.database import get_db
 from models.product_sales import ProductSales
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/product-sales", tags=["product-sales"])
+
+
+def build_sku_name_map(db: Session, sku_list: Optional[List[str]] = None) -> Dict[str, str]:
+    """构建 SKU → 中文品名 映射（权威来源 products.name，经 platform_products 关联）
+    用于 product_name 列为空的历史/新增数据动态兜底匹配
+    """
+    sql = """
+        SELECT pp.sku, MIN(p.name) AS pname
+        FROM platform_products pp
+        INNER JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+        WHERE pp.deleted_at IS NULL AND p.name IS NOT NULL AND p.name != ''
+    """
+    params: dict = {}
+    if sku_list:
+        placeholders = ", ".join([f":sku{i}" for i in range(len(sku_list))])
+        sql += f" AND pp.sku IN ({placeholders})"
+        params.update({f"sku{i}": s for i, s in enumerate(sku_list)})
+    sql += " GROUP BY pp.sku"
+    rows = db.execute(text(sql), params).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def _normalize_image_url(raw) -> str:
+    """规整图片URL：兼容 JSON 数组格式（取第一张）"""
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    if s.startswith("["):
+        try:
+            import json as _json
+            arr = _json.loads(s)
+            if isinstance(arr, list) and arr:
+                return str(arr[0]).strip()
+        except Exception:
+            return ""
+    return s
+
+
+def build_sku_image_map(db: Session, sku_list: Optional[List[str]] = None) -> Dict[str, str]:
+    """构建 SKU → 图片URL 映射：platform_products.image_url 优先，为空回退 products.main_image"""
+    sql = """
+        SELECT pp.sku,
+               COALESCE(MAX(NULLIF(pp.image_url, '')), MAX(p.main_image)) AS img
+        FROM platform_products pp
+        LEFT JOIN products p ON p.id = pp.product_id AND p.deleted_at IS NULL
+        WHERE pp.deleted_at IS NULL
+    """
+    params: dict = {}
+    if sku_list:
+        placeholders = ", ".join([f":sku{i}" for i in range(len(sku_list))])
+        sql += f" AND pp.sku IN ({placeholders})"
+        params.update({f"sku{i}": s for i, s in enumerate(sku_list)})
+    sql += " GROUP BY pp.sku"
+    rows = db.execute(text(sql), params).fetchall()
+    return {row[0]: _normalize_image_url(row[1]) for row in rows}
 
 
 @router.get("/stores", response_model=List[str])
@@ -78,9 +133,14 @@ async def get_product_sales(
             query = query.filter(ProductSales.date >= default_start)
         
         query = query.order_by(ProductSales.store, ProductSales.date, ProductSales.sku)
-        
+
         results = query.all()
-        
+
+        # 品名匹配：product_name 列有值优先用列值，为空时按 SKU 动态关联 products.name 兜底
+        result_skus = list({row.sku for row in results})
+        sku_name_map = build_sku_name_map(db, result_skus) if result_skus else {}
+        sku_image_map = build_sku_image_map(db, result_skus) if result_skus else {}
+
         data = []
         for row in results:
             data.append({
@@ -89,6 +149,8 @@ async def get_product_sales(
                 "date": row.date.isoformat(),
                 "store": row.store,
                 "sku": row.sku,
+                "product_name": row.product_name or sku_name_map.get(row.sku, ""),
+                "image_url": sku_image_map.get(row.sku, ""),
                 "sales_count": row.sales_count
             })
         
@@ -198,13 +260,20 @@ async def get_top_skus(
         results = query.all()
         _t1 = time.time()
         print(f"[PERF] top-skus SQL: {(_t1-_t0)*1000:.0f}ms, rows={len(results)}, stores={len(store_list)}")
-        
+
+        # 匹配品名与图片（按 SKU 关联产品档案）
+        top_skus = list({row.sku for row in results})
+        name_map = build_sku_name_map(db, top_skus) if top_skus else {}
+        image_map = build_sku_image_map(db, top_skus) if top_skus else {}
+
         data = []
         for row in results:
             data.append({
                 "store": row.store,
                 "sku": row.sku,
-                "total_sales": row.total_sales
+                "total_sales": row.total_sales,
+                "product_name": name_map.get(row.sku, ""),
+                "image_url": image_map.get(row.sku, "")
             })
         _t2 = time.time()
         print(f"[PERF] top-skus total: {(_t2-_t0)*1000:.0f}ms")

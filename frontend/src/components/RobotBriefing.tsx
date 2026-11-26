@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 
 // ===== 今日运营清单弹窗（机器人动漫引导 + 清单卡片，登录后首屏弹出） =====
 export interface BriefingTask {
@@ -42,9 +42,21 @@ interface RobotBriefingProps {
 const rbStyles = `
 .rb-overlay { position: fixed; inset: 0; z-index: 3000; background: rgba(24, 20, 40, 0.55); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; overflow-y: auto; padding: 3vh 0; animation: rbFade .35s ease both; }
 .rb-overlay.rb-closing { animation: rbFadeOut .5s ease both !important; pointer-events: none; }
-.rb-panel { width: min(1080px, 94vw); max-height: 88vh; margin: auto; border-radius: 20px; overflow: hidden; display: flex; background: linear-gradient(160deg, #fff8f0 0%, #ffeeda 55%, #f6efff 100%); box-shadow: 0 24px 70px rgba(30, 20, 60, 0.45); animation: rbPanelIn .55s cubic-bezier(.22, 1, .36, 1) both; }
+.rb-panel { width: min(1080px, 94vw); max-height: 88vh; margin: auto; border-radius: 20px; overflow: hidden; display: flex; background: linear-gradient(160deg, #fff8f0 0%, #ffeeda 55%, #f6efff 100%); box-shadow: 0 24px 70px rgba(30, 20, 60, 0.45); }
+.rb-panel.rb-wait { opacity: 0; pointer-events: none; }
+.rb-panel.rb-open { transform-origin: 18% 46%; animation: rbPanelGrow .55s cubic-bezier(.22, 1, .36, 1) both; }
+/* 独立登场机器人（面板展开前） */
+.rb-free-wrap { --rb-travel: calc(min(540px, 47vw) - 190px); position: fixed; left: 50%; top: calc(50% - 25px); transform: translate(-50%, -50%); z-index: 3005; pointer-events: none; animation: rbTravelX 1.2s cubic-bezier(.5, .05, .3, 1) 2.2s both; }
+.rb-free-bot { position: relative; animation: rbBotJumpIn .95s cubic-bezier(.3, .7, .35, 1) .15s both; }
+.rb-free-travel { position: relative; animation: rbTravelFloat 1.2s ease-in-out 2.2s both; }
+.rb-free-show { animation: rbBotShow 1s ease 1.15s both; }
+.rb-free-ring { position: absolute; left: 50%; top: 50%; width: 230px; height: 230px; margin: -115px 0 0 -115px; border-radius: 50%; border: 3px solid rgba(126, 232, 255, 0.75); box-shadow: 0 0 26px rgba(126, 232, 255, 0.35), inset 0 0 20px rgba(126, 232, 255, 0.22); opacity: 0; transform: scale(0.3); animation: rbScanRing .9s ease-out 3.4s both; pointer-events: none; }
+.rb-free-ring.rb-second { animation-delay: 3.85s; }
+.rb-free-wrap::after { content: ''; position: absolute; left: 50%; bottom: -18px; width: 150px; height: 32px; margin-left: -75px; border-radius: 50%; border: 3px solid rgba(255, 150, 60, 0.65); opacity: 0; transform: scale(0.2); animation: rbLandRing .7s ease-out .62s both; pointer-events: none; }
+.rb-free-wrap::before { content: ''; position: absolute; left: 50%; bottom: -18px; width: 150px; height: 32px; margin-left: -75px; border-radius: 50%; border: 3px solid rgba(255, 150, 60, 0.5); opacity: 0; transform: scale(0.2); animation: rbLandRing .6s ease-out 1.6s both; pointer-events: none; }
 .rb-stage { position: relative; width: 380px; flex-shrink: 0; background: radial-gradient(120px 90px at 50% 44%, rgba(255, 178, 102, 0.35), transparent 70%), radial-gradient(180px 130px at 30% 20%, rgba(150, 120, 255, 0.22), transparent 70%), radial-gradient(170px 130px at 76% 78%, rgba(120, 150, 255, 0.20), transparent 70%); }
 .rb-robot-wrap { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%); animation: rbBob 3s ease-in-out infinite; }
+.rb-bot-drop { position: relative; animation: rbBotLand .45s ease both; }
 .rb-holo { position: absolute; border-radius: 12px; background: linear-gradient(150deg, rgba(255, 255, 255, 0.94), rgba(233, 224, 255, 0.78)); border: 1px solid rgba(140, 110, 255, 0.35); box-shadow: 0 8px 24px rgba(120, 90, 255, 0.28); animation: rbHoloIn .55s cubic-bezier(.22, 1, .36, 1) both; }
 .rb-holo-in { animation: rbBob2 2.8s ease-in-out infinite alternate; }
 .rb-bar { width: 9px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, #9a7bff, #6c4cff); }
@@ -59,10 +71,10 @@ const rbStyles = `
 .rb-todo-row { display: flex; align-items: center; gap: 9px; padding: 5px 8px; margin: 0 -8px; border-radius: 8px; cursor: pointer; transition: background 0.15s; }
 .rb-todo-row:hover { background: #f4efff; }
 .rb-todo-row.rb-zero { opacity: 0.45; cursor: default; }
-.rb-count { animation: rbPulse 1s ease 1.45s both; }
+.rb-count { animation: rbPulse 1s ease 5.5s both; }
 .rb-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
 .rb-progress-track { height: 8px; border-radius: 4px; background: #efe9fa; overflow: hidden; }
-.rb-progress-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #9a7bff, #6c4cff); animation: rbFill 1.1s ease 1.5s both; }
+.rb-progress-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #9a7bff, #6c4cff); animation: rbFill 1.1s ease 5.55s both; }
 .rb-start-btn { display: inline-block; padding: 10px 44px; border-radius: 999px; background: linear-gradient(135deg, var(--rb-primary), var(--rb-primary-dark)); color: #ffffff; font-size: 14px; font-weight: 600; letter-spacing: 2px; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); transition: transform 0.2s; user-select: none; }
 .rb-start-btn:hover { transform: translateY(-1px); }
 .rb-bubble { position: absolute; left: 62%; top: 8%; background: #ffffff; color: #4a3f66; font-size: 12.5px; font-weight: 600; padding: 7px 13px; border-radius: 12px 12px 12px 3px; box-shadow: 0 6px 18px rgba(90, 60, 160, 0.25); white-space: nowrap; animation: rbHoloIn .35s ease both; }
@@ -70,10 +82,43 @@ const rbStyles = `
 .rb-wave { animation: rbWaveArm 2.2s ease-in-out infinite; }
 .rb-ring { animation: rbDash 6s linear infinite; }
 .rb-ant-glow { animation: rbAnt 1.8s ease-in-out infinite; }
+.rb-scan-eye { animation: rbScanGlow .5s ease-in-out infinite alternate; }
+.rb-scan-line { transform-box: fill-box; animation: rbScanMove .7s ease-in-out infinite alternate; }
 @keyframes rbFade { from { opacity: 0; } }
 @keyframes rbFadeOut { to { opacity: 0; } }
 @keyframes rbPanelIn { from { opacity: 0; transform: translateY(30px) scale(0.94); } to { opacity: 1; transform: none; } }
 @keyframes rbBob { 0%, 100% { transform: translate(-50%, -50%); } 50% { transform: translate(-50%, calc(-50% - 9px)); } }
+@keyframes rbPanelGrow { 0% { opacity: 0; transform: scale(0.5); } 62% { opacity: 1; transform: scale(1.025); } 82% { transform: scale(0.995); } 100% { opacity: 1; transform: none; } }
+@keyframes rbBotJumpIn {
+  0% { opacity: 0; transform: translateY(340px) scale(0.28) rotate(-12deg); }
+  38% { opacity: 1; transform: translateY(0) scale(1.16, 0.84) rotate(4deg); }
+  56% { transform: translateY(-52px) scale(0.94, 1.08) rotate(-2deg); }
+  74% { transform: translateY(0) scale(1.06, 0.94); }
+  88% { transform: translateY(-10px) scale(0.99, 1.02); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes rbBotShow {
+  0% { transform: none; }
+  25% { transform: translateY(-24px) scale(1.03, 0.97); }
+  45% { transform: translateY(0) scale(0.96, 1.05); }
+  62% { transform: translateY(-10px); }
+  82% { transform: translateY(0) rotate(-5deg); }
+  100% { transform: rotate(-3deg); }
+}
+@keyframes rbBotLand { 0% { transform: scale(1.06); } 60% { transform: scale(0.985); } 100% { transform: none; } }
+@keyframes rbLandRing { 0% { opacity: 0.95; transform: scale(0.2); } 100% { opacity: 0; transform: scale(1.65); } }
+@keyframes rbTravelX { from { transform: translate(-50%, -50%); } to { transform: translate(calc(-50% - var(--rb-travel)), -50%); } }
+@keyframes rbTravelFloat {
+  0% { transform: none; }
+  20% { transform: translateY(9px) rotate(-4deg); }
+  45% { transform: translateY(-11px) rotate(-6deg); }
+  70% { transform: translateY(7px) rotate(-3deg); }
+  90% { transform: translateY(-4px) rotate(-1deg); }
+  100% { transform: none; }
+}
+@keyframes rbScanRing { 0% { opacity: 0.9; transform: scale(0.3); } 100% { opacity: 0; transform: scale(2.1); } }
+@keyframes rbScanMove { from { transform: translateY(0); } to { transform: translateY(48px); } }
+@keyframes rbScanGlow { from { opacity: 0.65; } to { opacity: 1; } }
 @keyframes rbBob2 { from { transform: translateY(0); } to { transform: translateY(-7px); } }
 @keyframes rbHoloIn { from { opacity: 0; transform: translateY(16px) scale(0.8); } to { opacity: 1; transform: none; } }
 @keyframes rbCardIn { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
@@ -83,12 +128,12 @@ const rbStyles = `
 @keyframes rbWaveArm { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(18deg); } }
 @keyframes rbDash { to { stroke-dashoffset: -120; } }
 @keyframes rbAnt { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-@media (max-width: 920px) { .rb-stage { display: none; } }
+@media (max-width: 920px) { .rb-stage { display: none; } .rb-free-wrap { --rb-travel: 0px; } }
 @media (prefers-reduced-motion: reduce) { .rb-overlay * { animation-duration: 0.01s !important; animation-delay: 0s !important; } }
 `
 
-// 橙色可爱动漫机器人（SVG：悬浮 + 挥手 + 眨眼；happy 时眯眼大笑）
-const RobotGuide: React.FC<{ happy: boolean }> = ({ happy }) => (
+// 橙色可爱动漫机器人（SVG：悬浮 + 挥手 + 眨眼；happy 时眯眼大笑；scanning 时眼睛扫描）
+const RobotGuide: React.FC<{ happy: boolean; scanning?: boolean }> = ({ happy, scanning = false }) => (
   <svg width="250" height="250" viewBox="0 0 240 240">
     <defs>
       <linearGradient id="rbBody" x1="0" y1="0" x2="0" y2="1">
@@ -131,6 +176,13 @@ const RobotGuide: React.FC<{ happy: boolean }> = ({ happy }) => (
           <ellipse cx="88" cy="112" rx="7" ry="4" fill="#ff9d5c" opacity="0.75" />
           <ellipse cx="152" cy="112" rx="7" ry="4" fill="#ff9d5c" opacity="0.75" />
         </>
+      ) : scanning ? (
+        <>
+          {/* 扫描态：双眼高亮 + 面部屏幕内扫描线上下移动 */}
+          <rect x="93" y="90" width="13" height="5" rx="2.5" fill="#54d9ff" className="rb-scan-eye" />
+          <rect x="134" y="90" width="13" height="5" rx="2.5" fill="#54d9ff" className="rb-scan-eye" />
+          <rect x="80" y="72" width="80" height="3" rx="1.5" fill="#8be9ff" className="rb-scan-line" />
+        </>
       ) : (
         <>
           {/* 眼睛（周期性眨眼）+ 微笑 */}
@@ -151,7 +203,7 @@ const RobotGuide: React.FC<{ happy: boolean }> = ({ happy }) => (
 const HoloCards: React.FC = () => (
   <>
     {/* 迷你柱状图 */}
-    <div className="rb-holo" style={{ top: 20, left: 24, animationDelay: '0.85s' }}>
+    <div className="rb-holo" style={{ top: 20, left: 24, animationDelay: '4.6s' }}>
       <div className="rb-holo-in" style={{ animationDelay: '0.4s', padding: '9px 11px' }}>
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 5, height: 34 }}>
           {[14, 22, 10, 28, 18].map((h, i) => (
@@ -162,7 +214,7 @@ const HoloCards: React.FC = () => (
       </div>
     </div>
     {/* 迷你趋势卡 */}
-    <div className="rb-holo" style={{ top: 8, right: 18, animationDelay: '1s' }}>
+    <div className="rb-holo" style={{ top: 8, right: 18, animationDelay: '4.75s' }}>
       <div className="rb-holo-in" style={{ animationDelay: '0.7s', padding: '9px 11px', width: 116 }}>
         <div className="rb-line" style={{ width: 64, marginBottom: 7 }} />
         <svg width="94" height="26" viewBox="0 0 94 26">
@@ -171,7 +223,7 @@ const HoloCards: React.FC = () => (
       </div>
     </div>
     {/* AI 徽章卡 */}
-    <div className="rb-holo" style={{ bottom: 86, left: 6, animationDelay: '1.15s' }}>
+    <div className="rb-holo" style={{ bottom: 86, left: 6, animationDelay: '4.9s' }}>
       <div className="rb-holo-in" style={{ animationDelay: '1s', padding: '9px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{ width: 30, height: 30, borderRadius: '50%', background: 'linear-gradient(135deg, #9a7bff, #6c4cff)', color: '#fff', fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>AI</div>
         <div>
@@ -181,7 +233,7 @@ const HoloCards: React.FC = () => (
       </div>
     </div>
     {/* 迷你清单卡 */}
-    <div className="rb-holo" style={{ bottom: 34, right: 8, animationDelay: '1.3s' }}>
+    <div className="rb-holo" style={{ bottom: 34, right: 8, animationDelay: '5.05s' }}>
       <div className="rb-holo-in" style={{ animationDelay: '1.3s', padding: '9px 11px', width: 108 }}>
         {[0, 1, 2].map(i => (
           <div key={i} className="rb-mini-row" style={{ marginBottom: i < 2 ? 6 : 0 }}>
@@ -199,8 +251,19 @@ const RobotBriefing: React.FC<RobotBriefingProps> = ({
   primary, primaryDark, onTaskClick, onStartWork, onOverlayClose,
 }) => {
   const [happy, setHappy] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  // 进场阶段：0=居中登场→向左飘移→眼睛扫描（面板隐藏）→ 1=扫描出完整面板、机器人就位 → 内容依次展开
+  const [stage, setStage] = useState(0)
   const activeTasks = tasks.filter(t => t.count > 0)
-  const cardDelay = (i: number) => ({ animationDelay: `${0.2 + i * 0.13}s` })
+  const cardDelay = (i: number) => ({ animationDelay: `${4.9 + i * 0.13}s` })
+
+  useEffect(() => {
+    if (stage !== 0) return
+    // 时间轴：跳入登场(0.15-1.1s) → 表演(1.15-2.15s) → 向左飘移(2.2-3.4s) → 眼睛扫描(3.4s起) → 展开面板(4.35s)
+    const t1 = setTimeout(() => setScanning(true), 3350)
+    const t2 = setTimeout(() => { setScanning(false); setStage(1) }, 4350)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [stage])
 
   const handleStart = () => {
     if (closing || happy) return
@@ -211,13 +274,29 @@ const RobotBriefing: React.FC<RobotBriefingProps> = ({
   return (
     <div className={`rb-overlay${closing ? ' rb-closing' : ''}`} onClick={() => { if (!closing) onOverlayClose() }}>
       <style>{rbStyles}</style>
-      <div className="rb-panel" onClick={e => e.stopPropagation()} style={{ ['--rb-primary' as any]: primary, ['--rb-primary-dark' as any]: primaryDark }}>
+      {/* 独立登场机器人：居中跳出 → 向左飘移 → 眼睛扫描，面板展开时同帧就位 */}
+      {stage === 0 && (
+        <div className="rb-free-wrap">
+          <div className="rb-free-ring" />
+          <div className="rb-free-ring rb-second" />
+          <div className="rb-free-travel">
+            <div className="rb-free-bot">
+              <div className="rb-free-show"><RobotGuide happy={happy} scanning={scanning} /></div>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className={`rb-panel ${stage >= 1 ? 'rb-open' : 'rb-wait'}`} onClick={e => e.stopPropagation()} style={{ ['--rb-primary' as any]: primary, ['--rb-primary-dark' as any]: primaryDark }}>
         {/* 左侧：机器人动漫引导区 */}
         <div className="rb-stage">
           {happy && <div className="rb-bubble">收到！今日一起加油 🚀</div>}
           <HoloCards />
           <div className="rb-robot-wrap">
-            <RobotGuide happy={happy} />
+            {stage >= 1 && (
+              <div className="rb-bot-drop">
+                <RobotGuide happy={happy} />
+              </div>
+            )}
           </div>
         </div>
 
@@ -321,7 +400,7 @@ const RobotBriefing: React.FC<RobotBriefingProps> = ({
           </div>
 
           {/* 开启今日工作 */}
-          <div style={{ textAlign: 'center', paddingTop: 2, paddingBottom: 2, animation: 'rbCardIn .5s cubic-bezier(.22,1,.36,1) 1.25s both' }}>
+          <div style={{ textAlign: 'center', paddingTop: 2, paddingBottom: 2, animation: 'rbCardIn .5s cubic-bezier(.22,1,.36,1) 5.3s both' }}>
             <div className="rb-start-btn" onClick={handleStart}>开启今日工作</div>
           </div>
         </div>

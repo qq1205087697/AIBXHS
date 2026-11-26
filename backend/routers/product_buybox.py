@@ -4,7 +4,9 @@ from datetime import datetime
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database.database import get_db
+from dependencies import get_current_user
 from models.product_buybox import ProductBuybox
+from models.user import User
 
 router = APIRouter(prefix="/product-buybox", tags=["product-buybox"])
 
@@ -13,7 +15,8 @@ router = APIRouter(prefix="/product-buybox", tags=["product-buybox"])
 async def get_buybox_records(
     stores: Optional[str] = Query(None, description="逗号分隔的店铺名"),
     processed: Optional[bool] = Query(None, description="true=只查已处理，false/不传=只查未处理"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """获取购物车预警数据（默认未处理；processed=true 时返回已处理记录）"""
     try:
@@ -96,3 +99,25 @@ async def mark_processed(record_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"标记已处理失败: {str(e)}")
+
+
+@router.post("/{record_id}/unprocess")
+async def mark_unprocessed(record_id: int, db: Session = Depends(get_db)):
+    """将已处理记录移回待处理（状态写为待处理）"""
+    try:
+        record = db.query(ProductBuybox).filter(
+            ProductBuybox.id == record_id,
+            ProductBuybox.deleted_at.is_(None),
+        ).first()
+        if not record:
+            raise HTTPException(status_code=404, detail=f"记录 {record_id} 不存在")
+
+        record.status = '待处理'
+        record.updated_at = datetime.now()
+        db.commit()
+        return {"success": True, "message": f"记录 {record_id} 已移回待处理"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"移回待处理失败: {str(e)}")

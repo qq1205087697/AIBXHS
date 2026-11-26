@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import json
 import logging
+import csv
+from pathlib import Path
 from database.database import SessionLocal, get_db
 from config import get_settings
 from services.translate_service import translate_review
@@ -415,6 +417,14 @@ async def get_reviews(
                 print(f"[DEBUG] 索引10处的退货率值: {row[10] if len(row) > 10 else 'N/A'}")
                 print(f"[DEBUG] 最终 return_rate: {return_rate}")
 
+            # ASIN 当前总评分：按差评所属店铺匹配站点（避免跨市场错配），无数据为 None
+            row_store_name = store_name_map.get(store_meta_map.get(review_id), "")
+            asin_meta = _match_asin_meta(row[1], row_store_name)
+            asin_rating = asin_meta["star"] if asin_meta else None
+            asin_review_num = asin_meta["review_num"] if asin_meta else None
+            asin_store = asin_meta["store"] if asin_meta else ""
+            asin_synced = bool(asin_meta and asin_meta.get("star"))
+
             # 店铺名：直接按 store_id 查店铺表
             review_data.append({
                 "id": str(review_id),
@@ -438,7 +448,11 @@ async def get_reviews(
                 "isNew": is_new,
                 "author": row[2] or "Anonymous",
                 "importanceLevel": importance_level,
-                "returnRate": return_rate
+                "returnRate": return_rate,
+                "asinRating": asin_rating,
+                "asinReviewNum": asin_review_num,
+                "asinRatingStore": asin_store,
+                "asinRatingSynced": asin_synced
             })
 
         return {
@@ -665,6 +679,232 @@ async def get_negative_ranking(
         raise HTTPException(status_code=500, detail=f"获取差评排行榜失败: {str(e)}")
 
 
+# ============ 低分产品统计（领星全店铺 Listing 0 < last_star <= 3，由 lingxing_low_star_stats.py 生成） ============
+# 注意：必须注册在 GET /{review_id} 通配路由之前，否则会被其抢先匹配
+def _find_low_star_files():
+    """从当前文件向上逐级查找数据文件（兼容主目录与发布目录两种布局）"""
+    for ancestor in Path(__file__).resolve().parents[:5]:
+        for base in (ancestor, ancestor / "data"):
+            csv_path = base / "low_star_listings.csv"
+            if csv_path.exists():
+                json_path = base / "low_star_summary.json"
+                return csv_path, json_path if json_path.exists() else None
+    return None, None
+
+
+# ASIN→总评分映射缓存（asin_ratings.json 由 lingxing_low_star_stats.py 每天生成，
+# 同一 ASIN 跨店铺取评论数最多的那条；mtime 变化自动重载）
+_asin_ratings_cache: dict = {"mtime": 0.0, "data": {}}
+
+
+def _get_asin_ratings() -> dict:
+    """读取全量 ASIN→评分映射文件，形如 {"B0XXXX": {"star": 4.3, "review_num": 123, ...}}"""
+    for ancestor in Path(__file__).resolve().parents[:5]:
+        p = ancestor / "asin_ratings.json"
+        if p.exists():
+            try:
+                mtime = p.stat().st_mtime
+                if _asin_ratings_cache["mtime"] != mtime:
+                    with open(p, "r", encoding="utf-8") as f:
+                        _asin_ratings_cache["data"] = json.load(f)
+                    _asin_ratings_cache["mtime"] = mtime
+            except (OSError, json.JSONDecodeError):
+                pass  # 文件读取失败时沿用旧缓存
+            break
+    return _asin_ratings_cache["data"]
+
+
+def _match_asin_meta(asin: str, store_name: str) -> Optional[dict]:
+    """按差评所属店铺匹配 ASIN 评分条目（asin_ratings.json 中每 ASIN 存全站点条目列表）。
+
+    匹配优先级：
+      1. 店铺名与差评所属店铺精确一致（同一店铺多 MSKU 时映射已取评论最多）
+      2. 店铺名匹配不到（如 ASIN 未在该店铺同步）→ 取全局评论最多的条目（列表已按评论数降序）
+    返回条目 {"star": float|None, "review_num": int, "store": str, "marketplace": str}，无数据返回 None
+    """
+    entries = _get_asin_ratings().get((asin or "").strip()) or []
+    if not entries:
+        return None
+    same_store = [e for e in entries if e.get("store") == (store_name or "").strip()]
+    pool = same_store or entries
+    return max(pool, key=lambda e: e.get("review_num") or 0)
+
+
+# 手动触发统计的运行状态（内存态；前端轮询 GET /low-star-stats/status）
+_low_star_run_state: dict = {"running": False, "started_at": None, "finished_at": None, "error": None}
+
+
+@router.post("/low-star-stats/run")
+async def run_low_star_stats(current_user: User = Depends(get_current_user)):
+    """手动触发低分产品统计（后台线程执行，预计8~10分钟）。
+    复用 low_star_stats_job：内部抢 low_star_stats 分布式锁，与每日3:30定时任务互斥"""
+    import threading
+
+    if _low_star_run_state["running"]:
+        return {"success": True, "running": True, "message": "统计已在运行中，请等待完成"}
+
+    def _run():
+        _low_star_run_state.update({
+            "running": True,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "finished_at": None,
+            "error": None,
+        })
+        try:
+            from services.scheduler import low_star_stats_job
+            low_star_stats_job()
+        except Exception as e:
+            _low_star_run_state["error"] = str(e)
+            logger.error(f"手动低分产品统计失败: {e}")
+        finally:
+            _low_star_run_state["running"] = False
+            _low_star_run_state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"success": True, "running": True, "message": "统计已启动，预计8~10分钟，完成后自动刷新"}
+
+
+@router.get("/low-star-stats/status")
+async def get_low_star_stats_status(current_user: User = Depends(get_current_user)):
+    """低分产品统计运行状态（前端轮询用）"""
+    return _low_star_run_state
+
+
+@router.get("/low-star-listings")
+async def get_low_star_listings(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    sid: Optional[int] = Query(None, description="店铺ID筛选"),
+    keyword: Optional[str] = Query(None, description="搜索 ASIN / SKU / 标题"),
+    star_max: float = Query(3.0, description="评分上限"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """低分产品统计：过滤无评分(0星)后取 0 < last_star <= star_max，汇总数字按过滤后明细实时计算"""
+    csv_path, json_path = _find_low_star_files()
+    if not csv_path:
+        raise HTTPException(status_code=404, detail="低分产品数据未生成，请先运行 lingxing_low_star_stats.py run")
+    try:
+        rows = []
+        dist = {"<=1": 0, "1-2": 0, "2-3": 0}
+        store_counts: dict = {}
+        store_asins: dict = {}
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    row = {
+                        "sid": int(r["sid"]),
+                        "store_name": (r.get("店铺名") or "").strip(),
+                        "seller_sku": (r.get("seller_sku") or "").strip(),
+                        "asin": (r.get("asin") or "").strip(),
+                        "last_star": float(r["last_star"]) if r.get("last_star") else None,
+                        "price": float(r["price"]) if r.get("price") else None,
+                        "currency_code": (r.get("currency_code") or "").strip(),
+                        "status": int(r["status"]) if r.get("status") else None,
+                        "item_name": (r.get("item_name") or "").strip(),
+                    }
+                except (ValueError, TypeError):
+                    continue
+                # 无评分（0 星/空）不参与统计与展示
+                if row["last_star"] is None or row["last_star"] <= 0 or row["last_star"] > star_max:
+                    continue
+                if sid is not None and row["sid"] != sid:
+                    continue
+                if keyword:
+                    kw = keyword.lower()
+                    hay = f"{row['asin']} {row['seller_sku']} {row['item_name']}".lower()
+                    if kw not in hay:
+                        continue
+                if row["last_star"] <= 1:
+                    dist["<=1"] += 1
+                elif row["last_star"] <= 2:
+                    dist["1-2"] += 1
+                else:
+                    dist["2-3"] += 1
+                store_counts[row["sid"]] = store_counts.get(row["sid"], 0) + 1
+                store_asins.setdefault(row["sid"], set()).add(row["asin"])
+                rows.append(row)
+        rows.sort(key=lambda x: (x["last_star"], x["sid"], x["seller_sku"]))
+        total = len(rows)
+        start = (page - 1) * page_size
+
+        # 匹配产品管理品名：先按 ASIN（platform_products.asin），再按 SKU（platform_products.sku）；
+        # 产品管理未绑定的展示 "-"
+        page_rows = rows[start:start + page_size]
+        name_map: dict = {}
+        try:
+            page_asins = list({r["asin"] for r in page_rows if r["asin"]})
+            if page_asins:
+                ph = ",".join([f":a{i}" for i in range(len(page_asins))])
+                params = {f"a{i}": a for i, a in enumerate(page_asins)}
+                for p in db.execute(text(
+                    f"SELECT pp.asin, p.name FROM platform_products pp "
+                    f"JOIN products p ON p.id = pp.product_id "
+                    f"WHERE pp.asin IN ({ph}) AND p.deleted_at IS NULL"
+                ), params).mappings():
+                    name_map.setdefault(p["asin"], p["name"])
+            # ASIN 未命中的行再按 MSKU 匹配
+            sku_rows = [r for r in page_rows if not name_map.get(r["asin"]) and r["seller_sku"]]
+            page_skus = list({r["seller_sku"] for r in sku_rows})
+            sku_map: dict = {}
+            if page_skus:
+                ph2 = ",".join([f":s{i}" for i in range(len(page_skus))])
+                params2 = {f"s{i}": s for i, s in enumerate(page_skus)}
+                for p in db.execute(text(
+                    f"SELECT pp.sku, p.name FROM platform_products pp "
+                    f"JOIN products p ON p.id = pp.product_id "
+                    f"WHERE pp.sku IN ({ph2}) AND p.deleted_at IS NULL"
+                ), params2).mappings():
+                    sku_map.setdefault(p["sku"], p["name"])
+            for r in page_rows:
+                r["product_name"] = name_map.get(r["asin"]) or sku_map.get(r["seller_sku"])
+        except Exception as e:
+            logger.warning(f"匹配产品管理品名失败: {e}")
+            for r in page_rows:
+                r["product_name"] = r.get("product_name")
+
+        # 店铺名等元信息取自汇总 JSON；数字全部按过滤后的明细重新计算
+        names, generated_at, threshold, scanned_total = {}, None, None, None
+        if json_path:
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                names = {int(k): (v.get("店铺") or "") for k, v in (raw.get("按店铺分布") or {}).items()}
+                generated_at = raw.get("统计时间")
+                threshold = raw.get("阈值")
+                scanned_total = raw.get("扫描listing总数")
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
+
+        summary = {
+            "generated_at": generated_at,
+            "threshold": threshold,
+            "scanned_total": scanned_total,
+            "matched_total": total,
+            "unique_asin": len({r["asin"] for r in rows if r["asin"]}),
+            "unique_msku": len({(r["sid"], r["seller_sku"]) for r in rows}),
+            "distribution": dist,
+            "by_store": [
+                {"sid": k, "name": names.get(k, ""), "count": v,
+                 "asin_count": len(store_asins.get(k, set()))}
+                for k, v in sorted(store_counts.items(), key=lambda kv: -kv[1])
+            ],
+        }
+        return {
+            "success": True,
+            "data": {
+                "summary": summary,
+                "items": rows[start:start + page_size],
+                "total": total,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"读取低分产品数据失败: {e}")
+        raise HTTPException(status_code=500, detail=f"读取低分产品数据失败: {str(e)}")
+
+
 @router.get("/{review_id}")
 async def get_review_detail(review_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """获取差评详情"""
@@ -775,6 +1015,13 @@ async def get_review_detail(review_id: str, db: Session = Depends(get_db), curre
             "department": analysis_row[4] if analysis_row else "",
             "departments": [d for d in detail_departments_str.split(",") if d]
         }
+
+        # ASIN 当前总评分：按差评所属店铺匹配站点（asin_ratings.json；无数据则为 null）
+        asin_meta = _match_asin_meta(row[1], detail_store_name)
+        review_detail["asinRating"] = asin_meta["star"] if asin_meta else None
+        review_detail["asinReviewNum"] = asin_meta["review_num"] if asin_meta else None
+        review_detail["asinRatingStore"] = asin_meta["store"] if asin_meta else ""
+        review_detail["asinRatingSynced"] = bool(asin_meta and asin_meta.get("star"))
         
         if isinstance(review_detail["keyPoints"], str):
             try:

@@ -81,8 +81,8 @@ def sync(rows):
 
                 cur.execute(
                     """
-                    INSERT INTO product_shipment_notice (date, store, shipment_code, status)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO product_shipment_notice (date, store, shipment_code, status, platform)
+                    VALUES (%s, %s, %s, %s, 'Amazon')
                     """,
                     (date, store, shipment_code, DEFAULT_STATUS),
                 )

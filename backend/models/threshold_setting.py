@@ -15,5 +15,6 @@ class ThresholdSetting(BaseModel):
     acos_threshold = Column(Float, nullable=False, server_default="30.0", comment="ACOS阈值(%)")
     overall_trend_threshold = Column(Float, nullable=False, server_default="15.0", comment="总体趋势分组均值差阈值(%)")
     latest_trend_threshold = Column(Float, nullable=False, server_default="20.0", comment="近期趋势方向变化率阈值(%)")
+    platform = Column(String(20), nullable=False, default="Amazon", server_default="Amazon", comment="平台")
     
     tenant = relationship("Tenant")
