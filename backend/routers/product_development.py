@@ -262,6 +262,91 @@ def _match_or_create_product_code(db: Session, tenant_id: int, item: AdProductIn
     return None
 
 
+def _sync_product_stores(db: Session, tenant_id: int, product_code: Optional[str], item: AdProductInfo) -> None:
+    """新品创建后，将填写的店铺分组解析为具体店铺，自动建立产品-店铺绑定（写入 platform_products）。
+    不阻塞主流程：任何异常仅记录日志。"""
+    if not product_code:
+        return
+    try:
+        # 收集分组名：store_quantity_json 的 store 与 related_store 均为分组名
+        names: set = set()
+        if item.store_quantity_json:
+            try:
+                for sq in json.loads(item.store_quantity_json):
+                    name = str((sq or {}).get("store") or "").strip()
+                    if name:
+                        names.add(name)
+            except Exception:
+                pass
+        for part in re.split(r"[,，、]", item.related_store or ""):
+            name = part.strip()
+            if name:
+                names.add(name)
+        if not names:
+            return
+
+        # 定位产品
+        prow = db.execute(text(
+            "SELECT id FROM products WHERE product_code = :code AND tenant_id = :tid AND deleted_at IS NULL LIMIT 1"
+        ), {"code": product_code, "tid": tenant_id}).fetchone()
+        if not prow:
+            return
+        product_id = prow[0]
+
+        # 分组名/店铺名 -> 具体店铺（含平台）
+        name_list = list(names)
+        placeholders = ",".join([f":n{i}" for i in range(len(name_list))])
+        params: dict = {"tid": tenant_id}
+        for i, n in enumerate(name_list):
+            params[f"n{i}"] = n
+        srows = db.execute(text(f"""
+            SELECT s.id, s.platform FROM stores s
+            LEFT JOIN store_groups sg ON sg.id = s.group_id AND sg.deleted_at IS NULL
+            WHERE s.tenant_id = :tid AND s.deleted_at IS NULL
+              AND (sg.name IN ({placeholders}) OR s.name IN ({placeholders}))
+        """), params).fetchall()
+        # 按平台归集店铺ID
+        by_platform: dict = {}
+        for sid, platform in srows:
+            pf = (platform or "").strip()
+            if not pf:
+                continue
+            by_platform.setdefault(pf, set()).add(int(sid))
+        if not by_platform:
+            return
+
+        for platform, sids in by_platform.items():
+            existing = db.execute(text("""
+                SELECT id, store_id FROM platform_products
+                WHERE product_id = :pid AND platform = :pf AND tenant_id = :tid AND deleted_at IS NULL
+                ORDER BY id LIMIT 1
+            """), {"pid": product_id, "pf": platform, "tid": tenant_id}).fetchone()
+            if existing:
+                # 已有绑定则合并店铺ID
+                merged: list = []
+                try:
+                    cur = json.loads(existing[1]) if isinstance(existing[1], str) else (existing[1] or [])
+                    if isinstance(cur, (list, tuple)):
+                        merged = [int(x) for x in cur]
+                    else:
+                        merged = [int(cur)]
+                except Exception:
+                    merged = []
+                merged.extend(sids)
+                merged = list(dict.fromkeys(merged))
+                db.execute(text(
+                    "UPDATE platform_products SET store_id = :sids WHERE id = :id"
+                ), {"sids": json.dumps(merged), "id": existing[0]})
+            else:
+                db.execute(text("""
+                    INSERT INTO platform_products (tenant_id, product_id, platform, store_id, status, created_at, updated_at)
+                    VALUES (:tid, :pid, :pf, :sids, 'active', NOW(), NOW())
+                """), {"tid": tenant_id, "pid": product_id, "pf": platform, "sids": json.dumps(sorted(sids))})
+        logger.info(f"新品「{item.product_name_zh}」已同步店铺绑定到产品管理: {product_code}")
+    except Exception as e:
+        logger.warning(f"同步新品店铺绑定失败（不阻塞新品创建）: {e}")
+
+
 def _sync_designer_images_to_product(db: Session, item: AdProductInfo) -> None:
     """美工图片审核通过后，将产品图片同步到产品管理对应商品的产品图片"""
     import json as _json
@@ -585,6 +670,8 @@ def _create_one(db: Session, tenant_id: int, payload: ProductDevelopmentPayload)
     db.flush()
     # 根据中文产品名称与现有商品匹配产品编码，未匹配到则生成新编码
     item.product_code = _match_or_create_product_code(db, tenant_id, item)
+    # 将填写的店铺分组解析为具体店铺，同步建立产品-店铺绑定（不阻塞创建）
+    _sync_product_stores(db, tenant_id, item.product_code, item)
     return item
 
 
