@@ -540,7 +540,7 @@ const RatingOptimizationBot: React.FC = () => {
     } catch (error) {
       console.error('获取产品详情失败:', error)
     }
-    // 读取最近一次AI建议日志，提取旧建议内容：有内容才显示"导入旧Listing内容"按钮
+    // 读取最近一次AI建议日志，提取旧建议内容：点击"生成新Listing内容"时若有记录会提示沿用
     let oldData: Partial<Record<'title' | 'product_description' | 'keywords' | 'bullet_points', string>> | null = null
     try {
       const res = await operationLogsApi.getList({
@@ -571,12 +571,29 @@ const RatingOptimizationBot: React.FC = () => {
     setAiOldSuggestData(oldData)
   }
 
-  // 导入旧Listing内容：把最近一次AI建议日志中的旧建议内容载入AI生成内容区
+  // 导入旧建议：把最近一次AI建议日志中的旧建议内容载入AI生成内容区
   const handleImportOldSuggest = () => {
     if (!aiOldSuggestData || aiSuggestLoading) return
     setAiSuggestData(aiOldSuggestData)
     setAiCheckedFields(AI_BASIC_FIELDS.filter(f => !!aiOldSuggestData[f.key]).map(f => f.key))
-    message.success('已载入旧建议')
+    message.success('已载入上次生成的内容')
+  }
+
+  // 生成新Listing内容：操作日志中有生成记录时先询问是否沿用，否则直接生成新内容
+  const handleGenerateNewSuggest = () => {
+    if (!selectedRecord || aiSuggestLoading) return
+    if (aiOldSuggestData) {
+      Modal.confirm({
+        title: '检测到上次生成的内容',
+        content: '操作日志中已有生成记录，是否沿用上次生成内容？',
+        okText: '是，沿用上次内容',
+        cancelText: '否，重新生成',
+        onOk: handleImportOldSuggest,
+        onCancel: () => { runAiSuggest(selectedRecord) },
+      })
+      return
+    }
+    runAiSuggest(selectedRecord)
   }
 
   // 应用AI建议：勾选的基础信息字段AI内容逐字段提交到编辑基础信息地址；勾选广告→提交到开广告地址
@@ -1492,8 +1509,8 @@ const RatingOptimizationBot: React.FC = () => {
                         <div className="rating-score-item">
                           <span className="rating-score-item-label">星级评分</span>
                           {r.star !== null && r.star !== undefined && r.star !== '' ? (
-                            <span className="rating-badge rating-badge-text">
-                              {r.star} <span style={{ color: '#9ca3af', fontWeight: 400 }}>({r.star_rating ?? '-'}/10)</span>
+                            <span className={`rating-badge ${badgeCls(r.star_rating ?? r.star)}`}>
+                              {r.star} <span style={{ color: 'inherit', opacity: 0.7, fontWeight: 400 }}>({r.star_rating ?? '-'}/10)</span>
                             </span>
                           ) : (
                             <span className="rating-badge rating-badge-text">字段为空</span>
@@ -1690,16 +1707,11 @@ const RatingOptimizationBot: React.FC = () => {
                       基础信息
                     </Checkbox>
                     <Space size={8}>
-                      {aiOldSuggestData && (
-                        <Button size="small" disabled={aiSuggestLoading} onClick={handleImportOldSuggest}>
-                          导入旧Listing内容
-                        </Button>
-                      )}
                       <Button
                         size="small"
                         type="primary"
                         loading={aiSuggestLoading}
-                        onClick={() => selectedRecord && runAiSuggest(selectedRecord)}
+                        onClick={handleGenerateNewSuggest}
                       >
                         生成新Listing内容
                       </Button>
