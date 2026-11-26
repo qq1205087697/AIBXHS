@@ -136,6 +136,26 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   const [batchLoading, setBatchLoading] = useState(false)
   // A+ 版式选择弹窗（与 AI生图同款），保存到当前单据的 gen_options
   const [aplusPickerItem, setAplusPickerItem] = useState<MediaRequestItem | null>(null)
+  // 表格铺满剩余高度：测量容器高度，扣除表头与分页后作为 scroll.y
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const [tableBodyHeight, setTableBodyHeight] = useState(480)
+
+  useEffect(() => {
+    const el = tableWrapRef.current
+    if (!el) return
+    const update = () => {
+      // 92 ≈ 表头 + 分页高度（含间距）；留一点余量避免分页被裁切
+      setTableBodyHeight(Math.max(180, Math.floor(el.clientHeight - 92)))
+    }
+    update()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    ro?.observe(el)
+    window.addEventListener('resize', update)
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [])
 
   // ===== 弹窗 =====
   const [detailItem, setDetailItem] = useState<MediaRequestItem | null>(null)
@@ -1426,19 +1446,38 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
   }
 
   return (
-    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div
+      style={{
+        // MainLayout：Header 56 + Content 上边距 16，页面根高度直接锁定到视口剩余高度，
+        // 不依赖父级百分比高度链（避免表格只占内容高度、下方留白）
+        padding: 24, height: 'calc(100vh - 72px)', minHeight: 0,
+        overflow: 'hidden', boxSizing: 'border-box',
+        display: 'flex', flexDirection: 'column', gap: 16,
+      }}
+    >
       <Card
         size="small"
+        style={{ flexShrink: 0 }}
         title={<Space><VideoCameraOutlined /> 媒体任务中心</Space>}
         extra={<span style={{ color: '#8c8c8c', fontSize: 12 }}>运营提报 → 主管审核 → 美工生成 → 成片审核 → 运营二次审核 → 高清 → 绑定产品 → 平台上传</span>}
       >
         <Alert type="info" showIcon message={STAGE_HINT[stage]} />
       </Card>
 
-      <Card size="small" bodyStyle={{ paddingTop: 8 }}>
+      <Card
+        size="small"
+        style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+        styles={{
+          body: {
+            flex: 1, minHeight: 0, paddingTop: 8, overflow: 'hidden',
+            display: 'flex', flexDirection: 'column',
+          },
+        }}
+      >
         {/* key 随各阶段数量变化：计数加载后重渲染页签条，修复动态标签导致的下划线错位 */}
         <Tabs
           key={STAGES.map((s) => counts[s] || 0).join('-')}
+          style={{ flexShrink: 0 }}
           activeKey={stage}
           onChange={(key) => {
             if (key === stage) return
@@ -1451,7 +1490,7 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
           items={STAGES.map((s) => ({ key: s, label: `${s}${counts[s] ? ` (${counts[s]})` : ''}` }))}
         />
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 12, flexShrink: 0 }}>
           {stage === '待提交' && canReport && (
             <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate('normal')}>
               新增提报
@@ -1495,32 +1534,41 @@ const VideoUploadCenter: React.FC<{ initialTab?: 'tasks' | 'binding' }> = ({ ini
           </div>
         </div>
 
-        <Table<MediaRequestItem>
-          rowKey="id"
-          size="small"
-          loading={loading}
-          columns={columns}
-          dataSource={items}
-          scroll={{ x: stage === '待提交' ? 1964 : 2194 }}
-          rowSelection={stage === '已上传' ? undefined : {
-            selectedRowKeys,
-            onChange: setSelectedRowKeys,
-            preserveSelectedRowKeys: true,
+        <div
+          ref={tableWrapRef}
+          className={`media-task-table${items.length ? '' : ' is-empty'}`}
+          style={{
+            flex: 1, minHeight: 0, overflow: 'hidden',
+            ...({ '--media-table-body-height': `${tableBodyHeight}px` } as React.CSSProperties),
           }}
-          pagination={{
-            current: page,
-            pageSize: PAGE_SIZE,
-            total,
-            showSizeChanger: false,
-            showTotal: (t) => `共 ${t} 条`,
-            onChange: (p) => setPage(p),
-          }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该阶段暂无单据" /> }}
-        />
+        >
+          <Table<MediaRequestItem>
+            rowKey="id"
+            size="small"
+            loading={loading}
+            columns={columns}
+            dataSource={items}
+            scroll={{ x: stage === '待提交' ? 1964 : 2194, y: tableBodyHeight }}
+            rowSelection={stage === '已上传' ? undefined : {
+              selectedRowKeys,
+              onChange: setSelectedRowKeys,
+              preserveSelectedRowKeys: true,
+            }}
+            pagination={{
+              current: page,
+              pageSize: PAGE_SIZE,
+              total,
+              showSizeChanger: false,
+              showTotal: (t) => `共 ${t} 条`,
+              onChange: (p) => setPage(p),
+            }}
+            locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该阶段暂无单据" /> }}
+          />
+        </div>
       </Card>
 
       {stage === '待绑定' && (
-        <div style={{ color: '#8c8c8c', fontSize: 12 }}>
+        <div style={{ color: '#8c8c8c', fontSize: 12, flexShrink: 0 }}>
           提示：绑定申请审核通过后视频将写入产品详情；提交后可直接在本页任务行上「通过 / 拒绝」。
         </div>
       )}
