@@ -495,28 +495,9 @@ const ProductDevelopmentBot: React.FC = () => {
   }, [storeTree]);
 
   // 编辑弹窗店铺选择与添加新品一致：只到分组一级，数量对应分组下所有店铺
-  const editSiteOwners = Form.useWatch("site_owners", editForm) as string[] | undefined;
   const editStoreOptions = useMemo(() => {
-    let allowed: Set<string> | null = null;
-    if (editSiteOwners?.length) {
-      allowed = new Set<string>();
-      editSiteOwners.forEach((o) => (storeTree.owner_sites[o] || []).forEach((s) => allowed!.add(s)));
-      if (allowed.size === 0) allowed = null;
-    }
-    return storeTree.groups
-      .filter((g) => !allowed || g.stores.some((s) => s.site && allowed.has(s.site)))
-      .map((g) => ({ label: g.name, value: g.name }));
-  }, [storeTree, editSiteOwners]);
-
-  // 站点负责人员选项（全部员工昵称去重）
-  const siteOwnerOptions = useMemo(() => {
-    const names = new Set<string>();
-    employees.forEach((emp) => {
-      const name = (emp.nickname || emp.username || "").trim();
-      if (name) names.add(name);
-    });
-    return Array.from(names).sort((a, b) => a.localeCompare(b, "zh")).map((n) => ({ label: n, value: n }));
-  }, [employees]);
+    return storeTree.groups.map((g) => ({ label: g.name, value: g.name }));
+  }, [storeTree]);
 
   // 筛选栏状态（与选品机器人筛选栏一致）
   const [categoryFilter, setCategoryFilter] = useState<string>();
@@ -808,9 +789,6 @@ const ProductDevelopmentBot: React.FC = () => {
       au_keywords: editing.au_keywords || "",
       development_date: editing.development_date ? dayjs(editing.development_date) : undefined,
       reference_images: editing.purchase_images || [],
-      site_owners: editing.site_owners
-        ? String(editing.site_owners).split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
-        : [],
       store_rows: (editing.store_quantities && editing.store_quantities.length > 0
         ? editing.store_quantities.map((s) => ({
             path: storeToGroup[s.store] ? [storeToGroup[s.store]] : [s.store],
@@ -842,7 +820,6 @@ const ProductDevelopmentBot: React.FC = () => {
       au_keywords: values.au_keywords?.trim() || "",
       development_date: values.development_date ? dayjs(values.development_date).format("YYYY-MM-DD") : "",
       reference_images: values.reference_images || [],
-      site_owners: (values.site_owners || []).join(",") || undefined,
       related_store: (values.store_rows || [])
         .map((r: any) => (r?.path?.[0] || "").trim())
         .filter(Boolean)
@@ -933,7 +910,6 @@ const ProductDevelopmentBot: React.FC = () => {
         au_keywords: record.au_keywords || "",
         development_date: dayjs().format("YYYY-MM-DD"),
         reference_images: record.purchase_images || [],
-        site_owners: record.site_owners || undefined,
         related_store: record.related_store || undefined,
         store_quantities: record.store_quantities,
         purchase_items: record.purchase_items,
@@ -1363,7 +1339,6 @@ const ProductDevelopmentBot: React.FC = () => {
                     <Descriptions.Item label="图片审核">{detailRecord.image_review || "未审核"}</Descriptions.Item>
                     <Descriptions.Item label="完成图片日期">{detailRecord.designer_complete_date || "-"}</Descriptions.Item>
                     <Descriptions.Item label="仓库备注" span={2}>{detailRecord.warehouse_note || "-"}</Descriptions.Item>
-                    <Descriptions.Item label="站点负责人员" span={2}>{detailRecord.site_owners || "-"}</Descriptions.Item>
                   </Descriptions>
                 </DetailSection>
 
@@ -1485,19 +1460,6 @@ const ProductDevelopmentBot: React.FC = () => {
             <Col xs={24} md={8}>
               <Form.Item name="au_keywords" label="澳洲关键词">
                 <Input.TextArea rows={1} placeholder="澳洲关键词，用逗号分隔" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="site_owners" label="相关站点负责人员">
-                <Select
-                  mode="multiple"
-                  showSearch
-                  allowClear
-                  maxTagCount="responsive"
-                  placeholder="选择站点负责人员（可多选，筛选下方店铺选项）"
-                  options={siteOwnerOptions}
-                  optionFilterProp="label"
-                />
               </Form.Item>
             </Col>
           </Row>
