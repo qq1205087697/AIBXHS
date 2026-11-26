@@ -312,6 +312,18 @@ const ProductSelection: React.FC = () => {
     ro.observe(el)
     return () => ro.disconnect()
   }, [detailItem])
+  // 列表表格高度自适应容器：扣除表头与分页，避免底部被裁切
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
+  const [tableScrollY, setTableScrollY] = useState(420)
+  useEffect(() => {
+    const el = tableWrapRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      setTableScrollY(Math.max(240, el.clientHeight - 120))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [loading])
   const [form] = Form.useForm()
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [typeOptions, setTypeOptions] = useState<{ label: string; value: string }[]>([])
@@ -2049,7 +2061,7 @@ const ProductSelection: React.FC = () => {
       key: 'actions',
       width: 160,
       fixed: 'right',
-      align: 'right',
+      align: 'center',
       render: (_: any, record: ProductSelectionItem) => {
         const canApprove = hasPermission('product_selection:approve')
         const dropdownItems: any[] = [
@@ -2133,7 +2145,7 @@ const ProductSelection: React.FC = () => {
           },
         })
         return (
-          <Space size="small" style={{ justifyContent: 'flex-end' }}>
+          <Space size="small" style={{ justifyContent: 'center' }}>
             <Button
               size="small"
               icon={<EyeOutlined />}
@@ -2217,7 +2229,7 @@ const ProductSelection: React.FC = () => {
           background: transparent !important;
         }
       `}</style>
-      <div style={{ padding: 24, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, position: 'relative' }}>
+      <div style={{ padding: '8px 16px 16px', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, position: 'relative' }}>
       <Tabs
         activeKey={activeTab}
         onChange={(key) => {
@@ -2233,18 +2245,31 @@ const ProductSelection: React.FC = () => {
           { key: 'approved', label: '已审批' },
           { key: 'rejected', label: '审批未通过' },
         ]}
-        style={{ marginBottom: 16, flexShrink: 0 }}
+        style={{ marginBottom: 8, flexShrink: 0 }}
+        tabBarStyle={{ marginBottom: 0 }}
       />
       <Card
-        loading={loading}
-        title={
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, width: '100%', padding: '4px 0' }}>
-            <Space wrap size={6}>
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+        styles={{ body: { flex: 1, padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
+        className="ps-card"
+      >
+        {/* 筛选工具栏：筛选与操作分区，避免挤在卡片标题里错乱换行 */}
+        <div
+          style={{
+            padding: '10px 16px',
+            borderBottom: '1px solid #f0f0f0',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
               <Input
                 placeholder="搜索ASIN、产品标题、关键词..."
                 prefix={<SearchOutlined />}
                 allowClear
-                style={{ width: 250 }}
+                style={{ width: 280 }}
                 value={searchText}
                 onChange={(e) => handleSearch(e.target.value)}
               />
@@ -2270,7 +2295,7 @@ const ProductSelection: React.FC = () => {
                 mode="multiple"
                 placeholder="状态"
                 allowClear
-                style={{ minWidth: 100 }}
+                style={{ minWidth: 160, maxWidth: 280 }}
                 value={statusFilter}
                 options={[
                   { label: '未申请', value: 'empty' },
@@ -2287,9 +2312,9 @@ const ProductSelection: React.FC = () => {
                 onChange={(v) => { setDateFilter(v as [dayjs.Dayjs, dayjs.Dayjs] | null); setPagination(prev => ({ ...prev, current: 1 })) }}
               />
               <Button onClick={handleReset}>重置</Button>
-            </Space>
-            {/* 操作按钮独立成行：占满一行强制换行到筛选行下方，靠左对齐 */}
-            <Space wrap size={6} style={{ flexBasis: '100%' }}>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+            <Space wrap size={8}>
               <Dropdown
                 menu={{
                   items: [
@@ -2420,23 +2445,24 @@ const ProductSelection: React.FC = () => {
                   </div>
                 }
               >
-                <QuestionCircleOutlined style={{ color: '#999', cursor: 'help', fontSize: 14 }} />
+                <Space size={4} style={{ color: '#8c8c8c', fontSize: 13, cursor: 'help' }}>
+                  <QuestionCircleOutlined style={{ fontSize: 14 }} />
+                  <span>{useRealtimeRate ? '实时汇率' : '抓取时汇率'}</span>
+                </Space>
               </Tooltip>
             </Space>
           </div>
-        }
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-        styles={{ body: { flex: 1, padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}
-        className="ps-card"
-      >
-        <div style={{ flex: 1, padding: 16, overflow: 'hidden' }}>
+        </div>
+        <div ref={tableWrapRef} style={{ flex: 1, minHeight: 0, padding: '0 16px' }}>
           <Table
             className="ps-table"
+            size="middle"
+            loading={loading}
             rowSelection={rowSelection}
             dataSource={items}
             columns={columns}
             rowKey="id"
-            scroll={{ x: 3545, y: 'calc(100vh - 420px)' }}
+            scroll={{ x: 3545, y: tableScrollY }}
             onChange={(pg, _, sorter) => {
               setPagination(prev => ({ ...prev, current: pg.current, pageSize: pg.pageSize || 20 }))
               if (sorter && !Array.isArray(sorter) && sorter.columnKey) {

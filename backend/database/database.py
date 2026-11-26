@@ -359,6 +359,7 @@ def init_db():
                     gen_status VARCHAR(20) NULL COMMENT '生成状态：生成中/失败',
                     gen_task_id INT NULL COMMENT 'AI视频任务ID',
                     gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图',
+                    gen_options TEXT NULL COMMENT '生图参数（JSON：A+版式/张数/无文字模式）',
                     gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）',
                     gen_time DATETIME NULL COMMENT '生成时间',
                     media_url VARCHAR(1000) NULL COMMENT '生成成片地址',
@@ -404,6 +405,7 @@ def init_db():
             _media_extra_columns = [
                 ("plan", "ALTER TABLE media_requests ADD COLUMN plan TEXT NULL COMMENT 'AI生成的视频方案（JSON）' AFTER prompt"),
                 ("gen_kind", "ALTER TABLE media_requests ADD COLUMN gen_kind VARCHAR(10) NULL COMMENT '生成任务类型：video=AI视频/image=AI生图' AFTER gen_task_id"),
+                ("gen_options", "ALTER TABLE media_requests ADD COLUMN gen_options TEXT NULL COMMENT '生图参数（JSON：A+版式/张数/无文字模式）' AFTER gen_kind"),
                 ("gen_user_id", "ALTER TABLE media_requests ADD COLUMN gen_user_id INT NULL COMMENT '触发生成的用户ID（生图排队时用于并发判断）' AFTER gen_kind"),
                 ("hd_status", "ALTER TABLE media_requests ADD COLUMN hd_status VARCHAR(20) NULL COMMENT '高清状态：高清中/失败' AFTER media_url"),
                 ("hd_task_id", "ALTER TABLE media_requests ADD COLUMN hd_task_id INT NULL COMMENT '超分任务ID' AFTER hd_status"),

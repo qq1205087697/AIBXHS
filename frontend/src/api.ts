@@ -2264,6 +2264,12 @@ export interface MediaRequestItem {
   resolution: string;
   duration: number;
   video_type?: string | null;
+  /** 图片类需求生图参数（A+）：版式 / 张数 / 无文字模式 */
+  gen_options?: {
+    aplus_layout_ids?: string[];
+    aplus_image_count?: number;
+    aplus_text_mode?: string;
+  } | null;
   stage: MediaStage;
   gen_status?: string | null;
   gen_task_id?: number | null;
@@ -2348,6 +2354,17 @@ export const mediaRequestApi = {
       "/media-requests/product-skus",
       { params },
     ),
+  /** 待生成页 A+ 参数：版式库（官方推荐 / 我的上传 / 收藏） */
+  getAplusLayouts: () =>
+    apiClient.get<{
+      success: boolean;
+      data: {
+        presets: AIImageLayout[];
+        mine: AIImageLayout[];
+        favorites: AIImageLayout[];
+        limit?: number;
+      };
+    }>("/media-requests/aplus-layouts"),
   /** 运营提报（待提交页签）；待绑定/待上传页签可传 media_url+media_kind 直接上传已有素材（落待绑定） */
   create: (data: {
     product_id: number;
@@ -2372,6 +2389,12 @@ export const mediaRequestApi = {
       ratio?: string;
       resolution?: string;
       duration?: number;
+      /** 图片类需求生图参数（A+）：版式 / 张数 / 无文字模式 */
+      gen_options?: {
+        aplus_layout_ids?: string[];
+        aplus_image_count?: number;
+        aplus_text_mode?: string;
+      };
     },
   ) => apiClient.patch<{ success: boolean; data: MediaRequestItem }>(`/media-requests/${id}`, data),
   /** 待提交 → 待审核 */
@@ -2411,10 +2434,16 @@ export const mediaRequestApi = {
   /** 待绑定 → 提交绑定至产品申请（上传前门禁），审核通过后进入待上传 */
   bind: (id: number) =>
     apiClient.post<{ success: boolean; message: string; data: MediaRequestItem }>(`/media-requests/${id}/bind`),
-  /** 待上传 → 真实调用 Amazon（飞书 RPA）/ Ozon（Seller API）上传 */
-  upload: (id: number) =>
+  /** 待上传 → 真实调用 Amazon（飞书 RPA）/ Ozon（Seller API）上传；
+   * confirm_language_mismatch=true 表示已确认「视频语言与目标站点语言不匹配」警告；
+   * confirm_language_unknown=true 表示已确认「无法识别视频语言」提醒 */
+  upload: (id: number, confirmLanguageMismatch = false, confirmLanguageUnknown = false) =>
     apiClient.post<{ success: boolean; message: string; data?: Record<string, unknown>; item?: MediaRequestItem }>(
       `/media-requests/${id}/upload`,
+      {
+        confirm_language_mismatch: confirmLanguageMismatch,
+        confirm_language_unknown: confirmLanguageUnknown,
+      },
     ),
 };
 
@@ -2487,6 +2516,10 @@ export const videoBindingApi = {
     video_url?: string;
     video_urls?: string[];
     items: { pp_id: number; store_id: number }[];
+    /** 已确认「视频语言与目标站点语言不匹配」警告后重试 */
+    confirm_language_mismatch?: boolean;
+    /** 已确认「无法识别视频语言」提醒后重试 */
+    confirm_language_unknown?: boolean;
   }) =>
     apiClient.post<{
       success: boolean;

@@ -4,6 +4,7 @@ import { ReloadOutlined, SearchOutlined, CheckOutlined, CloseOutlined } from '@a
 import { videoBindingApi, VideoBindingRequest, PlatformSkuEntry, OzonUploadResult, OzonTaskStatusResult } from '../api'
 import PlatformSkuSelector, { skuKey } from '../components/PlatformSkuSelector'
 import { useAuth } from '../contexts/AuthContext'
+import { confirmLanguageMismatch, confirmLanguageUnknown, getLanguageMismatch, getLanguageUnknown } from '../utils/languageMismatch'
 
 const PAGE_SIZE_OPTIONS = ['10', '20', '50', '100']
 
@@ -141,7 +142,7 @@ const VideoBindingReview: React.FC<{ embedded?: boolean }> = ({ embedded = false
     }
   }
 
-  const handleSkuUploadSubmit = async () => {
+  const handleSkuUploadSubmit = async (languageConfirmed = false, unknownConfirmed = false) => {
     const target = skuTargetRef.current
     if (!target) return
     const allKeys = [...skuSelected, ...skuOzonSelected]
@@ -158,6 +159,8 @@ const VideoBindingReview: React.FC<{ embedded?: boolean }> = ({ embedded = false
           const [pp, store] = k.split('_')
           return { pp_id: Number(pp), store_id: Number(store) }
         }),
+        confirm_language_mismatch: languageConfirmed,
+        confirm_language_unknown: unknownConfirmed,
       })
       const body = res.data
       const d = body?.data || {}
@@ -169,6 +172,18 @@ const VideoBindingReview: React.FC<{ embedded?: boolean }> = ({ embedded = false
       setResultOpen(true)
       setSkuModalOpen(false)
     } catch (e: any) {
+      // 视频语言与目标站点语言不一致：弹警告，确认后带 confirm 标记重试
+      const mismatch = getLanguageMismatch(e)
+      if (mismatch) {
+        confirmLanguageMismatch(mismatch, () => handleSkuUploadSubmit(true, unknownConfirmed), '上传')
+        return
+      }
+      // 无法识别视频语言：提醒人工核对视频与目标站点语言是否匹配
+      const unknown = getLanguageUnknown(e)
+      if (unknown) {
+        confirmLanguageUnknown(unknown, () => handleSkuUploadSubmit(languageConfirmed, true), '上传')
+        return
+      }
       message.error(e?.response?.data?.detail || '上传失败')
     } finally {
       setSkuSubmitting(false)
@@ -490,7 +505,7 @@ const VideoBindingReview: React.FC<{ embedded?: boolean }> = ({ embedded = false
         okText="确定上传"
         cancelText="取消"
         confirmLoading={skuSubmitting}
-        onOk={handleSkuUploadSubmit}
+        onOk={() => handleSkuUploadSubmit()}
         onCancel={() => setSkuModalOpen(false)}
         width={760}
       >
