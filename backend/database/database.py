@@ -164,7 +164,7 @@ def init_db():
         from models.ai_image_task import AIImageTask
         from models.ai_image_layout import AIImageLayout
         from models.video_binding_request import VideoBindingRequest
-        from models.finance import FinanceRecord
+        from models.finance import FinanceRecord, FinanceCategory, FinanceTemplate
 
         # 创建所有表
         Base.metadata.create_all(bind=engine)
@@ -172,6 +172,11 @@ def init_db():
         # 检查并添加缺失的字段（幂等：已存在则跳过，不再伪造「失败」日志）
         with engine.connect() as conn:
             _ensure_columns(conn, [
+                # 财务流水表：一级/二级分类关联列（迁移到 finance_categories 分类表）
+                ("finance_records", "category_id",
+                 "ALTER TABLE finance_records ADD COLUMN category_id INT NULL COMMENT '一级分类ID，关联 finance_categories.id'"),
+                ("finance_records", "sub_category_id",
+                 "ALTER TABLE finance_records ADD COLUMN sub_category_id INT NULL COMMENT '二级分类ID，关联 finance_categories.id'"),
                 ("product_sales", "deleted_at",
                  "ALTER TABLE product_sales ADD COLUMN deleted_at DATETIME NULL"),
                 # 差评分析表新增部门板块分类字段
@@ -538,6 +543,14 @@ def init_db():
                 conn.commit()
         except Exception:
             pass  # 已是 ON UPDATE 或执行失败不影响启动
+
+        # 财务流水表 category 文本列放宽（分类改名后名称可能超 20 字符）
+        try:
+            with engine.connect() as conn:
+                _ensure_column_type(conn, "finance_records", "category", "varchar(50)",
+                                    "ALTER TABLE finance_records MODIFY COLUMN category VARCHAR(50) NOT NULL COMMENT '一级分类名称（冗余文本，兼容旧数据）'")
+        except Exception as e:
+            print(f"finance_records.category 列宽调整失败: {e}")
 
     except Exception as e:
         print(f"数据库初始化失败: {e}")

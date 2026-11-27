@@ -2524,6 +2524,9 @@ export const videoBindingApi = {
 export interface FinanceRecordItem {
   id: number;
   category: string;
+  categoryId: number | null;
+  subCategoryId: number | null;
+  subCategoryName: string;
   flowType: "收入" | "支出";
   recordDate: string;
   amount: number;
@@ -2533,12 +2536,13 @@ export interface FinanceRecordItem {
 }
 
 export const financeApi = {
-  /** 查询财务流水（按板块/日期范围过滤） */
+  /** 查询财务流水（按板块/日期范围过滤），附带二级分类名 */
   list: (params: { category?: string; start_date?: string; end_date?: string }) =>
     apiClient.get<{ success: boolean; data: FinanceRecordItem[] }>("/finance/records", { params }),
-  /** 登记一条财务流水 */
+  /** 登记一条财务流水（挂分类 ID） */
   create: (data: {
-    category: string;
+    category_id: number;
+    sub_category_id?: number;
     flow_type: string;
     record_date: string;
     amount: number;
@@ -2548,6 +2552,59 @@ export const financeApi = {
   /** 删除财务流水（软删除） */
   remove: (id: number) =>
     apiClient.delete<{ success: boolean; data: { id: number } }>(`/finance/records/${id}`),
+};
+
+// ========== Finance Categories API（财务机器人分类，一级+二级共用一张表） ==========
+export interface FinanceCategoryItem {
+  id: number;
+  parentId: number | null; // null=一级分类
+  name: string;
+  sort: number;
+  isSystem: boolean;
+  remark: string;
+  icon: string;
+  color: string;
+}
+
+export const financeCategoryApi = {
+  /** 查询分类平铺列表（租户首次访问自动初始化种子数据） */
+  list: () =>
+    apiClient.get<{ success: boolean; data: FinanceCategoryItem[] }>("/finance/categories"),
+  /** 新增分类（parentId 为空=一级分类） */
+  create: (data: { name: string; parent_id?: number | null; sort?: number }) =>
+    apiClient.post<{ success: boolean; data: FinanceCategoryItem }>("/finance/categories", data),
+  /** 编辑分类（重命名/排序；一级改名会同步流水冗余文本） */
+  update: (id: number, data: { name?: string; sort?: number; remark?: string }) =>
+    apiClient.put<{ success: boolean; data: FinanceCategoryItem }>(`/finance/categories/${id}`, data),
+  /** 批量调整排序（ids 按新顺序排列） */
+  reorder: (ids: number[]) =>
+    apiClient.put<{ success: boolean }>("/finance/categories/reorder", { ids }),
+  /** 删除分类（内置分类/有子级/被流水引用会被后端拦截） */
+  remove: (id: number) =>
+    apiClient.delete<{ success: boolean; data: { id: number } }>(`/finance/categories/${id}`),
+};
+
+// ========== Finance Templates API（财务机器人登记模板） ==========
+export interface FinanceTemplateItem {
+  id: number;
+  name: string;
+  categoryId: number;
+  items: { subCategoryId: number; subName: string }[];
+}
+
+export const financeTemplateApi = {
+  /** 查询模板列表（含子项二级分类名） */
+  list: () =>
+    apiClient.get<{ success: boolean; data: FinanceTemplateItem[] }>("/finance/templates"),
+  /** 新增模板 */
+  create: (data: { name: string; category_id: number; sub_category_ids: number[] }) =>
+    apiClient.post<{ success: boolean; data: FinanceTemplateItem }>("/finance/templates", data),
+  /** 编辑模板（名称/子项） */
+  update: (id: number, data: { name?: string; sub_category_ids?: number[] }) =>
+    apiClient.put<{ success: boolean; data: FinanceTemplateItem }>(`/finance/templates/${id}`, data),
+  /** 删除模板（软删除） */
+  remove: (id: number) =>
+    apiClient.delete<{ success: boolean; data: { id: number } }>(`/finance/templates/${id}`),
 };
 
 export const aiCreationApi = {
